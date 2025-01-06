@@ -17,6 +17,11 @@
   -webkit-text-size-adjust: 100%;
 }
 
+::-webkit-scrollbar {
+  width: 0px;
+  background: transparent;
+}
+
 .container {
   margin: 0;
   padding-top: 10vh;
@@ -26,15 +31,72 @@
   text-align: center;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+.chatlist-contact {
+  display: flex;
+  border-style: solid;
+  border-color: gray;
+  border-radius: 15px;
+  border-width: 1px;
+  cursor: pointer;
+  justify-content: center;
+  height: 50px;
+  padding: 5px;
+  margin-bottom: 10px;
 }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
+.chatlist-contact img {
+  width: auto;
+  height: 100%;
+  border-style: solid;
+  border-radius: 100%;
+  border-width: 1px;
+}
+
+.chatlist-contact h3 {
+  padding-left: 15px;
+  padding-right: 15px;
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
+.chats {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+}
+
+.chat-messages {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  overflow-y: scroll;
+  max-height: 250px;
+}
+
+.msg-me {
+  align-self: flex-end;
+  max-width: 200px;
+  border-style: solid;
+  border-width: 1px;
+  border-color: gray;
+  border-radius: 15px;
+  padding: 10px;
+  border-bottom-right-radius: 0px;
+}
+
+.msg-them {
+  align-self: flex-start;
+  max-width: 200px;
+  border-style: solid;
+  border-width: 1px;
+  border-color: gray;
+  border-radius: 15px;
+  padding: 10px;
+  border-bottom-left-radius: 0px;
+}
+
+#chat-back-btn {
+  cursor: pointer;
 }
 
 .row {
@@ -87,7 +149,7 @@ button {
   outline: none;
 }
 
-#greet-input {
+#login-input {
   margin-right: 5px;
 }
 
