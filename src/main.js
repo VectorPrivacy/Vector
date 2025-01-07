@@ -247,7 +247,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // Hook up an 'Enter' listener on the Message Box for sending them
     domChatMessageInput.onkeydown = async (evt) => {
         if (evt.code === 'Enter' && domChatMessageInput.value.trim().length) {
-            await message(domChatContact.textContent, domChatMessageInput.value);
+            await message(strOpenChat, domChatMessageInput.value);
             domChatMessageInput.value = '';
         }
     }
