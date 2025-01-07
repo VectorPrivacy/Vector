@@ -1,4 +1,12 @@
 const { invoke } = window.__TAURI__.core;
+const { getVersion } = window.__TAURI__.app;
+
+const domTitle = document.getElementById('title');
+
+// TEMP: just for user reference - add the current version to the title!
+getVersion().then(v => {
+    domTitle.textContent += ` ${v}`;
+}).catch(_e => { });
 
 const domLogin = document.getElementById('login-form');
 const domLoginInput = document.getElementById('login-input');
