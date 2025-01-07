@@ -200,14 +200,23 @@ function updateChat(contact) {
         const arrMessages = cContact.contents;
         domChatMessages.innerHTML = ``;
         for (const msg of arrMessages) {
-            // Construct the text container
-            const pMessage = document.createElement('p');
+            // Construct the message container
+            const divMessage = document.createElement('div');
             // Render it appropriately depending on who sent it
-            pMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+            divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+            // Render their avatar, if they have one
+            if (!msg.mine && cProfile?.avatar) {
+                const imgAvatar = document.createElement('img');
+                imgAvatar.src = cProfile.avatar;
+                divMessage.appendChild(imgAvatar);
+            }
+            // Construct the text content
+            const pMessage = document.createElement('p');
             // Render their text content
             pMessage.textContent = msg.content;
             // Add it to the chat!
-            domChatMessages.appendChild(pMessage);
+            divMessage.appendChild(pMessage);
+            domChatMessages.appendChild(divMessage);
         }
 
         // Auto-scroll on new messages (not a great implementation)
