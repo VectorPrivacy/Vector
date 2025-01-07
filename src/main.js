@@ -200,7 +200,14 @@ function updateChat(contact) {
         const arrMessages = cContact.contents;
         domChatMessages.innerHTML = ``;
         for (const msg of arrMessages) {
-            domChatMessages.innerHTML += `<p class="msg-${msg.mine ? 'me' : 'them'}">${msg.content}</p>`;
+            // Construct the text container
+            const pMessage = document.createElement('p');
+            // Render it appropriately depending on who sent it
+            pMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+            // Render their text content
+            pMessage.textContent = msg.content;
+            // Add it to the chat!
+            domChatMessages.appendChild(pMessage);
         }
 
         // Auto-scroll on new messages (not a great implementation)
