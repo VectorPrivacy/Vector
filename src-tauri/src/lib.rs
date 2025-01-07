@@ -194,9 +194,19 @@ async fn notifs() {
 }
 
 #[tauri::command]
-async fn login(npub: String) -> Result<bool, ()> {
-    // TODO: add validation, error handling, mnemonic phrase support, etc
-    let keys = Keys::parse(&npub).unwrap();
+async fn login(import_key: String) -> Result<bool, ()> {
+    let keys: Keys;
+    // TODO: add validation, error handling, etc
+
+    // If it's an nsec, import that
+    if import_key.starts_with("nsec") {
+        keys = Keys::parse(&import_key).unwrap();
+    } else {
+        // Otherwise, we'll try importing it as a mnemonic seed phrase (BIP-39)
+        keys = Keys::from_mnemonic(import_key, Some(String::new())).unwrap();
+    }
+
+    // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
         .opts(Options::new().gossip(false))

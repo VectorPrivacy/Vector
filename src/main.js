@@ -152,7 +152,7 @@ async function message(pubkey, content) {
  * Login to the Nostr network
  */
 async function login() {
-    const fLoggedIn = await invoke("login", { npub: domLoginInput.value });
+    const fLoggedIn = await invoke("login", { importKey: domLoginInput.value.trim() });
     if (fLoggedIn) {
         // Hide the login UI
         domLoginInput.value = "";
