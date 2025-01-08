@@ -124,6 +124,12 @@ body {
   padding-right: 10px;
 }
 
+.msg-inline-timestamp {
+  width: 100%;
+  text-align: center;
+  font-size: 14px;
+}
+
 .msg-me {
   display: flex;
   align-self: flex-end;

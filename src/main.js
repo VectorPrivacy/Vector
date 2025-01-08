@@ -233,7 +233,16 @@ function updateChat(contact) {
         // Render their messages
         const arrMessages = cContact.contents;
         domChatMessages.innerHTML = ``;
+        let nLastMsgTime = arrMessages[0]?.at || 0;
         for (const msg of arrMessages) {
+            // If the last message was over 10 minutes ago, add an inline timestamp
+            if (msg.at - nLastMsgTime > 600) {
+                nLastMsgTime = msg.at;
+                const pTimestamp = document.createElement('p');
+                pTimestamp.classList.add('msg-inline-timestamp');
+                pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
+                domChatMessages.appendChild(pTimestamp);
+            }
             // Construct the message container
             const divMessage = document.createElement('div');
             // Render it appropriately depending on who sent it
