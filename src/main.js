@@ -107,6 +107,9 @@ async function fetchMessages(init = false) {
     // Sort our linear message history in to Chats
     arrChats = sortTocontact(arrMessages);
 
+    // Now sort our Chat history by descending time since last message
+    arrChats.sort((a, b) => b.contents[b.contents.length - 1].at - a.contents[a.contents.length - 1].at);
+
     // If a chat is open, update it's messages
     if (strOpenChat) {
         updateChat(strOpenChat);
