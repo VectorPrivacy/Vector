@@ -10,8 +10,6 @@
 
   <body>
     <main class="container">
-      <span id="version">Chatstr</span>
-
       <div id="chats" class="chats">
         <div id="chat-list">
           
@@ -19,7 +17,8 @@
       </div>
 
       <div id="chat" class="chat" style="display: none;">
-        <h3 style="max-width: 100%; overflow: hidden; text-overflow: ellipsis; margin-bottom: 5px;"><i id="chat-back-btn">Back</i><br><b id="chat-contact"></b></h3>
+        <h3 id="chat-back-btn">Back</h3>
+        <h3 style="max-width: 100%; overflow: hidden; text-overflow: ellipsis; margin-bottom: 5px;"><br><b id="chat-contact"></b></h3>
         <div id="chat-messages" class="chat-messages">
 
         </div>
@@ -36,11 +35,11 @@
       </div>
 
       <div id="login-form">
-        <p><i style="opacity: 0.65; margin: 15px; font-size: 18px;">Welcome to</i></p>
-        <h1 style="margin: 0; font-size: 50px;">Chatstr</h1>
-        <p style="margin-top: 100px;">A Private, Decentralised, Modern communication app.</p>
+        <h1 style="margin-bottom: 0; font-size: 50px;">Chatstr</h1>
+        <span id="version">Chatstr</span>
+        <h3 class="text-gradient" style="margin-top: 100px;">A Private, Decentralised, Modern communication app.</h3>
         <div style="position: absolute; bottom: 8px;" class="row">
-          <input style="width: 224px;" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
+          <input style="width: 223px; margin-left: 8px;" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
           <button id="login-btn">Login</button>
         </div>
       </div>

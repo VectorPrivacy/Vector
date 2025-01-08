@@ -14,6 +14,10 @@
   -webkit-text-size-adjust: 100%;
 }
 
+body {
+  margin: 0;
+}
+
 ::-webkit-scrollbar {
   width: 0px;
   background: transparent;
@@ -27,13 +31,26 @@
   text-align: center;
 }
 
+.text-gradient {
+  background: linear-gradient(to right, #f8f8f8 13.87%, #b188e2 60%);
+  background-size: 200% 200%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
+}
+
+@keyframes BreathingGradient {
+  0% {background-position: 0% 50%;}
+  50% {background-position: 100% 50%;}
+  100% {background-position: 0% 50%;}
+}
+
 #version {
-  text-align: left;
-  position: relative;
-  top: 0px;
-  left: 0px;
+  display: block;
   font-size: 14px;
-  opacity: 0.85;
+  opacity: 0.5;
+  margin-top: 10px;
 }
 
 #chat-list {
@@ -70,10 +87,30 @@
   overflow-x: hidden;
 }
 
+#chat-new {
+  padding: 5px;
+}
+
 .chats {
   display: flex;
   justify-content: center;
   flex-direction: column;
+  padding: 15px;
+}
+
+#chat-back-btn {
+  position: absolute;
+  cursor: pointer;
+  left: 10px;
+  top: 10px;
+  margin: 0;
+  color: rgba(167, 137, 204, 1);
+}
+
+#chat-contact {
+  display: block;
+  margin-top: 5px;
+  margin-bottom: 15px;
 }
 
 .chat-messages {
@@ -81,7 +118,10 @@
   flex-direction: column;
   align-items: flex-end;
   overflow-y: scroll;
-  height: 410px;
+  background-color: #040308;
+  height: 428px;
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .msg-me {
@@ -123,18 +163,16 @@
 }
 
 #chat-box {
-  position: absolute;
   width: 100%;
-  bottom: -7px;
-  height: 40px;
+  background-color: #251134ff;
+  height: 55px;
 }
 
-#chat-back-btn {
-  position: absolute;
-  cursor: pointer;
-  left: 10px;
-  top: 40px;
-  color: rgba(121, 89, 159, 1);
+#chat-input {
+  position: relative;
+  bottom: -6px;
+  height: 20px;
+  width: 85%;
 }
 
 .row {

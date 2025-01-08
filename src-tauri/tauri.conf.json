@@ -13,8 +13,7 @@
         "title": "Chatstr",
         "width": 365,
         "height": 600,
-        "minWidth": 365,
-        "minHeight": 600
+        "resizable": false
       }
     ],
     "security": {
