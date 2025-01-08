@@ -33,6 +33,11 @@
   top: 0px;
   left: 0px;
   font-size: 14px;
+  opacity: 0.85;
+}
+
+#chat-list {
+  padding-top: 15px;
 }
 
 .chatlist-contact {
@@ -76,7 +81,7 @@
   flex-direction: column;
   align-items: flex-end;
   overflow-y: scroll;
-  height: 400px;
+  height: 410px;
 }
 
 .msg-me {
@@ -117,8 +122,19 @@
   display: flex;
 }
 
+#chat-box {
+  position: absolute;
+  width: 100%;
+  bottom: -7px;
+  height: 40px;
+}
+
 #chat-back-btn {
+  position: absolute;
   cursor: pointer;
+  left: 10px;
+  top: 40px;
+  color: rgba(121, 89, 159, 1);
 }
 
 .row {
