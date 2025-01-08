@@ -228,7 +228,7 @@ function updateChat(contact) {
     const cProfile = arrProfiles.find(a => a.id === contact);
     if (cContact) {
         // Prefer displaying their name, otherwise, npub
-        domChatContact.textContent = cProfile?.name || contact;
+        domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
 
         // Render their messages
         const arrMessages = cContact.contents;
@@ -263,7 +263,7 @@ function updateChat(contact) {
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
-        domChatContact.textContent = cProfile?.name || contact;
+        domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
 
         // Nuke the message list
         domChatMessages.innerHTML = ``;
