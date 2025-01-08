@@ -10,9 +10,11 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "chatstr",
-        "width": 800,
-        "height": 550
+        "title": "Chatstr",
+        "width": 365,
+        "height": 600,
+        "minWidth": 365,
+        "minHeight": 600
       }
     ],
     "security": {

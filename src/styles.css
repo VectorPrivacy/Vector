@@ -21,11 +21,18 @@
 
 .container {
   margin: 0;
-  padding-top: 10vh;
   display: flex;
   flex-direction: column;
   justify-content: center;
   text-align: center;
+}
+
+#version {
+  text-align: left;
+  position: relative;
+  top: 0px;
+  left: 0px;
+  font-size: 14px;
 }
 
 .chatlist-contact {
@@ -54,6 +61,8 @@
   padding-right: 15px;
   margin-top: auto;
   margin-bottom: auto;
+  text-overflow: ellipsis;
+  overflow-x: hidden;
 }
 
 .chats {
@@ -67,7 +76,7 @@
   flex-direction: column;
   align-items: flex-end;
   overflow-y: scroll;
-  max-height: 250px;
+  height: 400px;
 }
 
 .msg-me {
