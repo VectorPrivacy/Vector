@@ -3,9 +3,9 @@ const { getVersion } = window.__TAURI__.app;
 
 const domVersion = document.getElementById('version');
 
-// Display the current version in the top-left corner
+// Display the current version
 getVersion().then(v => {
-    domVersion.textContent += ` ${v}`;
+    domVersion.textContent += `v${v}`;
 });
 
 const domLogin = document.getElementById('login-form');
