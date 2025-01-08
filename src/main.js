@@ -13,6 +13,7 @@ const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
 const domChats = document.getElementById('chats');
+const domChatList = document.getElementById('chat-list');
 
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
@@ -20,6 +21,11 @@ const domChatContact = document.getElementById('chat-contact');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessageInput = document.getElementById('chat-input');
+
+const domChatNew = document.getElementById('chat-new');
+const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
+const domChatNewInput = document.getElementById('chat-new-input');
+const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 /**
  * @typedef {Object} Message
@@ -94,7 +100,7 @@ let strOpenChat = "";
  */
 async function fetchMessages(init = false) {
     if (init) {
-        domChats.textContent = `Loading DMs...`;
+        domChatList.textContent = `Loading DMs...`;
     }
     const arrMessages = await invoke("fetch_messages");
 
@@ -107,14 +113,14 @@ async function fetchMessages(init = false) {
     }
 
     // Render the chats
-    domChats.innerHTML = ``;
+    domChatList.innerHTML = ``;
     for (const chat of arrChats) {
         // Let's try to load the profile of each chat, too
         let cProfile = arrProfiles.find(a => a.id === chat.contact);
         if (!cProfile) {
             try {
                 if (init) {
-                    domChats.textContent = `Loading Contact Profile...`;
+                    domChatList.textContent = `Loading Contact Profile...`;
                 }
                 cProfile = await invoke("load_profile", { npub: chat.contact });
                 arrProfiles.push(cProfile);
@@ -140,7 +146,7 @@ async function fetchMessages(init = false) {
 
         // Slap it all together
         divContact.appendChild(h3ContactName);
-        domChats.appendChild(divContact);
+        domChatList.appendChild(divContact);
     }
 
     // Start a post-init refresh loop, which will frequently poll cached chats from the client
@@ -169,6 +175,12 @@ async function login() {
         // Connect and fetch historical messages
         await fetchMessages(true);
 
+         // Append a "Start New Chat" button
+        const btnStartChat = document.createElement('button');
+        btnStartChat.textContent = "Start New Chat";
+        btnStartChat.onclick = openNewChat;
+        domChats.appendChild(btnStartChat);
+
         // Setup a subscription for new websocket messages
         invoke("notifs");
     }
@@ -180,12 +192,23 @@ async function login() {
  */
 function openChat(contact) {
     // Display the Chat UI
+    domChatNew.style.display = 'none';
     domChats.style.display = 'none';
     domChat.style.display = '';
 
     // Render the current contact's messages
     strOpenChat = contact;
     updateChat(contact);
+}
+
+/**
+ * Open the dialog for starting a new chat
+ */
+function openNewChat() {
+    // Display the UI
+    domChatNew.style.display = '';
+    domChats.style.display = 'none';
+    domChat.style.display = 'none';
 }
 
 /**
@@ -235,6 +258,12 @@ function updateChat(contact) {
                 strLastMsgID = cLastMsg.id;
             }
         }
+    } else {
+        // Probably a 'New Chat', as such, we'll mostly render an empty chat
+        domChatContact.textContent = cProfile?.name || contact;
+
+        // Nuke the message list
+        domChatMessages.innerHTML = ``;
     }
 }
 
@@ -243,6 +272,7 @@ function updateChat(contact) {
  */
 function closeChat() {
     domChats.style.display = '';
+    domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
 }
@@ -251,6 +281,11 @@ window.addEventListener("DOMContentLoaded", () => {
     // Hook up our static buttons
     domLoginBtn.onclick = login;
     domChatBackBtn.onclick = closeChat;
+    domChatNewBackBtn.onclick = closeChat;
+    domChatNewStartBtn.onclick = () => {
+        openChat(domChatNewInput.value.trim());
+        domChatNewInput.value = ``;
+    };
 
     // Hook up an 'Enter' listener on the Message Box for sending them
     domChatMessageInput.onkeydown = async (evt) => {
