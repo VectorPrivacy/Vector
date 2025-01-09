@@ -255,8 +255,9 @@ function updateChat(contact) {
             }
             // Construct the text content
             const pMessage = document.createElement('p');
-            // Render their text content
-            pMessage.textContent = msg.content;
+            // Render their text content (using our custom Markdown renderer)
+            // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
+            pMessage.innerHTML = parseMarkdown(msg.content);
             // Add it to the chat!
             divMessage.appendChild(pMessage);
             domChatMessages.appendChild(divMessage);
