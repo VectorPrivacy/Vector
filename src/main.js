@@ -230,46 +230,49 @@ function updateChat(contact) {
         // Prefer displaying their name, otherwise, npub
         domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
 
-        // Render their messages
+        // Render their messages if a new one has been added
+        // TODO: this needs rewriting in the future to be event-based, i.e: new message added (append), message edited (modify one message in the DOM), etc.
         const arrMessages = cContact.contents;
-        domChatMessages.innerHTML = ``;
-        let nLastMsgTime = arrMessages[0]?.at || 0;
-        for (const msg of arrMessages) {
-            // If the last message was over 10 minutes ago, add an inline timestamp
-            if (msg.at - nLastMsgTime > 600) {
-                nLastMsgTime = msg.at;
-                const pTimestamp = document.createElement('p');
-                pTimestamp.classList.add('msg-inline-timestamp');
-                pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
-                domChatMessages.appendChild(pTimestamp);
-            }
-            // Construct the message container
-            const divMessage = document.createElement('div');
-            // Render it appropriately depending on who sent it
-            divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
-            // Render their avatar, if they have one
-            if (!msg.mine && cProfile?.avatar) {
-                const imgAvatar = document.createElement('img');
-                imgAvatar.src = cProfile.avatar;
-                divMessage.appendChild(imgAvatar);
-            }
-            // Construct the text content
-            const pMessage = document.createElement('p');
-            // Render their text content (using our custom Markdown renderer)
-            // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
-            pMessage.innerHTML = parseMarkdown(msg.content);
-            // Add it to the chat!
-            divMessage.appendChild(pMessage);
-            domChatMessages.appendChild(divMessage);
-        }
+        const cLastMsg = arrMessages[arrMessages.length - 1];
+        const isNewMsg = strLastMsgID !== cLastMsg.id;
+        if (isNewMsg) {
+            // Update the last message ID
+            strLastMsgID = cLastMsg.id
 
-        // Auto-scroll on new messages (not a great implementation)
-        if (arrMessages.length) {
-            const cLastMsg = arrMessages[arrMessages.length - 1];
-            if (strLastMsgID !== cLastMsg.id) {
-                domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
-                strLastMsgID = cLastMsg.id;
+            // Wipe and re-render the HTML
+            domChatMessages.innerHTML = ``;
+            let nLastMsgTime = arrMessages[0]?.at || 0;
+            for (const msg of arrMessages) {
+                // If the last message was over 10 minutes ago, add an inline timestamp
+                if (msg.at - nLastMsgTime > 600) {
+                    nLastMsgTime = msg.at;
+                    const pTimestamp = document.createElement('p');
+                    pTimestamp.classList.add('msg-inline-timestamp');
+                    pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
+                    domChatMessages.appendChild(pTimestamp);
+                }
+                // Construct the message container
+                const divMessage = document.createElement('div');
+                // Render it appropriately depending on who sent it
+                divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+                // Render their avatar, if they have one
+                if (!msg.mine && cProfile?.avatar) {
+                    const imgAvatar = document.createElement('img');
+                    imgAvatar.src = cProfile.avatar;
+                    divMessage.appendChild(imgAvatar);
+                }
+                // Construct the text content
+                const pMessage = document.createElement('p');
+                // Render their text content (using our custom Markdown renderer)
+                // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
+                pMessage.innerHTML = parseMarkdown(msg.content);
+                // Add it to the chat!
+                divMessage.appendChild(pMessage);
+                domChatMessages.appendChild(divMessage);
             }
+
+            // Auto-scroll on new messages
+            domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
