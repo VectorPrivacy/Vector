@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
@@ -61,55 +61,64 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
 
         // Grab our pubkey
         let signer = client.signer().await.unwrap();
-        let pubkey = signer.get_public_key().await.unwrap();
+        let my_public_key = signer.get_public_key().await.unwrap();
 
         // Fetch GiftWraps related to us
-        let filter = Filter::new().pubkey(pubkey).kind(Kind::GiftWrap);
+        let filter = Filter::new().pubkey(my_public_key).kind(Kind::GiftWrap);
         let events = client
             .fetch_events(vec![filter], std::time::Duration::from_secs(10))
-            .await.unwrap();
+            .await
+            .unwrap();
+
+        // Acquire the mutex lock
+        let mut state = STATE.lock().await;
 
         // Decrypt every GiftWrap and return their contents + senders
-        for maybe_dm in events.iter() {
-            if maybe_dm.kind == Kind::GiftWrap {
-                match client.unwrap_gift_wrap(&maybe_dm).await {
-                    Ok(UnwrappedGift { rumor, sender }) => {
-                        // Found a NIP-17 message!
-                        if rumor.kind == Kind::PrivateDirectMessage {
-                            let is_mine = sender == pubkey;
-                            // TODO: simplify and un-nest-ify this ugly section
-                            match rumor.tags.first() {
-                                Some(tag) => {
-                                    match tag.content() {
-                                        Some(content) => {
-                                            match PublicKey::from_hex(content) {
-                                                Ok(pub_key) => {
-                                                    match pub_key.to_bech32() {
-                                                        Ok(bech32) => {
-                                                            let msg = Message{ id: rumor.id.unwrap().to_bech32().unwrap(), content: rumor.content.to_string(), contact: if sender == pubkey { bech32 } else { sender.to_bech32().unwrap() }, at: rumor.created_at.as_u64(), mine: is_mine };
-                                                            let mut state = STATE.lock().unwrap();
-                                                            state.add_message(msg);
-                                                        },
-                                                        Err(_) => eprintln!("Failed to convert public key to bech32"),
-                                                    }
-                                                },
-                                                Err(_) => eprintln!("Failed to create public key from hex"),
-                                            }
-                                        },
-                                        None => eprintln!("No tag content"),
+        for maybe_dm in events.into_iter().filter(|e| e.kind == Kind::GiftWrap) {
+            // Unwrap the gift wrap
+            match client.unwrap_gift_wrap(&maybe_dm).await {
+                Ok(UnwrappedGift { rumor, sender }) => {
+                    // Found a NIP-17 message!
+                    if rumor.kind == Kind::PrivateDirectMessage {
+                        // Check if it's mine
+                        let is_mine = sender == my_public_key;
+
+                        // Get contact public key (bech32)
+                        let contact: String = if is_mine {
+                            // Get first public key from tags
+                            match rumor.tags.public_keys().next() {
+                                Some(pub_key) => match pub_key.to_bech32() {
+                                    Ok(p_tag_pubkey_bech32) => p_tag_pubkey_bech32,
+                                    Err(..) => {
+                                        eprintln!("Failed to convert public key to bech32");
+                                        continue;
                                     }
                                 },
-                                None => eprintln!("No tags found"),
-                            }                            
-                        }
+                                None => {
+                                    eprintln!("Public key tag found");
+                                    continue;
+                                }
+                            }
+                        } else {
+                            sender.to_bech32().unwrap()
+                        };
+
+                        let msg = Message {
+                            id: rumor.id.unwrap().to_bech32().unwrap(),
+                            content: rumor.content,
+                            contact,
+                            at: rumor.created_at.as_u64(),
+                            mine: is_mine,
+                        };
+                        state.add_message(msg);
                     }
-                    Err(_e) => (),
                 }
+                Err(_e) => (),
             }
         }
     }
 
-    let state = STATE.lock().unwrap();
+    let state = STATE.lock().await;
     let msgs = state.messages.clone();
 
     Ok(msgs)
@@ -119,14 +128,24 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
 async fn message(receiver: String, content: String) -> Result<bool, ()> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
+    // Grab our pubkey
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
     // Convert the Bech32 String in to a PublicKey
     let receiver_pubkey = PublicKey::from_bech32(receiver.as_str()).unwrap();
 
-    // Attempt to send the message
-    match client.send_private_msg(receiver_pubkey, content.clone(), []).await {
+    // Build the NIP-17 rumor
+    let rumor = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone());
+
+    // Send message to the real receiver
+    client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await.unwrap();
+
+    // Send message to our own public key, to allow for message recovering
+    match client.gift_wrap(&my_public_key, rumor, []).await {
         Ok(response) => {
             let msg = Message{ id: response.id().to_bech32().unwrap(), content: content, contact: receiver, at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), mine: true };
-            let mut state = STATE.lock().unwrap();
+            let mut state = STATE.lock().await;
             state.add_message(msg);
             return Ok(true);
         },
@@ -148,7 +167,7 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     match client.fetch_metadata(profile_pubkey, std::time::Duration::from_secs(10)).await {
         Ok(response) => {
             let profile = Profile{ id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default() };
-            let mut state = STATE.lock().unwrap();
+            let mut state = STATE.lock().await;
             state.add_profile(profile.clone());
             return Ok(profile);
         },
@@ -180,7 +199,7 @@ async fn notifs() {
                         Ok(UnwrappedGift { rumor, sender }) => {
                             if rumor.kind == Kind::PrivateDirectMessage {
                                 let msg = Message{ id: rumor.id.unwrap().to_bech32().unwrap(), content: rumor.content.to_string(), contact: sender.to_bech32().unwrap().to_string(), at: rumor.created_at.as_u64(), mine: pubkey == rumor.pubkey };
-                                let mut state = STATE.lock().unwrap();
+                                let mut state = STATE.lock().await;
                                 state.add_message(msg);
                             }
                         }
