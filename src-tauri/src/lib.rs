@@ -218,7 +218,8 @@ async fn login(import_key: String) -> Result<bool, ()> {
 async fn connect() {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
-    // Add a couple common relays, especially with explicit NIP-17 support (thanks 0xchat!)
+    // Add a couple common relays, especially with explicit NIP-17 support (thanks 0xchat and myself!)
+    client.add_relay("wss://jskitty.cat/nostr").await.unwrap();
     client.add_relay("wss://relay.0xchat.com").await.unwrap();
     client.add_relay("wss://auth.nostr1.com").await.unwrap();
     client.add_relay("wss://relay.damus.io").await.unwrap();
