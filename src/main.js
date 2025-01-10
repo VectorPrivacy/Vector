@@ -18,6 +18,7 @@ const domChatList = document.getElementById('chat-list');
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
 const domChatContact = document.getElementById('chat-contact');
+const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessageInput = document.getElementById('chat-input');
@@ -229,6 +230,19 @@ function updateChat(contact) {
     if (cContact) {
         // Prefer displaying their name, otherwise, npub
         domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
+
+        // Display their status, if one exists
+        const fHasStatus = !!cProfile?.status?.title;
+        domChatContactStatus.textContent = cProfile?.status?.title || '';
+
+        // Adjust our Contact Name class to manage space according to Status visibility
+        if (fHasStatus) {
+            domChatContact.classList.remove('chat-contact');
+            domChatContact.classList.add('chat-contact-with-status');
+        } else {
+            domChatContact.classList.add('chat-contact');
+            domChatContact.classList.remove('chat-contact-with-status');
+        }
 
         // Render their messages if a new one has been added
         // TODO: this needs rewriting in the future to be event-based, i.e: new message added (append), message edited (modify one message in the DOM), etc.

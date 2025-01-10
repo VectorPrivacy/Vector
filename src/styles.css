@@ -102,15 +102,33 @@ body {
   position: absolute;
   cursor: pointer;
   left: 10px;
-  top: 10px;
+  top: 18px;
   margin: 0;
   color: rgba(167, 137, 204, 1);
 }
 
-#chat-contact {
+.chat-contact-with-status {
   display: block;
-  margin-top: 5px;
-  margin-bottom: 15px;
+  max-width: 100%;
+  font-weight: bold;
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
+.chat-contact {
+  display: block;
+  max-width: 100%;
+  font-weight: bold;
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+
+#chat-contact-status {
+  opacity: 0.8;
+  font-style: oblique;
+  font-size: 14px;
+  margin-bottom: 2px;
+  display: block;
 }
 
 .chat-messages {
@@ -119,9 +137,12 @@ body {
   align-items: flex-end;
   overflow-y: scroll;
   background-color: #040308;
-  height: 428px;
+  height: 462px;
   padding-left: 10px;
   padding-right: 10px;
+  border-top-style: solid;
+  border-top-color: rgba(167, 137, 204, 0.75);
+  border-top-width: 1px;
 }
 
 .msg-inline-timestamp {

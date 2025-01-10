@@ -20,6 +20,14 @@ struct Profile {
     id: String,
     name: String,
     avatar: String,
+    status: Status,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+struct Status {
+    title: String,
+    purpose: String,
+    url: String,
 }
 
 struct ChatState {
@@ -163,10 +171,30 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     // Convert the Bech32 String in to a PublicKey
     let profile_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
 
+    // Attempt to fetch their status, if one exists
+    let status_filter = Filter::new().author(profile_pubkey).kind(Kind::from_u16(30315)).limit(1);
+    let status = match client.fetch_events(vec![status_filter], std::time::Duration::from_secs(10)).await {
+        Ok(res) => {
+            // Make sure they have a status available
+            if !res.is_empty() {
+                let status_event = res.first().unwrap();
+                // Simple status recognition: last, general-only, no URLs, Metadata or Expiry considered
+                // TODO: comply with expiries, accept more "d" types, allow URLs
+                Status { title: status_event.content.clone(), purpose: status_event.tags.first().unwrap().content().unwrap().to_string(), url: String::from("") }
+            } else {
+                // No status
+                Status { title: String::from(""), purpose: String::from(""), url: String::from("") }
+            }
+        },
+        Err(_e) => {
+            Status { title: String::from(""), purpose: String::from(""), url: String::from("") }
+        },
+    };
+
     // Attempt to fetch their Metadata profile
     match client.fetch_metadata(profile_pubkey, std::time::Duration::from_secs(10)).await {
         Ok(response) => {
-            let profile = Profile{ id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default() };
+            let profile = Profile { id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default(), status };
             let mut state = STATE.lock().await;
             state.add_profile(profile.clone());
             return Ok(profile);
