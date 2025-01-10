@@ -13,6 +13,7 @@ const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
 const domChats = document.getElementById('chats');
+const domAccount = document.getElementById('account');
 const domChatList = document.getElementById('chat-list');
 
 const domChat = document.getElementById('chat');
@@ -170,11 +171,37 @@ async function message(pubkey, content) {
  * Login to the Nostr network
  */
 async function login() {
-    const fLoggedIn = await invoke("login", { importKey: domLoginInput.value.trim() });
-    if (fLoggedIn) {
+    const strPubkey = await invoke("login", { importKey: domLoginInput.value.trim() });
+    if (strPubkey) {
         // Hide the login UI
         domLoginInput.value = "";
         domLogin.style.display = 'none';
+
+        // Connect to Nostr
+        domChatList.textContent = `Connecting to Nostr...`;
+        await invoke("connect");
+
+        // Attempt to sync our profile data
+        domChatList.textContent = `Syncing your profile...`;
+        let cProfile;
+        try {
+            cProfile = await invoke("load_profile", { npub: strPubkey });
+            arrProfiles.push(cProfile);
+        } catch (e) {
+            arrProfiles.push({ id: strPubkey, name: '', avatar: '', mine: true });
+        }
+
+        // Render our avatar (if we have one)
+        if (cProfile?.avatar) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = cProfile.avatar;
+            domAccount.appendChild(imgAvatar);
+        }
+
+        // Render our username (or npub)
+        const h3Username = document.createElement('h3');
+        h3Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
+        domAccount.appendChild(h3Username);
 
         // Connect and fetch historical messages
         await fetchMessages(true);

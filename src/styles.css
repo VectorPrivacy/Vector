@@ -53,6 +53,15 @@ body {
   margin-top: 10px;
 }
 
+.account {
+  align-items: center;
+}
+
+.account img {
+  height: 50px;
+  margin-right: 10px;
+}
+
 #chat-list {
   padding-top: 15px;
 }

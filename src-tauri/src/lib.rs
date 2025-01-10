@@ -21,6 +21,7 @@ struct Profile {
     name: String,
     avatar: String,
     status: Status,
+    mine: bool,
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -63,10 +64,9 @@ lazy_static! {
 async fn fetch_messages() -> Result<Vec<Message>, ()> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
-    // If we're not connected to any relays - connect and immediately retrieve our historical messages
-    if client.relays().await.len() == 0 {
-        connect().await;
-
+    // If we don't have any messages - keep trying to find 'em
+    let mut state = STATE.lock().await;
+    if state.messages.is_empty() {
         // Grab our pubkey
         let signer = client.signer().await.unwrap();
         let my_public_key = signer.get_public_key().await.unwrap();
@@ -77,9 +77,6 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
             .fetch_events(vec![filter], std::time::Duration::from_secs(10))
             .await
             .unwrap();
-
-        // Acquire the mutex lock
-        let mut state = STATE.lock().await;
 
         // Decrypt every GiftWrap and return their contents + senders
         for maybe_dm in events.into_iter().filter(|e| e.kind == Kind::GiftWrap) {
@@ -126,7 +123,6 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
         }
     }
 
-    let state = STATE.lock().await;
     let msgs = state.messages.clone();
 
     Ok(msgs)
@@ -171,6 +167,10 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     // Convert the Bech32 String in to a PublicKey
     let profile_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
 
+    // Grab our pubkey to check for profiles belonging to us
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
     // Attempt to fetch their status, if one exists
     let status_filter = Filter::new().author(profile_pubkey).kind(Kind::from_u16(30315)).limit(1);
     let status = match client.fetch_events(vec![status_filter], std::time::Duration::from_secs(10)).await {
@@ -194,7 +194,8 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     // Attempt to fetch their Metadata profile
     match client.fetch_metadata(profile_pubkey, std::time::Duration::from_secs(10)).await {
         Ok(response) => {
-            let profile = Profile { id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default(), status };
+            let mine = my_public_key == profile_pubkey;
+            let profile = Profile { mine, id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default(), status };
             let mut state = STATE.lock().await;
             state.add_profile(profile.clone());
             return Ok(profile);
@@ -241,7 +242,7 @@ async fn notifs() {
 }
 
 #[tauri::command]
-async fn login(import_key: String) -> Result<bool, ()> {
+async fn login(import_key: String) -> Result<String, ()> {
     let keys: Keys;
     // TODO: add validation, error handling, etc
 
@@ -259,9 +260,12 @@ async fn login(import_key: String) -> Result<bool, ()> {
         .opts(Options::new().gossip(false))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
-    Ok(true)
+
+    // Return our npub to the frontend client
+    Ok(keys.public_key.to_bech32().unwrap())
 }
 
+#[tauri::command]
 async fn connect() {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
@@ -279,7 +283,7 @@ async fn connect() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![fetch_messages, message, login, notifs, load_profile])
+        .invoke_handler(tauri::generate_handler![fetch_messages, message, login, notifs, load_profile, connect])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
