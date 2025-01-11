@@ -55,6 +55,6 @@ jobs:
           tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
           releaseName: 'Chatstr v__VERSION__'
           releaseBody: 'A new Chatstr release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!'
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
