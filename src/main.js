@@ -118,6 +118,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Bring the focus back to the chat
             domChatMessageInput.focus();
+        } else if (e.code === 'Escape') {
+            // Close the dialog
+            emojiSearch.value = '';
+            picker.classList.remove('active');
+
+            // Bring the focus back to the chat
+            domChatMessageInput.focus();
         }
     };
 
