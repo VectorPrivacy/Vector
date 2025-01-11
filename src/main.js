@@ -32,24 +32,111 @@ const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 document.addEventListener('DOMContentLoaded', () => {
     const picker = document.querySelector('.emoji-picker');
+    /** @type {HTMLInputElement} */
+    const emojiSearch = document.getElementById('emoji-search-input');
+    const emojiResults = document.getElementById('emoji-results');
 
     // Listen for Emoji Picker interactions
     document.addEventListener('click', (e) => {
         if (e.target === domChatMessageInputEmoji && !picker.classList.contains('active')) {
+            // Render our most used emojis by default
+            let nDisplayedEmojis = 0;
+            emojiResults.innerHTML = ``;
+            for (const cEmoji of getMostUsedEmojis()) {
+                // Only display 8
+                if (nDisplayedEmojis >= 8) break;
+                // Push it in to the results
+                const spanEmoji = document.createElement('span');
+                spanEmoji.textContent = cEmoji.emoji;
+                emojiResults.appendChild(spanEmoji);
+                nDisplayedEmojis++;
+            }
+
+            // Setup the picker UI
             const rect = domChatMessageBox.getBoundingClientRect();
             picker.style.right = `0px`;
+
+            // TODO: find out why the `-5px` is needed here... hidden margin? padding?
             picker.style.bottom = `${rect.height - 5}px`;
             picker.classList.add('active');
+
+            // Focus on the emoji search box for easy searching
+            emojiSearch.focus();
         } else {
+            // Hide and reset the UI
+            emojiSearch.value = '';
             picker.classList.remove('active');
         }
     });
 
+    // Listen for emoji searches
+    emojiSearch.addEventListener('input', (e) => {
+        // Search for the requested emojis and render them, if it's empty, just use our favorites
+        let nDisplayedEmojis = 0;
+        emojiResults.innerHTML = ``;
+        for (const cEmoji of emojiSearch.value ? searchEmojis(emojiSearch.value) : getMostUsedEmojis()) {
+            // Only display 8
+            if (nDisplayedEmojis >= 8) break;
+            // Push it in to the results
+            const spanEmoji = document.createElement('span');
+            spanEmoji.textContent = cEmoji.emoji;
+            // In searches; the first emoji gets a special tag denoting 'Enter' key selection
+            if (emojiSearch.value) {
+                if (nDisplayedEmojis === 0) {
+                    spanEmoji.id = 'first-emoji';
+                    spanEmoji.style.opacity = 1;
+                } else {
+                    spanEmoji.style.opacity = 0.75;
+                }
+            }
+            emojiResults.appendChild(spanEmoji);
+            nDisplayedEmojis++;
+        }
+
+        // If there's none, sad!
+        if (nDisplayedEmojis === 0) {
+            emojiResults.textContent = `No emojis found`;
+        }
+    });
+
+    // When hitting Enter on the emoji search - choose the first emoji
+    emojiSearch.onkeydown = async (e) => {
+        if (e.code === 'Enter') {
+            e.preventDefault();
+
+            // Register the selection in the emoji-dex
+            const domFirstEmoji = document.getElementById('first-emoji');
+            const cEmoji = arrEmojis.find(a => a.emoji === domFirstEmoji.textContent);
+            cEmoji.used++;
+
+            // Add it to the message input
+            domChatMessageInput.value += cEmoji.emoji;
+
+            // Reset the UI state
+            emojiSearch.value = '';
+            picker.classList.remove('active');
+
+            // Bring the focus back to the chat
+            domChatMessageInput.focus();
+        }
+    };
+
     // Emoji selection
     picker.addEventListener('click', (e) => {
         if (e.target.tagName === 'SPAN') {
-            domChatMessageInput.value += e.target.textContent;
+            // Register the click in the emoji-dex
+            const cEmoji = arrEmojis.find(a => a.emoji === e.target.textContent);
+            cEmoji.used++;
+
+            // Add it to the message input
+            domChatMessageInput.value += cEmoji.emoji;
+
+            // Reset the UI state
+            emojiSearch.value = '';
             picker.classList.remove('active');
+
+            // Bring the focus back to the chat
+            domChatMessageInput.focus();
         }
     });
 });

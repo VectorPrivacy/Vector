@@ -242,6 +242,12 @@ body {
   display: block;
 }
 
+.emoji-picker input {
+  width: -webkit-fill-available;
+  height: 12px;
+  margin-bottom: 12px;
+}
+
 .emoji-picker span {
   cursor: pointer;
   opacity: 1;

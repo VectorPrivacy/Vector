@@ -7,6 +7,7 @@
     <title>Chatstr</title>
     <script src="/main.js" defer></script>
     <script src="/js/markdown.js" defer></script>
+    <script src="/js/emoji.js" defer></script>
   </head>
 
   <body>
@@ -28,8 +29,8 @@
 
         <div class="row" id="chat-box">
           <div class="emoji-picker" tabindex="-1">
-            <!-- Emoji content here -->
-            <span>😂</span><span>😃</span><span>🖕</span><span>💜</span>
+            <input id="emoji-search-input" placeholder="Search..." style="width: -webkit-fill-available; height: 12px; margin-bottom: 12px;">
+            <div id="emoji-results"></div>
           </div>
           <div style="width: 95%; align-items: center;" class="row">
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
