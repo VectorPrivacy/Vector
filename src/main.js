@@ -433,7 +433,7 @@ function updateChat(contact) {
                 } else {
                     // Render their text content (using our custom Markdown renderer)
                     // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
-                    pMessage.innerHTML = parseMarkdown(msg.content);
+                    pMessage.innerHTML = parseMarkdown(msg.content.trim());
                 }
                 // Add it to the chat!
                 divMessage.appendChild(pMessage);
