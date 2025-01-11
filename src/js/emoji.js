@@ -572,3 +572,17 @@ function searchEmojis(search) {
 function getMostUsedEmojis() {
     return arrEmojis.sort((a, b) => b.used - a.used);
 }
+
+/**
+ * Checks if the given string consists only of emojis, ignoring whitespace.
+ * 
+ * @param {string} str - The string to check for emojis.
+ * @returns {boolean} True if the string contains only emojis (ignoring whitespace), false otherwise.
+ */
+function isEmojiOnly(str) {
+    // Regular expression to match any emoji character using Unicode property escapes, ignoring whitespace
+    const emojiRegex = /^[\s\p{Emoji}]+$/u;
+    
+    // Test if the string matches the emoji-only pattern
+    return emojiRegex.test(str);
+}

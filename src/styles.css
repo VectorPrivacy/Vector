@@ -193,6 +193,15 @@ body {
   word-break: break-word;
 }
 
+.emoji-only {
+  font-size: 75px;
+  /* Typically I recommend against !important, but this is the only element in `msg-them` we're force-overriding */
+  background: none !important;
+  padding-left: 0;
+  margin-top: 25px;
+  margin-bottom: 25px;
+}
+
 .msg-them {
   align-self: flex-start;
   display: flex;
