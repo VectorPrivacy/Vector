@@ -369,11 +369,12 @@ window.addEventListener("DOMContentLoaded", () => {
         domChatNewInput.value = ``;
     };
 
-    // Hook up an 'Enter' listener on the Message Box for sending them
+    // Hook up an 'Enter' listener on the Message Box for sending messages
     domChatMessageInput.onkeydown = async (evt) => {
-        if (evt.code === 'Enter' && domChatMessageInput.value.trim().length) {
+        if (evt.code === 'Enter' && !evt.shiftKey && domChatMessageInput.value.trim().length) {
+            evt.preventDefault();
             await message(strOpenChat, domChatMessageInput.value);
             domChatMessageInput.value = '';
         }
-    }
+    };
 });

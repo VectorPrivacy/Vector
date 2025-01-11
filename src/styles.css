@@ -206,17 +206,18 @@ body {
 
 #chat-input {
   width: 85%;
-  border-bottom-right-radius: 0;
-  border-top-right-radius: 0;
+  resize: none;
+  overflow: hidden;
+  height: 20px;
+  padding: 10px;
 }
 
 .emoji-button {
-  border-bottom-left-radius: 0;
-  border-top-left-radius: 0;
   font-size: 30px;
   padding: 0;
   padding-left: 12px;
-  padding-right: 12px;
+  padding-right: 10px;
+  background-color: transparent;
 }
 
 .emoji-picker {
@@ -275,6 +276,7 @@ h1 {
 }
 
 input,
+textarea,
 button {
   outline: none;
   border-radius: 8px;
