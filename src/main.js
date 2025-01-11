@@ -257,19 +257,35 @@ async function fetchMessages(init = false) {
         divContact.classList.add('chatlist-contact');
         divContact.onclick = () => { openChat(chat.contact) };
 
+        // The Username + Message Preview container
+        const divPreviewContainer = document.createElement('div');
+        divPreviewContainer.classList.add('chatlist-contact-preview');
+
         // The avatar, if one exists
         if (cProfile?.avatar) {
             const imgAvatar = document.createElement('img');
             imgAvatar.src = cProfile.avatar;
             divContact.appendChild(imgAvatar);
+        } else {
+            // Otherwise, add some left-margin compensation to keep them aligned
+            divPreviewContainer.style.marginLeft = `50px`;
         }
 
-        // The name (or, if missing metadata, their npub instead)
-        const h3ContactName = document.createElement('h3');
-        h3ContactName.textContent = cProfile?.name || chat.contact;
+        // Add the name (or, if missing metadata, their npub instead) to the chat preview
+        const h4ContactName = document.createElement('h4');
+        h4ContactName.textContent = cProfile?.name || chat.contact;
+        divPreviewContainer.appendChild(h4ContactName);
 
-        // Slap it all together
-        divContact.appendChild(h3ContactName);
+        // Add the last message to the chat preview
+        const cLastMsg = chat.contents[chat.contents.length - 1];
+        const pChatPreview = document.createElement('p');
+        pChatPreview.textContent = cLastMsg ? (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content : '...';
+        divPreviewContainer.appendChild(pChatPreview);
+
+        // Add the Chat Preview to the contact UI
+        divContact.appendChild(divPreviewContainer);
+
+        // Finally, add the full contact to the list
         domChatList.appendChild(divContact);
     }
 

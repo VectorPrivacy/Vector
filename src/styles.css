@@ -69,31 +69,47 @@ body {
 .chatlist-contact {
   display: flex;
   border-style: solid;
-  border-color: gray;
-  border-radius: 15px;
+  border-color: rgba(193, 147, 219, 0.24);
+  border-radius: 30px;
   border-width: 1px;
   cursor: pointer;
-  justify-content: center;
+  justify-content: left;
   height: 50px;
   padding: 5px;
   margin-bottom: 10px;
 }
 
+.chatlist-contact-preview {
+  margin-top: auto;
+  margin-bottom: auto;
+  max-width: 250px;
+}
+
 .chatlist-contact img {
   width: auto;
   height: 100%;
-  border-style: solid;
   border-radius: 100%;
-  border-width: 1px;
 }
 
-.chatlist-contact h3 {
+.chatlist-contact-preview h4 {
   padding-left: 15px;
   padding-right: 15px;
   margin-top: auto;
   margin-bottom: auto;
   text-overflow: ellipsis;
-  overflow-x: hidden;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.chatlist-contact-preview p {
+  opacity: 0.6;
+  margin: 0;
+  margin-left: 15px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: left;
 }
 
 #chat-new {
