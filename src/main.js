@@ -23,11 +23,36 @@ const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessageInput = document.getElementById('chat-input');
+const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
+
+document.addEventListener('DOMContentLoaded', () => {
+    const picker = document.querySelector('.emoji-picker');
+
+    // Listen for Emoji Picker interactions
+    document.addEventListener('click', (e) => {
+        if (e.target === domChatMessageInputEmoji && !picker.classList.contains('active')) {
+            const rect = domChatMessageBox.getBoundingClientRect();
+            picker.style.right = `0px`;
+            picker.style.bottom = `${rect.height - 5}px`;
+            picker.classList.add('active');
+        } else {
+            picker.classList.remove('active');
+        }
+    });
+
+    // Emoji selection
+    picker.addEventListener('click', (e) => {
+        if (e.target.tagName === 'SPAN') {
+            domChatMessageInput.value += e.target.textContent;
+            picker.classList.remove('active');
+        }
+    });
+});
 
 /**
  * @typedef {Object} Message

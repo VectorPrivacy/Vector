@@ -27,7 +27,14 @@
         </div>
 
         <div class="row" id="chat-box">
-          <input id="chat-input" placeholder="Enter message..." />
+          <div class="emoji-picker" tabindex="-1">
+            <!-- Emoji content here -->
+            <span>😂</span><span>😃</span><span>🖕</span><span>💜</span>
+          </div>
+          <div style="width: 95%; align-items: center;" class="row">
+            <input id="chat-input" placeholder="Enter message...">
+            <button id="chat-input-emoji" class="emoji-button">☻</button>
+          </div>
         </div>
       </div>
 

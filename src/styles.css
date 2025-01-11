@@ -205,10 +205,54 @@ body {
 }
 
 #chat-input {
-  position: relative;
-  bottom: -6px;
-  height: 20px;
   width: 85%;
+  border-bottom-right-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.emoji-button {
+  border-bottom-left-radius: 0;
+  border-top-left-radius: 0;
+  font-size: 30px;
+  padding: 0;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.emoji-picker {
+  display: none;
+  position: absolute;
+  z-index: 1000;
+  background: #251134e3;
+  padding: 10px;
+  width: 200px;
+  max-height: 200px;
+  overflow-y: auto;
+  border-radius: 0;
+  border-top-left-radius: 8px;
+  border-color: #1e0d2aff;
+  border-style: solid;
+  border-bottom: none;
+  border-right: none;
+  backdrop-filter: blur(6px);
+}
+
+.emoji-picker.active {
+  display: block;
+}
+
+.emoji-picker span {
+  cursor: pointer;
+  opacity: 1;
+  padding: 6px;
+  font-size: 30px;
+  border-radius: 100%;
+  display: inline-block;
+}
+
+.emoji-picker span:hover {
+  opacity: 0.8;
+  background: #0000003f;
 }
 
 .row {
