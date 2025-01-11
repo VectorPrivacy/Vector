@@ -60,6 +60,7 @@ body {
 .account img {
   height: 50px;
   margin-right: 10px;
+  border-radius: 100%;
 }
 
 #chat-list {
