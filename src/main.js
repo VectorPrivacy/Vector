@@ -165,7 +165,20 @@ emojiSearch.onkeydown = async (e) => {
                 // Found the message!
                 const strReceiverPubkey = cMsg.contact;
 
-                // Send the Reaction
+                // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
+                const spanReaction = document.createElement('span');
+                spanReaction.style.position = `relative`;
+                spanReaction.style.width = `60px`;
+                spanReaction.textContent = `${cEmoji.emoji} 1`;
+
+                // Remove the Reaction button
+                const divMessage = document.getElementById(cMsg.id);
+                divMessage.lastElementChild.remove();
+
+                // Append the Decoy Reaction
+                divMessage.appendChild(spanReaction);
+
+                // Send the Reaction to the network
                 invoke('react', { referenceId: strCurrentReactionReference, chatPubkey: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
@@ -208,7 +221,20 @@ picker.addEventListener('click', (e) => {
                 // Found the message!
                 const strReceiverPubkey = cMsg.contact;
 
-                // Send the Reaction
+                // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
+                const spanReaction = document.createElement('span');
+                spanReaction.style.position = `relative`;
+                spanReaction.style.width = `60px`;
+                spanReaction.textContent = `${cEmoji.emoji} 1`;
+
+                // Remove the Reaction button
+                const divMessage = document.getElementById(cMsg.id);
+                divMessage.lastElementChild.remove();
+
+                // Append the Decoy Reaction
+                divMessage.appendChild(spanReaction);
+
+                // Send the Reaction to the network
                 invoke('react', { referenceId: strCurrentReactionReference, chatPubkey: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
