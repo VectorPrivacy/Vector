@@ -1,6 +1,6 @@
 [package]
 name = "chatstr"
-version = "0.1.3"
+version = "0.1.4"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["JSKitty"]
 edition = "2021"
