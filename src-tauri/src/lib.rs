@@ -34,11 +34,13 @@ struct Status {
 struct ChatState {
     messages: Vec<Message>,
     profiles: Vec<Profile>,
+    // Used, particularly, for detecting Message + Profile changes and rendering them
+    has_state_changed: bool,
 }
 
 impl ChatState {
     fn new() -> Self {
-        Self { messages: Vec::new(), profiles: Vec::new() }
+        Self { messages: Vec::new(), profiles: Vec::new(), has_state_changed: true }
     }
 
     fn add_message(&mut self, message: Message) {
@@ -150,6 +152,7 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
         Ok(response) => {
             let msg = Message{ id: response.id().to_bech32().unwrap(), content: content, contact: receiver, at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), mine: true };
             let mut state = STATE.lock().await;
+            state.has_state_changed = true;
             state.add_message(msg);
             return Ok(true);
         },
@@ -197,6 +200,7 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
             let mine = my_public_key == profile_pubkey;
             let profile = Profile { mine, id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default(), status };
             let mut state = STATE.lock().await;
+            state.has_state_changed = true;
             state.add_profile(profile.clone());
             return Ok(profile);
         },
@@ -229,6 +233,7 @@ async fn notifs() {
                             if rumor.kind == Kind::PrivateDirectMessage {
                                 let msg = Message{ id: rumor.id.unwrap().to_bech32().unwrap(), content: rumor.content.to_string(), contact: sender.to_bech32().unwrap().to_string(), at: rumor.created_at.as_u64(), mine: pubkey == rumor.pubkey };
                                 let mut state = STATE.lock().await;
+                                state.has_state_changed = true;
                                 state.add_message(msg);
                             }
                         }
@@ -266,6 +271,18 @@ async fn login(import_key: String) -> Result<String, ()> {
 }
 
 #[tauri::command]
+async fn has_state_changed() -> Result<bool, ()> {
+    let state = STATE.lock().await;
+    Ok(state.has_state_changed)
+}
+
+#[tauri::command]
+async fn acknowledge_state_change() {
+    let mut state = STATE.lock().await;
+    state.has_state_changed = false;
+}
+
+#[tauri::command]
 async fn connect() {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
@@ -283,7 +300,7 @@ async fn connect() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![fetch_messages, message, login, notifs, load_profile, connect])
+        .invoke_handler(tauri::generate_handler![fetch_messages, message, login, notifs, load_profile, connect, has_state_changed, acknowledge_state_change])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -236,7 +236,10 @@ async function fetchMessages(init = false) {
         updateChat(strOpenChat);
     }
 
-    // Render the chats
+    // Render the chats (if the backend signals a state change)
+    const fStateChanged = await invoke('has_state_changed');
+    if (!fStateChanged) return;
+
     domChatList.innerHTML = ``;
     for (const chat of arrChats) {
         // Let's try to load the profile of each chat, too
@@ -288,6 +291,9 @@ async function fetchMessages(init = false) {
         // Finally, add the full contact to the list
         domChatList.appendChild(divContact);
     }
+
+    // Acknowledge the state change (thus, preventing re-renders when there's nothing new to render)
+    if (!init) await invoke('acknowledge_state_change');
 
     // Start a post-init refresh loop, which will frequently poll cached chats from the client
     if (init) setInterval(fetchMessages, 500);
