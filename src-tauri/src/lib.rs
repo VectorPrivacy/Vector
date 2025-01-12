@@ -4,7 +4,11 @@ use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
 use lazy_static::lazy_static;
 
+use tauri::{AppHandle, Manager};
+use tauri_plugin_notification::NotificationExt;
+
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
+static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 
 #[derive(serde::Serialize, Clone, Debug)]
 struct Message {
@@ -349,6 +353,18 @@ async fn notifs() {
                                     mine: pubkey == rumor.pubkey
                                 };
                                 let mut state = STATE.lock().await;
+
+                                // Send an OS notification for incoming messages
+                                if !msg.mine {
+                                    // Find the name of the sender, if we have it
+                                    if let Some(profile) = state.profiles.iter().find(|profile| profile.id == msg.contact) {
+                                        show_notification(profile.name.clone(), msg.content.clone());
+                                    } else {
+                                        show_notification(String::from("New Message"), msg.content.clone());
+                                    }
+                                }
+
+                                // Push the message to our state
                                 state.has_state_changed = true;
                                 state.add_message(msg);
                             }
@@ -391,6 +407,21 @@ async fn notifs() {
             Ok(false)
         })
         .await.unwrap();
+}
+
+#[tauri::command]
+fn show_notification(title: String, content: String) {
+    let app_handle = TAURI_APP.get().unwrap().clone();
+    // Only send notifications if the app is not focused
+    // TODO: generalise this assumption - it's only used for Message Notifications at the moment
+    if !app_handle.webview_windows().iter().next().unwrap().1.is_focused().unwrap() {
+        app_handle.notification()
+            .builder()
+            .title(title)
+            .body(content)
+            .show()
+            .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
+    }
 }
 
 #[tauri::command]
@@ -447,6 +478,13 @@ async fn connect() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let app_handle = app.app_handle().clone();
+            // Set as our accessible static app handle
+            TAURI_APP.set(app_handle).unwrap();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![fetch_messages, message, react, login, notifs, load_profile, connect, has_state_changed, acknowledge_state_change])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
