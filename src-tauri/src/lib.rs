@@ -223,6 +223,55 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
 }
 
 #[tauri::command]
+async fn react(reference_id: String, chat_pubkey: String, emoji: String) -> Result<bool, ()> {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+
+    // Grab the message we're reacting to
+    let mut state = STATE.lock().await;
+    if let Some(msg) = state.messages.iter_mut().find(|msg| msg.id == reference_id) {
+        // Format the reference ID in to an EventID
+        let reference_event = EventId::from_hex(reference_id.as_str()).unwrap();
+
+        // Format the chat pubkey (which is, currently, the single user we're talking to)
+        let receiver_pubkey = PublicKey::from_bech32(chat_pubkey.as_str()).unwrap();
+
+        // Grab our pubkey
+        let signer = client.signer().await.unwrap();
+        let my_public_key = signer.get_public_key().await.unwrap();
+
+        // Build our NIP-25 Reaction rumor
+        let rumor = EventBuilder::reaction_extended(reference_event, receiver_pubkey, Some(Kind::PrivateDirectMessage), emoji.clone());
+
+        // Send reaction to the real receiver
+        client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await.unwrap();
+
+        // Send reaction to our own public key, to allow for recovering
+        match client.gift_wrap(&my_public_key, rumor, []).await {
+            Ok(response) => {
+                // Add the reaction locally
+                let reaction = Reaction {
+                    id: response.id().to_hex(),
+                    reference_id,
+                    author_id: my_public_key.to_hex(),
+                    emoji
+                };
+                // Append it to the message
+                msg.add_reaction(reaction);
+                state.has_state_changed = true;
+                return Ok(true);
+            },
+            Err(e) => {
+                eprintln!("Error: {:?}", e);
+                return Ok(false);
+            },
+        }
+    } else {
+        //  No reference message, what do!?
+        return Ok(false);
+    }
+}
+
+#[tauri::command]
 async fn load_profile(npub: String) -> Result<Profile, ()> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
@@ -398,7 +447,7 @@ async fn connect() {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![fetch_messages, message, login, notifs, load_profile, connect, has_state_changed, acknowledge_state_change])
+        .invoke_handler(tauri::generate_handler![fetch_messages, message, react, login, notifs, load_profile, connect, has_state_changed, acknowledge_state_change])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

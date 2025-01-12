@@ -30,122 +30,200 @@ const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
-document.addEventListener('DOMContentLoaded', () => {
-    const picker = document.querySelector('.emoji-picker');
-    /** @type {HTMLInputElement} */
-    const emojiSearch = document.getElementById('emoji-search-input');
-    const emojiResults = document.getElementById('emoji-results');
+const picker = document.querySelector('.emoji-picker');
+/** @type {HTMLInputElement} */
+const emojiSearch = document.getElementById('emoji-search-input');
+const emojiResults = document.getElementById('emoji-results');
 
-    // Listen for Emoji Picker interactions
-    document.addEventListener('click', (e) => {
-        if (e.target === domChatMessageInputEmoji && !picker.classList.contains('active')) {
-            // Render our most used emojis by default
-            let nDisplayedEmojis = 0;
-            emojiResults.innerHTML = ``;
-            for (const cEmoji of getMostUsedEmojis()) {
-                // Only display 8
-                if (nDisplayedEmojis >= 8) break;
-                // Push it in to the results
-                const spanEmoji = document.createElement('span');
-                spanEmoji.textContent = cEmoji.emoji;
-                emojiResults.appendChild(spanEmoji);
-                nDisplayedEmojis++;
-            }
+/**
+ * The current reaction reference - i.e: a message being reacted to.
+ * 
+ * When empty, emojis are simply injected to the current chat input.
+ */
+let strCurrentReactionReference = "";
 
-            // Setup the picker UI
-            const rect = domChatMessageBox.getBoundingClientRect();
-            picker.style.right = `0px`;
+/**
+ * Opens the Emoji Input Panel
+ * 
+ * If a DOM element is passed, the panel will be rendered 'floating' near the element.
+ * If none is specified, it opens in the default location near the Message Input.
+ * @param {MouseEvent?} e - An associated click event
+ */
+function openEmojiPanel(e) {
+    const isDefaultPanel = e.target === domChatMessageInputEmoji;
 
-            // TODO: find out why the `-5px` is needed here... hidden margin? padding?
-            picker.style.bottom = `${rect.height - 5}px`;
-            picker.classList.add('active');
-
-            // Focus on the emoji search box for easy searching
-            emojiSearch.focus();
-        } else {
-            // Hide and reset the UI
-            emojiSearch.value = '';
-            picker.classList.remove('active');
-        }
-    });
-
-    // Listen for emoji searches
-    emojiSearch.addEventListener('input', (e) => {
-        // Search for the requested emojis and render them, if it's empty, just use our favorites
+    // Open or Close the panel depending on it's state
+    const fReaction = e.target.hasAttribute('reaction');
+    const fClickedInputOrReaction = isDefaultPanel || fReaction;
+    if (fClickedInputOrReaction && picker.style.display !== `block`) {
+        // Render our most used emojis by default
         let nDisplayedEmojis = 0;
         emojiResults.innerHTML = ``;
-        for (const cEmoji of emojiSearch.value ? searchEmojis(emojiSearch.value) : getMostUsedEmojis()) {
+        for (const cEmoji of getMostUsedEmojis()) {
             // Only display 8
             if (nDisplayedEmojis >= 8) break;
             // Push it in to the results
             const spanEmoji = document.createElement('span');
             spanEmoji.textContent = cEmoji.emoji;
-            // In searches; the first emoji gets a special tag denoting 'Enter' key selection
-            if (emojiSearch.value) {
-                if (nDisplayedEmojis === 0) {
-                    spanEmoji.id = 'first-emoji';
-                    spanEmoji.style.opacity = 1;
-                } else {
-                    spanEmoji.style.opacity = 0.75;
-                }
-            }
             emojiResults.appendChild(spanEmoji);
             nDisplayedEmojis++;
         }
 
-        // If there's none, sad!
-        if (nDisplayedEmojis === 0) {
-            emojiResults.textContent = `No emojis found`;
+        // Setup the picker UI
+        /** @type {DOMRect} */
+        const rect = (isDefaultPanel ? domChatMessageBox : e.target).getBoundingClientRect();
+
+        // Display and stick it to the right side
+        picker.style.display = `block`;
+        picker.style.right = `0px`;
+
+        // Compute it's position based on the element calling it (i.e: reactions are a floaty panel)
+        const pickerRect = picker.getBoundingClientRect();
+        if (isDefaultPanel) {
+            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height + 5}px`
+            picker.classList.add('emoji-picker-message-type');
+        } else {
+            picker.classList.remove('emoji-picker-message-type');
+            picker.style.top = `${rect.y - rect.height + (pickerRect.height / 2) + 10}px`;
+            // TODO: this could be more intelligent (aim for the 'e.target' location)
+            // ... however, you need to compute when the picker will overflow the app
+            // ... and prevent it, so, I'm just glue-ing it to the right for now with
+            // ... some 'groundwork' code that shouldn't be too hard to modify.
+            //picker.style.left = `${document.body.clientWidth - pickerRect.width}px`
         }
-    });
 
-    // When hitting Enter on the emoji search - choose the first emoji
-    emojiSearch.onkeydown = async (e) => {
-        if (e.code === 'Enter') {
-            e.preventDefault();
+        // If this is a Reaction, let's cache the Reference ID
+        if (fReaction) {
+            // Message IDs are stored on the parent of the React button
+            strCurrentReactionReference = e.target.parentElement.id;
+        } else {
+            strCurrentReactionReference = '';
+        }
 
-            // Register the selection in the emoji-dex
-            const domFirstEmoji = document.getElementById('first-emoji');
-            const cEmoji = arrEmojis.find(a => a.emoji === domFirstEmoji.textContent);
-            cEmoji.used++;
+        // Focus on the emoji search box for easy searching
+        emojiSearch.focus();
+    } else {
+        // Hide and reset the UI
+        emojiSearch.value = '';
+        picker.style.display = ``;
+        strCurrentReactionReference = '';
+    }
+}
 
+// Listen for Emoji Picker interactions
+document.addEventListener('click', (e) => {
+    openEmojiPanel(e);
+});
+
+// Listen for emoji searches
+emojiSearch.addEventListener('input', (e) => {
+    // Search for the requested emojis and render them, if it's empty, just use our favorites
+    let nDisplayedEmojis = 0;
+    emojiResults.innerHTML = ``;
+    for (const cEmoji of emojiSearch.value ? searchEmojis(emojiSearch.value) : getMostUsedEmojis()) {
+        // Only display 8
+        if (nDisplayedEmojis >= 8) break;
+        // Push it in to the results
+        const spanEmoji = document.createElement('span');
+        spanEmoji.textContent = cEmoji.emoji;
+        // In searches; the first emoji gets a special tag denoting 'Enter' key selection
+        if (emojiSearch.value) {
+            if (nDisplayedEmojis === 0) {
+                spanEmoji.id = 'first-emoji';
+                spanEmoji.style.opacity = 1;
+            } else {
+                spanEmoji.style.opacity = 0.75;
+            }
+        }
+        emojiResults.appendChild(spanEmoji);
+        nDisplayedEmojis++;
+    }
+
+    // If there's none, sad!
+    if (nDisplayedEmojis === 0) {
+        emojiResults.textContent = `No emojis found`;
+    }
+});
+
+// When hitting Enter on the emoji search - choose the first emoji
+emojiSearch.onkeydown = async (e) => {
+    if (e.code === 'Enter') {
+        e.preventDefault();
+
+        // Register the selection in the emoji-dex
+        const domFirstEmoji = document.getElementById('first-emoji');
+        const cEmoji = arrEmojis.find(a => a.emoji === domFirstEmoji.textContent);
+        cEmoji.used++;
+
+        // If this is a Reaction - let's send it!
+        if (strCurrentReactionReference) {
+            // Grab the referred message to find it's chat pubkey
+            for (const cChat of arrChats) {
+                const cMsg = cChat.contents.find(a => a.id === strCurrentReactionReference);
+                if (!cMsg) continue;
+
+                // Found the message!
+                const strReceiverPubkey = cMsg.contact;
+
+                // Send the Reaction
+                invoke('react', { referenceId: strCurrentReactionReference, chatPubkey: strReceiverPubkey, emoji: cEmoji.emoji });
+            }
+        } else {
             // Add it to the message input
             domChatMessageInput.value += cEmoji.emoji;
-
-            // Reset the UI state
-            emojiSearch.value = '';
-            picker.classList.remove('active');
-
-            // Bring the focus back to the chat
-            domChatMessageInput.focus();
-        } else if (e.code === 'Escape') {
-            // Close the dialog
-            emojiSearch.value = '';
-            picker.classList.remove('active');
-
-            // Bring the focus back to the chat
-            domChatMessageInput.focus();
         }
-    };
 
-    // Emoji selection
-    picker.addEventListener('click', (e) => {
-        if (e.target.tagName === 'SPAN') {
-            // Register the click in the emoji-dex
-            const cEmoji = arrEmojis.find(a => a.emoji === e.target.textContent);
-            cEmoji.used++;
+        // Reset the UI state
+        emojiSearch.value = '';
+        picker.style.display = ``;
+        strCurrentReactionReference = '';
 
+        // Bring the focus back to the chat
+        domChatMessageInput.focus();
+    } else if (e.code === 'Escape') {
+        // Close the dialog
+        emojiSearch.value = '';
+        picker.style.display = ``;
+        strCurrentReactionReference = '';
+
+        // Bring the focus back to the chat
+        domChatMessageInput.focus();
+    }
+};
+
+// Emoji selection
+picker.addEventListener('click', (e) => {
+    if (e.target.tagName === 'SPAN') {
+        // Register the click in the emoji-dex
+        const cEmoji = arrEmojis.find(a => a.emoji === e.target.textContent);
+        cEmoji.used++;
+
+        // If this is a Reaction - let's send it!
+        if (strCurrentReactionReference) {
+            // Grab the referred message to find it's chat pubkey
+            for (const cChat of arrChats) {
+                const cMsg = cChat.contents.find(a => a.id === strCurrentReactionReference);
+                if (!cMsg) continue;
+
+                // Found the message!
+                const strReceiverPubkey = cMsg.contact;
+
+                // Send the Reaction
+                invoke('react', { referenceId: strCurrentReactionReference, chatPubkey: strReceiverPubkey, emoji: cEmoji.emoji });
+            }
+        } else {
             // Add it to the message input
             domChatMessageInput.value += cEmoji.emoji;
-
-            // Reset the UI state
-            emojiSearch.value = '';
-            picker.classList.remove('active');
-
-            // Bring the focus back to the chat
-            domChatMessageInput.focus();
         }
-    });
+
+        // Reset the UI state
+        emojiSearch.value = '';
+        picker.classList.remove('active');
+        strCurrentReactionReference = '';
+
+        // Bring the focus back to the chat
+        domChatMessageInput.focus();
+    }
 });
 
 /**
@@ -425,8 +503,9 @@ function updateChat(contact) {
                 pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
                 domChatMessages.appendChild(pTimestamp);
             }
-            // Construct the message container
+            // Construct the message container (the DOM ID is the HEX Nostr Event ID)
             const divMessage = document.createElement('div');
+            divMessage.id = msg.id;
             // Render it appropriately depending on who sent it
             divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
             // Render their avatar, if they have one
@@ -461,6 +540,12 @@ function updateChat(contact) {
                 spanReaction.style.position = `relative`;
                 spanReaction.style.width = `60px`;
                 spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
+            } else if (!msg.mine) {
+                // No reaction on the contact's message, so let's display the 'Add Reaction' UI
+                spanReaction = document.createElement('span');
+                spanReaction.textContent = `☻`;
+                spanReaction.classList.add('add-reaction');
+                spanReaction.setAttribute('reaction', true);
             }
 
             // Decide which side of the msg to render reactions on - if they exist

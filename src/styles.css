@@ -224,6 +224,17 @@ body {
   display: flex;
 }
 
+.add-reaction {
+  cursor: pointer;
+  opacity: 0;
+  font-size: 25px;
+  transition: opacity 0.1s;
+}
+
+.msg-them:hover .add-reaction  {
+  opacity: 0.75;
+}
+
 #chat-box {
   width: 100%;
   background-color: #251134ff;
@@ -255,17 +266,17 @@ body {
   width: 200px;
   max-height: 200px;
   overflow-y: auto;
-  border-radius: 0;
-  border-top-left-radius: 8px;
+  border-radius: 8px;
   border-color: #1e0d2aff;
   border-style: solid;
-  border-bottom: none;
-  border-right: none;
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(4px);
 }
 
-.emoji-picker.active {
-  display: block;
+.emoji-picker-message-type {
+  border-bottom: none;
+  border-right: none;
+  border-radius: 0;
+  border-top-left-radius: 8px;
 }
 
 .emoji-picker input {
