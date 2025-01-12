@@ -11,8 +11,20 @@ struct Message {
     id: String,
     content: String,
     contact: String,
+    reactions: Vec<Reaction>,
     at: u64,
     mine: bool,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+struct Reaction {
+    id: String,
+    /** The HEX Event ID of the message being reacted to */
+    reference_id: String,
+    /** The HEX ID of the author */
+    author_id: String,
+    /** The emoji of the reaction */
+    emoji: String,
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -54,6 +66,15 @@ impl ChatState {
         // Make sure we don't add the same profile twice
         if !self.profiles.iter().any(|m| m.id == profile.id) {
             self.profiles.push(profile);
+        }
+    }
+}
+
+impl Message {
+    fn add_reaction(&mut self, reaction: Reaction) {
+        // Make sure we don't add the same reaction twice
+        if !self.reactions.iter().any(|r| r.id == reaction.id) {
+            self.reactions.push(reaction);
         }
     }
 }
@@ -111,13 +132,44 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
                         };
 
                         let msg = Message {
-                            id: rumor.id.unwrap().to_bech32().unwrap(),
+                            id: rumor.id.unwrap().to_hex(),
                             content: rumor.content,
                             contact,
                             at: rumor.created_at.as_u64(),
+                            reactions: Vec::new(),
                             mine: is_mine,
                         };
                         state.add_message(msg);
+                    }
+                    // GiftWrapped Emoji Reaction (compatible with 0xchat implementation)
+                    else if rumor.kind == Kind::Reaction {
+                        match rumor.tags.find(TagKind::e()) {
+                            Some(react_reference_tag) => {
+                                // The message ID being 'reacted' to
+                                let reference_id = react_reference_tag.content().unwrap();
+                                // Now we search our message cache for the referred message
+                                let mut found_message: bool = state.has_state_changed;
+                                for msg in state.messages.iter_mut() {
+                                    // Found it!
+                                    if msg.id == reference_id.to_string() {
+                                        // Create the Reaction
+                                        let reaction = Reaction {
+                                            id: rumor.id.unwrap().to_hex(),
+                                            reference_id: reference_id.to_string(),
+                                            author_id: sender.to_hex(),
+                                            emoji: rumor.content.clone()
+                                        };
+                                        // Append it to the message
+                                        msg.add_reaction(reaction);
+                                        found_message = true;
+                                    }
+                                }
+
+                                // If we found the relevent message: mark the state as changed!
+                                state.has_state_changed = found_message;
+                            },
+                            None => println!("No referenced message for reaction"),
+                        }
                     }
                 }
                 Err(_e) => (),
@@ -150,7 +202,14 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
     // Send message to our own public key, to allow for message recovering
     match client.gift_wrap(&my_public_key, rumor, []).await {
         Ok(response) => {
-            let msg = Message{ id: response.id().to_bech32().unwrap(), content: content, contact: receiver, at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), mine: true };
+            let msg = Message {
+                id: response.id().to_hex(),
+                content: content,
+                contact: receiver,
+                at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                reactions: Vec::new(),
+                mine: true
+            };
             let mut state = STATE.lock().await;
             state.has_state_changed = true;
             state.add_message(msg);
@@ -230,11 +289,50 @@ async fn notifs() {
                 if event.kind == Kind::GiftWrap {
                     match client.unwrap_gift_wrap(&event).await {
                         Ok(UnwrappedGift { rumor, sender }) => {
+                            // NIP-17 Private Direct Message
                             if rumor.kind == Kind::PrivateDirectMessage {
-                                let msg = Message{ id: rumor.id.unwrap().to_bech32().unwrap(), content: rumor.content.to_string(), contact: sender.to_bech32().unwrap().to_string(), at: rumor.created_at.as_u64(), mine: pubkey == rumor.pubkey };
+                                let msg = Message {
+                                    id: rumor.id.unwrap().to_hex(),
+                                    content: rumor.content.to_string(),
+                                    contact: sender.to_bech32().unwrap().to_string(),
+                                    at: rumor.created_at.as_u64(),
+                                    reactions: Vec::new(),
+                                    mine: pubkey == rumor.pubkey
+                                };
                                 let mut state = STATE.lock().await;
                                 state.has_state_changed = true;
                                 state.add_message(msg);
+                            }
+                            // GiftWrapped Emoji Reaction (compatible with 0xchat implementation)
+                            else if rumor.kind == Kind::Reaction {
+                                match rumor.tags.find(TagKind::e()) {
+                                    Some(react_reference_tag) => {
+                                        // The message ID being 'reacted' to
+                                        let reference_id = react_reference_tag.content().unwrap();
+                                        // Now we search our message cache for the referred message
+                                        let mut state = STATE.lock().await;
+                                        let mut found_message: bool = state.has_state_changed;
+                                        for msg in state.messages.iter_mut() {
+                                            // Found it!
+                                            if msg.id == reference_id.to_string() {
+                                                // Create the Reaction
+                                                let reaction = Reaction {
+                                                    id: rumor.id.unwrap().to_hex(),
+                                                    reference_id: reference_id.to_string(),
+                                                    author_id: sender.to_hex(),
+                                                    emoji: rumor.content.clone()
+                                                };
+                                                // Append it to the message
+                                                msg.add_reaction(reaction);
+                                                found_message = true;
+                                            }
+                                        }
+
+                                        // If we found the relevent message: mark the state as changed!
+                                        state.has_state_changed = found_message;
+                                    },
+                                    None => println!("No referenced message for reaction"),
+                                }
                             }
                         }
                         Err(_e) => (),

@@ -231,14 +231,14 @@ async function fetchMessages(init = false) {
     // Now sort our Chat history by descending time since last message
     arrChats.sort((a, b) => b.contents[b.contents.length - 1].at - a.contents[a.contents.length - 1].at);
 
+    // Render the chats (if the backend signals a state change)
+    const fStateChanged = await invoke('has_state_changed');
+    if (!fStateChanged) return;
+
     // If a chat is open, update it's messages
     if (strOpenChat) {
         updateChat(strOpenChat);
     }
-
-    // Render the chats (if the backend signals a state change)
-    const fStateChanged = await invoke('has_state_changed');
-    if (!fStateChanged) return;
 
     domChatList.innerHTML = ``;
     for (const chat of arrChats) {
@@ -412,57 +412,81 @@ function updateChat(contact) {
             domChatContact.classList.remove('chat-contact-with-status');
         }
 
-        // Render their messages if a new one has been added
+        // Render their messages upon state changes (guided by fetchMessages())
         // TODO: this needs rewriting in the future to be event-based, i.e: new message added (append), message edited (modify one message in the DOM), etc.
-        const arrMessages = cContact.contents;
-        const cLastMsg = arrMessages[arrMessages.length - 1];
-        const isNewMsg = strLastMsgID !== cLastMsg.id;
-        if (isNewMsg) {
-            // Update the last message ID
-            strLastMsgID = cLastMsg.id
-
-            // Wipe and re-render the HTML
-            domChatMessages.innerHTML = ``;
-            let nLastMsgTime = arrMessages[0]?.at || 0;
-            for (const msg of arrMessages) {
-                // If the last message was over 10 minutes ago, add an inline timestamp
-                if (msg.at - nLastMsgTime > 600) {
-                    nLastMsgTime = msg.at;
-                    const pTimestamp = document.createElement('p');
-                    pTimestamp.classList.add('msg-inline-timestamp');
-                    pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
-                    domChatMessages.appendChild(pTimestamp);
-                }
-                // Construct the message container
-                const divMessage = document.createElement('div');
-                // Render it appropriately depending on who sent it
-                divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
-                // Render their avatar, if they have one
-                if (!msg.mine && cProfile?.avatar) {
-                    const imgAvatar = document.createElement('img');
-                    imgAvatar.src = cProfile.avatar;
-                    divMessage.appendChild(imgAvatar);
-                }
-                // Construct the text content
-                const pMessage = document.createElement('p');
-                // If it's emoji-only, and less than four emojis, format them nicely
-                const strEmojiCleaned = msg.content.replace(/\s/g, '');
-                if (isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6) {
-                    // Strip out unnecessary whitespace
-                    pMessage.textContent = strEmojiCleaned
-                    // Add an emoji-only CSS format
-                    pMessage.classList.add('emoji-only');
-                } else {
-                    // Render their text content (using our custom Markdown renderer)
-                    // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
-                    pMessage.innerHTML = parseMarkdown(msg.content.trim());
-                }
-                // Add it to the chat!
-                divMessage.appendChild(pMessage);
-                domChatMessages.appendChild(divMessage);
+        domChatMessages.innerHTML = ``;
+        let nLastMsgTime = cContact.contents[0]?.at || 0;
+        for (const msg of cContact.contents) {
+            // If the last message was over 10 minutes ago, add an inline timestamp
+            if (msg.at - nLastMsgTime > 600) {
+                nLastMsgTime = msg.at;
+                const pTimestamp = document.createElement('p');
+                pTimestamp.classList.add('msg-inline-timestamp');
+                pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
+                domChatMessages.appendChild(pTimestamp);
+            }
+            // Construct the message container
+            const divMessage = document.createElement('div');
+            // Render it appropriately depending on who sent it
+            divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+            // Render their avatar, if they have one
+            if (!msg.mine && cProfile?.avatar) {
+                const imgAvatar = document.createElement('img');
+                imgAvatar.src = cProfile.avatar;
+                divMessage.appendChild(imgAvatar);
+            }
+            // Construct the text content
+            const pMessage = document.createElement('p');
+            // If it's emoji-only, and less than four emojis, format them nicely
+            const strEmojiCleaned = msg.content.replace(/\s/g, '');
+            if (isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6) {
+                // Strip out unnecessary whitespace
+                pMessage.textContent = strEmojiCleaned
+                // Add an emoji-only CSS format
+                pMessage.classList.add('emoji-only');
+            } else {
+                // Render their text content (using our custom Markdown renderer)
+                // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
+                pMessage.innerHTML = parseMarkdown(msg.content.trim());
             }
 
-            // Auto-scroll on new messages
+            // Add message reactions
+            // TODO: while currently limited to one; add support for multi-reactions with a nice UX
+            const cReaction = msg.reactions[0];
+            let spanReaction;
+            if (cReaction) {
+                // Aggregate the 'reactions' of this reaction's type
+                const nReacts = msg.reactions.reduce((a, b) => b.emoji === cReaction.emoji ? a + 1 : a, 0);
+                spanReaction = document.createElement('span');
+                spanReaction.style.position = `relative`;
+                spanReaction.style.width = `60px`;
+                spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
+            }
+
+            // Decide which side of the msg to render reactions on - if they exist
+            if (spanReaction) {
+                if (msg.mine) {
+                    // My message: reactions on the left
+                    divMessage.appendChild(spanReaction);
+                    divMessage.appendChild(pMessage);
+                } else {
+                    // Their message: reactions on the right
+                    divMessage.appendChild(pMessage);
+                    divMessage.appendChild(spanReaction);
+                }
+            } else {
+                // No reactions: just render the message
+                divMessage.appendChild(pMessage);
+            }
+
+            // Add it to the chat!
+            domChatMessages.appendChild(divMessage);
+        }
+
+        // Auto-scroll on new messages
+        const cLastMsg = cContact.contents[cContact.contents.length - 1];
+        if (cLastMsg.id !== strLastMsgID) {
+            strLastMsgID = cLastMsg.id;
             domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
         }
     } else {
