@@ -27,6 +27,7 @@ const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
+const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
@@ -443,9 +444,10 @@ async function login() {
             domAccount.appendChild(imgAvatar);
         }
 
-        // Render our username (or npub)
+        // Render our username and npub
         const h3Username = document.createElement('h3');
         h3Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
+        domShareNpub.textContent = strPubkey;
         domAccount.appendChild(h3Username);
 
         // Connect and fetch historical messages

@@ -20,7 +20,7 @@
       </div>
 
       <div id="chat" class="chat" style="display: none;">
-        <h3 id="chat-back-btn">Back</h3>
+        <h3 class="back-btn" id="chat-back-btn">Back</h3>
         <h3 id="chat-contact"></h3>
         <span id="chat-contact-status"></span>
         <div id="chat-messages" class="chat-messages">
@@ -40,8 +40,21 @@
       </div>
 
       <div id="chat-new" style="display: none;">
-        <h3><i style="cursor: pointer;" id="chat-new-back-btn">Back</i></h3>
-        <input id="chat-new-input" placeholder="Enter npub..." />
+        <h3 class="back-btn" id="chat-new-back-btn">Back</h3>
+        <center>
+          <h2 style="margin-top: 50px; margin-bottom: 5px;">Share your Contact</h2>
+          <span style="opacity: 0.75;">Your 'npub' key can be shared with anyone to give them a way of messaging you.</span>
+        </center>
+        <br>
+        <div style="padding-left: 40px; padding-right: 40px;">
+          <code class="text-gradient" style="line-break: anywhere; font-size: 14px;" id="share-npub"></code>
+        </div>
+        <hr style="color: rgba(167, 137, 204, 0.75); margin-top: 50px; margin-bottom: 50px;">
+        <center>
+          <h2 style="margin-bottom: 5px;">Chat with someone</h2>
+          <span style="opacity: 0.75;">Use your friend's 'npub' to begin a conversation with them.</span>
+        </center>
+        <input style="margin-top: 15px;" id="chat-new-input" placeholder="Enter npub..." />
         <button style="margin-top: 10px;" id="chat-new-btn">Start Chat</button>
       </div>
 

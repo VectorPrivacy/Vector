@@ -124,13 +124,14 @@ body {
   padding: 15px;
 }
 
-#chat-back-btn {
+.back-btn {
   position: absolute;
   cursor: pointer;
   left: 10px;
   top: 18px;
   margin: 0;
   color: rgba(167, 137, 204, 1);
+  z-index: 10;
 }
 
 .chat-contact-with-status {
