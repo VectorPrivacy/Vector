@@ -1,8 +1,8 @@
 use tokio::sync::Mutex;
 
+use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
-use lazy_static::lazy_static;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -56,7 +56,11 @@ struct ChatState {
 
 impl ChatState {
     fn new() -> Self {
-        Self { messages: Vec::new(), profiles: Vec::new(), has_state_changed: true }
+        Self {
+            messages: Vec::new(),
+            profiles: Vec::new(),
+            has_state_changed: true,
+        }
     }
 
     fn add_message(&mut self, message: Message) {
@@ -161,7 +165,7 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
                                             id: rumor.id.unwrap().to_hex(),
                                             reference_id: reference_id.to_string(),
                                             author_id: sender.to_hex(),
-                                            emoji: rumor.content.clone()
+                                            emoji: rumor.content.clone(),
                                         };
                                         // Append it to the message
                                         msg.add_reaction(reaction);
@@ -171,7 +175,7 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
 
                                 // If we found the relevent message: mark the state as changed!
                                 state.has_state_changed = found_message;
-                            },
+                            }
                             None => println!("No referenced message for reaction"),
                         }
                     }
@@ -201,7 +205,10 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
     let rumor = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone());
 
     // Send message to the real receiver
-    client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await.unwrap();
+    client
+        .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+        .await
+        .unwrap();
 
     // Send message to our own public key, to allow for message recovering
     match client.gift_wrap(&my_public_key, rumor, []).await {
@@ -210,19 +217,22 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
                 id: response.id().to_hex(),
                 content: content,
                 contact: receiver,
-                at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
                 reactions: Vec::new(),
-                mine: true
+                mine: true,
             };
             let mut state = STATE.lock().await;
             state.has_state_changed = true;
             state.add_message(msg);
             return Ok(true);
-        },
+        }
         Err(e) => {
             eprintln!("Error: {:?}", e);
             return Ok(false);
-        },
+        }
     }
 }
 
@@ -244,10 +254,18 @@ async fn react(reference_id: String, chat_pubkey: String, emoji: String) -> Resu
         let my_public_key = signer.get_public_key().await.unwrap();
 
         // Build our NIP-25 Reaction rumor
-        let rumor = EventBuilder::reaction_extended(reference_event, receiver_pubkey, Some(Kind::PrivateDirectMessage), emoji.clone());
+        let rumor = EventBuilder::reaction_extended(
+            reference_event,
+            receiver_pubkey,
+            Some(Kind::PrivateDirectMessage),
+            emoji.clone(),
+        );
 
         // Send reaction to the real receiver
-        client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await.unwrap();
+        client
+            .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+            .await
+            .unwrap();
 
         // Send reaction to our own public key, to allow for recovering
         match client.gift_wrap(&my_public_key, rumor, []).await {
@@ -257,17 +275,17 @@ async fn react(reference_id: String, chat_pubkey: String, emoji: String) -> Resu
                     id: response.id().to_hex(),
                     reference_id,
                     author_id: my_public_key.to_hex(),
-                    emoji
+                    emoji,
                 };
                 // Append it to the message
                 msg.add_reaction(reaction);
                 state.has_state_changed = true;
                 return Ok(true);
-            },
+            }
             Err(e) => {
                 eprintln!("Error: {:?}", e);
                 return Ok(false);
-            },
+            }
         }
     } else {
         //  No reference message, what do!?
@@ -287,39 +305,70 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     let my_public_key = signer.get_public_key().await.unwrap();
 
     // Attempt to fetch their status, if one exists
-    let status_filter = Filter::new().author(profile_pubkey).kind(Kind::from_u16(30315)).limit(1);
-    let status = match client.fetch_events(vec![status_filter], std::time::Duration::from_secs(10)).await {
+    let status_filter = Filter::new()
+        .author(profile_pubkey)
+        .kind(Kind::from_u16(30315))
+        .limit(1);
+    let status = match client
+        .fetch_events(vec![status_filter], std::time::Duration::from_secs(10))
+        .await
+    {
         Ok(res) => {
             // Make sure they have a status available
             if !res.is_empty() {
                 let status_event = res.first().unwrap();
                 // Simple status recognition: last, general-only, no URLs, Metadata or Expiry considered
                 // TODO: comply with expiries, accept more "d" types, allow URLs
-                Status { title: status_event.content.clone(), purpose: status_event.tags.first().unwrap().content().unwrap().to_string(), url: String::from("") }
+                Status {
+                    title: status_event.content.clone(),
+                    purpose: status_event
+                        .tags
+                        .first()
+                        .unwrap()
+                        .content()
+                        .unwrap()
+                        .to_string(),
+                    url: String::from(""),
+                }
             } else {
                 // No status
-                Status { title: String::from(""), purpose: String::from(""), url: String::from("") }
+                Status {
+                    title: String::from(""),
+                    purpose: String::from(""),
+                    url: String::from(""),
+                }
             }
-        },
-        Err(_e) => {
-            Status { title: String::from(""), purpose: String::from(""), url: String::from("") }
+        }
+        Err(_e) => Status {
+            title: String::from(""),
+            purpose: String::from(""),
+            url: String::from(""),
         },
     };
 
     // Attempt to fetch their Metadata profile
-    match client.fetch_metadata(profile_pubkey, std::time::Duration::from_secs(10)).await {
+    match client
+        .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(10))
+        .await
+    {
         Ok(response) => {
             let mine = my_public_key == profile_pubkey;
-            let profile = Profile { mine, id: npub, name: response.name.unwrap_or_default(), avatar: response.picture.unwrap_or_default(), status };
+            let profile = Profile {
+                mine,
+                id: npub,
+                name: response.name.unwrap_or_default(),
+                avatar: response.picture.unwrap_or_default(),
+                status,
+            };
             let mut state = STATE.lock().await;
             state.has_state_changed = true;
             state.add_profile(profile.clone());
             return Ok(profile);
-        },
+        }
         Err(e) => {
             eprintln!("Error: {:?}", e);
             return Err(());
-        },
+        }
     }
 }
 
@@ -350,17 +399,27 @@ async fn notifs() {
                                     contact: sender.to_bech32().unwrap().to_string(),
                                     at: rumor.created_at.as_u64(),
                                     reactions: Vec::new(),
-                                    mine: pubkey == rumor.pubkey
+                                    mine: pubkey == rumor.pubkey,
                                 };
                                 let mut state = STATE.lock().await;
 
                                 // Send an OS notification for incoming messages
                                 if !msg.mine {
                                     // Find the name of the sender, if we have it
-                                    if let Some(profile) = state.profiles.iter().find(|profile| profile.id == msg.contact) {
-                                        show_notification(profile.name.clone(), msg.content.clone());
+                                    if let Some(profile) = state
+                                        .profiles
+                                        .iter()
+                                        .find(|profile| profile.id == msg.contact)
+                                    {
+                                        show_notification(
+                                            profile.name.clone(),
+                                            msg.content.clone(),
+                                        );
                                     } else {
-                                        show_notification(String::from("New Message"), msg.content.clone());
+                                        show_notification(
+                                            String::from("New Message"),
+                                            msg.content.clone(),
+                                        );
                                     }
                                 }
 
@@ -385,7 +444,7 @@ async fn notifs() {
                                                     id: rumor.id.unwrap().to_hex(),
                                                     reference_id: reference_id.to_string(),
                                                     author_id: sender.to_hex(),
-                                                    emoji: rumor.content.clone()
+                                                    emoji: rumor.content.clone(),
                                                 };
                                                 // Append it to the message
                                                 msg.add_reaction(reaction);
@@ -395,7 +454,7 @@ async fn notifs() {
 
                                         // If we found the relevent message: mark the state as changed!
                                         state.has_state_changed = found_message;
-                                    },
+                                    }
                                     None => println!("No referenced message for reaction"),
                                 }
                             }
@@ -406,7 +465,8 @@ async fn notifs() {
             }
             Ok(false)
         })
-        .await.unwrap();
+        .await
+        .unwrap();
 }
 
 #[tauri::command]
@@ -414,8 +474,17 @@ fn show_notification(title: String, content: String) {
     let app_handle = TAURI_APP.get().unwrap().clone();
     // Only send notifications if the app is not focused
     // TODO: generalise this assumption - it's only used for Message Notifications at the moment
-    if !app_handle.webview_windows().iter().next().unwrap().1.is_focused().unwrap() {
-        app_handle.notification()
+    if !app_handle
+        .webview_windows()
+        .iter()
+        .next()
+        .unwrap()
+        .1
+        .is_focused()
+        .unwrap()
+    {
+        app_handle
+            .notification()
             .builder()
             .title(title)
             .body(content)
@@ -485,7 +554,17 @@ pub fn run() {
             TAURI_APP.set(app_handle).unwrap();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![fetch_messages, message, react, login, notifs, load_profile, connect, has_state_changed, acknowledge_state_change])
+        .invoke_handler(tauri::generate_handler![
+            fetch_messages,
+            message,
+            react,
+            login,
+            notifs,
+            load_profile,
+            connect,
+            has_state_changed,
+            acknowledge_state_change
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
