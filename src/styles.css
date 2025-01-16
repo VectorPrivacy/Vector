@@ -238,6 +238,13 @@ body {
   transition: opacity 0.1s;
 }
 
+.reaction {
+  cursor: default;
+  position: relative;
+  height: fit-content;
+  width: fit-content;
+}
+
 .msg-them:hover .add-reaction  {
   opacity: 0.75;
 }

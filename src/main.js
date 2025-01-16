@@ -660,8 +660,7 @@ function updateChat(contact) {
                 // Aggregate the 'reactions' of this reaction's type
                 const nReacts = msg.reactions.reduce((a, b) => b.emoji === cReaction.emoji ? a + 1 : a, 0);
                 spanReaction = document.createElement('span');
-                spanReaction.style.position = `relative`;
-                spanReaction.style.width = `60px`;
+                spanReaction.classList.add('reaction');
                 spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
             } else if (!msg.mine) {
                 // No reaction on the contact's message, so let's display the 'Add Reaction' UI
@@ -675,10 +674,13 @@ function updateChat(contact) {
             if (spanReaction) {
                 if (msg.mine) {
                     // My message: reactions on the left
+                    spanReaction.style.left = `5px`;
                     divMessage.appendChild(spanReaction);
                     divMessage.appendChild(pMessage);
                 } else {
                     // Their message: reactions on the right
+                    spanReaction.style.left = `-2px`;
+                    spanReaction.style.bottom = `-2px`;
                     divMessage.appendChild(pMessage);
                     divMessage.appendChild(spanReaction);
                 }
