@@ -1,5 +1,8 @@
+use rand::Rng;
+use argon2::{Argon2, Params, Version};
 use tokio::sync::Mutex;
-
+use chacha20::ChaCha20;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
@@ -493,8 +496,14 @@ fn show_notification(title: String, content: String) {
     }
 }
 
+#[derive(serde::Serialize, Clone)]
+struct LoginKeyPair {
+    public: String,
+    private: String,
+}
+
 #[tauri::command]
-async fn login(import_key: String) -> Result<String, ()> {
+async fn login(import_key: String) -> Result<LoginKeyPair, ()> {
     let keys: Keys;
     // TODO: add validation, error handling, etc
 
@@ -514,7 +523,7 @@ async fn login(import_key: String) -> Result<String, ()> {
     NOSTR_CLIENT.set(client).unwrap();
 
     // Return our npub to the frontend client
-    Ok(keys.public_key.to_bech32().unwrap())
+    Ok( LoginKeyPair { public: keys.public_key.to_bech32().unwrap(), private: keys.secret_key().to_bech32().unwrap()} )
 }
 
 #[tauri::command]
@@ -543,11 +552,97 @@ async fn connect() {
     client.connect().await;
 }
 
+// Convert string to bytes, ensuring we're dealing with the raw content
+fn string_to_bytes(s: &str) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+
+// Convert bytes to string, but we'll use hex encoding for encrypted data
+fn bytes_to_hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// Convert hex string back to bytes for decryption
+fn hex_string_to_bytes(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap())
+        .collect()
+}
+
+async fn hash_pass(password: String) -> [u8; 32] {
+    // 75000 KiB memory size
+    let memory = 75000;
+    // 5 iterations
+    let iterations = 5;
+    let params = Params::new(memory, iterations, 1, Some(32)).unwrap();
+
+    // TODO: create a random on-disk salt at first init
+    // However, with the nature of this being local software, it won't help a user whom has their system compromised in the first place
+    let salt = "vectorvectovectvecvev".as_bytes();
+
+    // Prepare derivation
+    let argon = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
+    let mut key: [u8; 32] = [0; 32];
+    argon
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .unwrap();
+
+    key
+}
+
+// Encrypt an Input with ChaCha20 and password-derived Argon2 key
+// Output format: <12-byte-rand-nonce><encrypted-payload>
+#[tauri::command]
+async fn encrypt(input: String, password: String) -> String {
+    // Hash our password with ramped-up Argon2 and use it as the key
+    let key = hash_pass(password).await;
+
+    // Generate a nonce
+    let mut rng = rand::thread_rng();
+    let nonce: [u8; 12] = rng.gen();
+
+    // Prepend the nonce to our cipher output
+    let mut buffer: Vec<u8> = nonce.to_vec();
+
+    // Encrypt the input
+    let mut cipher = ChaCha20::new(&key.into(), &nonce.into());
+    let mut cipher_buffer = string_to_bytes(&input);
+    cipher.apply_keystream(&mut cipher_buffer);
+
+    // Append the cipher buffer
+    buffer.append(&mut cipher_buffer);
+
+    // Convert the encrypted bytes to a hex string for safe storage/transmission
+    bytes_to_hex_string(&buffer)
+}
+
+#[tauri::command]
+async fn decrypt(ciphertext: String, password: String) -> Result<String, ()> {
+    // Hash our password with ramped-up Argon2 and use it as the key
+    let key = hash_pass(password).await;
+
+    // Prepare our decryption buffer split it away from our prepended nonce
+    let mut nonce = hex_string_to_bytes(&ciphertext);
+    let mut buffer = nonce.split_off(12);
+
+    // Decrypt
+    let mut cipher = ChaCha20::new(&key.into(), nonce.as_slice().into());
+    cipher.apply_keystream(&mut buffer);
+
+    // Convert decrypted bytes back to string
+    match String::from_utf8(buffer) {
+        Ok(decrypted) => Ok(decrypted),
+        Err(_) => Err(())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             let app_handle = app.app_handle().clone();
             // Set as our accessible static app handle
@@ -563,7 +658,9 @@ pub fn run() {
             load_profile,
             connect,
             has_state_changed,
-            acknowledge_state_change
+            acknowledge_state_change,
+            encrypt,
+            decrypt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

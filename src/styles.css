@@ -53,6 +53,12 @@ body {
   margin-top: 10px;
 }
 
+.pin-row input {
+  text-align: center;
+  width: 10px;
+  margin: 5px;
+}
+
 .account {
   align-items: center;
 }
@@ -317,6 +323,12 @@ a:hover {
 
 h1 {
   text-align: center;
+}
+
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 input,

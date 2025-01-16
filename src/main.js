@@ -9,8 +9,13 @@ getVersion().then(v => {
 });
 
 const domLogin = document.getElementById('login-form');
+const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
+
+const domLoginEncrypt = document.getElementById('login-encrypt');
+const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
+const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
 
 const domChats = document.getElementById('chats');
 const domAccount = document.getElementById('account');
@@ -417,11 +422,11 @@ async function message(pubkey, content) {
  * Login to the Nostr network
  */
 async function login() {
-    const strPubkey = await invoke("login", { importKey: domLoginInput.value.trim() });
     if (strPubkey) {
-        // Hide the login UI
+        // Hide the login and encryption UI
         domLoginInput.value = "";
         domLogin.style.display = 'none';
+        domLoginEncrypt.style.display = 'none';
 
         // Connect to Nostr
         domChatList.textContent = `Connecting to Nostr...`;
@@ -461,6 +466,96 @@ async function login() {
 
         // Setup a subscription for new websocket messages
         invoke("notifs");
+    }
+}
+
+/**
+ * Display the Encryption/Decryption flow, depending on the passed options
+ * @param {string} pkey - A private key to encrypt
+ * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one
+ */
+function openEncryptionFlow(pkey, fUnlock = false) {
+    domLoginImport.style.display = 'none';
+    domLoginEncrypt.style.display = '';
+
+    // Track our pin entries ('Current' is what the user has currently typed)
+    // ... while 'Last' holds a previous pin in memory for typo-checking purposes.
+    let strPinLast = [];
+    let strPinCurrent = Array(5).fill('-');
+
+    // If we're unlocking - display that
+    if (fUnlock) domLoginEncryptTitle.textContent = `Enter your Decryption Pin`;
+
+    // Track our pin inputs
+    const arrPinDOMs = document.querySelectorAll(`.pin-row input`);
+    arrPinDOMs.item(0).focus();
+    for (const domPin of arrPinDOMs) {
+        domPin.addEventListener('input', async function (e) {
+            this.value = this.value.replace(/[^0-9]/g, '');
+            if (this.value) {
+                // Find the index of this pin entry
+                const nIndex = Number(this.id.slice(-1));
+
+                // Focus the next entry
+                const domNextEntry = arrPinDOMs.item(nIndex + 1);
+                if (domNextEntry) domNextEntry.focus();
+                else arrPinDOMs.item(0).focus();
+
+                // Set the current digit entry
+                strPinCurrent[nIndex] = this.value;
+
+                // Figure out which Pin Array we're working with
+                if (strPinLast.length === 0) {
+                    // There's no set pin, so we're still setting the initial one
+                    // Check if we've filled this pin entry
+                    if (!strPinCurrent.includes(`-`)) {
+                        if (fUnlock) {
+                            // Attempt to decrypt our key with the pin
+                            domLoginEncryptTitle.textContent = `Decrypting your keys...`;
+                            domLoginEncryptPinRow.style.display = `none`;
+                            try {
+                                const decryptedPkey = await loadAndDecryptPrivateKey(strPinCurrent.join(''));
+                                const { public, _private } = await invoke("login", { importKey: decryptedPkey });
+                                strPubkey = public;
+                                login();
+                            } catch (e) {
+                                // Decrypt failed - let's re-try
+                                domLoginEncryptPinRow.style.display = ``;
+                                domLoginEncryptTitle.textContent = `Incorrect pin, try again`;
+                            }
+                        } else {
+                            // No more empty entries - let's reset for typo checking!
+                            strPinLast = [...strPinCurrent];
+                            domLoginEncryptTitle.textContent = `Re-enter your Pin`;
+                        }
+
+                        // Wipe the current digits
+                        for (const domPinToReset of arrPinDOMs) domPinToReset.value = ``;
+                        strPinCurrent = Array(5).fill('-');
+                    }
+                } else {
+                    // There's a pin set - let's make sure the re-type matches
+                    if (!strPinCurrent.includes(`-`)) {
+                        // Do they match?
+                        const fMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
+                        if (fMatching) {
+                            // Encrypt and proceed
+                            domLoginEncryptTitle.textContent = `Encrypting your keys...`;
+                            domLoginEncryptPinRow.style.display = `none`;
+                            await saveAndEncryptPrivateKey(pkey, strPinLast.join(''));
+                            login();
+                        } else {
+                            // Wrong pin! Let's start again
+                            domLoginEncryptTitle.textContent = `Pin doesn't match, re-try`;
+                            strPinCurrent = Array(5).fill(`-`);
+                            strPinLast = [];
+                        }
+                        // Reset the pin inputs
+                        for (const domPinToReset of arrPinDOMs) domPinToReset.value = ``;
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -621,15 +716,36 @@ function closeChat() {
     strOpenChat = "";
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+/**
+ * Our Bech32 Nostr Public Key
+ */
+let strPubkey;
+
+window.addEventListener("DOMContentLoaded", async () => {
     // Hook up our static buttons
-    domLoginBtn.onclick = login;
+    domLoginBtn.onclick = async () => {
+        // Import and derive our keys
+        try {
+            const { public, private } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            strPubkey = public;
+            // Open the Encryption Flow
+            openEncryptionFlow(private);
+        } catch (e) { console.error(e) }
+    }
     domChatBackBtn.onclick = closeChat;
     domChatNewBackBtn.onclick = closeChat;
     domChatNewStartBtn.onclick = () => {
         openChat(domChatNewInput.value.trim());
         domChatNewInput.value = ``;
     };
+
+    // Load the DB
+    store = await load('vector.json', { autoSave: true });
+
+    // If a local encrypted key exists, boot up the decryption UI
+    if (await hasKey()) {
+        openEncryptionFlow(null, true);
+    }
 
     // Hook up an 'Enter' listener on the Message Box for sending messages
     domChatMessageInput.onkeydown = async (evt) => {
