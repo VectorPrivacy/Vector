@@ -118,6 +118,8 @@ function openEmojiPanel(e) {
 
 // Listen for Emoji Picker interactions
 document.addEventListener('click', (e) => {
+    // If we're clicking the emoji search, don't close it!
+    if (e.target === emojiSearch) return;
     openEmojiPanel(e);
 });
 
