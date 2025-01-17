@@ -752,6 +752,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up an 'Enter' listener on the Message Box for sending messages
+    const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
     domChatMessageInput.onkeydown = async (evt) => {
         // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message
         if (evt.code === 'Enter' && !evt.shiftKey) {
@@ -759,15 +760,18 @@ window.addEventListener("DOMContentLoaded", async () => {
             if (domChatMessageInput.value.trim().length) {
                 // Cache the message and previous Input Placeholder
                 const strMessage = domChatMessageInput.value;
-                const strPlaceholder = domChatMessageInput.getAttribute('placeholder');
 
                 // Send the message, and display "Sending..." as the placeholder
                 domChatMessageInput.value = '';
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
-                await message(strOpenChat, strMessage);
+                try {
+                    await message(strOpenChat, strMessage);
+                } catch(e) {
+                    // TODO: temporary storage of failed messages for later re-try attempts
+                }
 
-                // Sent! Reset the placeholder
-                domChatMessageInput.setAttribute('placeholder', strPlaceholder);
+                // Reset the placeholder
+                domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
             }
         }
     };

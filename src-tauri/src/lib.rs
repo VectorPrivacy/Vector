@@ -194,7 +194,7 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
 }
 
 #[tauri::command]
-async fn message(receiver: String, content: String) -> Result<bool, ()> {
+async fn message(receiver: String, content: String) -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
@@ -208,10 +208,10 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
     let rumor = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone());
 
     // Send message to the real receiver
-    client
-        .gift_wrap(&receiver_pubkey, rumor.clone(), [])
-        .await
-        .unwrap();
+    match client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await {
+        Ok(_) => ( /* Good! Nothing to do */ ),
+        Err(e) => return Err(e.to_string())
+    }
 
     // Send message to our own public key, to allow for message recovering
     match client.gift_wrap(&my_public_key, rumor, []).await {
@@ -233,8 +233,7 @@ async fn message(receiver: String, content: String) -> Result<bool, ()> {
             return Ok(true);
         }
         Err(e) => {
-            eprintln!("Error: {:?}", e);
-            return Ok(false);
+            return Err(e.to_string())
         }
     }
 }
