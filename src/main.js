@@ -77,7 +77,7 @@ function openEmojiPanel(e) {
 
         // Setup the picker UI
         /** @type {DOMRect} */
-        const rect = (isDefaultPanel ? domChatMessageBox : e.target).getBoundingClientRect();
+        const rect = (isDefaultPanel ? domChatContact : e.target).getBoundingClientRect();
 
         // Display and stick it to the right side
         picker.style.display = `block`;
@@ -86,11 +86,14 @@ function openEmojiPanel(e) {
         // Compute it's position based on the element calling it (i.e: reactions are a floaty panel)
         const pickerRect = picker.getBoundingClientRect();
         if (isDefaultPanel) {
-            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height + 5}px`
+            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height}px`
             picker.classList.add('emoji-picker-message-type');
         } else {
             picker.classList.remove('emoji-picker-message-type');
-            picker.style.top = `${rect.y - rect.height + (pickerRect.height / 2) + 10}px`;
+            const fLargeMessage = rect.y < rect.height;
+            const yAxisTarget = fLargeMessage ? rect.y : rect.y - rect.height;
+            const yAxisCorrection = fLargeMessage ? 0 : pickerRect.height / 2;
+            picker.style.top = `${yAxisTarget + yAxisCorrection}px`;
             // TODO: this could be more intelligent (aim for the 'e.target' location)
             // ... however, you need to compute when the picker will overflow the app
             // ... and prevent it, so, I'm just glue-ing it to the right for now with
@@ -701,6 +704,7 @@ function updateChat(contact) {
         const cLastMsg = cContact.contents[cContact.contents.length - 1];
         if (cLastMsg.id !== strLastMsgID) {
             strLastMsgID = cLastMsg.id;
+            adjustSize();
             domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
         }
     } else {
@@ -710,6 +714,8 @@ function updateChat(contact) {
         // Nuke the message list
         domChatMessages.innerHTML = ``;
     }
+
+    adjustSize();
 }
 
 /**
@@ -728,6 +734,8 @@ function closeChat() {
 let strPubkey;
 
 window.addEventListener("DOMContentLoaded", async () => {
+    adjustSize();
+
     // Hook up our static buttons
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
@@ -778,3 +786,17 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 });
+
+/**
+ * Resize certain tricky components (i.e: the Chat Box) on window resizes.
+ * 
+ * This can also be re-called when some components are spawned, since they can
+ * affect the height and width of other components, too.
+ */
+function adjustSize() {
+    // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
+    const rectContact = domChatContact.getBoundingClientRect();
+    domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+}
+
+window.onresize = adjustSize;

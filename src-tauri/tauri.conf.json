@@ -11,9 +11,11 @@
     "windows": [
       {
         "title": "Chatstr",
-        "width": 365,
-        "height": 600,
-        "resizable": false
+        "minWidth": 375,
+        "width": 375,
+        "minHeight": 550,
+        "height": 650,
+        "resizable": true
       }
     ],
     "security": {

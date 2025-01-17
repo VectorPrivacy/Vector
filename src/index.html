@@ -13,6 +13,12 @@
 
   <body>
     <main class="container">
+      <!-- The Global emoji picker popup -->
+      <div class="emoji-picker" tabindex="-1">
+        <input id="emoji-search-input" placeholder="Search..." style="width: -webkit-fill-available; height: 12px; margin-bottom: 12px;">
+        <div id="emoji-results"></div>
+      </div>
+
       <div id="chats" class="chats">
         <div id="account" class="account row"></div>
         <div id="chat-list">
@@ -29,10 +35,6 @@
         </div>
 
         <div class="row" id="chat-box">
-          <div class="emoji-picker" tabindex="-1">
-            <input id="emoji-search-input" placeholder="Search..." style="width: -webkit-fill-available; height: 12px; margin-bottom: 12px;">
-            <div id="emoji-results"></div>
-          </div>
           <div style="width: 95%; align-items: center;" class="row">
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
             <button id="chat-input-emoji" class="emoji-button">☻</button>

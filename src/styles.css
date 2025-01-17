@@ -170,7 +170,8 @@ body {
   align-items: flex-end;
   overflow-y: scroll;
   background-color: #040308;
-  height: 462px;
+  /* An imperfect solution attempting to fit the message list within it's Chat Box proportionately to the window height */
+  height: calc(100% - 80px);
   padding-left: 10px;
   padding-right: 10px;
   border-top-style: solid;
@@ -254,6 +255,8 @@ body {
   width: 100%;
   background-color: #251134ff;
   height: 55px;
+  position: absolute;
+  bottom: 0;
 }
 
 #chat-input {
