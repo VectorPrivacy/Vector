@@ -387,8 +387,8 @@ async function fetchMessages(init = false) {
             imgAvatar.src = cProfile.avatar;
             divContact.appendChild(imgAvatar);
         } else {
-            // Otherwise, add some left-margin compensation to keep them aligned
-            divPreviewContainer.style.marginLeft = `50px`;
+            // Otherwise, generate a Gradient Avatar
+            divContact.appendChild(pubkeyToAvatar(chat.contact));
         }
 
         // Add the name (or, if missing metadata, their npub instead) to the chat preview
@@ -454,6 +454,9 @@ async function login() {
             const imgAvatar = document.createElement('img');
             imgAvatar.src = cProfile.avatar;
             domAccount.appendChild(imgAvatar);
+        } else {
+            // Display our Gradient Avatar
+            domAccount.appendChild(pubkeyToAvatar(strPubkey));
         }
 
         // Render our username and npub

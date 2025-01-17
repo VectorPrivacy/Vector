@@ -63,6 +63,10 @@ body {
   align-items: center;
 }
 
+.account .placeholder-avatar {
+  margin-right: 10px;
+}
+
 .account img {
   height: 50px;
   margin-right: 10px;
@@ -96,6 +100,12 @@ body {
   width: auto;
   height: 100%;
   border-radius: 100%;
+}
+
+.placeholder-avatar {
+  border-radius: 100%;
+  height: 50px;
+  width: 50px;
 }
 
 .chatlist-contact-preview h4 {
