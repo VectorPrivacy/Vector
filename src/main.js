@@ -173,8 +173,9 @@ emojiSearch.onkeydown = async (e) => {
 
                 // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
                 const spanReaction = document.createElement('span');
-                spanReaction.style.position = `relative`;
-                spanReaction.style.width = `60px`;
+                spanReaction.classList.add('reaction');
+                spanReaction.style.left = `-2px`;
+                spanReaction.style.bottom = `-2px`;
                 spanReaction.textContent = `${cEmoji.emoji} 1`;
 
                 // Remove the Reaction button
@@ -229,8 +230,9 @@ picker.addEventListener('click', (e) => {
 
                 // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
                 const spanReaction = document.createElement('span');
-                spanReaction.style.position = `relative`;
-                spanReaction.style.width = `60px`;
+                spanReaction.classList.add('reaction');
+                spanReaction.style.left = `-2px`;
+                spanReaction.style.bottom = `-2px`;
                 spanReaction.textContent = `${cEmoji.emoji} 1`;
 
                 // Remove the Reaction button
