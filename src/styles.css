@@ -67,6 +67,15 @@ body {
   margin-right: 10px;
 }
 
+.placeholder-avatar p {
+  top: 25px;
+  margin: 0;
+  position: relative;
+  line-height: 0;
+  font-size: 20px;
+  opacity: 0.75;
+}
+
 .account img {
   height: 50px;
   margin-right: 10px;

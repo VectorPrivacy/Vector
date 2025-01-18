@@ -388,7 +388,7 @@ async function fetchMessages(init = false) {
             divContact.appendChild(imgAvatar);
         } else {
             // Otherwise, generate a Gradient Avatar
-            divContact.appendChild(pubkeyToAvatar(chat.contact));
+            divContact.appendChild(pubkeyToAvatar(chat.contact, cProfile?.name));
         }
 
         // Add the name (or, if missing metadata, their npub instead) to the chat preview
@@ -456,7 +456,7 @@ async function login() {
             domAccount.appendChild(imgAvatar);
         } else {
             // Display our Gradient Avatar
-            domAccount.appendChild(pubkeyToAvatar(strPubkey));
+            domAccount.appendChild(pubkeyToAvatar(strPubkey, cProfile?.name));
         }
 
         // Render our username and npub

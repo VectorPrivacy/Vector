@@ -1,8 +1,9 @@
 /**
  * Generate a consistent Gradient Avatar from an npub
- * @param {string} npub 
+ * @param {string} npub - The npub to generate an avatar for
+ * @param {string} username - A username to display initials from
  */
-function pubkeyToAvatar(npub) {
+function pubkeyToAvatar(npub, username) {
     // Otherwise, display their Gradient Avatar
     const divAvatar = document.createElement('div');
     divAvatar.classList.add('placeholder-avatar');
@@ -15,5 +16,21 @@ function pubkeyToAvatar(npub) {
 
     // Create a gradient for it using Purple and their personalised HEX
     divAvatar.style.background = `linear-gradient(-40deg, #${rHex}${gHex}${bHex}, 65%, purple)`;
+
+    // If a username is given, extract Initials or First Letter to be added on-top
+    if (username) {
+        const pInitials = document.createElement('p');
+        pInitials.textContent = getNameInitials(username) || username[0].toUpperCase();
+        divAvatar.appendChild(pInitials);
+    }
+
     return divAvatar;
 }
+
+/**
+ * Extract up to three initials from a name, for example: "JSKitty" -> "JSK"
+ * or "Michael Jackson" -> "MJ".
+ * @param {string} str - A username to extract name initials from
+ * @returns {string} - Up to three initials
+ */
+const getNameInitials = str => (str.match(/[A-Z]/g) || []).slice(0, 3).join('');
