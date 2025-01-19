@@ -512,6 +512,8 @@ function renderCurrentProfile(cProfile) {
     // Render our status
     const iStatus = document.createElement('i');
     iStatus.textContent = cProfile?.status?.title || 'Set a Status';
+    iStatus.classList.add('btn');
+    iStatus.onclick = askForStatus;
     domAccount.appendChild(iStatus);
 
     // Then add a divider to seperate it all visually from the Chatlist

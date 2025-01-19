@@ -39,3 +39,24 @@ async function askForAvatar() {
         await popupConfirm('Avatar Update Failed!', 'An error occurred while updating your Avatar, the change may not have committed to the network, you can re-try any time.', true);
     }
 }
+
+/**
+ * A GUI wrapper to ask the user for a status, and apply it both
+ * in-app and on the Nostr network.
+ */
+async function askForStatus() {
+    const strStatus = await popupConfirm('Status', `Set a public status for everyone to see`, false, 'Custom Status');
+    if (!strStatus) return;
+
+    // Display the change immediately
+    const cProfile = arrProfiles.find(a => a.mine);
+    cProfile.status.title = strStatus;
+    renderCurrentProfile(cProfile);
+
+    // Send out the metadata update
+    try {
+        await invoke("update_status", { status: strStatus, });
+    } catch (e) {
+        await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true);
+    }
+}
