@@ -43,6 +43,12 @@ struct Profile {
     mine: bool,
 }
 
+impl Profile {
+    fn from_metadata(&mut self, meta: Metadata) {
+        self.name = meta.name.unwrap();
+    }
+}
+
 #[derive(serde::Serialize, Clone, Debug)]
 struct Status {
     title: String,
@@ -374,6 +380,61 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     }
 }
 
+
+#[tauri::command]
+async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let mut state = STATE.lock().await;
+
+    // Grab our pubkey to check for profiles belonging to us
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
+    // Try to find our profile
+    let mut meta: Metadata;
+    if let Some(profile) = state.profiles.iter_mut().find(|profile| profile.mine == true) {
+        // Found one, we'll apply the changes to the previous profile and carry-on the rest
+        meta = Metadata::new()
+            .name(if name.is_empty() { profile.name.clone() } else { name });
+
+        // Optional avatar
+        if !avatar.is_empty() || !profile.avatar.is_empty() {
+            meta = meta.picture(Url::parse(if avatar.is_empty() { profile.avatar.as_str() } else { avatar.as_str() }).unwrap());
+        }
+    } else {
+        // None found, we'll generate a new one
+        meta = Metadata::new()
+            .name(name);
+
+        // Optional avatar
+        if !avatar.is_empty() {
+            meta = meta.picture(Url::parse(avatar.as_str()).unwrap());
+        }
+    }
+
+    // Broadcast the profile update
+    match client.set_metadata(&meta).await {
+        Ok(_event) => {
+            // Convert our Metadata to a profile, or modify the existing one
+            if let Some(profile) = state.profiles.iter_mut().find(|profile| profile.mine == true) {
+                profile.from_metadata(meta);
+                Ok(profile.to_owned())
+            } else {
+                let mut profile = Profile {
+                    id: my_public_key.to_bech32().unwrap(),
+                    name: String::from(""),
+                    avatar: String::from(""),
+                    status: Status { title: String::from(""), purpose: String::from(""), url: String::from("") },
+                    mine: true
+                };
+                profile.from_metadata(meta);
+                Ok(profile)
+            }
+        },
+        Err(_e) => { Err(()) }
+    }
+}
+
 #[tauri::command]
 async fn notifs() {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -655,6 +716,7 @@ pub fn run() {
             login,
             notifs,
             load_profile,
+            update_profile,
             connect,
             has_state_changed,
             acknowledge_state_change,

@@ -34,3 +34,59 @@ function pubkeyToAvatar(npub, username) {
  * @returns {string} - Up to three initials
  */
 const getNameInitials = str => (str.match(/[A-Z]/g) || []).slice(0, 3).join('');
+
+/**
+ * Show a popup dialog to confirm an action.
+ *
+ * @param {String} strTitle - The title of the popup dialog.
+ * @param {String} strSubtext - The subtext of the popup dialog.
+ * @param {Boolean} fNotice - If this is a Notice or an Interactive Dialog.
+ * @param {String} strInputPlaceholder - If specified, renders a text input with a custom placeholder, and returns a string instead of a boolean.
+ * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
+ */
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '') {
+    // Display the popup and render the UI
+    domPopup.style.display = '';
+    domPopupTitle.innerText = strTitle;
+    domPopupSubtext.innerHTML = strSubtext;
+
+    // Adjust the 'Confirm' button if this is only a notice
+    domPopupConfirmBtn.innerText = fNotice ? 'Okay!' : 'Confirm';
+    domPopupCancelBtn.style.display = fNotice ? 'none' : '';
+
+    // If a string placeholder is specified, render it
+    domPopupInput.value = '';
+    if (strInputPlaceholder) {
+        domPopupInput.style.display = '';
+        domPopupInput.setAttribute('placeholder', strInputPlaceholder);
+        domPopupInput.focus();
+    } else {
+        // Otherwise, hide it
+        domPopupInput.style.display = 'none';
+    }
+
+    // Event handler for the confirm click
+    const onConfirmClick = (resolve) => {
+        domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
+        domPopupCancelBtn.removeEventListener('click', onCancelClick);
+        domPopup.style.display = 'none';
+        resolve(strInputPlaceholder ? domPopupInput.value : true);
+    };
+
+    // Event handler for the cancel click
+    const onCancelClick = (resolve) => {
+        domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
+        domPopupCancelBtn.removeEventListener('click', onCancelClick);
+        domPopup.style.display = 'none';
+        resolve(strInputPlaceholder ? '' : false);
+    };
+
+    // Create a promise that resolves when either the confirm or cancel button was clicked
+    return new Promise((resolve) => {
+        // Apply event listener for the confirm button
+        domPopupConfirmBtn.addEventListener('click', () => onConfirmClick(resolve));
+
+        // Apply event listener for the cancel button
+        if (!fNotice) domPopupCancelBtn.addEventListener('click', () => onCancelClick(resolve));
+    });
+}

@@ -31,6 +31,27 @@ body {
   text-align: center;
 }
 
+.popup-container {
+  z-index: 1001;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.popup {
+  position: absolute;
+  background-color: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 0 15px rgba(112, 0, 128, 0.20);
+  border-style: solid;
+  border-radius: 8px;
+  padding: 30px;
+  border-color: rgba(112, 0, 128, 0.5);
+  border-width: 1px;
+  margin-top: 30vh;
+}
+
 .text-gradient {
   background: linear-gradient(to right, #f8f8f8 13.87%, #b188e2 60%);
   background-size: 200% 200%;
@@ -77,6 +98,8 @@ body {
 }
 
 .account img {
+  object-fit: cover;
+  object-position: center;
   height: 50px;
   width: 50px;
   margin-right: 10px;
@@ -107,6 +130,8 @@ body {
 }
 
 .chatlist-contact img {
+  object-fit: cover;
+  object-position: center;
   width: 50px;
   height: 50px;
   border-radius: 100%;
@@ -132,7 +157,8 @@ body {
 }
 
 .chatlist-contact-preview p {
-  opacity: 0.6;
+  /* Opacity breaks the Popup by making the text bleed through it... WTF? */
+  /* opacity: 0.6;*/
   margin: 0;
   margin-left: 15px;
   text-overflow: ellipsis;
@@ -213,6 +239,8 @@ body {
 }
 
 .msg-them img {
+  object-fit: cover;
+  object-position: center;
   height: 50px;
   width: 50px;
   border-radius: 100%;
@@ -386,6 +414,22 @@ button {
 
 button:active {
   background-color: #0f0f0f69;
+}
+
+.btn {
+  cursor: pointer;
+}
+
+.btn:hover {
+  opacity: 0.75;
+}
+
+.divider {
+  height: 1px;
+  width: 100%;
+  background-color: rgba(128, 0, 128, 0.25);
+  margin-top: 15px;
+  margin-bottom: 15px
 }
 
 #login-input {

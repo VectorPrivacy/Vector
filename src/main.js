@@ -36,6 +36,14 @@ const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
+const domApp = document.getElementById('popup-container');
+const domPopup = document.getElementById('popup');
+const domPopupTitle = document.getElementById('popupTitle');
+const domPopupSubtext = document.getElementById('popupSubtext');
+const domPopupConfirmBtn = document.getElementById('popupConfirm');
+const domPopupCancelBtn = document.getElementById('popupCancel');
+const domPopupInput = document.getElementById('popupInput');
+
 const picker = document.querySelector('.emoji-picker');
 /** @type {HTMLInputElement} */
 const emojiSearch = document.getElementById('emoji-search-input');
@@ -449,21 +457,8 @@ async function login() {
             arrProfiles.push({ id: strPubkey, name: '', avatar: '', mine: true });
         }
 
-        // Render our avatar (if we have one)
-        if (cProfile?.avatar) {
-            const imgAvatar = document.createElement('img');
-            imgAvatar.src = cProfile.avatar;
-            domAccount.appendChild(imgAvatar);
-        } else {
-            // Display our Gradient Avatar
-            domAccount.appendChild(pubkeyToAvatar(strPubkey, cProfile?.name));
-        }
-
-        // Render our username and npub
-        const h3Username = document.createElement('h3');
-        h3Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
-        domShareNpub.textContent = strPubkey;
-        domAccount.appendChild(h3Username);
+        // Render it
+        renderCurrentProfile(cProfile);
 
         // Connect and fetch historical messages
         await fetchMessages(true);
@@ -477,6 +472,55 @@ async function login() {
         // Setup a subscription for new websocket messages
         invoke("notifs");
     }
+}
+
+/**
+ * Renders the user's own profile UI
+ * @param {object} cProfile 
+ */
+function renderCurrentProfile(cProfile) {
+    // Reset any existing UI
+    domAccount.innerHTML = ``;
+
+    // Create the 'Name + Avatar' row
+    const divRow = document.createElement('div');
+    divRow.classList.add('row');
+
+    // Render our avatar (if we have one)
+    let domAvatar;
+    if (cProfile?.avatar) {
+        domAvatar = document.createElement('img');
+        domAvatar.src = cProfile.avatar;
+    } else {
+        // Display our Gradient Avatar
+        domAvatar = pubkeyToAvatar(strPubkey, cProfile?.name)
+    }
+    domAvatar.classList.add('btn');
+    domAvatar.onclick = askForAvatar;
+    divRow.appendChild(domAvatar);
+
+    // Render our username and npub
+    const h3Username = document.createElement('h3');
+    h3Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
+    h3Username.classList.add('btn');
+    h3Username.onclick = askForUsername;
+    divRow.appendChild(h3Username);
+
+    // Add the username row
+    domAccount.appendChild(divRow);
+
+    // Render our status
+    const iStatus = document.createElement('i');
+    iStatus.textContent = cProfile?.status?.title || 'Set a Status';
+    domAccount.appendChild(iStatus);
+
+    // Then add a divider to seperate it all visually from the Chatlist
+    const divDivider = document.createElement('div');
+    divDivider.classList.add('divider');
+    domAccount.appendChild(divDivider);
+
+    // Render our Share npub
+    domShareNpub.textContent = strPubkey;
 }
 
 /**
