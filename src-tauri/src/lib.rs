@@ -386,7 +386,7 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let mut state = STATE.lock().await;
 
-    // Grab our pubkey to check for profiles belonging to us
+    // Grab our pubkey
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
@@ -432,6 +432,39 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
             }
         },
         Err(_e) => { Err(()) }
+    }
+}
+
+#[tauri::command]
+async fn update_status(status: String) -> Result<Profile, ()> {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let mut state = STATE.lock().await;
+
+    // Grab our pubkey
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
+    // Build and broadcast the status
+    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str()).tag(Tag::custom(TagKind::d(), vec!["general"]));
+    match client.send_event_builder(status_builder).await {
+        Ok(_event) => {
+            // Add the status to our profile
+            if let Some(profile) = state.profiles.iter_mut().find(|profile| profile.mine == true) {
+                profile.status.purpose = String::from("general");
+                profile.status.title = status;
+                Ok(profile.to_owned())
+            } else {
+                let profile = Profile {
+                    id: my_public_key.to_bech32().unwrap(),
+                    name: String::from(""),
+                    avatar: String::from(""),
+                    status: Status { title: status, purpose: String::from("general"), url: String::from("") },
+                    mine: true
+                };
+                Ok(profile)
+            }
+        },
+        Err(_e) => { Err(()) },
     }
 }
 
@@ -717,6 +750,7 @@ pub fn run() {
             notifs,
             load_profile,
             update_profile,
+            update_status,
             connect,
             has_state_changed,
             acknowledge_state_change,
