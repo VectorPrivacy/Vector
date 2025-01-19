@@ -194,9 +194,7 @@ async fn fetch_messages() -> Result<Vec<Message>, ()> {
         }
     }
 
-    let msgs = state.messages.clone();
-
-    Ok(msgs)
+    Ok(state.messages.clone())
 }
 
 #[tauri::command]
