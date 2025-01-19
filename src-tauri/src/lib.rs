@@ -76,6 +76,7 @@ impl ChatState {
         // Make sure we don't add the same message twice
         if !self.messages.iter().any(|m| m.id == message.id) {
             self.messages.push(message);
+            self.has_state_changed = true;
         }
     }
 
@@ -83,6 +84,7 @@ impl ChatState {
         // Make sure we don't add the same profile twice
         if !self.profiles.iter().any(|m| m.id == profile.id) {
             self.profiles.push(profile);
+            self.has_state_changed = true;
         }
     }
 }
@@ -232,7 +234,6 @@ async fn message(receiver: String, content: String) -> Result<bool, String> {
                 mine: true,
             };
             let mut state = STATE.lock().await;
-            state.has_state_changed = true;
             state.add_message(msg);
             return Ok(true);
         }
@@ -367,7 +368,6 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
                 status,
             };
             let mut state = STATE.lock().await;
-            state.has_state_changed = true;
             state.add_profile(profile.clone());
             return Ok(profile);
         }
@@ -518,7 +518,6 @@ async fn notifs() {
                                 }
 
                                 // Push the message to our state
-                                state.has_state_changed = true;
                                 state.add_message(msg);
                             }
                             // GiftWrapped Emoji Reaction (compatible with 0xchat implementation)
@@ -619,14 +618,12 @@ async fn login(import_key: String) -> Result<LoginKeyPair, ()> {
 
 #[tauri::command]
 async fn has_state_changed() -> Result<bool, ()> {
-    let state = STATE.lock().await;
-    Ok(state.has_state_changed)
+    Ok(STATE.lock().await.has_state_changed)
 }
 
 #[tauri::command]
 async fn acknowledge_state_change() {
-    let mut state = STATE.lock().await;
-    state.has_state_changed = false;
+    STATE.lock().await.has_state_changed = false;
 }
 
 #[tauri::command]
