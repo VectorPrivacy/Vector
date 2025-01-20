@@ -542,6 +542,7 @@ async fn notifs() {
                                                 // Append it to the message
                                                 msg.add_reaction(reaction);
                                                 found_message = true;
+                                                break;
                                             }
                                         }
 
