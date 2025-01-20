@@ -211,7 +211,7 @@ async fn message(receiver: String, content: String) -> Result<bool, String> {
     let receiver_pubkey = PublicKey::from_bech32(receiver.as_str()).unwrap();
 
     // Build the NIP-17 rumor
-    let rumor = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone());
+    let rumor: UnsignedEvent = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone()).build(my_public_key);
 
     // Send message to the real receiver
     match client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await {
@@ -220,10 +220,10 @@ async fn message(receiver: String, content: String) -> Result<bool, String> {
     }
 
     // Send message to our own public key, to allow for message recovering
-    match client.gift_wrap(&my_public_key, rumor, []).await {
-        Ok(response) => {
+    match client.gift_wrap(&my_public_key, rumor.clone(), []).await {
+        Ok(_) => {
             let msg = Message {
-                id: response.id().to_hex(),
+                id: rumor.id.unwrap().to_hex(),
                 content: content,
                 contact: receiver,
                 at: std::time::SystemTime::now()
