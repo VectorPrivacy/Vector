@@ -402,11 +402,13 @@ async function fetchMessages(init = false) {
         // Add the name (or, if missing metadata, their npub instead) to the chat preview
         const h4ContactName = document.createElement('h4');
         h4ContactName.textContent = cProfile?.name || chat.contact;
+        h4ContactName.classList.add('cutoff')
         divPreviewContainer.appendChild(h4ContactName);
 
         // Add the last message to the chat preview
         const cLastMsg = chat.contents[chat.contents.length - 1];
         const pChatPreview = document.createElement('p');
+        pChatPreview.classList.add('cutoff');
         pChatPreview.textContent = cLastMsg ? (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content : '...';
         divPreviewContainer.appendChild(pChatPreview);
 
@@ -502,7 +504,7 @@ function renderCurrentProfile(cProfile) {
     // Render our username and npub
     const h3Username = document.createElement('h3');
     h3Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
-    h3Username.classList.add('btn');
+    h3Username.classList.add('btn', 'cutoff');
     h3Username.onclick = askForUsername;
     divRow.appendChild(h3Username);
 
@@ -512,7 +514,7 @@ function renderCurrentProfile(cProfile) {
     // Render our status
     const iStatus = document.createElement('i');
     iStatus.textContent = cProfile?.status?.title || 'Set a Status';
-    iStatus.classList.add('btn');
+    iStatus.classList.add('btn', 'cutoff');
     iStatus.onclick = askForStatus;
     domAccount.appendChild(iStatus);
 

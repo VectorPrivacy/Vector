@@ -126,14 +126,17 @@ body {
 .chatlist-contact-preview {
   margin-top: auto;
   margin-bottom: auto;
-  max-width: 250px;
+  margin-right: 60px;
+  max-width: -webkit-fill-available;
 }
 
 .chatlist-contact img {
   object-fit: cover;
   object-position: center;
-  width: 50px;
-  height: 50px;
+  min-width: 50px;
+  min-height: 50px;
+  max-width: 50px;
+  max-height: 50px;
   border-radius: 100%;
   margin-top: auto;
   margin-bottom: auto;
@@ -141,8 +144,10 @@ body {
 
 .placeholder-avatar {
   border-radius: 100%;
-  height: 50px;
-  width: 50px;
+  min-height: 50px;
+  min-width: 50px;
+  max-height: 50px;
+  max-width: 50px;
 }
 
 .chatlist-contact-preview h4 {
@@ -150,9 +155,6 @@ body {
   padding-right: 15px;
   margin-top: auto;
   margin-bottom: auto;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  white-space: nowrap;
   text-align: left;
 }
 
@@ -161,9 +163,6 @@ body {
   /* opacity: 0.6;*/
   margin: 0;
   margin-left: 15px;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  white-space: nowrap;
   text-align: left;
 }
 
@@ -210,6 +209,9 @@ body {
   font-size: 14px;
   margin-bottom: 2px;
   display: block;
+  width: 60%;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .chat-messages {
@@ -294,7 +296,7 @@ body {
   cursor: default;
   position: relative;
   height: fit-content;
-  width: fit-content;
+  width: 50px;
 }
 
 .msg-them:hover .add-reaction  {
@@ -370,6 +372,13 @@ body {
 .row {
   display: flex;
   justify-content: center;
+}
+
+.cutoff {
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  display: block;
 }
 
 a {
