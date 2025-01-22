@@ -310,21 +310,25 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     let my_public_key = signer.get_public_key().await.unwrap();
 
     // Fetch an immutable profile from the cache (or, quickly generate a new one to pass to the fetching logic)
-    let mut state = STATE.lock().await;
-    let profile = match state.get_profile(npub.clone()) {
-        Ok(p) => p,
-        Err(_) => {
-            // Create a new profile
-            let mut new_profile = Profile::new();
-            new_profile.id = npub.clone();
-            state.profiles.push(new_profile);
-            state.get_profile(npub.clone()).unwrap()
-        }
-    }.clone();
+    // Mutex Scope: we want to hold this lock as short as possible, given this function is "spammed" for very fast profile cache hit checks
+    let profile: Profile;
+    {
+        let mut state = STATE.lock().await;
+        profile = match state.get_profile(npub.clone()) {
+            Ok(p) => p,
+            Err(_) => {
+                // Create a new profile
+                let mut new_profile = Profile::new();
+                new_profile.id = npub.clone();
+                state.profiles.push(new_profile);
+                state.get_profile(npub.clone()).unwrap()
+            }
+        }.clone();
 
-    // If the profile has been refreshed in the last 30s, return it's cached version
-    if profile.last_updated + 30 > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() {
-        return Ok(profile.clone())
+        // If the profile has been refreshed in the last 30s, return it's cached version
+        if profile.last_updated + 30 > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() {
+            return Ok(profile.clone())
+        }
     }
 
     // Attempt to fetch their status, if one exists
@@ -368,6 +372,7 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
     {
         Ok(meta) => {
             // If it's ours, mark it as such
+            let mut state = STATE.lock().await;
             let profile_mutable = state.get_profile_mut(npub).unwrap();
             profile_mutable.mine = my_public_key == profile_pubkey;
             // Update the Status
@@ -386,7 +391,6 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
         }
     }
 }
-
 
 #[tauri::command]
 async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {

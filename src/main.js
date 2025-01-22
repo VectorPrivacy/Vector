@@ -330,9 +330,6 @@ let strOpenChat = "";
  * **Note:** Setting 'init' simply starts an automatic re-call every half-second
  * to emulate a "live" feed, this could probably be improved later.
  * 
- * **Note:** Only the first call actually calls to the Nostr network, all 
- * consecutive calls utilise cache, which is updated by the event (notify) system.
- * 
  * @param {boolean} init - Whether this is an Init call or not
  */
 async function fetchMessages(init = false) {
@@ -342,17 +339,47 @@ async function fetchMessages(init = false) {
     arrChats.sort((a, b) => b?.messages[b.messages.length - 1]?.at - a?.messages[a?.messages.length - 1]?.at);
     if (init) domChatList.textContent = ``;
 
+    // Render the bare chat list (npub-based) initially, profiles will trickle from the `fetchProfiles` "thread".
+    await renderChatlist();
+
+    // Start a post-init refresh loop, which will frequently poll cached profiles and render chats from the client
+    if (init) {
+        setAsyncInterval(fetchMessages, 100);
+        fetchProfiles().finally(() => {
+            setAsyncInterval(fetchProfiles, 30000);
+        });
+    }
+}
+
+/**
+ * A "thread" function dedicated to refreshing Profile data in the background
+ */
+async function fetchProfiles() {
+    // Poll for changes in profiles
+    for (const chat of arrChats) {
+        await invoke("load_profile", { npub: chat.id });
+    }
+    // Once all the profiles have refreshed, we'll also run an ASAP chatlist + chat render
+    if (!strOpenChat) {
+        await renderChatlist();
+    }
+}
+
+/**
+ * A "thread" function dedicated to rendering the Chat UI in real-time
+ */
+async function renderChatlist() {
     // If a chat is open, update it's messages
+    const fStateChanged = await invoke('has_state_changed');
     if (strOpenChat) {
-        await updateChat(strOpenChat, !(await invoke('has_state_changed')));
-        await invoke('acknowledge_state_change');
+        await updateChat(strOpenChat, !fStateChanged);
     }
 
+    // Render the Chat List
+    if (!fStateChanged) return;
+    await invoke('acknowledge_state_change');
     for (const chat of arrChats) {
         if (chat.messages.length === 0) continue;
-
-        // Grab the latest profile data available (prompting a refresh if necessary)
-        const cProfile = init ? null : await invoke("load_profile", { npub: chat.id });
 
         // The Contact container
         const divContact = document.createElement('div');
@@ -365,25 +392,25 @@ async function fetchMessages(init = false) {
         divPreviewContainer.classList.add('chatlist-contact-preview');
 
         // The avatar, if one exists
-        if (cProfile?.avatar) {
+        if (chat?.avatar) {
             const imgAvatar = document.createElement('img');
-            imgAvatar.src = cProfile?.avatar;
+            imgAvatar.src = chat?.avatar;
             divContact.appendChild(imgAvatar);
         } else {
             // Otherwise, generate a Gradient Avatar
-            divContact.appendChild(pubkeyToAvatar(chat.id, cProfile?.name));
+            divContact.appendChild(pubkeyToAvatar(chat.id, chat?.name));
         }
 
         // Add the name (or, if missing metadata, their npub instead) to the chat preview
         const h4ContactName = document.createElement('h4');
-        h4ContactName.textContent = cProfile?.name || chat.id;
+        h4ContactName.textContent = chat?.name || chat.id;
         h4ContactName.classList.add('cutoff')
         divPreviewContainer.appendChild(h4ContactName);
 
         // Display either their Last Message or Typing Indicator
         const pChatPreview = document.createElement('p');
         pChatPreview.classList.add('cutoff');
-        const fIsTyping = cProfile?.typing_until ? cProfile.typing_until > Date.now() / 1000 : false;
+        const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
         if (fIsTyping) {
             // Typing; display the glowy indicator!
             pChatPreview.classList.add('text-gradient');
@@ -400,16 +427,13 @@ async function fetchMessages(init = false) {
         divContact.appendChild(divPreviewContainer);
 
         // Finally, add the full contact to the list (or update the existing element)
-        const domExistingContact = document.getElementById(divContact.id);
+        const domExistingContact = document.getElementById(`chatlist-${chat.id}`);
         if (domExistingContact) {
             domExistingContact.replaceWith(divContact);
         } else {
             domChatList.appendChild(divContact);
         }
     }
-
-    // Start a post-init refresh loop, which will frequently poll cached chats from the client
-    if (init) setAsyncInterval(fetchMessages, 500);
 }
 
 /**
