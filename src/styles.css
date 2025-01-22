@@ -41,8 +41,9 @@ body {
 
 .popup {
   position: absolute;
-  background-color: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(10px);
+  background-color: rgba(0, 0, 0, 1);
+  /* Too many weird WebKit filter issues - disabling and going solid for now */
+  /* backdrop-filter: blur(10px); */
   box-shadow: 0 0 15px rgba(112, 0, 128, 0.20);
   border-style: solid;
   border-radius: 8px;
