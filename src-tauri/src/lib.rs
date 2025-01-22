@@ -75,9 +75,11 @@ impl Profile {
     fn internal_add_message(&mut self, message: Message) {
         // Make sure we don't add the same message twice
         if !self.messages.iter().any(|m| m.id == message.id) {
+            // If it's their message; disable their typing indicator until further indicators are sent
+            if !message.mine {
+                self.typing_until = 0;
+            }
             self.messages.push(message);
-            // And disable their typing indicator until further indicators are sent
-            self.typing_until = 0;
             // TODO: use appending/prepending and splicing, rather than sorting each message!
             // This is very expensive, but will do for now as a stop-gap.
             self.messages.sort_by(|a, b| a.at.cmp(&b.at));
