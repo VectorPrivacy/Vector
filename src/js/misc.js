@@ -90,3 +90,17 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         if (!fNotice) domPopupCancelBtn.addEventListener('click', () => onCancelClick(resolve));
     });
 }
+
+function setAsyncInterval(callback, interval) {
+    let timer = null;
+    async function run() {
+        while (true) {
+            await new Promise(resolve => timer = setTimeout(resolve, interval));
+            await callback();
+        }
+    }
+    run();
+    return {
+        clear: () => clearTimeout(timer)
+    };
+}

@@ -178,11 +178,11 @@ emojiSearch.onkeydown = async (e) => {
         if (strCurrentReactionReference) {
             // Grab the referred message to find it's chat pubkey
             for (const cChat of arrChats) {
-                const cMsg = cChat.contents.find(a => a.id === strCurrentReactionReference);
+                const cMsg = cChat.messages.find(a => a.id === strCurrentReactionReference);
                 if (!cMsg) continue;
 
                 // Found the message!
-                const strReceiverPubkey = cMsg.contact;
+                const strReceiverPubkey = cChat.id;
 
                 // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
                 const spanReaction = document.createElement('span');
@@ -199,7 +199,7 @@ emojiSearch.onkeydown = async (e) => {
                 divMessage.appendChild(spanReaction);
 
                 // Send the Reaction to the network
-                invoke('react', { referenceId: strCurrentReactionReference, chatPubkey: strReceiverPubkey, emoji: cEmoji.emoji });
+                invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
             // Add it to the message input
@@ -235,11 +235,11 @@ picker.addEventListener('click', (e) => {
         if (strCurrentReactionReference) {
             // Grab the referred message to find it's chat pubkey
             for (const cChat of arrChats) {
-                const cMsg = cChat.contents.find(a => a.id === strCurrentReactionReference);
+                const cMsg = cChat.messages.find(a => a.id === strCurrentReactionReference);
                 if (!cMsg) continue;
 
                 // Found the message!
-                const strReceiverPubkey = cMsg.contact;
+                const strReceiverPubkey = cChat.id;
 
                 // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
                 const spanReaction = document.createElement('span');
@@ -256,7 +256,7 @@ picker.addEventListener('click', (e) => {
                 divMessage.appendChild(spanReaction);
 
                 // Send the Reaction to the network
-                invoke('react', { referenceId: strCurrentReactionReference, chatPubkey: strReceiverPubkey, emoji: cEmoji.emoji });
+                invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
             // Add it to the message input
@@ -274,59 +274,50 @@ picker.addEventListener('click', (e) => {
 });
 
 /**
+ * Represents a user profile.
+ * @typedef {Object} Profile
+ * @property {string} id - Unique identifier for the profile.
+ * @property {string} name - The name of the user.
+ * @property {string} avatar - URL to the user's avatar image.
+ * @property {Message[]} messages - An array of messages associated with the profile.
+ * @property {Status} status - The current status of the user.
+ * @property {number} last_updated - Timestamp indicating when the profile was last updated.
+ * @property {number} typing_until - Timestamp until which the user is considered typing.
+ * @property {boolean} mine - Indicates if this profile belongs to the current user.
+ */
+
+/**
+ * Represents a message in the system.
  * @typedef {Object} Message
+ * @property {string} id - Unique identifier for the message.
  * @property {string} content - The content of the message.
- * @property {string} contact - The identifier of the contact.
- * @property {number} at - The timestamp of the message.
- * @property {boolean} mine - Whether the message was sent by us, or them.
+ * @property {Reaction[]} reactions - An array of reactions to this message.
+ * @property {number} at - Timestamp when the message was sent.
+ * @property {boolean} mine - Indicates if this message was sent by the current user.
  */
 
 /**
- * @typedef {Object} Chat
- * @property {string} contact - The id of the contact.
- * @property {Message[]} contents - Array of messages associated with the contact.
+ * Represents the status of a user.
+ * @typedef {Object} Status
+ * @property {string} title - The title of the status.
+ * @property {string} purpose - Description or purpose of the status.
+ * @property {string} url - URL associated with the status, if any.
  */
 
 /**
- * Organizes an array of Message objects by contact into an array of Chat objects.
- * Each contact in the Chat array has an array of associated message contents.
- *
- * @param {Message[]} data - The data to be sorted.
- * @returns {Chat} - The organized data.
+ * Represents a reaction to a message.
+ * @typedef {Object} Reaction
+ * @property {string} id - Unique identifier for the reaction.
+ * @property {string} reference_id - The HEX Event ID of the message being reacted to.
+ * @property {string} author_id - The HEX ID of the author who reacted.
+ * @property {string} emoji - The emoji used for the reaction.
  */
-function sortTocontact(data) {
-    // Sort the messages in ascending order of timestamps
-    data.sort((a, b) => a.at - b.at);
-
-    // Create an empty object to collect contact data for sorting
-    let contactData = {};
-
-    // Iterate through every item in the data array
-    data.forEach(item => {
-
-        // If the contact doesn't exist in contactData yet, create a new array for them
-        if (!(item.contact in contactData)) {
-            contactData[item.contact] = [];
-        }
-
-        // Add the message to the chat data
-        contactData[item.contact].push(item);
-    });
-
-    // Create an array of Chats from contactData
-    return Object.entries(contactData).map(([contact, contents]) => ({ contact, contents }));
-}
 
 /**
  * A cache of all chats with linear chronological history
- * @type {Chat[]}
+ * @type {Profile[]}
  */
 let arrChats = [];
-
-/**
- * A cache of all profile metadata for folks we've chat with
- */
-let arrProfiles = [];
 
 /**
  * The current open chat (by npub)
@@ -345,45 +336,29 @@ let strOpenChat = "";
  * @param {boolean} init - Whether this is an Init call or not
  */
 async function fetchMessages(init = false) {
-    if (init) {
-        domChatList.textContent = `Loading DMs...`;
-    }
-    const arrMessages = await invoke("fetch_messages");
-
-    // Sort our linear message history in to Chats
-    arrChats = sortTocontact(arrMessages);
-
-    // Now sort our Chat history by descending time since last message
-    arrChats.sort((a, b) => b.contents[b.contents.length - 1].at - a.contents[a.contents.length - 1].at);
-
-    // Render the chats (if the backend signals a state change)
-    const fStateChanged = await invoke('has_state_changed');
-    if (!fStateChanged) return;
+    // Fetch our full state cache from the backend
+    if (init) domChatList.textContent = `Loading DMs...`;
+    arrChats = await invoke("fetch_messages", { init });
+    arrChats.sort((a, b) => b?.messages[b.messages.length - 1]?.at - a?.messages[a?.messages.length - 1]?.at);
+    if (init) domChatList.textContent = ``;
 
     // If a chat is open, update it's messages
     if (strOpenChat) {
-        updateChat(strOpenChat);
+        await updateChat(strOpenChat, !(await invoke('has_state_changed')));
+        await invoke('acknowledge_state_change');
     }
 
-    domChatList.innerHTML = ``;
     for (const chat of arrChats) {
-        // Let's try to load the profile of each chat, too
-        let cProfile = arrProfiles.find(a => a.id === chat.contact);
-        if (!cProfile) {
-            try {
-                if (init) {
-                    domChatList.textContent = `Loading Contact Profile...`;
-                }
-                cProfile = await invoke("load_profile", { npub: chat.contact });
-                arrProfiles.push(cProfile);
-            } catch (e) {
-                arrProfiles.push({ id: chat.contact, name: '', avatar: '' });
-            }
-        }
+        if (chat.messages.length === 0) continue;
+
+        // Grab the latest profile data available (prompting a refresh if necessary)
+        const cProfile = init ? null : await invoke("load_profile", { npub: chat.id });
+
         // The Contact container
         const divContact = document.createElement('div');
         divContact.classList.add('chatlist-contact');
-        divContact.onclick = () => { openChat(chat.contact) };
+        divContact.onclick = () => { openChat(chat.id) };
+        divContact.id = `chatlist-${chat.id}`;
 
         // The Username + Message Preview container
         const divPreviewContainer = document.createElement('div');
@@ -392,38 +367,49 @@ async function fetchMessages(init = false) {
         // The avatar, if one exists
         if (cProfile?.avatar) {
             const imgAvatar = document.createElement('img');
-            imgAvatar.src = cProfile.avatar;
+            imgAvatar.src = cProfile?.avatar;
             divContact.appendChild(imgAvatar);
         } else {
             // Otherwise, generate a Gradient Avatar
-            divContact.appendChild(pubkeyToAvatar(chat.contact, cProfile?.name));
+            divContact.appendChild(pubkeyToAvatar(chat.id, cProfile?.name));
         }
 
         // Add the name (or, if missing metadata, their npub instead) to the chat preview
         const h4ContactName = document.createElement('h4');
-        h4ContactName.textContent = cProfile?.name || chat.contact;
+        h4ContactName.textContent = cProfile?.name || chat.id;
         h4ContactName.classList.add('cutoff')
         divPreviewContainer.appendChild(h4ContactName);
 
-        // Add the last message to the chat preview
-        const cLastMsg = chat.contents[chat.contents.length - 1];
+        // Display either their Last Message or Typing Indicator
         const pChatPreview = document.createElement('p');
         pChatPreview.classList.add('cutoff');
-        pChatPreview.textContent = cLastMsg ? (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content : '...';
+        const fIsTyping = cProfile?.typing_until ? cProfile.typing_until > Date.now() / 1000 : false;
+        if (fIsTyping) {
+            // Typing; display the glowy indicator!
+            pChatPreview.classList.add('text-gradient');
+            pChatPreview.textContent = `Typing...`;
+        } else {
+            // Not typing; display their last message
+            pChatPreview.classList.remove('text-gradient');
+            const cLastMsg = chat.messages[chat.messages.length - 1];
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+        }
         divPreviewContainer.appendChild(pChatPreview);
 
         // Add the Chat Preview to the contact UI
         divContact.appendChild(divPreviewContainer);
 
-        // Finally, add the full contact to the list
-        domChatList.appendChild(divContact);
+        // Finally, add the full contact to the list (or update the existing element)
+        const domExistingContact = document.getElementById(divContact.id);
+        if (domExistingContact) {
+            domExistingContact.replaceWith(divContact);
+        } else {
+            domChatList.appendChild(divContact);
+        }
     }
 
-    // Acknowledge the state change (thus, preventing re-renders when there's nothing new to render)
-    if (!init) await invoke('acknowledge_state_change');
-
     // Start a post-init refresh loop, which will frequently poll cached chats from the client
-    if (init) setInterval(fetchMessages, 500);
+    if (init) setAsyncInterval(fetchMessages, 500);
 }
 
 /**
@@ -451,13 +437,7 @@ async function login() {
 
         // Attempt to sync our profile data
         domChatList.textContent = `Syncing your profile...`;
-        let cProfile;
-        try {
-            cProfile = await invoke("load_profile", { npub: strPubkey });
-            arrProfiles.push(cProfile);
-        } catch (e) {
-            arrProfiles.push({ id: strPubkey, name: '', avatar: '', mine: true });
-        }
+        const cProfile = await invoke("load_profile", { npub: strPubkey });
 
         // Render it
         renderCurrentProfile(cProfile);
@@ -650,20 +630,22 @@ let strLastMsgID = "";
 /**
  * Updates the current chat (to display incoming and outgoing messages)
  * @param {string} contact 
+ * @param {boolean} fSoft - Whether this is a soft update (i.e: status, typing indicator - no chat rendering)
  */
-function updateChat(contact) {
-    const cContact = arrChats.find(a => a.contact === contact);
-    const cProfile = arrProfiles.find(a => a.id === contact);
-    if (cContact) {
+async function updateChat(contact, fSoft = false) {
+    const cProfile = arrChats.find(a => a.id === contact);
+    if (cProfile?.messages.length) {
         // Prefer displaying their name, otherwise, npub
         domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
 
-        // Display their status, if one exists
-        const fHasStatus = !!cProfile?.status?.title;
-        domChatContactStatus.textContent = cProfile?.status?.title || '';
+        // Display either their Status or Typing Indicator
+        const fIsTyping = cProfile?.typing_until ? cProfile.typing_until > Date.now() / 1000 : false;
+        domChatContactStatus.textContent = fIsTyping ? `${cProfile?.name || 'User'} is typing...` : cProfile?.status?.title || '';
+        if (fIsTyping) domChatContactStatus.classList.add('text-gradient');
+        else domChatContactStatus.classList.remove('text-gradient');
 
         // Adjust our Contact Name class to manage space according to Status visibility
-        if (fHasStatus) {
+        if (domChatContactStatus.textContent) {
             domChatContact.classList.remove('chat-contact');
             domChatContact.classList.add('chat-contact-with-status');
         } else {
@@ -671,11 +653,14 @@ function updateChat(contact) {
             domChatContact.classList.remove('chat-contact-with-status');
         }
 
+        // Below is considered 'hard rendering' and should be avoided unless new messages have arrived
+        if (fSoft) return;
+
         // Render their messages upon state changes (guided by fetchMessages())
         // TODO: this needs rewriting in the future to be event-based, i.e: new message added (append), message edited (modify one message in the DOM), etc.
         domChatMessages.innerHTML = ``;
-        let nLastMsgTime = cContact.contents[0]?.at || 0;
-        for (const msg of cContact.contents) {
+        let nLastMsgTime = cProfile.messages[0].at;
+        for (const msg of cProfile.messages) {
             // If the last message was over 10 minutes ago, add an inline timestamp
             if (msg.at - nLastMsgTime > 600) {
                 nLastMsgTime = msg.at;
@@ -701,7 +686,7 @@ function updateChat(contact) {
             const strEmojiCleaned = msg.content.replace(/\s/g, '');
             if (isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6) {
                 // Strip out unnecessary whitespace
-                pMessage.textContent = strEmojiCleaned
+                pMessage.textContent = strEmojiCleaned;
                 // Add an emoji-only CSS format
                 pMessage.classList.add('emoji-only');
             } else {
@@ -752,8 +737,8 @@ function updateChat(contact) {
         }
 
         // Auto-scroll on new messages
-        const cLastMsg = cContact.contents[cContact.contents.length - 1];
-        if (cLastMsg.id !== strLastMsgID) {
+        const cLastMsg = cProfile.messages[cProfile.messages.length - 1];
+        if (strLastMsgID !== cLastMsg.id) {
             strLastMsgID = cLastMsg.id;
             adjustSize();
             domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
@@ -777,12 +762,20 @@ function closeChat() {
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
+    nLastTypingIndicator = 0;
 }
 
 /**
  * Our Bech32 Nostr Public Key
  */
 let strPubkey;
+
+/**
+ * The timestamp we sent our last typing indicator
+ * 
+ * Ensure this is wiped when the chat is closed!
+ */
+let nLastTypingIndicator = 0;
 
 window.addEventListener("DOMContentLoaded", async () => {
     adjustSize();
@@ -831,8 +824,15 @@ window.addEventListener("DOMContentLoaded", async () => {
                     // TODO: temporary storage of failed messages for later re-try attempts
                 }
 
-                // Reset the placeholder
+                // Reset the placeholder and typing indicator timestamp
                 domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+                nLastTypingIndicator = 0;
+            }
+        } else {
+            // Send a Typing Indicator
+            if (nLastTypingIndicator + 30000 < Date.now()) {
+                nLastTypingIndicator = Date.now();
+                await invoke("start_typing", { receiver: strOpenChat });
             }
         }
     };

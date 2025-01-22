@@ -7,7 +7,7 @@ async function askForUsername() {
     if (!strUsername) return;
 
     // Display the change immediately
-    const cProfile = arrProfiles.find(a => a.mine);
+    const cProfile = arrChats.find(a => a.mine);
     cProfile.name = strUsername;
     renderCurrentProfile(cProfile);
 
@@ -28,7 +28,7 @@ async function askForAvatar() {
     if (!strURL) return;
 
     // Display the change immediately
-    const cProfile = arrProfiles.find(a => a.mine);
+    const cProfile = arrChats.find(a => a.mine);
     cProfile.avatar = strURL;
     renderCurrentProfile(cProfile);
 
@@ -49,7 +49,7 @@ async function askForStatus() {
     if (!strStatus) return;
 
     // Display the change immediately
-    const cProfile = arrProfiles.find(a => a.mine);
+    const cProfile = arrChats.find(a => a.mine);
     cProfile.status.title = strStatus;
     renderCurrentProfile(cProfile);
 
