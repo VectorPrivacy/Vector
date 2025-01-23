@@ -19,6 +19,8 @@ struct Message {
     content: String,
     reactions: Vec<Reaction>,
     at: u64,
+    pending: bool,
+    failed: bool,
     mine: bool,
 }
 
@@ -213,42 +215,70 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
 
 #[tauri::command]
 async fn message(receiver: String, content: String) -> Result<bool, String> {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    // Immediately add the message to our state as "Pending", we'll update it as either Sent (non-pending) or Failed in the future
+    let pending_count = STATE.lock().await.get_profile(receiver.clone()).unwrap_or(&Profile::new()).messages.iter().filter(|m| m.pending).count();
+    let pending_id = String::from("pending-") + &pending_count.to_string();
+    let msg = Message {
+        id: pending_id.clone(),
+        content: content.clone(),
+        at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        reactions: Vec::new(),
+        pending: true,
+        failed: false,
+        mine: true,
+    };
+    STATE.lock().await.add_message(receiver.clone(), msg);
 
     // Grab our pubkey
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
     // Convert the Bech32 String in to a PublicKey
-    let receiver_pubkey = PublicKey::from_bech32(receiver.as_str()).unwrap();
+    let receiver_pubkey = PublicKey::from_bech32(receiver.clone().as_str()).unwrap();
 
     // Build the NIP-17 rumor
     let rumor: UnsignedEvent = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone()).build(my_public_key);
 
     // Send message to the real receiver
     match client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await {
-        Ok(_) => ( /* Good! Nothing to do */ ),
-        Err(e) => return Err(e.to_string())
-    }
-
-    // Send message to our own public key, to allow for message recovering
-    match client.gift_wrap(&my_public_key, rumor.clone(), []).await {
         Ok(_) => {
-            let msg = Message {
-                id: rumor.id.unwrap().to_hex(),
-                content: content,
-                at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                reactions: Vec::new(),
-                mine: true,
-            };
-            STATE.lock().await.add_message(receiver, msg);
-            return Ok(true);
-        }
-        Err(e) => {
-            return Err(e.to_string())
+            // Send message to our own public key, to allow for message recovering
+            match client.gift_wrap(&my_public_key, rumor.clone(), []).await {
+                Ok(_) => {
+                    // Mark the message as a success
+                    let mut state = STATE.lock().await;
+                    let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
+                    let message = chat.get_message_mut(pending_id).unwrap();
+                    message.id = rumor.id.unwrap().to_hex();
+                    message.pending = false;
+                    state.has_state_changed = true;
+                    return Ok(true);
+                }
+                Err(_) => {
+                    // This is an odd case; the message was sent to the receiver, but NOT ourselves
+                    // We'll class it as sent, for now...
+                    let mut state = STATE.lock().await;
+                    let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
+                    let message = chat.get_message_mut(pending_id).unwrap();
+                    message.id = rumor.id.unwrap().to_hex();
+                    message.pending = false;
+                    state.has_state_changed = true;
+                    return Ok(true)
+                }
+            }
+        },
+        Err(_) => {
+            // Mark the message as a failure, bad message, bad!
+            let mut state = STATE.lock().await;
+            let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
+            let failed_msg = chat.get_message_mut(pending_id).unwrap();
+            failed_msg.failed = true;
+            state.has_state_changed = true;
+            return Ok(false);
         }
     }
 }
@@ -535,6 +565,8 @@ async fn handle_event(event: Event, is_new: bool) {
                     at: rumor.created_at.as_u64(),
                     reactions: Vec::new(),
                     mine: is_mine,
+                    pending: false,
+                    failed: false
                 };
                 state.add_message(contact, msg);
             }

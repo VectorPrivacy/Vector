@@ -719,6 +719,14 @@ async function updateChat(contact, fSoft = false) {
                 pMessage.innerHTML = parseMarkdown(msg.content.trim());
             }
 
+            // If the message is pending or failed, let's adjust it
+            if (msg.pending) {
+                divMessage.style.opacity = 0.75;
+            }
+            if (msg.failed) {
+                pMessage.style.color = 'red';
+            }
+
             // Add message reactions
             // TODO: while currently limited to one; add support for multi-reactions with a nice UX
             const cReaction = msg.reactions[0];
@@ -844,9 +852,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
                 try {
                     await message(strOpenChat, strMessage);
-                } catch(e) {
-                    // TODO: temporary storage of failed messages for later re-try attempts
-                }
+                } catch(_) {}
 
                 // Reset the placeholder and typing indicator timestamp
                 domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
