@@ -378,6 +378,13 @@ async function renderChatlist() {
     // Render the Chat List
     if (!fStateChanged) return;
     await invoke('acknowledge_state_change');
+
+    // Check if the order of chats has changed
+    const currentOrder = Array.from(domChatList.children).map(el => el.id.replace('chatlist-', ''));
+    const orderChanged = JSON.stringify(currentOrder) !== JSON.stringify(arrChats.map(chat => chat.id));
+
+    // If the order of the chatlist changes (i.e: new message), prep a fragment to re-render the full list in one sweep
+    const fragment = document.createDocumentFragment();
     for (const chat of arrChats) {
         if (chat.messages.length === 0) continue;
 
@@ -426,13 +433,25 @@ async function renderChatlist() {
         // Add the Chat Preview to the contact UI
         divContact.appendChild(divPreviewContainer);
 
-        // Finally, add the full contact to the list (or update the existing element)
-        const domExistingContact = document.getElementById(`chatlist-${chat.id}`);
-        if (domExistingContact) {
-            domExistingContact.replaceWith(divContact);
+        // If the chat order changed; append to fragment instead of directly to the DOM for full list re-render efficiency
+        if (orderChanged) {
+            fragment.appendChild(divContact);
         } else {
-            domChatList.appendChild(divContact);
+            // The order hasn't changed, so it's more efficient to replace the existing elements
+            const domExistingContact = document.getElementById(`chatlist-${chat.id}`);
+            domExistingContact.replaceWith(divContact);
+            // Note: we don't check if domExistingContact exists now, as it should be guarenteed by the very first orderChanged check
         }
+    }
+
+    // Add all elements at once for performance
+    if (orderChanged) {
+        // Nuke the existing list
+        while (domChatList.firstChild) {
+            domChatList.removeChild(domChatList.firstChild);
+        }
+        // Append our new fragment
+        domChatList.appendChild(fragment);
     }
 }
 
