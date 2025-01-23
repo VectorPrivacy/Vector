@@ -704,8 +704,15 @@ async fn login(import_key: String) -> Result<LoginKeyPair, ()> {
         .build();
     NOSTR_CLIENT.set(client).unwrap();
 
+    // Add our profile (at least, the npub of it) to our state
+    let npub = keys.public_key.to_bech32().unwrap();
+    let mut profile = Profile::new();
+    profile.id = npub.clone();
+    profile.mine = true;
+    STATE.lock().await.profiles.push(profile);
+
     // Return our npub to the frontend client
-    Ok( LoginKeyPair { public: keys.public_key.to_bech32().unwrap(), private: keys.secret_key().to_bech32().unwrap()} )
+    Ok( LoginKeyPair { public: npub, private: keys.secret_key().to_bech32().unwrap()} )
 }
 
 #[tauri::command]
