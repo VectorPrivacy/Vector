@@ -166,7 +166,7 @@ emojiSearch.addEventListener('input', (e) => {
 
 // When hitting Enter on the emoji search - choose the first emoji
 emojiSearch.onkeydown = async (e) => {
-    if (e.code === 'Enter') {
+    if ((e.code === 'Enter' || e.code === 'NumpadEnter')) {
         e.preventDefault();
 
         // Register the selection in the emoji-dex
@@ -860,7 +860,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
     domChatMessageInput.onkeydown = async (evt) => {
         // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message
-        if (evt.code === 'Enter' && !evt.shiftKey) {
+        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
             evt.preventDefault();
             if (domChatMessageInput.value.trim().length) {
                 // Cache the message and previous Input Placeholder
