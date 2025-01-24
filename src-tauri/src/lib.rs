@@ -10,6 +10,13 @@ use once_cell::sync::OnceCell;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
+/// # Trusted Relay
+/// 
+/// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
+/// 
+/// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
+static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
+
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 
@@ -491,15 +498,17 @@ async fn start_typing(receiver: String) -> Result<bool, ()> {
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
-    // Build and broadcast the status
+    // Build and broadcast the Typing Indicator
     let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
         .tag(Tag::public_key(receiver_pubkey))
         .tag(Tag::custom(TagKind::d(), vec!["vector"]))
         .tag(Tag::expiration(Timestamp::from_secs(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 30)))
         .build(my_public_key);
 
-    // Gift Wrap and send our typing indicator to receiver
-    match client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await {
+    // Gift Wrap and send our Typing Indicator to receiver via our Trusted Relay
+    // Note: we set a "public-facing" 1-hour expiry so that our trusted NIP-40 relay can purge old Typing Indicators
+    let expiry_time = Timestamp::from_secs(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600);
+    match client.gift_wrap_to([TRUSTED_RELAY], &receiver_pubkey, rumor.clone(), [Tag::expiration(expiry_time)]).await {
         Ok(_) => Ok(true),
         Err(_) => Ok(false)
     }
@@ -761,8 +770,10 @@ async fn acknowledge_state_change() {
 async fn connect() {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
-    // Add a couple common relays, especially with explicit NIP-17 support (thanks 0xchat and myself!)
-    client.add_relay("wss://jskitty.cat/nostr").await.unwrap();
+    // Add our 'Trusted Relay' (see Rustdoc for TRUSTED_RELAY for more info)
+    client.add_relay(TRUSTED_RELAY).await.unwrap();
+
+    // Add a couple common relays, especially with explicit NIP-17 support (thanks 0xchat!)
     client.add_relay("wss://relay.0xchat.com").await.unwrap();
     client.add_relay("wss://auth.nostr1.com").await.unwrap();
     client.add_relay("wss://relay.damus.io").await.unwrap();
