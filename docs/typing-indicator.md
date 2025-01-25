@@ -54,12 +54,14 @@ The [Client Receiver Implementation Code](https://github.com/JSKitty/Chatstr/blo
 
 # Giftwrapping (NIP-59)
 
-Typing Indicators were built with giftwrapping in mind, as part of the Chatstr implementation in NIP-17 DMs.
+Typing Indicators were built with giftwrapping in mind, as part of the Chatstr implementation in NIP-17 DMs: any configuration you use will NOT affect clients that have properly implemented NIP-59 and Typing Indicator Events, however, you CAN configure Typing Indicator Events for improved Relay and network efficiency, some of which are documented below.
 
-If you wish to retain maximum privacy (minimal metadata leakage), then there is no modification necessary to the original specification, just giftwrap your Typing Indicator as a rumor, and send it.
+Since giftwrapping hides the `expiration` timestamp from relays, they have no way to automatically purge Typing Indicator Events, leading to a large buildup of 'past indicators' in relays, slowing down your client giftwrap sync and cluttering relays. This can be fully avoided by publishing an extended `expiration` timestamp on the giftwrap event itself, which is the Chatstr implementation.
 
-The [Event Giftwrapping Implementation Code](https://github.com/JSKitty/Chatstr/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L502) of a giftwrapped Typing Indicator.
+A sufficiently long public expiration timestamp makes it more difficult to know if the event is a "disappearing message" or a Typing Indicator.
 
-Clients MAY add a duplicate of the `expiration` tag to the giftwrap event, therefore saving storage on Relays by allowing them to purge old Typing Indicators, but this may indicate to an outsider that the event is a Typing Indicator.
+If your client supports disappearing messages, and you are actively using them, then setting your Typing Indicator's expiration to match their timestamp will make them further indistinguishable.
 
-Clients MAY set a different, much longer `expiration` tag on the giftwrap event, for example, 1 week, to save Relay storage while blending-in the Typing Indicator to look like a "disappearing message".
+For additional privacy, you may select a singular "Trusted Relay" to handle Typing Indicator Events, an approach also taken by the Chatstr client.
+
+The [Event Giftwrapping Implementation Code](https://github.com/JSKitty/Chatstr/blob/f2fa50543c740a7054b04fa5d341ca14ed8b7a13/src-tauri/src/lib.rs#L508) of a giftwrapped Typing Indicator with extended public `expiration` timestamp.
