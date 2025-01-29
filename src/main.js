@@ -791,6 +791,11 @@ async function updateChat(contact, fSoft = false) {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
         domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
 
+        // Force wipe the 'Status' and it's styling
+        domChatContactStatus.textContent = '';
+        domChatContact.classList.add('chat-contact');
+        domChatContact.classList.remove('chat-contact-with-status');
+
         // Nuke the message list
         domChatMessages.innerHTML = ``;
     }
