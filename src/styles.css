@@ -280,12 +280,15 @@ body {
 }
 
 .emoji-only {
-  font-size: 75px;
   /* Typically I recommend against !important, but this is the only element in `msg-them` we're force-overriding */
   background: none !important;
   padding-left: 0;
   margin-top: 25px;
   margin-bottom: 25px;
+}
+
+.emoji-only-content {
+  font-size: 75px;
   line-height: 75px;
 }
 

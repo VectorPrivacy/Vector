@@ -743,7 +743,10 @@ async function updateChat(contact, fSoft = false) {
                 // Strip out unnecessary whitespace
                 spanMessage.textContent = strEmojiCleaned;
                 // Add an emoji-only CSS format
-                spanMessage.classList.add('emoji-only');
+                pMessage.classList.add('emoji-only');
+                spanMessage.classList.add('emoji-only-content');
+                // Align the emoji depending on who sent it
+                spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
             } else {
                 // Render their text content (using our custom Markdown renderer)
                 // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
