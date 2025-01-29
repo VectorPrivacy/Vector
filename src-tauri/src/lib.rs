@@ -559,11 +559,18 @@ async fn handle_event(event: Event, is_new: bool) {
                 // Send an OS notification for incoming messages
                 if !is_mine && is_new {
                     // Find the name of the sender, if we have it
-                    let profile = state.get_profile(contact.clone()).unwrap();
-                    let display_name = match profile.name.is_empty() {
-                        true => String::from("New Message"),
-                        false => profile.name.clone()
-                    };
+                    let display_name: String;
+                    match state.get_profile(contact.clone()) {
+                        Ok(profile) => {
+                            // We have a profile, just check for a name
+                            display_name = match profile.name.is_empty() {
+                                true => String::from("New Message"),
+                                false => profile.name.clone()
+                            };
+                        },
+                        // No profile
+                        Err(_) => display_name = String::from("New Message")
+                    }
                     show_notification(display_name, rumor.content.clone());
                 }
 
