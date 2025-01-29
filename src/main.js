@@ -331,11 +331,12 @@ let strOpenChat = "";
  * to emulate a "live" feed, this could probably be improved later.
  * 
  * @param {boolean} init - Whether this is an Init call or not
+ * @param {boolean} fHasConnected - Whether the client has immediately connected or not - allowing for quicker init by only fetching cache
  */
-async function fetchMessages(init = false) {
+async function fetchMessages(init = false, fHasConnected = false) {
     // Fetch our full state cache from the backend
     if (init) domChatList.textContent = `Loading DMs...`;
-    arrChats = await invoke("fetch_messages", { init });
+    arrChats = await invoke("fetch_messages", { init: fHasConnected });
     arrChats.sort((a, b) => b?.messages[b.messages.length - 1]?.at - a?.messages[a?.messages.length - 1]?.at);
     if (init) domChatList.textContent = ``;
 
@@ -475,8 +476,9 @@ async function login() {
         domLoginEncrypt.style.display = 'none';
 
         // Connect to Nostr
+        // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip a full network sync
         domChatList.textContent = `Connecting to Nostr...`;
-        await invoke("connect");
+        const fHasConnected = await invoke("connect");
 
         // Attempt to sync our profile data
         domChatList.textContent = `Syncing your profile...`;
@@ -486,7 +488,7 @@ async function login() {
         renderCurrentProfile(cProfile);
 
         // Connect and fetch historical messages
-        await fetchMessages(true);
+        await fetchMessages(true, fHasConnected);
 
          // Append a "Start New Chat" button
         const btnStartChat = document.createElement('button');
@@ -839,7 +841,10 @@ window.addEventListener("DOMContentLoaded", async () => {
             strPubkey = public;
             // Open the Encryption Flow
             openEncryptionFlow(private);
-        } catch (e) { console.error(e) }
+        } catch (e) {
+            // Display the backend error
+            popupConfirm(e, '', true);
+        }
     }
     domChatBackBtn.onclick = closeChat;
     domChatNewBackBtn.onclick = closeChat;

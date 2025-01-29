@@ -726,16 +726,41 @@ struct LoginKeyPair {
 }
 
 #[tauri::command]
-async fn login(import_key: String) -> Result<LoginKeyPair, ()> {
+async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     let keys: Keys;
-    // TODO: add validation, error handling, etc
+
+    // If we're already logged in (i.e: Developer Mode with frontend hot-loading), just return the existing keys.
+    // TODO: in the future, with event-based state changes, we need to make sure the state syncs correctly too!
+    if let Some(client) = NOSTR_CLIENT.get() {
+        let signer = client.signer().await.unwrap();
+        let new_keys = Keys::parse(&import_key).unwrap();
+
+        /* Derive our Public Key from the Import and Existing key sets */
+        let prev_npub = signer.get_public_key().await.unwrap().to_bech32().unwrap();
+        let new_npub = new_keys.public_key.to_bech32().unwrap();
+        if prev_npub == new_npub {
+            // Simply return the same KeyPair and allow the frontend to continue login as usual
+            // Note: we also say that the state has changed so that the frontend knows to refresh it's data
+            STATE.lock().await.has_state_changed = true;
+            return Ok(LoginKeyPair { public: signer.get_public_key().await.unwrap().to_bech32().unwrap(), private: new_keys.secret_key().to_bech32().unwrap() });
+        } else {
+            // This shouldn't happen in the real-world, but just in case...
+            return Err(String::from("An existing Nostr Client instance exists, but a second incompatible key import was requested."));
+        }
+    }
 
     // If it's an nsec, import that
     if import_key.starts_with("nsec") {
-        keys = Keys::parse(&import_key).unwrap();
+        match Keys::parse(&import_key) {
+            Ok(parsed) => keys = parsed,
+            Err(_) => return Err(String::from("Invalid nsec"))
+        };
     } else {
         // Otherwise, we'll try importing it as a mnemonic seed phrase (BIP-39)
-        keys = Keys::from_mnemonic(import_key, Some(String::new())).unwrap();
+        match Keys::from_mnemonic(import_key, Some(String::new())) {
+            Ok(parsed) => keys = parsed,
+            Err(_) => return Err(String::from("Invalid Seed Phrase"))
+        };
     }
 
     // Initialise the Nostr client
@@ -753,7 +778,7 @@ async fn login(import_key: String) -> Result<LoginKeyPair, ()> {
     STATE.lock().await.profiles.push(profile);
 
     // Return our npub to the frontend client
-    Ok( LoginKeyPair { public: npub, private: keys.secret_key().to_bech32().unwrap()} )
+    Ok(LoginKeyPair { public: npub, private: keys.secret_key().to_bech32().unwrap() })
 }
 
 #[tauri::command]
@@ -766,9 +791,15 @@ async fn acknowledge_state_change() {
     STATE.lock().await.has_state_changed = false;
 }
 
+/// Returns `true` if the client has connected, `false` if it was already connected
 #[tauri::command]
-async fn connect() {
+async fn connect() -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+
+    // If we're already connected to some relays - skip and tell the frontend our client is already online
+    if client.relays().await.len() > 0 {
+        return false;
+    }
 
     // Add our 'Trusted Relay' (see Rustdoc for TRUSTED_RELAY for more info)
     client.add_relay(TRUSTED_RELAY).await.unwrap();
@@ -780,6 +811,7 @@ async fn connect() {
 
     // Connect!
     client.connect().await;
+    true
 }
 
 // Convert string to bytes, ensuring we're dealing with the raw content
