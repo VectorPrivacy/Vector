@@ -24,6 +24,7 @@ static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 struct Message {
     id: String,
     content: String,
+    replied_to: String,
     reactions: Vec<Reaction>,
     at: u64,
     pending: bool,
@@ -228,6 +229,8 @@ async fn message(receiver: String, content: String) -> Result<bool, String> {
     let msg = Message {
         id: pending_id.clone(),
         content: content.clone(),
+        // TODO: add the ability to reply to messages
+        replied_to: String::from(""),
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -556,6 +559,18 @@ async fn handle_event(event: Event, is_new: bool) {
                     sender.to_bech32().expect("Failed to convert sender's public key to bech32")
                 };
 
+                // Check if the message replies to anything
+                let mut replied_to = String::from("");
+                match rumor.tags.find(TagKind::e()) {
+                    Some(tag) => {
+                        if tag.is_reply() {
+                            // Add the referred Event ID to our `replied_to` field
+                            replied_to = tag.content().unwrap().to_string();
+                        }
+                    },
+                    None => ()
+                };
+
                 // Send an OS notification for incoming messages
                 if !is_mine && is_new {
                     // Find the name of the sender, if we have it
@@ -578,6 +593,7 @@ async fn handle_event(event: Event, is_new: bool) {
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
                     content: rumor.content,
+                    replied_to,
                     at: rumor.created_at.as_u64(),
                     reactions: Vec::new(),
                     mine: is_mine,
@@ -627,10 +643,10 @@ async fn handle_event(event: Event, is_new: bool) {
                         // Add the reaction
                         match state.add_reaction(npub, reference_id.to_string(), reaction) {
                             true => {},
-                            false => { println!("Couldn't find a profile for a reacted-to message, odd!") }
+                            false => (/* Couldn't find the relevant Profile or Message */)
                         }
                     }
-                    None => println!("No referenced message for reaction"),
+                    None => (/* No Reference (Note ID) supplied */),
                 }
             }
             // Vector-specific events (NIP-78)

@@ -271,6 +271,14 @@ body {
   word-break: break-word;
 }
 
+.msg-reply {
+  display: block;
+  border-left: solid #9941dbff 2px;
+  padding-left: 10px;
+  opacity: 0.6;
+  margin-bottom: 5px;
+}
+
 .emoji-only {
   font-size: 75px;
   /* Typically I recommend against !important, but this is the only element in `msg-them` we're force-overriding */

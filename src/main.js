@@ -718,20 +718,43 @@ async function updateChat(contact, fSoft = false) {
                 imgAvatar.src = cProfile.avatar;
                 divMessage.appendChild(imgAvatar);
             }
-            // Construct the text content
+
+            // Prepare the message container
             const pMessage = document.createElement('p');
-            // If it's emoji-only, and less than four emojis, format them nicely
+
+            // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
+            if (msg.replied_to) {
+                // Try to find the referenced message
+                for (const cChat of arrChats) {
+                    const cMsg = cChat.messages.find(m => m.id === msg.replied_to);
+                    if (cMsg) {
+                        // Render the reply in a quote-like fashion
+                        // TODO: add ability to click it for a shortcut
+                        const spanRef = document.createElement('span');
+                        spanRef.classList.add('msg-reply');
+                        spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
+                        pMessage.appendChild(spanRef);
+                        break;
+                    }
+                }
+            }
+
+            // Render the text - if it's emoji-only, and less than four emojis, format them nicely
+            const spanMessage = document.createElement('span');
             const strEmojiCleaned = msg.content.replace(/\s/g, '');
             if (isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6) {
                 // Strip out unnecessary whitespace
-                pMessage.textContent = strEmojiCleaned;
+                spanMessage.textContent = strEmojiCleaned;
                 // Add an emoji-only CSS format
-                pMessage.classList.add('emoji-only');
+                spanMessage.classList.add('emoji-only');
             } else {
                 // Render their text content (using our custom Markdown renderer)
                 // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
-                pMessage.innerHTML = parseMarkdown(msg.content.trim());
+                spanMessage.innerHTML = parseMarkdown(msg.content.trim());
             }
+
+            // Append the message contents
+            pMessage.appendChild(spanMessage);
 
             // If the message is pending or failed, let's adjust it
             if (msg.pending) {
