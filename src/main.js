@@ -725,17 +725,14 @@ async function updateChat(contact, fSoft = false) {
             // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
             if (msg.replied_to) {
                 // Try to find the referenced message
-                for (const cChat of arrChats) {
-                    const cMsg = cChat.messages.find(m => m.id === msg.replied_to);
-                    if (cMsg) {
-                        // Render the reply in a quote-like fashion
-                        // TODO: add ability to click it for a shortcut
-                        const spanRef = document.createElement('span');
-                        spanRef.classList.add('msg-reply');
-                        spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
-                        pMessage.appendChild(spanRef);
-                        break;
-                    }
+                const cMsg = cProfile.messages.find(m => m.id === msg.replied_to);
+                if (cMsg) {
+                    // Render the reply in a quote-like fashion
+                    // TODO: add ability to click it for a shortcut
+                    const spanRef = document.createElement('span');
+                    spanRef.classList.add('msg-reply');
+                    spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
+                    pMessage.appendChild(spanRef);
                 }
             }
 
