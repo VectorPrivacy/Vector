@@ -419,13 +419,12 @@ async function renderChatlist() {
         const pChatPreview = document.createElement('p');
         pChatPreview.classList.add('cutoff');
         const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
+        pChatPreview.classList.toggle('text-gradient', fIsTyping);
         if (fIsTyping) {
             // Typing; display the glowy indicator!
-            pChatPreview.classList.add('text-gradient');
             pChatPreview.textContent = `Typing...`;
         } else {
             // Not typing; display their last message
-            pChatPreview.classList.remove('text-gradient');
             const cLastMsg = chat.messages[chat.messages.length - 1];
             pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
         }
@@ -686,17 +685,11 @@ async function updateChat(contact, fSoft = false) {
         // Display either their Status or Typing Indicator
         const fIsTyping = cProfile?.typing_until ? cProfile.typing_until > Date.now() / 1000 : false;
         domChatContactStatus.textContent = fIsTyping ? `${cProfile?.name || 'User'} is typing...` : cProfile?.status?.title || '';
-        if (fIsTyping) domChatContactStatus.classList.add('text-gradient');
-        else domChatContactStatus.classList.remove('text-gradient');
+        domChatContactStatus.classList.toggle('text-gradient', fIsTyping);
 
         // Adjust our Contact Name class to manage space according to Status visibility
-        if (domChatContactStatus.textContent) {
-            domChatContact.classList.remove('chat-contact');
-            domChatContact.classList.add('chat-contact-with-status');
-        } else {
-            domChatContact.classList.add('chat-contact');
-            domChatContact.classList.remove('chat-contact-with-status');
-        }
+        domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
+        domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
 
         // Below is considered 'hard rendering' and should be avoided unless new messages have arrived
         if (fSoft) return;
@@ -770,15 +763,13 @@ async function updateChat(contact, fSoft = false) {
             if (spanReaction) {
                 if (msg.mine) {
                     // My message: reactions on the left
-                    spanReaction.style.left = `5px`;
-                    divMessage.appendChild(spanReaction);
-                    divMessage.appendChild(pMessage);
+                    spanReaction.style.left = '5px';
+                    divMessage.append(spanReaction, pMessage);
                 } else {
                     // Their message: reactions on the right
-                    spanReaction.style.left = `-2px`;
-                    spanReaction.style.bottom = `-2px`;
-                    divMessage.appendChild(pMessage);
-                    divMessage.appendChild(spanReaction);
+                    spanReaction.style.left = '-2px';
+                    spanReaction.style.bottom = '-2px';
+                    divMessage.append(pMessage, spanReaction);
                 }
             } else {
                 // No reactions: just render the message
