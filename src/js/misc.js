@@ -91,6 +91,23 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
     });
 }
 
+/** Helper function to determine if a date is today */
+function isToday(date) {
+    const today = new Date();
+    return date.getDate() === today.getDate() &&
+           date.getMonth() === today.getMonth() &&
+           date.getFullYear() === today.getFullYear();
+}
+
+/** Helper function to determine if a date is yesterday */
+function isYesterday(date) {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    return date.getDate() === yesterday.getDate() &&
+           date.getMonth() === yesterday.getMonth() &&
+           date.getFullYear() === yesterday.getFullYear();
+}
+
 function setAsyncInterval(callback, interval) {
     let timer = null;
     async function run() {

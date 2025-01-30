@@ -704,7 +704,16 @@ async function updateChat(contact, fSoft = false) {
                 nLastMsgTime = msg.at;
                 const pTimestamp = document.createElement('p');
                 pTimestamp.classList.add('msg-inline-timestamp');
-                pTimestamp.textContent = (new Date(msg.at * 1000)).toLocaleString();
+                const messageDate = new Date(msg.at * 1000);
+
+                // Render the time contextually
+                if (isToday(messageDate)) {
+                    pTimestamp.textContent = messageDate.toLocaleTimeString();
+                } else if (isYesterday(messageDate)) {
+                    pTimestamp.textContent = `Yesterday, ${messageDate.toLocaleTimeString()}`;
+                } else {
+                    pTimestamp.textContent = messageDate.toLocaleString();
+                }
                 domChatMessages.appendChild(pTimestamp);
             }
             // Construct the message container (the DOM ID is the HEX Nostr Event ID)
