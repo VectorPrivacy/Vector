@@ -906,6 +906,10 @@ function cancelReply() {
  * Closes the current chat, taking the user back to the chat list
  */
 function closeChat() {
+    // Cancel any ongoing replies
+    cancelReply();
+
+    // Reset the chat UI
     domChats.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
