@@ -208,7 +208,7 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
         // Fetch GiftWraps related to us
         let filter = Filter::new().pubkey(my_public_key).kind(Kind::GiftWrap);
         let events = client
-            .fetch_events(vec![filter], std::time::Duration::from_secs(30))
+            .fetch_events(filter, std::time::Duration::from_secs(30))
             .await
             .unwrap();
 
@@ -311,7 +311,7 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
         receiver_pubkey,
         Some(Kind::PrivateDirectMessage),
         emoji.clone(),
-    );
+    ).build(my_public_key);
 
     // Send reaction to the real receiver
     client
@@ -377,7 +377,7 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
         .kind(Kind::from_u16(30315))
         .limit(1);
     let status = match client
-        .fetch_events(vec![status_filter], std::time::Duration::from_secs(10))
+        .fetch_events(status_filter, std::time::Duration::from_secs(10))
         .await
     {
         Ok(res) => {
@@ -701,7 +701,7 @@ async fn notifs() -> Result<bool, String> {
     let filter = Filter::new().pubkey(pubkey).kind(Kind::GiftWrap).limit(0);
 
     // Subscribe to the filter and begin handling incoming events
-    match client.subscribe(vec![filter], None).await {
+    match client.subscribe(filter, None).await {
         Ok(_) => { /* Good! */ },
         Err(e) => { return Err(e.to_string()) }
     }
