@@ -28,6 +28,7 @@ const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessageInput = document.getElementById('chat-input');
+const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 
 const domChatNew = document.getElementById('chat-new');
@@ -67,8 +68,8 @@ function openEmojiPanel(e) {
     const isDefaultPanel = e.target === domChatMessageInputEmoji;
 
     // Open or Close the panel depending on it's state
-    const fReaction = e.target.hasAttribute('reaction');
-    const fClickedInputOrReaction = isDefaultPanel || fReaction;
+    const strReaction = e.target.getAttribute('reaction');
+    const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && picker.style.display !== `block`) {
         // Render our most used emojis by default
         let nDisplayedEmojis = 0;
@@ -110,9 +111,9 @@ function openEmojiPanel(e) {
         }
 
         // If this is a Reaction, let's cache the Reference ID
-        if (fReaction) {
+        if (strReaction) {
             // Message IDs are stored on the parent of the React button
-            strCurrentReactionReference = e.target.parentElement.id;
+            strCurrentReactionReference = strReaction;
         } else {
             strCurrentReactionReference = '';
         }
@@ -193,10 +194,10 @@ emojiSearch.onkeydown = async (e) => {
 
                 // Remove the Reaction button
                 const divMessage = document.getElementById(cMsg.id);
-                divMessage.lastElementChild.remove();
 
-                // Append the Decoy Reaction
-                divMessage.appendChild(spanReaction);
+                // Note: this is basically a shoddy flow to access the `add-reaction` element.
+                // DOM Tree: msg-(them/me) -> msg-extras -> add-reaction
+                divMessage.lastElementChild.firstElementChild.replaceWith(spanReaction);
 
                 // Send the Reaction to the network
                 invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
@@ -459,9 +460,10 @@ async function renderChatlist() {
  * Send a NIP-17 message to a Nostr user
  * @param {string} pubkey - The user's pubkey
  * @param {string} content - The content of the message
+ * @param {string?} replied_to - The reference of the message
  */
-async function message(pubkey, content) {
-    await invoke("message", { receiver: pubkey, content: content });
+async function message(pubkey, content, replied_to) {
+    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
 }
 
 /**
@@ -672,6 +674,11 @@ function openNewChat() {
 let strLastMsgID = "";
 
 /**
+ * The current Message ID being replied to
+ */
+let strCurrentReplyReference = "";
+
+/**
  * Updates the current chat (to display incoming and outgoing messages)
  * @param {string} contact 
  * @param {boolean} fSoft - Whether this is a soft update (i.e: status, typing indicator - no chat rendering)
@@ -731,6 +738,10 @@ async function updateChat(contact, fSoft = false) {
             // Prepare the message container
             const pMessage = document.createElement('p');
 
+            // If we're replying to this, give it a glowing border
+            const fReplying = strCurrentReplyReference === msg.id;
+            if (fReplying) pMessage.style.border = `solid #9941dbff 1px`;
+
             // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
             if (msg.replied_to) {
                 // Try to find the referenced message
@@ -787,26 +798,47 @@ async function updateChat(contact, fSoft = false) {
                 // No reaction on the contact's message, so let's display the 'Add Reaction' UI
                 spanReaction = document.createElement('span');
                 spanReaction.textContent = `☻`;
-                spanReaction.classList.add('add-reaction');
-                spanReaction.setAttribute('reaction', true);
+                spanReaction.classList.add('add-reaction', 'hideable');
+                spanReaction.setAttribute('reaction', msg.id);
             }
 
-            // Decide which side of the msg to render reactions on - if they exist
-            if (spanReaction) {
-                if (msg.mine) {
-                    // My message: reactions on the left
-                    spanReaction.style.left = '5px';
-                    divMessage.append(spanReaction, pMessage);
+            // Construct our "extras" (reactions, reply button, etc)
+            // TODO: placeholder style, looks awful, but works!
+            const divExtras = document.createElement('div');
+            divExtras.classList.add('msg-extras');
+
+            // These can ONLY be shown on fully sent messages (inherently does not apply to received msgs)
+            if (!msg.pending && !msg.failed) {
+                // Reactions
+                if (spanReaction) {
+                    if (msg.mine) {
+                        // My message: reactions on the left
+                        spanReaction.style.left = '5px';
+                    } else {
+                        // Their message: reactions on the right
+                        spanReaction.style.left = '-2px';
+                        spanReaction.style.bottom = '-2px';
+                    }
+                    divExtras.append(spanReaction);
                 } else {
-                    // Their message: reactions on the right
-                    spanReaction.style.left = '-2px';
-                    spanReaction.style.bottom = '-2px';
-                    divMessage.append(pMessage, spanReaction);
+                    // No reactions: just render the message
+                    divMessage.appendChild(pMessage);
                 }
-            } else {
-                // No reactions: just render the message
-                divMessage.appendChild(pMessage);
+
+                // Reply Icon (if we're not already replying!)
+                if (!fReplying) {
+                    const spanReply = document.createElement('span');
+                    spanReply.classList.add('reply-btn', 'hideable');
+                    spanReply.setAttribute('reply-to', msg.id);
+                    spanReply.onclick = selectReplyingMessage;
+                    spanReply.textContent = `R`;
+                    divExtras.append(spanReply);
+                }
             }
+
+            // Depending on who it is: render the extras appropriately
+            if (msg.mine) divMessage.append(divExtras, pMessage);
+            else divMessage.append(pMessage, divExtras);
 
             // Add it to the chat!
             domChatMessages.appendChild(divMessage);
@@ -836,6 +868,41 @@ async function updateChat(contact, fSoft = false) {
 }
 
 /**
+ * Select a message to begin replying to
+ * @param {MouseEvent} e 
+ */
+function selectReplyingMessage(e) {
+    // Get the reply ID
+    strCurrentReplyReference = e.target.getAttribute('reply-to');
+    // Display the cancel UI
+    domChatMessageInputCancel.style.display = '';
+    // Display a replying placeholder
+    domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
+    // Focus the message input
+    domChatMessageInput.focus();
+    // Refresh the UI to add a reply-focus
+    updateChat(strOpenChat, false);
+}
+
+/**
+ * Cancel any ongoing replies and reset the messaging interface
+ */
+function cancelReply() {
+    // Remove the reply ID
+    strCurrentReplyReference = '';
+
+    // Reset the message UI
+    domChatMessageInputCancel.style.display = 'none';
+    domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+
+    // Focus the message input
+    domChatMessageInput.focus();
+
+    // Update the UI to remove any reply-focus changes, if applicable
+    if (strOpenChat) updateChat(strOpenChat, false);
+}
+
+/**
  * Closes the current chat, taking the user back to the chat list
  */
 function closeChat() {
@@ -858,6 +925,7 @@ let strPubkey;
  */
 let nLastTypingIndicator = 0;
 
+const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
 window.addEventListener("DOMContentLoaded", async () => {
     adjustSize();
 
@@ -880,6 +948,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         openChat(domChatNewInput.value.trim());
         domChatNewInput.value = ``;
     };
+    domChatMessageInputCancel.onclick = cancelReply;
 
     // Load the DB
     store = await load('vector.json', { autoSave: true });
@@ -890,7 +959,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up an 'Enter' listener on the Message Box for sending messages
-    const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
     domChatMessageInput.onkeydown = async (evt) => {
         // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message
         if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
@@ -903,11 +971,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                 domChatMessageInput.value = '';
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
                 try {
-                    await message(strOpenChat, strMessage);
+                    await message(strOpenChat, strMessage, strCurrentReplyReference);
                 } catch(_) {}
 
                 // Reset the placeholder and typing indicator timestamp
-                domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+                cancelReply();
                 nLastTypingIndicator = 0;
             }
         } else {

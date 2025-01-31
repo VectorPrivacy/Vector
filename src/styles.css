@@ -297,11 +297,22 @@ body {
   display: flex;
 }
 
-.add-reaction {
+.msg-extras {
+  display: flex;
+  flex-direction: column;
+}
+
+.msg-extras span {
   cursor: pointer;
+}
+
+.msg-extras .hideable {
   opacity: 0;
-  font-size: 25px;
   transition: opacity 0.1s;
+}
+
+.add-reaction {
+  font-size: 25px;
 }
 
 .reaction {
@@ -311,7 +322,15 @@ body {
   width: 50px;
 }
 
-.msg-them:hover .add-reaction  {
+.reply-btn {
+  font-size: 25px;
+}
+
+.msg-them:hover .msg-extras .hideable {
+  opacity: 0.75;
+}
+
+.msg-me:hover .msg-extras .hideable {
   opacity: 0.75;
 }
 

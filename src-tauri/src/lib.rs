@@ -222,15 +222,14 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
 }
 
 #[tauri::command]
-async fn message(receiver: String, content: String) -> Result<bool, String> {
+async fn message(receiver: String, content: String, replied_to: String) -> Result<bool, String> {
     // Immediately add the message to our state as "Pending", we'll update it as either Sent (non-pending) or Failed in the future
     let pending_count = STATE.lock().await.get_profile(receiver.clone()).unwrap_or(&Profile::new()).messages.iter().filter(|m| m.pending).count();
     let pending_id = String::from("pending-") + &pending_count.to_string();
     let msg = Message {
         id: pending_id.clone(),
         content: content.clone(),
-        // TODO: add the ability to reply to messages
-        replied_to: String::from(""),
+        replied_to: replied_to.clone(),
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -250,20 +249,28 @@ async fn message(receiver: String, content: String) -> Result<bool, String> {
     // Convert the Bech32 String in to a PublicKey
     let receiver_pubkey = PublicKey::from_bech32(receiver.clone().as_str()).unwrap();
 
-    // Build the NIP-17 rumor
-    let rumor: UnsignedEvent = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone()).build(my_public_key);
+    // Prepare the NIP-17 rumor
+    let mut rumor = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone());
+
+    // If a reply reference is included, add the tag
+    if !replied_to.is_empty() {
+        rumor = rumor.tag(Tag::custom(TagKind::e(), [replied_to, String::from(""), String::from("reply")]));
+    }
+
+    // Build the rumor with our key (unsigned)
+    let built_rumor = rumor.build(my_public_key);
 
     // Send message to the real receiver
-    match client.gift_wrap(&receiver_pubkey, rumor.clone(), []).await {
+    match client.gift_wrap(&receiver_pubkey, built_rumor.clone(), []).await {
         Ok(_) => {
             // Send message to our own public key, to allow for message recovering
-            match client.gift_wrap(&my_public_key, rumor.clone(), []).await {
+            match client.gift_wrap(&my_public_key, built_rumor.clone(), []).await {
                 Ok(_) => {
                     // Mark the message as a success
                     let mut state = STATE.lock().await;
                     let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
                     let message = chat.get_message_mut(pending_id).unwrap();
-                    message.id = rumor.id.unwrap().to_hex();
+                    message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
                     state.has_state_changed = true;
                     return Ok(true);
@@ -274,7 +281,7 @@ async fn message(receiver: String, content: String) -> Result<bool, String> {
                     let mut state = STATE.lock().await;
                     let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
                     let message = chat.get_message_mut(pending_id).unwrap();
-                    message.id = rumor.id.unwrap().to_hex();
+                    message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
                     state.has_state_changed = true;
                     return Ok(true)
