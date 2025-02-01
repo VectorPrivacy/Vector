@@ -740,7 +740,7 @@ async function updateChat(contact, fSoft = false) {
 
             // If we're replying to this, give it a glowing border
             const fReplying = strCurrentReplyReference === msg.id;
-            if (fReplying) pMessage.style.border = `solid #9941dbff 1px`;
+            pMessage.style.border = `solid ${fReplying ? '#9941dbff' : 'transparent'} 1px`;
 
             // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
             if (msg.replied_to) {
