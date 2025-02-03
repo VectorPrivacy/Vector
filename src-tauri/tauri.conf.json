@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "chatstr",
+  "productName": "vector",
   "identifier": "com.chatstr.app",
   "build": {
     "frontendDist": "../src"
@@ -9,7 +9,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Chatstr",
+        "title": "Vector",
         "minWidth": 375,
         "width": 375,
         "minHeight": 550,

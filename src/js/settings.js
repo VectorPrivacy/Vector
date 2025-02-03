@@ -60,3 +60,23 @@ async function askForStatus() {
         await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true);
     }
 }
+
+/**
+ * Set the theme of the app by hot-swapping theme CSS files
+ * @param {string} theme - The theme name, i.e: `vector`, `chatstr`
+ * @param {string} mode - The theme mode, i.e: `light`, `dark`
+ */
+function setTheme(theme = 'vector', mode = 'dark') {
+    domTheme.href = `/themes/${theme}/${mode}.css`;
+
+    // Ensure the value of the Theme Selector matches (i.e: at bootup during theme load)
+    domSettingsThemeSelect.value = theme;
+
+    // Save the selection to DB
+    setKey('theme', theme);
+}
+
+// Apply Theme changes in real-time
+domSettingsThemeSelect.onchange = (evt) => {
+    setTheme(evt.target.value);
+};

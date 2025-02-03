@@ -38,3 +38,20 @@ async function hasKey() {
 async function deleteKey() {
     await store.delete('pkey');
 }
+
+/**
+ * Get a string value via DB key
+ * @param {string} key - The key to fetch from the DB
+ */
+async function getKey(key) {
+    return await store.get(key);
+}
+
+/**
+ * Set a string value via DB key
+ * @param {string} key - The key we're setting
+ * @param {string} value - The value to set
+ */
+async function setKey(key, value) {
+    await store.set(key, value);
+}

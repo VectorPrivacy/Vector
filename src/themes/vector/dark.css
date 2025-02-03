@@ -1,0 +1,80 @@
+:root {
+  background-color: #0a0a0a;
+}
+
+.popup {
+  background-color: rgba(0, 0, 0, 1);
+  box-shadow: 0 0 15px rgba(90, 252, 180, 0.25);
+  border-color: rgba(90, 252, 180, 0.35);
+}
+
+.text-gradient {
+  background: linear-gradient(to right, #ffffff 13.87%, #59fcb3 60%);
+  background-size: 200% 200%;
+  background-clip: text;
+}
+
+.back-btn {
+  color: rgb(191, 191, 191);
+}
+
+.chatlist-contact {
+  border-color: rgba(152, 255, 214, 0.15);
+}
+
+.chatlist-contact:hover {
+  border-color: rgba(152, 255, 214, 0.5);
+}
+
+.chat {
+  background-color: #161616;
+}
+
+.chat-messages {
+  background-color: #0a0a0a;
+}
+
+.msg-me p {
+  color: #ffffff;
+  background-color: #161616;
+  border-color: #161616;
+}
+
+.msg-them p {
+  background: linear-gradient(90deg, #59fcb325 0%, #2b976c23 100%);
+  border-color: rgba(90, 252, 180, 0.43);
+}
+
+.msg-reply {
+  border-left: solid rgb(215, 215, 215) 2px;
+}
+
+.emoji-picker {
+  background: #5afcb433;
+  border-color: #5afcb400;
+}
+
+#chat-box {
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  -webkit-box-shadow: 
+    0 10px 20px 5px #59fcb33c,
+    0 8px 12px 20px rgba(90, 252, 180, 0.36);
+}
+
+#chat-input {
+  background-color: #0a0a0a;
+}
+
+input,
+textarea,
+button {
+  background-color: rgba(152, 255, 214, 0.15);
+}
+
+button:hover {
+  background-color: (152, 255, 214, 0.5);
+}
+
+.divider {
+  background-color: #59fcb3;
+}

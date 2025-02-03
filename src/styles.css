@@ -5,7 +5,6 @@
   font-weight: 400;
 
   color: #f6f6f6;
-  background-color: #0e0e10;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -31,6 +30,21 @@ body {
   text-align: center;
 }
 
+.settings-btn {
+  position: absolute;
+  height: 0px;
+  top: 0px;
+  right: 15px;
+  padding: 0;
+  font-size: 40px;
+  border: none;
+  opacity: 0.75;
+}
+
+.settings-btn:hover {
+  opacity: 0.5;
+}
+
 .popup-container {
   z-index: 1001;
   width: 100%;
@@ -41,22 +55,16 @@ body {
 
 .popup {
   position: absolute;
-  background-color: rgba(0, 0, 0, 1);
   /* Too many weird WebKit filter issues - disabling and going solid for now */
   /* backdrop-filter: blur(10px); */
-  box-shadow: 0 0 15px rgba(112, 0, 128, 0.20);
   border-style: solid;
   border-radius: 8px;
   padding: 30px;
-  border-color: rgba(112, 0, 128, 0.5);
   border-width: 1px;
   margin-top: 30vh;
 }
 
 .text-gradient {
-  background: linear-gradient(to right, #f8f8f8 13.87%, #b188e2 60%);
-  background-size: 200% 200%;
-  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
@@ -114,7 +122,6 @@ body {
 .chatlist-contact {
   display: flex;
   border-style: solid;
-  border-color: rgba(193, 147, 219, 0.24);
   border-radius: 30px;
   border-width: 1px;
   cursor: pointer;
@@ -184,7 +191,6 @@ body {
   left: 10px;
   top: 18px;
   margin: 0;
-  color: rgba(167, 137, 204, 1);
   z-index: 10;
 }
 
@@ -220,14 +226,10 @@ body {
   flex-direction: column;
   align-items: flex-end;
   overflow-y: scroll;
-  background-color: #040308;
   /* An imperfect solution attempting to fit the message list within it's Chat Box proportionately to the window height */
-  height: calc(100% - 80px);
+  height: calc(100% - 100px);
   padding-left: 10px;
   padding-right: 10px;
-  border-top-style: solid;
-  border-top-color: rgba(167, 137, 204, 0.75);
-  border-top-width: 1px;
 }
 
 .msg-inline-timestamp {
@@ -255,7 +257,8 @@ body {
   text-align: left;
   max-width: 300px;
   border-radius: 15px;
-  background: linear-gradient(157deg, rgba(29,29,117,0.5) 45%, rgba(118,33,129,0.5) 100%);
+  border-style: solid;
+  border-width: 1px;
   padding: 12px;
   border-bottom-right-radius: 0px;
   word-break: break-word;
@@ -265,7 +268,8 @@ body {
   text-align: left;
   max-width: 300px;
   border-radius: 15px;
-  background-color: #24252a;
+  border-style: solid;
+  border-width: 1px;
   padding: 12px;
   border-bottom-left-radius: 0px;
   word-break: break-word;
@@ -273,15 +277,15 @@ body {
 
 .msg-reply {
   display: block;
-  border-left: solid #9941dbff 2px;
   padding-left: 10px;
   opacity: 0.6;
   margin-bottom: 5px;
 }
 
 .emoji-only {
-  /* Typically I recommend against !important, but this is the only element in `msg-them` we're force-overriding */
+  /* Typically I recommend against !important, but this is the only style in `msg-*` we're force-overriding */
   background: none !important;
+  border-color: transparent !important;
   padding-left: 0;
   margin-top: 25px;
   margin-bottom: 25px;
@@ -443,9 +447,12 @@ button {
   font-weight: 500;
   font-family: inherit;
   color: #ffffff;
-  background-color: #593b6f99;
   transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+}
+
+select {
+  width: 150px;
+  font-size: 150px;
 }
 
 button {
@@ -467,9 +474,9 @@ button:active {
 .divider {
   height: 1px;
   width: 100%;
-  background-color: rgba(128, 0, 128, 0.25);
   margin-top: 15px;
-  margin-bottom: 15px
+  margin-bottom: 15px;
+  border: none;
 }
 
 #login-input {

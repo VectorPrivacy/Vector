@@ -8,6 +8,8 @@ getVersion().then(v => {
     domVersion.textContent += `v${v}`;
 });
 
+const domTheme = document.getElementById('theme');
+
 const domLogin = document.getElementById('login-form');
 const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
@@ -36,6 +38,11 @@ const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
 const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
+
+const domSettings = document.getElementById('settings');
+const domSettingsBtn = document.getElementById('settings-btn');
+const domSettingsBackBtn = document.getElementById('settings-back-btn');
+const domSettingsThemeSelect = document.getElementById('theme-select');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
@@ -475,6 +482,7 @@ async function login() {
         domLoginInput.value = "";
         domLogin.style.display = 'none';
         domLoginEncrypt.style.display = 'none';
+        domSettingsBtn.style.display = '';
 
         // Connect to Nostr
         // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip a full network sync
@@ -643,30 +651,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
     }
 }
 
-/**
- * Open a chat with a particular contact
- * @param {string} contact 
- */
-function openChat(contact) {
-    // Display the Chat UI
-    domChatNew.style.display = 'none';
-    domChats.style.display = 'none';
-    domChat.style.display = '';
 
-    // Render the current contact's messages
-    strOpenChat = contact;
-    updateChat(contact);
-}
-
-/**
- * Open the dialog for starting a new chat
- */
-function openNewChat() {
-    // Display the UI
-    domChatNew.style.display = '';
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
-}
 
 /**
  * A simple state tracker for the last message ID, if it changes, we auto-scroll
@@ -740,7 +725,12 @@ async function updateChat(contact, fSoft = false) {
 
             // If we're replying to this, give it a glowing border
             const fReplying = strCurrentReplyReference === msg.id;
-            pMessage.style.border = `solid ${fReplying ? '#9941dbff' : 'transparent'} 1px`;
+            const strEmojiCleaned = msg.content.replace(/\s/g, '');
+            const fEmojiOnly = isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
+            if (fReplying) {
+                // Only display if replying
+                pMessage.style.borderColor = `#ffffff`;
+            }
 
             // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
             if (msg.replied_to) {
@@ -758,8 +748,7 @@ async function updateChat(contact, fSoft = false) {
 
             // Render the text - if it's emoji-only, and less than four emojis, format them nicely
             const spanMessage = document.createElement('span');
-            const strEmojiCleaned = msg.content.replace(/\s/g, '');
-            if (isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6) {
+            if (fEmojiOnly) {
                 // Strip out unnecessary whitespace
                 spanMessage.textContent = strEmojiCleaned;
                 // Add an emoji-only CSS format
@@ -903,6 +892,33 @@ function cancelReply() {
 }
 
 /**
+ * Open a chat with a particular contact
+ * @param {string} contact 
+ */
+function openChat(contact) {
+    // Display the Chat UI
+    domChatNew.style.display = 'none';
+    domChats.style.display = 'none';
+    domChat.style.display = '';
+    domSettingsBtn.style.display = 'none';
+
+    // Render the current contact's messages
+    strOpenChat = contact;
+    updateChat(contact);
+}
+
+/**
+ * Open the dialog for starting a new chat
+ */
+function openNewChat() {
+    // Display the UI
+    domChatNew.style.display = '';
+    domSettingsBtn.style.display = 'none';
+    domChats.style.display = 'none';
+    domChat.style.display = 'none';
+}
+
+/**
  * Closes the current chat, taking the user back to the chat list
  */
 function closeChat() {
@@ -911,10 +927,28 @@ function closeChat() {
 
     // Reset the chat UI
     domChats.style.display = '';
+    domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
     nLastTypingIndicator = 0;
+}
+
+function openSettings() {
+    domSettings.style.display = '';
+    domSettingsBtn.style.display = 'none';
+
+    // Close the Chat UI
+    domChats.style.display = 'none';
+}
+
+
+function closeSettings() {
+    domSettings.style.display = 'none';
+    domSettingsBtn.style.display = '';
+
+    // Open the Chat UI
+    domChats.style.display = '';
 }
 
 /**
@@ -931,9 +965,24 @@ let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
 window.addEventListener("DOMContentLoaded", async () => {
+    // Load the DB
+    store = await load('vector.json', { autoSave: true });
+
+    // Immediately load and apply theme settings
+    const strTheme = await getKey('theme');
+    if (strTheme) {
+        setTheme(strTheme);
+    }
     adjustSize();
 
+    // If a local encrypted key exists, boot up the decryption UI
+    if (await hasKey()) {
+        openEncryptionFlow(null, true);
+    }
+
     // Hook up our static buttons
+    domSettingsBtn.onclick = openSettings;
+    domSettingsBackBtn.onclick = closeSettings;
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
@@ -953,14 +1002,6 @@ window.addEventListener("DOMContentLoaded", async () => {
         domChatNewInput.value = ``;
     };
     domChatMessageInputCancel.onclick = cancelReply;
-
-    // Load the DB
-    store = await load('vector.json', { autoSave: true });
-
-    // If a local encrypted key exists, boot up the decryption UI
-    if (await hasKey()) {
-        openEncryptionFlow(null, true);
-    }
 
     // Hook up an 'Enter' listener on the Message Box for sending messages
     domChatMessageInput.onkeydown = async (evt) => {

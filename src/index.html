@@ -3,8 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
+    <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Chatstr</title>
+    <title>Vector</title>
     <script src="/main.js" defer></script>
     <script src="/js/settings.js" defer></script>
     <script src="/js/misc.js" defer></script>
@@ -20,13 +21,14 @@
         <p id="popupSubtext"><br><i style="opacity: 0.5"></i></p>
 
         <input id="popupInput">
-        <div class="divider"></div>
+        <hr class="divider">
 
         <button id="popupConfirm">Confirm</button><button id="popupCancel" style="opacity: 0.8;margin-left: 10px;">Cancel</button>
       </center>
     </div>
 
     <main class="container">
+      <button id="settings-btn" class="settings-btn" style="display: none;">⚙</button>
       <!-- The Global emoji picker popup -->
       <div class="emoji-picker" tabindex="-1">
         <input id="emoji-search-input" placeholder="Search..." style="width: -webkit-fill-available; height: 12px; margin-bottom: 12px;">
@@ -41,7 +43,7 @@
       </div>
 
       <div id="chat" class="chat" style="display: none;">
-        <h3 class="back-btn" id="chat-back-btn">Back</h3>
+        <h4 class="back-btn" id="chat-back-btn">Back</h4>
         <h3 id="chat-contact"></h3>
         <span class="cutoff" id="chat-contact-status"></span>
         <div id="chat-messages" class="chat-messages">
@@ -58,7 +60,7 @@
       </div>
 
       <div id="chat-new" style="display: none;">
-        <h3 class="back-btn" id="chat-new-back-btn">Back</h3>
+        <h4 class="back-btn" id="chat-new-back-btn">Back</h4>
         <center>
           <h2 style="margin-top: 50px; margin-bottom: 5px;">Share your Contact</h2>
           <span style="opacity: 0.75;">Your 'npub' key can be shared with anyone to give them a way of messaging you.</span>
@@ -67,7 +69,7 @@
         <div style="padding-left: 40px; padding-right: 40px;">
           <code class="text-gradient" style="line-break: anywhere; font-size: 14px;" id="share-npub"></code>
         </div>
-        <hr style="color: rgba(167, 137, 204, 0.75); margin-top: 50px; margin-bottom: 50px;">
+        <hr class="divider" style="margin-top: 55px; margin-bottom: 50px;">
         <center>
           <h2 style="margin-bottom: 5px;">Chat with someone</h2>
           <span style="opacity: 0.75;">Use your friend's 'npub' to begin a conversation with them.</span>
@@ -76,8 +78,18 @@
         <button style="margin-top: 10px;" id="chat-new-btn">Start Chat</button>
       </div>
 
+      <div id="settings" style="display: none;">
+        <h4 class="back-btn" id="settings-back-btn">Back</h4>
+        <hr style="margin-top: 55px; margin-bottom: 5px;" class="divider">
+        <h2>Choose your Theme</h2>
+        <select id="theme-select">
+          <option value="vector">Vector</option>
+          <option value="chatstr">Chatstr</option>
+        </select>
+      </div>
+
       <div id="login-form">
-        <h1 style="margin-bottom: 0; font-size: 50px;">Chatstr</h1>
+        <h1 style="margin-bottom: 0; font-size: 50px;">Vector</h1>
         <span id="version"></span>
         <div id="login-import">
           <h3 class="text-gradient" style="margin-top: 100px;">A Private, Decentralised, Modern communication app.</h3>
