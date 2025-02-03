@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_fs::FsExt;
 
 /// # Trusted Relay
 ///
@@ -16,6 +17,11 @@ use tauri_plugin_notification::NotificationExt;
 ///
 /// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
 static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
+
+/// # Trusted NIP-96 Server
+///
+/// A temporary hardcoded NIP-96 server, handling file uploads
+static TRUSTED_NIP96: &str = "https://nostr.build";
 
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
@@ -558,6 +564,40 @@ async fn update_status(status: String) -> Result<Profile, ()> {
 }
 
 #[tauri::command]
+async fn upload_avatar(filepath: String) -> Result<String, String> {
+    let app_handle = TAURI_APP.get().unwrap().clone();
+
+    // Grab the file
+    return match app_handle.fs().read(std::path::Path::new(&filepath)) {
+        Ok(file) => {
+            // Get our NIP-96 server config
+            return match get_server_config(Url::parse(TRUSTED_NIP96).unwrap(), None).await {
+                Ok(conf) => {
+                    // Format a Mime Type from the file extension
+                    let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+                        "png" => "image/png",
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        _ => "application/octet-stream",
+                    };
+
+                    // Upload the file to the server
+                    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+                    let signer = client.signer().await.unwrap();
+                    return match upload_data(&signer, &conf, file, Some(mime_type), None).await {
+                        Ok(url) => Ok(url.to_string()),
+                        Err(e) => Err(e.to_string())
+                    }
+                },
+                Err(e) => Err(e.to_string())
+            }
+        },
+        Err(_) => Err(String::from("Image couldn't be loaded from disk"))
+    }
+}
+
+#[tauri::command]
 async fn start_typing(receiver: String) -> Result<bool, ()> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
@@ -1037,6 +1077,7 @@ async fn decrypt(ciphertext: String, password: String) -> Result<String, ()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -1056,6 +1097,7 @@ pub fn run() {
             load_profile,
             update_profile,
             update_status,
+            upload_avatar,
             start_typing,
             connect,
             has_state_changed,

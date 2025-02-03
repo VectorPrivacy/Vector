@@ -1,3 +1,5 @@
+const { open } = window.__TAURI__.dialog;
+
 /**
  * A GUI wrapper to ask the user for a username, and apply it both
  * in-app and on the Nostr network.
@@ -24,19 +26,36 @@ async function askForUsername() {
  * in-app and on the Nostr network.
  */
 async function askForAvatar() {
-    const strURL = await popupConfirm('Choose an Avatar', `Use an image URL as your avatar.<br><i style="opacity: 0.6">In the future, in-app avatar uploading will be supported, hang tight!</i>`, false, 'An Image URL');
-    if (!strURL) return;
+    // Prompt the user to select an image file
+    const file = await open({
+        title: 'Choose an Avatar',
+        multiple: false,
+        directory: false,
+        filters: [{
+            name: 'Image',
+            extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp']
+        }]
+    });
+    if (!file) return;
+
+    // Upload the avatar to a NIP-96 server
+    let strUploadURL = '';
+    try {
+        strUploadURL = await invoke("upload_avatar", { filepath: file });
+    } catch (e) {
+        return await popupConfirm('Avatar Upload Failed!', e, true);
+    }
 
     // Display the change immediately
     const cProfile = arrChats.find(a => a.mine);
-    cProfile.avatar = strURL;
+    cProfile.avatar = strUploadURL;
     renderCurrentProfile(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: strURL });
+        await invoke("update_profile", { name: "", avatar: strUploadURL });
     } catch (e) {
-        await popupConfirm('Avatar Update Failed!', 'An error occurred while updating your Avatar, the change may not have committed to the network, you can re-try any time.', true);
+        return await popupConfirm('Avatar Update Failed!', e, true);
     }
 }
 
