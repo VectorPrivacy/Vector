@@ -1,19 +1,19 @@
-use rand::Rng;
 use argon2::{Argon2, Params, Version};
-use tokio::sync::Mutex;
-use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::ChaCha20;
 use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
+use rand::Rng;
+use tokio::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 /// # Trusted Relay
-/// 
+///
 /// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
-/// 
+///
 /// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
 static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
 
@@ -65,7 +65,7 @@ impl Profile {
             status: Status::new(),
             last_updated: 0,
             typing_until: 0,
-            mine: false
+            mine: false,
         }
     }
 
@@ -105,8 +105,8 @@ impl Profile {
                     msg.reactions.push(reaction);
                 }
                 true
-            },
-            Err(_) => false
+            }
+            Err(_) => false,
         }
     }
 }
@@ -123,7 +123,7 @@ impl Status {
         Self {
             title: String::new(),
             purpose: String::new(),
-            url: String::new()
+            url: String::new(),
         }
     }
 }
@@ -182,11 +182,11 @@ impl ChatState {
                     true => {
                         self.has_state_changed = true;
                         true
-                    },
-                    false => false
+                    }
+                    false => false,
                 }
-            },
-            Err(_) => false
+            }
+            Err(_) => false,
         }
     }
 }
@@ -224,7 +224,15 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
 #[tauri::command]
 async fn message(receiver: String, content: String, replied_to: String) -> Result<bool, String> {
     // Immediately add the message to our state as "Pending", we'll update it as either Sent (non-pending) or Failed in the future
-    let pending_count = STATE.lock().await.get_profile(receiver.clone()).unwrap_or(&Profile::new()).messages.iter().filter(|m| m.pending).count();
+    let pending_count = STATE
+        .lock()
+        .await
+        .get_profile(receiver.clone())
+        .unwrap_or(&Profile::new())
+        .messages
+        .iter()
+        .filter(|m| m.pending)
+        .count();
     let pending_id = String::from("pending-") + &pending_count.to_string();
     let msg = Message {
         id: pending_id.clone(),
@@ -254,21 +262,34 @@ async fn message(receiver: String, content: String, replied_to: String) -> Resul
 
     // If a reply reference is included, add the tag
     if !replied_to.is_empty() {
-        rumor = rumor.tag(Tag::custom(TagKind::e(), [replied_to, String::from(""), String::from("reply")]));
+        rumor = rumor.tag(Tag::custom(
+            TagKind::e(),
+            [replied_to, String::from(""), String::from("reply")],
+        ));
     }
 
     // Build the rumor with our key (unsigned)
     let built_rumor = rumor.build(my_public_key);
 
     // Send message to the real receiver
-    match client.gift_wrap(&receiver_pubkey, built_rumor.clone(), []).await {
+    match client
+        .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
+        .await
+    {
         Ok(_) => {
             // Send message to our own public key, to allow for message recovering
-            match client.gift_wrap(&my_public_key, built_rumor.clone(), []).await {
+            match client
+                .gift_wrap(&my_public_key, built_rumor.clone(), [])
+                .await
+            {
                 Ok(_) => {
                     // Mark the message as a success
                     let mut state = STATE.lock().await;
-                    let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
+                    let chat = state
+                        .profiles
+                        .iter_mut()
+                        .find(|chat| chat.id == receiver)
+                        .unwrap();
                     let message = chat.get_message_mut(pending_id).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
@@ -279,19 +300,27 @@ async fn message(receiver: String, content: String, replied_to: String) -> Resul
                     // This is an odd case; the message was sent to the receiver, but NOT ourselves
                     // We'll class it as sent, for now...
                     let mut state = STATE.lock().await;
-                    let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
+                    let chat = state
+                        .profiles
+                        .iter_mut()
+                        .find(|chat| chat.id == receiver)
+                        .unwrap();
                     let message = chat.get_message_mut(pending_id).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
                     state.has_state_changed = true;
-                    return Ok(true)
+                    return Ok(true);
                 }
             }
-        },
+        }
         Err(_) => {
             // Mark the message as a failure, bad message, bad!
             let mut state = STATE.lock().await;
-            let chat = state.profiles.iter_mut().find(|chat| chat.id == receiver).unwrap();
+            let chat = state
+                .profiles
+                .iter_mut()
+                .find(|chat| chat.id == receiver)
+                .unwrap();
             let failed_msg = chat.get_message_mut(pending_id).unwrap();
             failed_msg.failed = true;
             state.has_state_changed = true;
@@ -318,7 +347,8 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
         receiver_pubkey,
         Some(Kind::PrivateDirectMessage),
         emoji.clone(),
-    ).build(my_public_key);
+    )
+    .build(my_public_key);
 
     // Send reaction to the real receiver
     client
@@ -336,7 +366,10 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
                 author_id: my_public_key.to_hex(),
                 emoji,
             };
-            return Ok(STATE.lock().await.add_reaction(npub, reference_id, reaction));
+            return Ok(STATE
+                .lock()
+                .await
+                .add_reaction(npub, reference_id, reaction));
         }
         Err(e) => {
             eprintln!("Error: {:?}", e);
@@ -370,11 +403,17 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
                 state.profiles.push(new_profile);
                 state.get_profile(npub.clone()).unwrap()
             }
-        }.clone();
+        }
+        .clone();
 
         // If the profile has been refreshed in the last 30s, return it's cached version
-        if profile.last_updated + 30 > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() {
-            return Ok(profile.clone())
+        if profile.last_updated + 30
+            > std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        {
+            return Ok(profile.clone());
         }
     }
 
@@ -427,7 +466,10 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
             // Update the Metadata
             profile_mutable.from_metadata(meta);
             // And apply the current update time
-            profile_mutable.last_updated = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            profile_mutable.last_updated = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             // And mark the state as changed
             let ret_profile = profile_mutable.clone();
             state.has_state_changed = true;
@@ -450,27 +492,42 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
     // Get our profile
     let mut meta: Metadata;
     let mut state = STATE.lock().await;
-    let profile = state.get_profile(my_public_key.to_bech32().unwrap()).unwrap().clone();
+    let profile = state
+        .get_profile(my_public_key.to_bech32().unwrap())
+        .unwrap()
+        .clone();
 
     // We'll apply the changes to the previous profile and carry-on the rest
-    meta = Metadata::new()
-        .name(if name.is_empty() { profile.name.clone() } else { name });
+    meta = Metadata::new().name(if name.is_empty() {
+        profile.name.clone()
+    } else {
+        name
+    });
 
     // Optional avatar
     if !avatar.is_empty() || !profile.avatar.is_empty() {
-        meta = meta.picture(Url::parse(if avatar.is_empty() { profile.avatar.as_str() } else { avatar.as_str() }).unwrap());
+        meta = meta.picture(
+            Url::parse(if avatar.is_empty() {
+                profile.avatar.as_str()
+            } else {
+                avatar.as_str()
+            })
+            .unwrap(),
+        );
     }
 
     // Broadcast the profile update
     match client.set_metadata(&meta).await {
         Ok(_event) => {
             // Apply our Metadata to our Profile
-            let profile_mutable = state.get_profile_mut(my_public_key.to_bech32().unwrap()).unwrap();
+            let profile_mutable = state
+                .get_profile_mut(my_public_key.to_bech32().unwrap())
+                .unwrap();
             profile_mutable.from_metadata(meta);
             state.has_state_changed = true;
             Ok(profile.clone())
-        },
-        Err(_e) => { Err(()) }
+        }
+        Err(_e) => Err(()),
     }
 }
 
@@ -483,17 +540,20 @@ async fn update_status(status: String) -> Result<Profile, ()> {
     let my_public_key = signer.get_public_key().await.unwrap();
 
     // Build and broadcast the status
-    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str()).tag(Tag::custom(TagKind::d(), vec!["general"]));
+    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
+        .tag(Tag::custom(TagKind::d(), vec!["general"]));
     match client.send_event_builder(status_builder).await {
         Ok(_event) => {
             // Add the status to our profile
             let mut state = STATE.lock().await;
-            let profile = state.get_profile_mut(my_public_key.to_bech32().unwrap()).unwrap();
+            let profile = state
+                .get_profile_mut(my_public_key.to_bech32().unwrap())
+                .unwrap();
             profile.status.purpose = String::from("general");
             profile.status.title = status;
             Ok(profile.clone())
-        },
-        Err(_e) => { Err(()) },
+        }
+        Err(_e) => Err(()),
     }
 }
 
@@ -512,19 +572,37 @@ async fn start_typing(receiver: String) -> Result<bool, ()> {
     let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
         .tag(Tag::public_key(receiver_pubkey))
         .tag(Tag::custom(TagKind::d(), vec!["vector"]))
-        .tag(Tag::expiration(Timestamp::from_secs(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 30)))
+        .tag(Tag::expiration(Timestamp::from_secs(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 30,
+        )))
         .build(my_public_key);
 
     // Gift Wrap and send our Typing Indicator to receiver via our Trusted Relay
     // Note: we set a "public-facing" 1-hour expiry so that our trusted NIP-40 relay can purge old Typing Indicators
-    let expiry_time = Timestamp::from_secs(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600);
-    match client.gift_wrap_to([TRUSTED_RELAY], &receiver_pubkey, rumor.clone(), [Tag::expiration(expiry_time)]).await {
+    let expiry_time = Timestamp::from_secs(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600,
+    );
+    match client
+        .gift_wrap_to(
+            [TRUSTED_RELAY],
+            &receiver_pubkey,
+            rumor.clone(),
+            [Tag::expiration(expiry_time)],
+        )
+        .await
+    {
         Ok(_) => Ok(true),
-        Err(_) => Ok(false)
+        Err(_) => Ok(false),
     }
 }
-
-
 
 #[tauri::command]
 async fn handle_event(event: Event, is_new: bool) {
@@ -552,18 +630,24 @@ async fn handle_event(event: Event, is_new: bool) {
                             Err(_) => {
                                 eprintln!("Failed to convert public key to bech32");
                                 // If conversion fails, fall back to sender
-                                sender.to_bech32().expect("Failed to convert sender's public key to bech32")
+                                sender
+                                    .to_bech32()
+                                    .expect("Failed to convert sender's public key to bech32")
                             }
                         },
                         None => {
                             eprintln!("No public key tag found");
                             // If no public key found in tags, fall back to sender
-                            sender.to_bech32().expect("Failed to convert sender's public key to bech32")
+                            sender
+                                .to_bech32()
+                                .expect("Failed to convert sender's public key to bech32")
                         }
                     }
                 } else {
                     // If not is_mine, just use sender's bech32
-                    sender.to_bech32().expect("Failed to convert sender's public key to bech32")
+                    sender
+                        .to_bech32()
+                        .expect("Failed to convert sender's public key to bech32")
                 };
 
                 // Check if the message replies to anything
@@ -574,8 +658,8 @@ async fn handle_event(event: Event, is_new: bool) {
                             // Add the referred Event ID to our `replied_to` field
                             replied_to = tag.content().unwrap().to_string();
                         }
-                    },
-                    None => ()
+                    }
+                    None => (),
                 };
 
                 // Send an OS notification for incoming messages
@@ -587,11 +671,11 @@ async fn handle_event(event: Event, is_new: bool) {
                             // We have a profile, just check for a name
                             display_name = match profile.name.is_empty() {
                                 true => String::from("New Message"),
-                                false => profile.name.clone()
+                                false => profile.name.clone(),
                             };
-                        },
+                        }
                         // No profile
-                        Err(_) => display_name = String::from("New Message")
+                        Err(_) => display_name = String::from("New Message"),
                     }
                     show_notification(display_name, rumor.content.clone());
                 }
@@ -605,7 +689,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     reactions: Vec::new(),
                     mine: is_mine,
                     pending: false,
-                    failed: false
+                    failed: false,
                 };
                 state.add_message(contact, msg);
             }
@@ -625,18 +709,24 @@ async fn handle_event(event: Event, is_new: bool) {
                                     Err(_) => {
                                         eprintln!("Failed to convert public key to bech32");
                                         // If conversion fails, fall back to sender
-                                        sender.to_bech32().expect("Failed to convert sender's public key to bech32")
+                                        sender.to_bech32().expect(
+                                            "Failed to convert sender's public key to bech32",
+                                        )
                                     }
                                 },
                                 None => {
                                     eprintln!("No public key tag found");
                                     // If no public key found in tags, fall back to sender
-                                    sender.to_bech32().expect("Failed to convert sender's public key to bech32")
+                                    sender
+                                        .to_bech32()
+                                        .expect("Failed to convert sender's public key to bech32")
                                 }
                             }
                         } else {
                             // If not is_mine, just use sender's bech32
-                            sender.to_bech32().expect("Failed to convert sender's public key to bech32")
+                            sender
+                                .to_bech32()
+                                .expect("Failed to convert sender's public key to bech32")
                         };
 
                         // Create the Reaction
@@ -649,8 +739,8 @@ async fn handle_event(event: Event, is_new: bool) {
 
                         // Add the reaction
                         match state.add_reaction(npub, reference_id.to_string(), reaction) {
-                            true => {},
-                            false => (/* Couldn't find the relevant Profile or Message */)
+                            true => {}
+                            false => (/* Couldn't find the relevant Profile or Message */),
                         }
                     }
                     None => (/* No Reference (Note ID) supplied */),
@@ -668,26 +758,34 @@ async fn handle_event(event: Event, is_new: bool) {
                                 match rumor.tags.find(TagKind::Expiration) {
                                     Some(ex_tag) => {
                                         // And it must be within 30 seconds
-                                        let expiry_timestamp: u64 = ex_tag.content().unwrap().parse().unwrap_or(0);
+                                        let expiry_timestamp: u64 =
+                                            ex_tag.content().unwrap().parse().unwrap_or(0);
                                         // Check if the expiry timestamp is within 30 seconds from now (we'll say 35 to account for slight 'system time drift')
                                         let current_timestamp = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                                        if expiry_timestamp <= current_timestamp + 35 && expiry_timestamp > current_timestamp {
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs();
+                                        if expiry_timestamp <= current_timestamp + 35
+                                            && expiry_timestamp > current_timestamp
+                                        {
                                             // Now we apply the typing indicator to it's author profile
-                                            match state.get_profile_mut(rumor.pubkey.to_bech32().unwrap()) {
+                                            match state
+                                                .get_profile_mut(rumor.pubkey.to_bech32().unwrap())
+                                            {
                                                 Ok(profile) => {
                                                     profile.typing_until = expiry_timestamp;
                                                     state.has_state_changed = true;
-                                                },
-                                                Err(_) => { /* Received a Typing Indicator from an unknown contact, ignoring... */ }
+                                                }
+                                                Err(_) => { /* Received a Typing Indicator from an unknown contact, ignoring... */
+                                                }
                                             };
                                         }
-                                    },
+                                    }
                                     None => {}
                                 }
                             }
                         }
-                    },
+                    }
                     None => {}
                 }
             }
@@ -709,8 +807,8 @@ async fn notifs() -> Result<bool, String> {
 
     // Subscribe to the filter and begin handling incoming events
     match client.subscribe(filter, None).await {
-        Ok(_) => { /* Good! */ },
-        Err(e) => { return Err(e.to_string()) }
+        Ok(_) => { /* Good! */ }
+        Err(e) => return Err(e.to_string()),
     }
     match client
         .handle_notifications(|notification| async {
@@ -719,10 +817,11 @@ async fn notifs() -> Result<bool, String> {
             }
             Ok(false)
         })
-        .await {
-            Ok(_) => Ok(true),
-            Err(e) => { Err(e.to_string()) }
-        }
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -772,7 +871,10 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
             // Simply return the same KeyPair and allow the frontend to continue login as usual
             // Note: we also say that the state has changed so that the frontend knows to refresh it's data
             STATE.lock().await.has_state_changed = true;
-            return Ok(LoginKeyPair { public: signer.get_public_key().await.unwrap().to_bech32().unwrap(), private: new_keys.secret_key().to_bech32().unwrap() });
+            return Ok(LoginKeyPair {
+                public: signer.get_public_key().await.unwrap().to_bech32().unwrap(),
+                private: new_keys.secret_key().to_bech32().unwrap(),
+            });
         } else {
             // This shouldn't happen in the real-world, but just in case...
             return Err(String::from("An existing Nostr Client instance exists, but a second incompatible key import was requested."));
@@ -783,13 +885,13 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     if import_key.starts_with("nsec") {
         match Keys::parse(&import_key) {
             Ok(parsed) => keys = parsed,
-            Err(_) => return Err(String::from("Invalid nsec"))
+            Err(_) => return Err(String::from("Invalid nsec")),
         };
     } else {
         // Otherwise, we'll try importing it as a mnemonic seed phrase (BIP-39)
         match Keys::from_mnemonic(import_key, Some(String::new())) {
             Ok(parsed) => keys = parsed,
-            Err(_) => return Err(String::from("Invalid Seed Phrase"))
+            Err(_) => return Err(String::from("Invalid Seed Phrase")),
         };
     }
 
@@ -808,7 +910,10 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     STATE.lock().await.profiles.push(profile);
 
     // Return our npub to the frontend client
-    Ok(LoginKeyPair { public: npub, private: keys.secret_key().to_bech32().unwrap() })
+    Ok(LoginKeyPair {
+        public: npub,
+        private: keys.secret_key().to_bech32().unwrap(),
+    })
 }
 
 #[tauri::command]
@@ -858,7 +963,7 @@ fn bytes_to_hex_string(bytes: &[u8]) -> String {
 fn hex_string_to_bytes(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap())
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
         .collect()
 }
 
@@ -925,13 +1030,14 @@ async fn decrypt(ciphertext: String, password: String) -> Result<String, ()> {
     // Convert decrypted bytes back to string
     match String::from_utf8(buffer) {
         Ok(decrypted) => Ok(decrypted),
-        Err(_) => Err(())
+        Err(_) => Err(()),
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
