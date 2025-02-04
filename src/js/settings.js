@@ -81,6 +81,17 @@ async function askForStatus() {
 }
 
 /**
+ * A GUI wrapper to ask the user for a file path.
+ */
+async function selectFile() {
+    const file = await open({
+        multiple: false,
+        directory: false,
+    });
+    return file || "";
+}
+
+/**
  * Set the theme of the app by hot-swapping theme CSS files
  * @param {string} theme - The theme name, i.e: `vector`, `chatstr`
  * @param {string} mode - The theme mode, i.e: `light`, `dark`

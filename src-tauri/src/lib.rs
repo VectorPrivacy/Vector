@@ -248,7 +248,19 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
 }
 
 #[tauri::command]
-async fn message(receiver: String, content: String, replied_to: String) -> Result<bool, String> {
+async fn message(receiver: String, content: String, replied_to: String, file_path: String) -> Result<bool, String> {
+    // If there's a file attached, build it's attachment
+    let mut attachments: Vec<Attachment> = Vec::new();
+    if !file_path.is_empty() {
+        let ext = file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase();
+        attachments.push(Attachment {
+            id: String::new(),
+            extension: ext.to_string(),
+            path: file_path.clone(),
+            downloaded: true
+        });
+    }
+
     // Immediately add the message to our state as "Pending", we'll update it as either Sent (non-pending) or Failed in the future
     let pending_count = STATE
         .lock()
@@ -268,7 +280,7 @@ async fn message(receiver: String, content: String, replied_to: String) -> Resul
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
-        attachments: Vec::new(),
+        attachments: attachments.clone(),
         reactions: Vec::new(),
         pending: true,
         failed: false,
@@ -285,7 +297,76 @@ async fn message(receiver: String, content: String, replied_to: String) -> Resul
     let receiver_pubkey = PublicKey::from_bech32(receiver.clone().as_str()).unwrap();
 
     // Prepare the NIP-17 rumor
-    let mut rumor = EventBuilder::private_msg_rumor(receiver_pubkey, content.clone());
+    let mut rumor = if attachments.is_empty() {
+        // Text Message
+        EventBuilder::private_msg_rumor(receiver_pubkey, content.clone())
+    } else {
+        // Load the file
+        let file = std::fs::read(file_path.as_str()).unwrap();
+
+        // Encrypt the attachment
+        let params = generate_encryption_params();
+        let enc_file = encrypt_data(file.as_slice(), &params).unwrap();
+
+        // Update the attachment in-state
+        {
+            let mut state = STATE.lock().await;
+            let chat = state
+                        .profiles
+                        .iter_mut()
+                        .find(|chat| chat.id == receiver)
+                        .unwrap();
+            let message = chat.get_message_mut(pending_id.clone()).unwrap();
+            let msg_attachment: &mut Attachment = message.attachments.iter_mut().nth(0).unwrap();
+            msg_attachment.id = params.nonce.clone();
+        }
+
+        // Upload the attachment
+        match get_server_config(Url::parse("https://medea-small.jskitty.cat").unwrap(), None).await {
+            Ok(conf) => {
+                // Format a Mime Type from the file extension
+                let mime_type = match file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    "webp" => "image/webp",
+                    _ => "application/octet-stream",
+                };
+
+                // Upload the file to the server
+                let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+                let signer = client.signer().await.unwrap();
+                match upload_data(&signer, &conf, enc_file, Some(mime_type), None).await {
+                    Ok(url) => {
+                        // Create the attachment rumor
+                        let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
+
+                        // Append decryption keys and file metadata
+                        attachment_rumor
+                            .tag(Tag::public_key(receiver_pubkey))
+                            .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                            .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
+                            .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
+                            .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
+                    },
+                    Err(_) => {
+                        // The file upload failed: so we mark the message as failed and notify of an error
+                        let mut state = STATE.lock().await;
+                        let chat = state
+                            .profiles
+                            .iter_mut()
+                            .find(|chat| chat.id == receiver)
+                            .unwrap();
+                        let failed_msg = chat.get_message_mut(pending_id).unwrap();
+                        failed_msg.failed = true;
+                        state.has_state_changed = true;
+                        return Err(String::from("Failed to upload file"));
+                    }
+                }
+            },
+            Err(e) => return Err(String::from("Failed to sync server configuration"))
+        }
+    };
 
     // If a reply reference is included, add the tag
     if !replied_to.is_empty() {
@@ -809,7 +890,13 @@ async fn handle_event(event: Event, is_new: bool) {
                 if !file_path.exists() {
                     // No file! Try fetching it
                     let req = reqwest::Client::new();
-                    let response = req.get(content_url).send().await.unwrap();
+                    let res = req.get(content_url.clone()).send().await;
+                    if res.is_err() {
+                        // TEMP: reaaaallly improve this area!
+                        print!("Weird file: {}", content_url);
+                        return;
+                    }
+                    let response = res.unwrap();
                     let file_contents = response.bytes().await.unwrap().to_vec();
 
                     // Decrypt the file
@@ -946,6 +1033,56 @@ fn show_notification(title: String, content: String) {
             .show()
             .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
     }
+}
+
+/// Represents encryption parameters
+#[derive(Debug)]
+pub struct EncryptionParams {
+    pub key: String,    // Hex string
+    pub nonce: String,  // Hex string
+}
+
+/// Generates random encryption parameters (key and nonce)
+pub fn generate_encryption_params() -> EncryptionParams {
+    let mut rng = rand::thread_rng();
+    
+    // Generate 32 byte key (for AES-256)
+    let key: [u8; 32] = rng.gen();
+    // Generate 16 byte nonce (to match 0xChat)
+    let nonce: [u8; 16] = rng.gen();
+    
+    EncryptionParams {
+        key: hex::encode(key),
+        nonce: hex::encode(nonce),
+    }
+}
+
+/// Encrypts data using AES-256-GCM with a 16-byte nonce
+pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, String> {
+    // Decode key and nonce from hex
+    let key_bytes = hex::decode(&params.key).unwrap();
+    let nonce_bytes = hex::decode(&params.nonce).unwrap();
+
+    // Initialize AES-GCM cipher
+    let cipher = AesGcm::<Aes256, U16>::new(
+        GenericArray::from_slice(&key_bytes)
+    );
+
+    // Prepare nonce
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+
+    // Create output buffer
+    let mut buffer = data.to_vec();
+
+    // Encrypt in place and get authentication tag
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, &[], &mut buffer)
+        .map_err(|_| String::from("Failed to Encrypt Data"))?;
+
+    // Append the authentication tag to the encrypted data
+    buffer.extend_from_slice(tag.as_slice());
+
+    Ok(buffer)
 }
 
 pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {

@@ -30,6 +30,7 @@ const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessageInput = document.getElementById('chat-input');
+const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 
@@ -467,10 +468,11 @@ async function renderChatlist() {
  * Send a NIP-17 message to a Nostr user
  * @param {string} pubkey - The user's pubkey
  * @param {string} content - The content of the message
- * @param {string?} replied_to - The reference of the message
+ * @param {string?} replied_to - The reference of the message, if any
+ * @param {string?} file_path - The file to upload, if any
  */
-async function message(pubkey, content, replied_to) {
-    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
+async function message(pubkey, content, replied_to, file_path) {
+    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to, filePath: file_path });
 }
 
 /**
@@ -741,8 +743,17 @@ async function updateChat(contact, fSoft = false) {
                     // TODO: add ability to click it for a shortcut
                     const spanRef = document.createElement('span');
                     spanRef.classList.add('msg-reply');
-                    spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
-                    pMessage.appendChild(spanRef);
+
+                    // Figure out the reply context
+                    if (cMsg.content) {
+                        // Reply to Text Message
+                        spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
+                        pMessage.appendChild(spanRef);
+                    } else if (cMsg.attachments.length) {
+                        // Reply to Attachment
+                        spanRef.textContent = `Attachment`;
+                        pMessage.appendChild(spanRef);
+                    }
                 }
             }
 
@@ -1025,6 +1036,25 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
     domChatMessageInputCancel.onclick = cancelReply;
 
+    // Hook up an in-chat File Upload listener
+    domChatMessageInputFile.onclick = async () => {
+        let filepath = await selectFile();
+        if (filepath) {
+            domChatMessageInput.setAttribute('placeholder', 'Uploading...');
+            try {
+                // Send the attachment file
+                await message(strOpenChat, "", strCurrentReplyReference, filepath);
+            } catch (e) {
+                // Notify of an attachment send failure
+                popupConfirm(e, '', true);
+            }
+
+            // Reset the placeholder and typing indicator timestamp
+            cancelReply();
+            nLastTypingIndicator = 0;
+        }
+    };
+
     // Hook up an 'Enter' listener on the Message Box for sending messages
     domChatMessageInput.onkeydown = async (evt) => {
         // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message
@@ -1038,7 +1068,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 domChatMessageInput.value = '';
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
                 try {
-                    await message(strOpenChat, strMessage, strCurrentReplyReference);
+                    await message(strOpenChat, strMessage, strCurrentReplyReference, "");
                 } catch(_) {}
 
                 // Reset the placeholder and typing indicator timestamp
