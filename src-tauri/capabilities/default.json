@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "notification:default",
     "store:default",
     "dialog:default",
     "fs:default"
