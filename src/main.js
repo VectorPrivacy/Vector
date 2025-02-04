@@ -425,6 +425,7 @@ async function renderChatlist() {
         divPreviewContainer.appendChild(h4ContactName);
 
         // Display either their Last Message or Typing Indicator
+        const cLastMsg = chat.messages[chat.messages.length - 1];
         const pChatPreview = document.createElement('p');
         pChatPreview.classList.add('cutoff');
         const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
@@ -432,9 +433,11 @@ async function renderChatlist() {
         if (fIsTyping) {
             // Typing; display the glowy indicator!
             pChatPreview.textContent = `Typing...`;
+        } else if (!cLastMsg.content) {
+            // Not typing, and no text; display as an attachment
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent an attachment';
         } else {
             // Not typing; display their last message
-            const cLastMsg = chat.messages[chat.messages.length - 1];
             pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
         }
         divPreviewContainer.appendChild(pChatPreview);
