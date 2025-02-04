@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use argon2::{Argon2, Params, Version};
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
@@ -6,6 +7,12 @@ use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use tokio::sync::Mutex;
+use aes::Aes256;
+use aes_gcm::{
+    aead::{AeadInPlace, KeyInit},
+    AesGcm,
+};
+use generic_array::{GenericArray, typenum::U16};
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -31,11 +38,24 @@ struct Message {
     id: String,
     content: String,
     replied_to: String,
+    attachments: Vec<Attachment>,
     reactions: Vec<Reaction>,
     at: u64,
     pending: bool,
     failed: bool,
     mine: bool,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+struct Attachment {
+    /** The encryption Nonce as the unique file ID */
+    id: String,
+    /** The file extension */
+    extension: String,
+    /** The storage directory path (typically the ~/Downloads folder) */
+    path: String,
+    /** Whether the file has been downloaded or not */
+    downloaded: bool,
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -248,6 +268,7 @@ async fn message(receiver: String, content: String, replied_to: String) -> Resul
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
+        attachments: Vec::new(),
         reactions: Vec::new(),
         pending: true,
         failed: false,
@@ -653,45 +674,47 @@ async fn handle_event(event: Event, is_new: bool) {
     let my_public_key = signer.get_public_key().await.unwrap();
 
     // Unwrap the gift wrap
-    let mut state = STATE.lock().await;
     match client.unwrap_gift_wrap(&event).await {
         Ok(UnwrappedGift { rumor, sender }) => {
             // Check if it's mine
             let is_mine = sender == my_public_key;
 
-            // Direct Message (NIP-17)
-            if rumor.kind == Kind::PrivateDirectMessage {
-                // Get contact public key (bech32)
-                let contact: String = if is_mine {
-                    // Try to get the first public key from tags
-                    match rumor.tags.public_keys().next() {
-                        Some(pub_key) => match pub_key.to_bech32() {
-                            Ok(p_tag_pubkey_bech32) => p_tag_pubkey_bech32,
-                            Err(_) => {
-                                eprintln!("Failed to convert public key to bech32");
-                                // If conversion fails, fall back to sender
-                                sender
-                                    .to_bech32()
-                                    .expect("Failed to convert sender's public key to bech32")
-                            }
-                        },
-                        None => {
-                            eprintln!("No public key tag found");
-                            // If no public key found in tags, fall back to sender
+            // Attempt to get contact public key (bech32)
+            let contact: String = if is_mine {
+                // Try to get the first public key from tags
+                match rumor.tags.public_keys().next() {
+                    Some(pub_key) => match pub_key.to_bech32() {
+                        Ok(p_tag_pubkey_bech32) => p_tag_pubkey_bech32,
+                        Err(_) => {
+                            eprintln!("Failed to convert public key to bech32");
+                            // If conversion fails, fall back to sender
                             sender
                                 .to_bech32()
                                 .expect("Failed to convert sender's public key to bech32")
                         }
+                    },
+                    None => {
+                        eprintln!("No public key tag found");
+                        // If no public key found in tags, fall back to sender
+                        sender
+                            .to_bech32()
+                            .expect("Failed to convert sender's public key to bech32")
                     }
-                } else {
-                    // If not is_mine, just use sender's bech32
-                    sender
-                        .to_bech32()
-                        .expect("Failed to convert sender's public key to bech32")
-                };
+                }
+            } else {
+                // If not is_mine, just use sender's bech32
+                sender
+                    .to_bech32()
+                    .expect("Failed to convert sender's public key to bech32")
+            };
 
+            // Grab our state Mutex
+            let mut state = STATE.lock().await;
+
+            // Direct Message (NIP-17)
+            if rumor.kind == Kind::PrivateDirectMessage {
                 // Check if the message replies to anything
-                let mut replied_to = String::from("");
+                let mut replied_to = String::new();
                 match rumor.tags.find(TagKind::e()) {
                     Some(tag) => {
                         if tag.is_reply() {
@@ -726,6 +749,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     content: rumor.content,
                     replied_to,
                     at: rumor.created_at.as_u64(),
+                    attachments: Vec::new(),
                     reactions: Vec::new(),
                     mine: is_mine,
                     pending: false,
@@ -740,35 +764,6 @@ async fn handle_event(event: Event, is_new: bool) {
                         // The message ID being 'reacted' to
                         let reference_id = react_reference_tag.content().unwrap();
 
-                        // The contact (npub) sending us this reaction
-                        let npub: String = if is_mine {
-                            // Try to get the first public key from tags
-                            match rumor.tags.public_keys().next() {
-                                Some(pub_key) => match pub_key.to_bech32() {
-                                    Ok(p_tag_pubkey_bech32) => p_tag_pubkey_bech32,
-                                    Err(_) => {
-                                        eprintln!("Failed to convert public key to bech32");
-                                        // If conversion fails, fall back to sender
-                                        sender.to_bech32().expect(
-                                            "Failed to convert sender's public key to bech32",
-                                        )
-                                    }
-                                },
-                                None => {
-                                    eprintln!("No public key tag found");
-                                    // If no public key found in tags, fall back to sender
-                                    sender
-                                        .to_bech32()
-                                        .expect("Failed to convert sender's public key to bech32")
-                                }
-                            }
-                        } else {
-                            // If not is_mine, just use sender's bech32
-                            sender
-                                .to_bech32()
-                                .expect("Failed to convert sender's public key to bech32")
-                        };
-
                         // Create the Reaction
                         let reaction = Reaction {
                             id: rumor.id.unwrap().to_hex(),
@@ -778,13 +773,78 @@ async fn handle_event(event: Event, is_new: bool) {
                         };
 
                         // Add the reaction
-                        match state.add_reaction(npub, reference_id.to_string(), reaction) {
+                        match state.add_reaction(contact, reference_id.to_string(), reaction) {
                             true => {}
                             false => (/* Couldn't find the relevant Profile or Message */),
                         }
                     }
                     None => (/* No Reference (Note ID) supplied */),
                 }
+            }
+            // Files and Images
+            else if rumor.kind == Kind::from_u16(15) {
+                // Extract our AES-GCM decryption key and nonce
+                let decryption_key = rumor.tags.find(TagKind::Custom(Cow::Borrowed("decryption-key"))).unwrap().content().unwrap();
+                let decryption_nonce = rumor.tags.find(TagKind::Custom(Cow::Borrowed("decryption-nonce"))).unwrap().content().unwrap();
+
+                // Extract the content storage URL
+                let content_url = rumor.content;
+
+                // Figure out the file extension from the mime-type
+                let mime_type = rumor.tags.find(TagKind::Custom(Cow::Borrowed("file-type"))).unwrap().content().unwrap();
+                let extension = match mime_type.split('/').nth(1) {
+                    Some("png") => "png",
+                    Some("jpeg") => "jpg",
+                    Some("jpg") => "jpg",
+                    Some("gif") => "gif",
+                    Some("webp") => "webp",
+                    Some(ext) => ext,
+                    None => "bin",
+                };
+
+                // Check if the file exists on our system already
+                let app_handle = TAURI_APP.get().unwrap().clone();
+                let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
+                let file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
+                if !file_path.exists() {
+                    // No file! Try fetching it
+                    let req = reqwest::Client::new();
+                    let response = req.get(content_url).send().await.unwrap();
+                    let file_contents = response.bytes().await.unwrap().to_vec();
+
+                    // Decrypt the file
+                    let decrypted_file = decrypt_data(file_contents.as_slice(), decryption_key, decryption_nonce).unwrap();
+
+                    // Create the vector directory if it doesn't exist
+                    std::fs::create_dir_all(&dir).unwrap();
+
+                    // Save the file to disk
+                    std::fs::write(&file_path, &decrypted_file).unwrap();
+                }
+
+                // Create an attachment
+                let mut attachments = Vec::new();
+                let attachment = Attachment {
+                    id: decryption_nonce.to_string(),
+                    extension: extension.to_string(),
+                    path: file_path.to_string_lossy().to_string(),
+                    downloaded: true
+                };
+                attachments.push(attachment);
+
+                // Add the attachment to our state
+                let msg = Message {
+                    id: rumor.id.unwrap().to_hex(),
+                    content: String::new(),
+                    replied_to: String::new(),
+                    at: rumor.created_at.as_u64(),
+                    attachments: attachments,
+                    reactions: Vec::new(),
+                    mine: is_mine,
+                    pending: false,
+                    failed: false,
+                };
+                state.add_message(contact, msg);
             }
             // Vector-specific events (NIP-78)
             else if rumor.kind == Kind::ApplicationSpecificData {
@@ -886,6 +946,38 @@ fn show_notification(title: String, content: String) {
             .show()
             .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
     }
+}
+
+pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
+    // Verify minimum size requirements
+    if encrypted_data.len() < 16 {
+        return Err(String::from("Invalid Input"));
+    }
+
+    // Decode key and nonce from hex
+    let key_bytes = hex::decode(key_hex).unwrap();
+    let nonce_bytes = hex::decode(nonce_hex).unwrap();
+
+    // Split input into ciphertext and authentication tag
+    let (ciphertext, tag_bytes) = encrypted_data.split_at(encrypted_data.len() - 16);
+
+    // Initialize AES-GCM cipher
+    let cipher = AesGcm::<Aes256, U16>::new(
+        GenericArray::from_slice(&key_bytes)
+    );
+
+    // Prepare nonce and tag
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+    let tag = aes_gcm::Tag::from_slice(tag_bytes);
+
+    // Create output buffer
+    let mut buffer = ciphertext.to_vec();
+
+    // Perform decryption
+    cipher
+        .decrypt_in_place_detached(nonce, &[], &mut buffer, tag).unwrap();
+
+    Ok(buffer)
 }
 
 #[derive(serde::Serialize, Clone)]

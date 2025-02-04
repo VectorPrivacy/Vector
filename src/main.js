@@ -1,4 +1,4 @@
-const { invoke } = window.__TAURI__.core;
+const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getVersion } = window.__TAURI__.app;
 
 const domVersion = document.getElementById('version');
@@ -746,9 +746,9 @@ async function updateChat(contact, fSoft = false) {
                 }
             }
 
-            // Render the text - if it's emoji-only, and less than four emojis, format them nicely
+            // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
             const spanMessage = document.createElement('span');
-            if (fEmojiOnly) {
+            if (fEmojiOnly || !msg.content) {
                 // Strip out unnecessary whitespace
                 spanMessage.textContent = strEmojiCleaned;
                 // Add an emoji-only CSS format
@@ -764,6 +764,28 @@ async function updateChat(contact, fSoft = false) {
 
             // Append the message contents
             pMessage.appendChild(spanMessage);
+
+            // Append attachments
+            for (const cAttachment of msg.attachments) {
+                if (cAttachment.downloaded) {
+                    // Convert the absolute file path to a Tauri asset
+                    const assetUrl = convertFileSrc(cAttachment.path);
+
+                    // Render the attachment appropriately for it's type
+                    if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                        const imgPreview = document.createElement('img');
+                        imgPreview.style.width = `100%`;
+                        imgPreview.style.height = `auto`;
+                        imgPreview.style.borderRadius = `0`;
+                        imgPreview.src = assetUrl;
+                        pMessage.appendChild(imgPreview);
+                    } else {
+                        // Unknown attachment
+                    }
+                } else {
+                    // Display download prompt UI
+                }
+            }
 
             // If the message is pending or failed, let's adjust it
             if (msg.pending) {
