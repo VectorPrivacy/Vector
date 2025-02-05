@@ -893,14 +893,19 @@ async fn handle_event(event: Event, is_new: bool) {
                     let res = req.get(content_url.clone()).send().await;
                     if res.is_err() {
                         // TEMP: reaaaallly improve this area!
-                        print!("Weird file: {}", content_url);
+                        println!("Weird file: {}", content_url);
                         return;
                     }
                     let response = res.unwrap();
                     let file_contents = response.bytes().await.unwrap().to_vec();
 
                     // Decrypt the file
-                    let decrypted_file = decrypt_data(file_contents.as_slice(), decryption_key, decryption_nonce).unwrap();
+                    let decryption = decrypt_data(file_contents.as_slice(), decryption_key, decryption_nonce);
+                    if decryption.is_err() {
+                        println!("Failed to decrypt: {}", content_url);
+                        return;
+                    }
+                    let decrypted_file = decryption.unwrap();
 
                     // Create the vector directory if it doesn't exist
                     std::fs::create_dir_all(&dir).unwrap();
@@ -1111,8 +1116,13 @@ pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Re
     let mut buffer = ciphertext.to_vec();
 
     // Perform decryption
-    cipher
-        .decrypt_in_place_detached(nonce, &[], &mut buffer, tag).unwrap();
+    let decryption = cipher
+        .decrypt_in_place_detached(nonce, &[], &mut buffer, tag);
+
+    // Check that it went well
+    if decryption.is_err() {
+        return Err(decryption.unwrap_err().to_string());
+    }
 
     Ok(buffer)
 }
