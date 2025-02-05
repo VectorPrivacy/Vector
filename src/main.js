@@ -1,5 +1,6 @@
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getVersion } = window.__TAURI__.app;
+const { getCurrentWebview } = window.__TAURI__.webview;
 
 const domVersion = document.getElementById('version');
 
@@ -476,6 +477,25 @@ async function renderChatlist() {
  */
 async function message(pubkey, content, replied_to, file_path) {
     await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to, filePath: file_path });
+}
+
+/**
+ * Send a file via NIP-96 server to the current chat
+ * @param {string} filepath - The absolute file path
+ */
+async function sendFile(filepath) {
+    domChatMessageInput.setAttribute('placeholder', 'Uploading...');
+    try {
+        // Send the attachment file
+        await message(strOpenChat, "", strCurrentReplyReference, filepath);
+    } catch (e) {
+        // Notify of an attachment send failure
+        popupConfirm(e, '', true);
+    }
+
+    // Reset the placeholder and typing indicator timestamp
+    cancelReply();
+    nLastTypingIndicator = 0;
 }
 
 /**
@@ -1086,6 +1106,20 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
         }
     };
+
+    // Hook up our drag-n-drop listeners
+    await getCurrentWebview().onDragDropEvent(async (event) => {
+        // Only accept File Drops if a chat is open
+        if (strOpenChat) {
+            if (event.payload.type === 'over') {
+                // TODO: add hover effects
+            } else if (event.payload.type === 'drop') {
+                await sendFile(event.payload.paths[0]);
+            } else {
+                // TODO: remove hover effects
+            }
+        }
+    });
 });
 
 /**
