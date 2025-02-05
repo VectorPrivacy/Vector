@@ -1063,18 +1063,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatMessageInputFile.onclick = async () => {
         let filepath = await selectFile();
         if (filepath) {
-            domChatMessageInput.setAttribute('placeholder', 'Uploading...');
-            try {
-                // Send the attachment file
-                await message(strOpenChat, "", strCurrentReplyReference, filepath);
-            } catch (e) {
-                // Notify of an attachment send failure
-                popupConfirm(e, '', true);
-            }
-
-            // Reset the placeholder and typing indicator timestamp
-            cancelReply();
-            nLastTypingIndicator = 0;
+            await sendFile(filepath);
         }
     };
 
