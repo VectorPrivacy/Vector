@@ -520,7 +520,6 @@ async function login() {
 
         // Render it
         renderCurrentProfile(cProfile);
-        adjustSize();
 
         // Connect and fetch historical messages
         await fetchMessages(true, fHasConnected);
@@ -530,6 +529,7 @@ async function login() {
         btnStartChat.textContent = "Start New Chat";
         btnStartChat.onclick = openNewChat;
         domChats.appendChild(btnStartChat);
+        adjustSize();
 
         // Setup a subscription for new websocket messages
         invoke("notifs");
