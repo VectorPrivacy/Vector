@@ -5,7 +5,7 @@ const { open } = window.__TAURI__.dialog;
  * in-app and on the Nostr network.
  */
 async function askForUsername() {
-    const strUsername = await popupConfirm('Choose a Username', `This lets Chatstr users identify you easier!`, false, 'New Username');
+    const strUsername = await popupConfirm('Choose a Username', `This lets Vector users identify you easier!`, false, 'New Username');
     if (!strUsername) return;
 
     // Display the change immediately

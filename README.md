@@ -1,6 +1,6 @@
 # Purpose
 
-Chatstr was born out of a feeling of, for the lack of a better word; "necessity".
+Vector was born out of a feeling of, for the lack of a better word; "necessity".
 
 The messengers with all the cool features, have stark downsides: opt-in proprietary encryption (Telegram), no encryption at all (Discord), or encryption added, almost seemingly through pity, and most certainly with backdoors, to apps created by the world's largest and most anti-human tech conglomerates (Meta's WhatsApp).
 
@@ -10,7 +10,7 @@ In addition to security and privacy in communication, modern software has hit a 
 
 Modern software wastes Modern compute, because developers have gotten lazy, and project managers have gotten greedy.
 
-**Chatstr; possibly naively, but surely bravely, aims to fill this gap.**
+**Vector; possibly naively, but surely bravely, aims to fill this gap.**
 
 Powered by Passion, Built on [Nostr](https://nostr.com/).
 
@@ -25,12 +25,12 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 Rust Stable and Tauri must be installed along with other dependencies. The easiest way to do that is to follow this guide:    
 <https://v1.tauri.app/v1/guides/getting-started/prerequisites>  
 
-### Compiling Chatstr for the First Time
+### Compiling Vector for the First Time
 
-Assuming you want Chatstr in an `apps` folder (adjust as necessary):  
+Assuming you want Vector in an `apps` folder (adjust as necessary):  
 
 ```
-cd ~/apps && git pull https://github.com/JSKitty/Chatstr
+cd ~/apps && git pull https://github.com/JSKitty/Vector
 ```
 
 ```
@@ -41,12 +41,12 @@ cd ~/apps/Chatsr && yarn add -D @tauri-apps/cli && yarn install
 npm run tauri build
 ```
 
-### Upgrading Chatstr
+### Upgrading Vector
 
 Check for updates:  
 
 ```
-cd ~/apps/Chatstr && git pull
+cd ~/apps/Vector && git pull
 ```
 
 Compiling is only necessary if files were updated when running the previous command:
@@ -55,10 +55,10 @@ Compiling is only necessary if files were updated when running the previous comm
 npm run tauri build
 ```
 
-### Chatstr Executables
+### Vector Executables
 
-The compiled Chatstr app can be found in the release folder located here:  
+The compiled Vector app can be found in the release folder located here:  
 
 ```
-cd ~/apps/Chatstr/src-tauri/target/release/
+cd ~/apps/Vector/src-tauri/target/release/
 ```

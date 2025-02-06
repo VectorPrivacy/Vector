@@ -53,8 +53,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: 'Chatstr v__VERSION__'
-          releaseBody: 'A new Chatstr release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!'
+          releaseName: 'Vector v__VERSION__'
+          releaseBody: 'A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
