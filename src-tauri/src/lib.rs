@@ -1247,10 +1247,10 @@ fn hex_string_to_bytes(s: &str) -> Vec<u8> {
 }
 
 async fn hash_pass(password: String) -> [u8; 32] {
-    // 75000 KiB memory size
-    let memory = 75000;
-    // 5 iterations
-    let iterations = 5;
+    // 150000 KiB memory size
+    let memory = 150000;
+    // 10 iterations
+    let iterations = 10;
     let params = Params::new(memory, iterations, 1, Some(32)).unwrap();
 
     // TODO: create a random on-disk salt at first init
