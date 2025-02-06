@@ -364,7 +364,7 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                     }
                 }
             },
-            Err(e) => return Err(String::from("Failed to sync server configuration"))
+            Err(_) => return Err(String::from("Failed to sync server configuration"))
         }
     };
 
