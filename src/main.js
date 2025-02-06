@@ -693,8 +693,9 @@ let strCurrentReplyReference = "";
  * Updates the current chat (to display incoming and outgoing messages)
  * @param {string} contact 
  * @param {boolean} fSoft - Whether this is a soft update (i.e: status, typing indicator - no chat rendering)
+ * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
-async function updateChat(contact, fSoft = false) {
+async function updateChat(contact, fSoft = false, fClicked = false) {
     const cProfile = arrChats.find(a => a.id === contact);
     if (cProfile?.messages.length) {
         // Prefer displaying their name, otherwise, npub
@@ -890,11 +891,11 @@ async function updateChat(contact, fSoft = false) {
             domChatMessages.appendChild(divMessage);
         }
 
-        // Auto-scroll on new messages (if the user hasn't scrolled up)
+        // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open)
         const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
-        if (pxFromBottom < 250) {
+        if (pxFromBottom < 250 || fClicked) {
             const cLastMsg = cProfile.messages[cProfile.messages.length - 1];
-            if (strLastMsgID !== cLastMsg.id) {
+            if (strLastMsgID !== cLastMsg.id || fClicked) {
                 strLastMsgID = cLastMsg.id;
                 adjustSize();
                 domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
@@ -964,7 +965,7 @@ function openChat(contact) {
 
     // Render the current contact's messages
     strOpenChat = contact;
-    updateChat(contact);
+    updateChat(contact, false, true);
 }
 
 /**
