@@ -1071,6 +1071,38 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
+    // Hook up an in-chat File Paste listener
+    document.onpaste = async (evt) => {
+        if (strOpenChat) {
+            for (const item of evt.clipboardData.items) {
+                // Check if the pasted content is an image
+                if (item.type.startsWith('image/')) {
+                    const blob = item.getAsFile();
+                    if (blob) {
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const uint8Array = new Uint8Array(arrayBuffer);
+
+                        // Placeholder
+                        domChatMessageInput.value = '';
+                        domChatMessageInput.setAttribute('placeholder', 'Sending...');
+
+                        // Send raw bytes to Rust
+                        await invoke('paste_message', {
+                            receiver: strOpenChat,
+                            repliedTo: strCurrentReplyReference,
+                            file: Array.from(uint8Array),
+                            mimeType: item.type
+                        });
+
+                        // Reset placeholder
+                        cancelReply();
+                        nLastTypingIndicator = 0;
+                    }
+                }
+            }
+        }
+    }
+
     // Hook up an 'Enter' listener on the Message Box for sending messages
     domChatMessageInput.onkeydown = async (evt) => {
         // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message

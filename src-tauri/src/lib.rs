@@ -318,7 +318,23 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                         .unwrap();
             let message = chat.get_message_mut(pending_id.clone()).unwrap();
             let msg_attachment: &mut Attachment = message.attachments.iter_mut().nth(0).unwrap();
+
+            // Store the nonce-based file name on-disk for future reference
+            let app_handle = TAURI_APP.get().unwrap().clone();
+            let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
+            let nonce_file_path = dir.join(format!("{}.{}", params.nonce.clone(), msg_attachment.extension.clone()));
+
+            // Create the vector directory if it doesn't exist
+            std::fs::create_dir_all(&dir).unwrap();
+
+            // Save the nonce-named file
+            std::fs::write(&nonce_file_path, &file).unwrap();
+
+            // Update ID
             msg_attachment.id = params.nonce.clone();
+
+            // Update file path
+            msg_attachment.path = nonce_file_path.to_string_lossy().to_string();
         }
 
         // Upload the attachment
@@ -435,6 +451,40 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
             return Ok(false);
         }
     }
+}
+
+#[tauri::command]
+async fn paste_message(receiver: String, replied_to: String, file: Vec<u8>, mime_type: String) -> Result<bool, String> {
+    // TODO: revamp the entire way we send files... the current method is clunky and highly limiting, hence this workaround
+    // Figure out the file extension from the mime-type
+    let extension = match mime_type.split('/').nth(1) {
+        Some("png") => "png",
+        Some("jpeg") => "jpg",
+        Some("jpg") => "jpg",
+        Some("gif") => "gif",
+        Some("webp") => "webp",
+        _ => return Err(String::from("Unsupported File Type!"))
+    };
+
+    // Check if the file exists on our system already
+    let app_handle = TAURI_APP.get().unwrap().clone();
+    let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
+    let file_path = dir.join(format!("tmp.{}", extension));
+
+    // Create the vector directory if it doesn't exist
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Temp save the file to disk
+    std::fs::write(&file_path, &file).unwrap();
+
+    // Message the file to the intended user
+    let msg_res = message(receiver, String::new(), replied_to, file_path.to_string_lossy().to_string()).await;
+
+    // Nuke the temporary save
+    std::fs::remove_file(file_path).unwrap();
+
+    // Return the message result
+    msg_res
 }
 
 #[tauri::command]
@@ -1330,6 +1380,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_messages,
             message,
+            paste_message,
             react,
             login,
             notifs,
