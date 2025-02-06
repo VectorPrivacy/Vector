@@ -34,7 +34,7 @@ cd ~/apps && git pull https://github.com/JSKitty/Vector
 ```
 
 ```
-cd ~/apps/Chatsr && yarn add -D @tauri-apps/cli && yarn install
+cd ~/apps/Vector && yarn add -D @tauri-apps/cli && yarn install
 ```
 
 ```
