@@ -889,12 +889,15 @@ async function updateChat(contact, fSoft = false) {
             domChatMessages.appendChild(divMessage);
         }
 
-        // Auto-scroll on new messages
-        const cLastMsg = cProfile.messages[cProfile.messages.length - 1];
-        if (strLastMsgID !== cLastMsg.id) {
-            strLastMsgID = cLastMsg.id;
-            adjustSize();
-            domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
+        // Auto-scroll on new messages (if the user hasn't scrolled up)
+        const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
+        if (pxFromBottom < 250) {
+            const cLastMsg = cProfile.messages[cProfile.messages.length - 1];
+            if (strLastMsgID !== cLastMsg.id) {
+                strLastMsgID = cLastMsg.id;
+                adjustSize();
+                domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
+            }
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
