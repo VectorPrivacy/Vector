@@ -520,6 +520,7 @@ async function login() {
 
         // Render it
         renderCurrentProfile(cProfile);
+        adjustSize();
 
         // Connect and fetch historical messages
         await fetchMessages(true, fHasConnected);
@@ -1032,7 +1033,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (strTheme) {
         setTheme(strTheme);
     }
-    adjustSize();
 
     // If a local encrypted key exists, boot up the decryption UI
     if (await hasKey()) {
@@ -1121,6 +1121,11 @@ window.addEventListener("DOMContentLoaded", async () => {
  * affect the height and width of other components, too.
  */
 function adjustSize() {
+    // Chat List: resize the list to fit within the screen after the upper Account area
+    // Note: no idea why the `- 75px` is needed below, magic numbers, I guess.
+    const rectAccount = domAccount.getBoundingClientRect();
+    domChatList.style.maxHeight = (window.innerHeight - rectAccount.height) - 75 + `px`;
+
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();
     domChat.style.height = (window.innerHeight - rectContact.height) + `px`;

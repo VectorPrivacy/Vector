@@ -116,7 +116,7 @@ body {
 }
 
 #chat-list {
-  padding-top: 15px;
+  overflow-y: scroll;
 }
 
 .chatlist-contact {
