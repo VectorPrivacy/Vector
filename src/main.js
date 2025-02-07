@@ -993,6 +993,9 @@ function closeChat() {
     domChat.style.display = 'none';
     strOpenChat = "";
     nLastTypingIndicator = 0;
+
+    // Ensure the chat list re-adjusts to fit
+    adjustSize();
 }
 
 function openSettings() {
@@ -1002,7 +1005,6 @@ function openSettings() {
     // Close the Chat UI
     domChats.style.display = 'none';
 }
-
 
 function closeSettings() {
     domSettings.style.display = 'none';
