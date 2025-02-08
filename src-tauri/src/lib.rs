@@ -14,7 +14,7 @@ use aes_gcm::{
 };
 use generic_array::{GenericArray, typenum::U16};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
 
@@ -33,7 +33,7 @@ static TRUSTED_NIP96: &str = "https://nostr.build";
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct Message {
     id: String,
     content: String,
@@ -46,7 +46,21 @@ struct Message {
     mine: bool,
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone)]
+struct MessageEvent {
+    message: Message,
+    chat_id: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct MessageUpdateEvent {
+    /// old_id is the reference to the previous message being updated, as `message` may have a new ID, i.e: pending to on-line rumor transitions
+    old_id: String,
+    message: Message,
+    chat_id: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct Attachment {
     /** The encryption Nonce as the unique file ID */
     id: String,
@@ -58,7 +72,7 @@ struct Attachment {
     downloaded: bool,
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct Reaction {
     id: String,
     /** The HEX Event ID of the message being reacted to */
@@ -69,7 +83,7 @@ struct Reaction {
     emoji: String,
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct Profile {
     id: String,
     name: String,
@@ -93,6 +107,11 @@ impl Profile {
             typing_until: 0,
             mine: false,
         }
+    }
+
+    // Helper method to get the last message timestamp
+    fn last_message_time(&self) -> Option<u64> {
+        self.messages.last().map(|msg| msg.at)
     }
 
     fn get_message_mut(&mut self, id: String) -> Result<&mut Message, ()> {
@@ -129,6 +148,10 @@ impl Profile {
                 // Make sure we don't add the same reaction twice
                 if !msg.reactions.iter().any(|r| r.id == reaction.id) {
                     msg.reactions.push(reaction);
+
+                    // Update the frontend
+                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: msg.id.clone(), message: msg.clone(), chat_id: self.id.clone() }).unwrap();
                 }
                 true
             }
@@ -137,7 +160,7 @@ impl Profile {
     }
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct Status {
     title: String,
     purpose: String,
@@ -157,15 +180,12 @@ impl Status {
 #[derive(serde::Serialize, Clone, Debug)]
 struct ChatState {
     profiles: Vec<Profile>,
-    // Used, particularly, for detecting Message + Profile changes and rendering them
-    has_state_changed: bool,
 }
 
 impl ChatState {
     fn new() -> Self {
         Self {
             profiles: Vec::new(),
-            has_state_changed: true,
         }
     }
 
@@ -194,9 +214,22 @@ impl ChatState {
             let mut profile = Profile::new();
             profile.id = npub;
             profile.internal_add_message(message);
-            self.profiles.push(profile);
+            self.profiles.push(profile.clone());
+
+            // Update the frontend
+            let app_handle = TAURI_APP.get().unwrap().clone();
+            app_handle.emit("profile_update", profile).unwrap();
         }
-        self.has_state_changed = true;
+
+        // Sort our profile positions based on last message time
+        self.profiles.sort_by(|a, b| {
+            // Get last message time for both profiles
+            let a_time = a.last_message_time();
+            let b_time = b.last_message_time();
+
+            // Compare timestamps in reverse order (newest first)
+            b_time.cmp(&a_time)
+        });
     }
 
     fn add_reaction(&mut self, npub: String, msg_id: String, reaction: Reaction) -> bool {
@@ -204,13 +237,7 @@ impl ChatState {
         match self.get_profile_mut(npub) {
             Ok(profile) => {
                 // Add the reaction to the profile's message
-                match profile.internal_add_reaction(msg_id, reaction) {
-                    true => {
-                        self.has_state_changed = true;
-                        true
-                    }
-                    false => false,
-                }
+                profile.internal_add_reaction(msg_id, reaction)
             }
             Err(_) => false,
         }
@@ -234,12 +261,12 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
         // Fetch GiftWraps related to us
         let filter = Filter::new().pubkey(my_public_key).kind(Kind::GiftWrap);
         let events = client
-            .fetch_events(filter, std::time::Duration::from_secs(30))
+            .fetch_events(filter, std::time::Duration::from_secs(120))
             .await
             .unwrap();
 
         // Decrypt every GiftWrap and return their contents + senders
-        for event in events.into_iter().filter(|e| e.kind == Kind::GiftWrap) {
+        for event in events.into_iter() {
             handle_event(event, false).await;
         }
     }
@@ -286,7 +313,11 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
         failed: false,
         mine: true,
     };
-    STATE.lock().await.add_message(receiver.clone(), msg);
+    STATE.lock().await.add_message(receiver.clone(), msg.clone());
+
+    // Send the pending message to our frontend
+    let app_handle = TAURI_APP.get().unwrap().clone();
+    app_handle.emit("message_new", MessageEvent { message: msg.clone(), chat_id: receiver.clone() }).unwrap();
 
     // Grab our pubkey
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -335,6 +366,9 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
 
             // Update file path
             msg_attachment.path = nonce_file_path.to_string_lossy().to_string();
+
+            // Update the frontend
+            app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
         }
 
         // Upload the attachment
@@ -373,9 +407,14 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                             .iter_mut()
                             .find(|chat| chat.id == receiver)
                             .unwrap();
-                        let failed_msg = chat.get_message_mut(pending_id).unwrap();
+                        let failed_msg = chat.get_message_mut(pending_id.clone()).unwrap();
                         failed_msg.failed = true;
-                        state.has_state_changed = true;
+
+                        // Update the frontend
+                        let app_handle = TAURI_APP.get().unwrap().clone();
+                        app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: failed_msg.clone(), chat_id: receiver.clone() }).unwrap();
+
+                        // Return the error
                         return Err(String::from("Failed to upload file"));
                     }
                 }
@@ -414,10 +453,13 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                         .iter_mut()
                         .find(|chat| chat.id == receiver)
                         .unwrap();
-                    let message = chat.get_message_mut(pending_id).unwrap();
+                    let message = chat.get_message_mut(pending_id.clone()).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
-                    state.has_state_changed = true;
+
+                    // Update the frontend
+                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
                     return Ok(true);
                 }
                 Err(_) => {
@@ -429,10 +471,13 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                         .iter_mut()
                         .find(|chat| chat.id == receiver)
                         .unwrap();
-                    let message = chat.get_message_mut(pending_id).unwrap();
+                    let message = chat.get_message_mut(pending_id.clone()).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
-                    state.has_state_changed = true;
+
+                    // Update the frontend
+                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
                     return Ok(true);
                 }
             }
@@ -447,7 +492,6 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                 .unwrap();
             let failed_msg = chat.get_message_mut(pending_id).unwrap();
             failed_msg.failed = true;
-            state.has_state_changed = true;
             return Ok(false);
         }
     }
@@ -537,7 +581,7 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
 }
 
 #[tauri::command]
-async fn load_profile(npub: String) -> Result<Profile, ()> {
+async fn load_profile(npub: String) -> Result<bool, ()> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Convert the Bech32 String in to a PublicKey
@@ -571,7 +615,7 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
                 .unwrap()
                 .as_secs()
         {
-            return Ok(profile.clone());
+            return Ok(true);
         }
     }
 
@@ -618,23 +662,26 @@ async fn load_profile(npub: String) -> Result<Profile, ()> {
             // If it's ours, mark it as such
             let mut state = STATE.lock().await;
             let profile_mutable = state.get_profile_mut(npub).unwrap();
+            let old_profile = profile_mutable.clone();
             profile_mutable.mine = my_public_key == profile_pubkey;
             // Update the Status
             profile_mutable.status = status;
             // Update the Metadata
             profile_mutable.from_metadata(meta);
+            // If there's any change between our Old and New profile, emit an update
+            if *profile_mutable != old_profile {
+                let app_handle = TAURI_APP.get().unwrap().clone();
+                app_handle.emit("profile_update", profile_mutable.clone()).unwrap();
+            }
             // And apply the current update time
             profile_mutable.last_updated = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            // And mark the state as changed
-            let ret_profile = profile_mutable.clone();
-            state.has_state_changed = true;
-            return Ok(ret_profile);
+            return Ok(true);
         }
         Err(_) => {
-            return Ok(profile);
+            return Ok(false);
         }
     }
 }
@@ -682,7 +729,10 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
                 .get_profile_mut(my_public_key.to_bech32().unwrap())
                 .unwrap();
             profile_mutable.from_metadata(meta);
-            state.has_state_changed = true;
+
+            // Update the frontend
+            let app_handle = TAURI_APP.get().unwrap().clone();
+            app_handle.emit("profile_update", profile_mutable.clone()).unwrap();
             Ok(profile.clone())
         }
         Err(_e) => Err(()),
@@ -709,6 +759,10 @@ async fn update_status(status: String) -> Result<Profile, ()> {
                 .unwrap();
             profile.status.purpose = String::from("general");
             profile.status.title = status;
+
+            // Update the frontend
+            let app_handle = TAURI_APP.get().unwrap().clone();
+            app_handle.emit("profile_update", profile.clone()).unwrap();
             Ok(profile.clone())
         }
         Err(_e) => Err(()),
@@ -874,7 +928,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     show_notification(display_name, rumor.content.clone());
                 }
 
-                // Add to our state
+                // Create the Message
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
                     content: rumor.content,
@@ -886,7 +940,15 @@ async fn handle_event(event: Event, is_new: bool) {
                     pending: false,
                     failed: false,
                 };
-                state.add_message(contact, msg);
+
+                // Add the message to the state
+                state.add_message(contact.clone(), msg.clone());
+
+                // Update the frontend
+                if is_new {
+                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
+                }
             }
             // Emoji Reaction (NIP-25)
             else if rumor.kind == Kind::Reaction {
@@ -974,7 +1036,7 @@ async fn handle_event(event: Event, is_new: bool) {
                 };
                 attachments.push(attachment);
 
-                // Add the attachment to our state
+                // Create the message
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
                     content: String::new(),
@@ -986,7 +1048,15 @@ async fn handle_event(event: Event, is_new: bool) {
                     pending: false,
                     failed: false,
                 };
-                state.add_message(contact, msg);
+
+                // Add the message to the state
+                state.add_message(contact.clone(), msg.clone());
+
+                // Update the frontend
+                if is_new {
+                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
+                }
             }
             // Vector-specific events (NIP-78)
             else if rumor.kind == Kind::ApplicationSpecificData {
@@ -1002,12 +1072,12 @@ async fn handle_event(event: Event, is_new: bool) {
                                         // And it must be within 30 seconds
                                         let expiry_timestamp: u64 =
                                             ex_tag.content().unwrap().parse().unwrap_or(0);
-                                        // Check if the expiry timestamp is within 30 seconds from now (we'll say 35 to account for slight 'system time drift')
+                                        // Check if the expiry timestamp is within 30 seconds from now
                                         let current_timestamp = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap()
                                             .as_secs();
-                                        if expiry_timestamp <= current_timestamp + 35
+                                        if expiry_timestamp <= current_timestamp + 30
                                             && expiry_timestamp > current_timestamp
                                         {
                                             // Now we apply the typing indicator to it's author profile
@@ -1015,8 +1085,12 @@ async fn handle_event(event: Event, is_new: bool) {
                                                 .get_profile_mut(rumor.pubkey.to_bech32().unwrap())
                                             {
                                                 Ok(profile) => {
+                                                    // Apply typing indicator
                                                     profile.typing_until = expiry_timestamp;
-                                                    state.has_state_changed = true;
+
+                                                    // Update the frontend
+                                                    let app_handle = TAURI_APP.get().unwrap().clone();
+                                                    app_handle.emit("profile_update", profile.clone()).unwrap();
                                                 }
                                                 Err(_) => { /* Received a Typing Indicator from an unknown contact, ignoring... */
                                                 }
@@ -1198,8 +1272,6 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
         let new_npub = new_keys.public_key.to_bech32().unwrap();
         if prev_npub == new_npub {
             // Simply return the same KeyPair and allow the frontend to continue login as usual
-            // Note: we also say that the state has changed so that the frontend knows to refresh it's data
-            STATE.lock().await.has_state_changed = true;
             return Ok(LoginKeyPair {
                 public: signer.get_public_key().await.unwrap().to_bech32().unwrap(),
                 private: new_keys.secret_key().to_bech32().unwrap(),
@@ -1243,16 +1315,6 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
         public: npub,
         private: keys.secret_key().to_bech32().unwrap(),
     })
-}
-
-#[tauri::command]
-async fn has_state_changed() -> Result<bool, ()> {
-    Ok(STATE.lock().await.has_state_changed)
-}
-
-#[tauri::command]
-async fn acknowledge_state_change() {
-    STATE.lock().await.has_state_changed = false;
 }
 
 /// Returns `true` if the client has connected, `false` if it was already connected
@@ -1390,8 +1452,6 @@ pub fn run() {
             upload_avatar,
             start_typing,
             connect,
-            has_state_changed,
-            acknowledge_state_change,
             encrypt,
             decrypt
         ])

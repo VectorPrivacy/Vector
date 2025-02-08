@@ -1,6 +1,7 @@
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
+const { listen } = window.__TAURI__.event;
 
 const domVersion = document.getElementById('version');
 
@@ -77,7 +78,7 @@ function openEmojiPanel(e) {
     const isDefaultPanel = e.target === domChatMessageInputEmoji;
 
     // Open or Close the panel depending on it's state
-    const strReaction = e.target.getAttribute('reaction');
+    const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && picker.style.display !== `block`) {
         // Render our most used emojis by default
@@ -345,13 +346,12 @@ let strOpenChat = "";
  */
 async function fetchMessages(init = false, fHasConnected = false) {
     // Fetch our full state cache from the backend
-    if (init) domChatList.textContent = `Loading DMs...`;
-    arrChats = await invoke("fetch_messages", { init: fHasConnected });
-    arrChats.sort((a, b) => b?.messages[b.messages.length - 1]?.at - a?.messages[a?.messages.length - 1]?.at);
-    if (init) domChatList.textContent = ``;
-
-    // Render the bare chat list (npub-based) initially, profiles will trickle from the `fetchProfiles` "thread".
-    await renderChatlist();
+    if (init) {
+        domChatList.textContent = `Loading DMs...`;
+        arrChats = await invoke("fetch_messages", { init: fHasConnected });
+        domChatList.textContent = ``;
+        renderChatlist();
+    }
 
     // Start a post-init refresh loop, which will frequently poll cached profiles and render chats from the client
     if (init) {
@@ -370,26 +370,12 @@ async function fetchProfiles() {
     for (const chat of arrChats) {
         await invoke("load_profile", { npub: chat.id });
     }
-    // Once all the profiles have refreshed, we'll also run an ASAP chatlist + chat render
-    if (!strOpenChat) {
-        await renderChatlist();
-    }
 }
 
 /**
  * A "thread" function dedicated to rendering the Chat UI in real-time
  */
-async function renderChatlist() {
-    // If a chat is open, update it's messages
-    const fStateChanged = await invoke('has_state_changed');
-    if (strOpenChat) {
-        await updateChat(strOpenChat, !fStateChanged);
-    }
-
-    // Render the Chat List
-    if (!fStateChanged) return;
-    await invoke('acknowledge_state_change');
-
+function renderChatlist() {
     // Check if the order of chats has changed
     const currentOrder = Array.from(domChatList.children).map(el => el.id.replace('chatlist-', ''));
     const orderChanged = JSON.stringify(currentOrder) !== JSON.stringify(arrChats.map(chat => chat.id));
@@ -399,54 +385,8 @@ async function renderChatlist() {
     for (const chat of arrChats) {
         if (chat.messages.length === 0) continue;
 
-        // The Contact container
-        const divContact = document.createElement('div');
-        divContact.classList.add('chatlist-contact');
-        divContact.onclick = () => { openChat(chat.id) };
-        divContact.id = `chatlist-${chat.id}`;
-
-        // The Username + Message Preview container
-        const divPreviewContainer = document.createElement('div');
-        divPreviewContainer.classList.add('chatlist-contact-preview');
-
-        // The avatar, if one exists
-        if (chat?.avatar) {
-            const imgAvatar = document.createElement('img');
-            imgAvatar.src = chat?.avatar;
-            divContact.appendChild(imgAvatar);
-        } else {
-            // Otherwise, generate a Gradient Avatar
-            divContact.appendChild(pubkeyToAvatar(chat.id, chat?.name));
-        }
-
-        // Add the name (or, if missing metadata, their npub instead) to the chat preview
-        const h4ContactName = document.createElement('h4');
-        h4ContactName.textContent = chat?.name || chat.id;
-        h4ContactName.classList.add('cutoff')
-        divPreviewContainer.appendChild(h4ContactName);
-
-        // Display either their Last Message or Typing Indicator
-        const cLastMsg = chat.messages[chat.messages.length - 1];
-        const pChatPreview = document.createElement('p');
-        pChatPreview.classList.add('cutoff');
-        const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
-        pChatPreview.classList.toggle('text-gradient', fIsTyping);
-        if (fIsTyping) {
-            // Typing; display the glowy indicator!
-            pChatPreview.textContent = `Typing...`;
-        } else if (!cLastMsg.content) {
-            // Not typing, and no text; display as an attachment
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent an attachment';
-        } else {
-            // Not typing; display their last message
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
-        }
-        divPreviewContainer.appendChild(pChatPreview);
-
-        // Add the Chat Preview to the contact UI
-        divContact.appendChild(divPreviewContainer);
-
         // If the chat order changed; append to fragment instead of directly to the DOM for full list re-render efficiency
+        const divContact = renderContact(chat);
         if (orderChanged) {
             fragment.appendChild(divContact);
         } else {
@@ -466,6 +406,57 @@ async function renderChatlist() {
         // Append our new fragment
         domChatList.appendChild(fragment);
     }
+}
+
+function renderContact(chat) {
+    // The Contact container
+    const divContact = document.createElement('div');
+    divContact.classList.add('chatlist-contact');
+    divContact.onclick = () => { openChat(chat.id) };
+    divContact.id = `chatlist-${chat.id}`;
+
+    // The Username + Message Preview container
+    const divPreviewContainer = document.createElement('div');
+    divPreviewContainer.classList.add('chatlist-contact-preview');
+
+    // The avatar, if one exists
+    if (chat?.avatar) {
+        const imgAvatar = document.createElement('img');
+        imgAvatar.src = chat?.avatar;
+        divContact.appendChild(imgAvatar);
+    } else {
+        // Otherwise, generate a Gradient Avatar
+        divContact.appendChild(pubkeyToAvatar(chat.id, chat?.name));
+    }
+
+    // Add the name (or, if missing metadata, their npub instead) to the chat preview
+    const h4ContactName = document.createElement('h4');
+    h4ContactName.textContent = chat?.name || chat.id;
+    h4ContactName.classList.add('cutoff')
+    divPreviewContainer.appendChild(h4ContactName);
+
+    // Display either their Last Message or Typing Indicator
+    const cLastMsg = chat.messages[chat.messages.length - 1];
+    const pChatPreview = document.createElement('p');
+    pChatPreview.classList.add('cutoff');
+    const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
+    pChatPreview.classList.toggle('text-gradient', fIsTyping);
+    if (fIsTyping) {
+        // Typing; display the glowy indicator!
+        pChatPreview.textContent = `Typing...`;
+    } else if (!cLastMsg.content) {
+        // Not typing, and no text; display as an attachment
+        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent an attachment';
+    } else {
+        // Not typing; display their last message
+        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+    }
+    divPreviewContainer.appendChild(pChatPreview);
+
+    // Add the Chat Preview to the contact UI
+    divContact.appendChild(divPreviewContainer);
+
+    return divContact;
 }
 
 /**
@@ -499,6 +490,93 @@ async function sendFile(filepath) {
 }
 
 /**
+ * Setup our Rust Event listeners, used for relaying the majority of backend changes
+ */
+async function setupRustListeners() {
+    // Listen for profile updates
+    await listen('profile_update', (evt) => {
+        // Check if the frontend is already aware
+        const nProfileIdx = arrChats.findIndex(p => p.id === evt.payload.id);
+        if (nProfileIdx >= 0) {
+            // Update our frontend memory
+            arrChats[nProfileIdx] = evt.payload;
+        } else {
+            // Add the new profile
+            arrChats.unshift(evt.payload);
+        }
+        // If this user has an open chat, then soft-update the chat too
+        if (strOpenChat === evt.payload.id) {
+            updateChat(arrChats[nProfileIdx], []);
+        }
+        // Render the Chat List
+        renderChatlist();
+    });
+
+    // Listen for incoming messages
+    await listen('message_new', (evt) => {
+        // Grab our profile index (a profile should be guarenteed before it's first message event)
+        const nProfileIdx = arrChats.findIndex(p => p.id === evt.payload.chat_id);
+
+        // Double-check we haven't received this twice (unless this is their first message)
+        if (arrChats[nProfileIdx].messages.length > 1 && arrChats[nProfileIdx].messages.some(m => m.id === evt.payload.message.id)) return;
+
+        // Reset their typing status
+        arrChats[nProfileIdx].typing_until = 0;
+
+        // Append new messages and prepend older messages
+        const cFirstMsg = arrChats[nProfileIdx].messages[0];
+        if (cFirstMsg.at < evt.payload.message.at) {
+            // New message
+            arrChats[nProfileIdx].messages.push(evt.payload.message);
+            // Move the chat to the top of our chatlist (TODO: any way to optimise this?)
+            if (nProfileIdx > 0) {
+                // Remove the profile at index and get it
+                const [profile] = arrChats.splice(nProfileIdx, 1);
+                // Add it to the beginning
+                arrChats.unshift(profile);
+            }
+        } else {
+            // Old message
+            arrChats[nProfileIdx].messages.unshift(evt.payload.message);
+        }
+
+        // If this user has an open chat, then soft-update the chat too
+        if (strOpenChat === evt.payload.chat_id) {
+            updateChat(arrChats[0], [evt.payload.message]);
+        }
+
+        // Render the Chat List
+        renderChatlist();
+    });
+
+    // Listen for existing message updates
+    await listen('message_update', (evt) => {
+        // Find the message we're updating
+        const cProfile = arrChats.find(p => p.id === evt.payload.chat_id);
+        const nMsgIdx = cProfile.messages.findIndex(m => m.id === evt.payload.old_id);
+
+        // Update it
+        cProfile.messages[nMsgIdx] = evt.payload.message;
+
+        // If this user has an open chat, then update the rendered message
+        if (strOpenChat === evt.payload.chat_id) {
+            // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
+            const domMsg = document.getElementById(evt.payload.old_id);
+            domMsg?.replaceWith(renderMessage(evt.payload.message, cProfile));
+
+            // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
+            if (evt.payload.old_id.startsWith('pending')) {
+                strLastMsgID = evt.payload.message.id;
+                domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
+            }
+        }
+
+        // Render the Chat List
+        renderChatlist();
+    });
+}
+
+/**
  * Login to the Nostr network
  */
 async function login() {
@@ -514,9 +592,13 @@ async function login() {
         domChatList.textContent = `Connecting to Nostr...`;
         const fHasConnected = await invoke("connect");
 
+        // Setup our Rust Event listeners for efficient back<-->front sync
+        await setupRustListeners();
+
         // Attempt to sync our profile data
         domChatList.textContent = `Syncing your profile...`;
-        const cProfile = await invoke("load_profile", { npub: strPubkey });
+        await invoke("load_profile", { npub: strPubkey });
+        const cProfile = arrChats.find(p => p.mine);
 
         // Render it
         renderCurrentProfile(cProfile);
@@ -691,33 +773,28 @@ let strCurrentReplyReference = "";
 
 /**
  * Updates the current chat (to display incoming and outgoing messages)
- * @param {string} contact 
- * @param {boolean} fSoft - Whether this is a soft update (i.e: status, typing indicator - no chat rendering)
+ * @param {Profile} profile 
+ * @param {Array<Message>} arrMessages - The messages to efficiently append/prepend to the chat
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
-async function updateChat(contact, fSoft = false, fClicked = false) {
-    const cProfile = arrChats.find(a => a.id === contact);
-    if (cProfile?.messages.length) {
+async function updateChat(profile, arrMessages = [], fClicked = false) {
+    if (arrMessages.length) {
         // Prefer displaying their name, otherwise, npub
-        domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
+        domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
 
         // Display either their Status or Typing Indicator
-        const fIsTyping = cProfile?.typing_until ? cProfile.typing_until > Date.now() / 1000 : false;
-        domChatContactStatus.textContent = fIsTyping ? `${cProfile?.name || 'User'} is typing...` : cProfile?.status?.title || '';
+        const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
+        domChatContactStatus.textContent = fIsTyping ? `${profile?.name || 'User'} is typing...` : profile?.status?.title || '';
         domChatContactStatus.classList.toggle('text-gradient', fIsTyping);
 
         // Adjust our Contact Name class to manage space according to Status visibility
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
         domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
 
-        // Below is considered 'hard rendering' and should be avoided unless new messages have arrived
-        if (fSoft) return;
-
-        // Render their messages upon state changes (guided by fetchMessages())
-        // TODO: this needs rewriting in the future to be event-based, i.e: new message added (append), message edited (modify one message in the DOM), etc.
-        domChatMessages.innerHTML = ``;
-        let nLastMsgTime = cProfile.messages[0].at;
-        for (const msg of cProfile.messages) {
+        // Efficiently append or prepend messages based on their time relative to the chat
+        const cLastRenderedMessage = profile.messages.find(m => m.id === domChatMessages?.lastElementChild?.id);
+        let nLastMsgTime = cLastRenderedMessage?.at || Date.now() / 1000;
+        for (const msg of arrMessages) {
             // If the last message was over 10 minutes ago, add an inline timestamp
             if (msg.at - nLastMsgTime > 600) {
                 nLastMsgTime = msg.at;
@@ -735,166 +812,21 @@ async function updateChat(contact, fSoft = false, fClicked = false) {
                 }
                 domChatMessages.appendChild(pTimestamp);
             }
-            // Construct the message container (the DOM ID is the HEX Nostr Event ID)
-            const divMessage = document.createElement('div');
-            divMessage.id = msg.id;
-            // Render it appropriately depending on who sent it
-            divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
-            // Render their avatar, if they have one
-            if (!msg.mine && cProfile?.avatar) {
-                const imgAvatar = document.createElement('img');
-                imgAvatar.src = cProfile.avatar;
-                divMessage.appendChild(imgAvatar);
-            }
 
-            // Prepare the message container
-            const pMessage = document.createElement('p');
-
-            // If we're replying to this, give it a glowing border
-            const fReplying = strCurrentReplyReference === msg.id;
-            const strEmojiCleaned = msg.content.replace(/\s/g, '');
-            const fEmojiOnly = isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
-            if (fReplying) {
-                // Only display if replying
-                pMessage.style.borderColor = `#ffffff`;
-            }
-
-            // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
-            if (msg.replied_to) {
-                // Try to find the referenced message
-                const cMsg = cProfile.messages.find(m => m.id === msg.replied_to);
-                if (cMsg) {
-                    // Render the reply in a quote-like fashion
-                    // TODO: add ability to click it for a shortcut
-                    const spanRef = document.createElement('span');
-                    spanRef.classList.add('msg-reply');
-
-                    // Figure out the reply context
-                    if (cMsg.content) {
-                        // Reply to Text Message
-                        spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
-                        pMessage.appendChild(spanRef);
-                    } else if (cMsg.attachments.length) {
-                        // Reply to Attachment
-                        spanRef.textContent = `Attachment`;
-                        pMessage.appendChild(spanRef);
-                    }
-                }
-            }
-
-            // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
-            const spanMessage = document.createElement('span');
-            if (fEmojiOnly || !msg.content) {
-                // Strip out unnecessary whitespace
-                spanMessage.textContent = strEmojiCleaned;
-                // Add an emoji-only CSS format
-                pMessage.classList.add('emoji-only');
-                spanMessage.classList.add('emoji-only-content');
-                // Align the emoji depending on who sent it
-                spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
+            const domMsg = renderMessage(msg, profile);
+            if (!cLastRenderedMessage || cLastRenderedMessage.at <= msg.at) {
+                // If the message is newer than the last, append it
+                domChatMessages.appendChild(domMsg);
             } else {
-                // Render their text content (using our custom Markdown renderer)
-                // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
-                spanMessage.innerHTML = parseMarkdown(msg.content.trim());
+                // Otherwise, these are older messages, prepend them
+                domChatMessages.prepend(domMsg);
             }
-
-            // Append the message contents
-            pMessage.appendChild(spanMessage);
-
-            // Append attachments
-            for (const cAttachment of msg.attachments) {
-                if (cAttachment.downloaded) {
-                    // Convert the absolute file path to a Tauri asset
-                    const assetUrl = convertFileSrc(cAttachment.path);
-
-                    // Render the attachment appropriately for it's type
-                    if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
-                        const imgPreview = document.createElement('img');
-                        imgPreview.style.width = `100%`;
-                        imgPreview.style.height = `auto`;
-                        imgPreview.style.borderRadius = `0`;
-                        imgPreview.src = assetUrl;
-                        pMessage.appendChild(imgPreview);
-                    } else {
-                        // Unknown attachment
-                    }
-                } else {
-                    // Display download prompt UI
-                }
-            }
-
-            // If the message is pending or failed, let's adjust it
-            if (msg.pending) {
-                divMessage.style.opacity = 0.75;
-            }
-            if (msg.failed) {
-                pMessage.style.color = 'red';
-            }
-
-            // Add message reactions
-            // TODO: while currently limited to one; add support for multi-reactions with a nice UX
-            const cReaction = msg.reactions[0];
-            let spanReaction;
-            if (cReaction) {
-                // Aggregate the 'reactions' of this reaction's type
-                const nReacts = msg.reactions.reduce((a, b) => b.emoji === cReaction.emoji ? a + 1 : a, 0);
-                spanReaction = document.createElement('span');
-                spanReaction.classList.add('reaction');
-                spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
-            } else if (!msg.mine) {
-                // No reaction on the contact's message, so let's display the 'Add Reaction' UI
-                spanReaction = document.createElement('span');
-                spanReaction.textContent = `☻`;
-                spanReaction.classList.add('add-reaction', 'hideable');
-                spanReaction.setAttribute('reaction', msg.id);
-            }
-
-            // Construct our "extras" (reactions, reply button, etc)
-            // TODO: placeholder style, looks awful, but works!
-            const divExtras = document.createElement('div');
-            divExtras.classList.add('msg-extras');
-
-            // These can ONLY be shown on fully sent messages (inherently does not apply to received msgs)
-            if (!msg.pending && !msg.failed) {
-                // Reactions
-                if (spanReaction) {
-                    if (msg.mine) {
-                        // My message: reactions on the left
-                        spanReaction.style.left = '5px';
-                    } else {
-                        // Their message: reactions on the right
-                        spanReaction.style.left = '-2px';
-                        spanReaction.style.bottom = '-2px';
-                    }
-                    divExtras.append(spanReaction);
-                } else {
-                    // No reactions: just render the message
-                    divMessage.appendChild(pMessage);
-                }
-
-                // Reply Icon (if we're not already replying!)
-                if (!fReplying) {
-                    const spanReply = document.createElement('span');
-                    spanReply.classList.add('reply-btn', 'hideable');
-                    spanReply.setAttribute('reply-to', msg.id);
-                    spanReply.onclick = selectReplyingMessage;
-                    spanReply.textContent = `R`;
-                    divExtras.append(spanReply);
-                }
-            }
-
-            // Depending on who it is: render the extras appropriately
-            if (msg.mine) divMessage.append(divExtras, pMessage);
-            else divMessage.append(pMessage, divExtras);
-
-            // Add it to the chat!
-            domChatMessages.appendChild(divMessage);
         }
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open)
         const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
-        if (pxFromBottom < 250 || fClicked) {
-            const cLastMsg = cProfile.messages[cProfile.messages.length - 1];
+        if (pxFromBottom < 500 || fClicked) {
+            const cLastMsg = profile.messages[profile.messages.length - 1];
             if (strLastMsgID !== cLastMsg.id || fClicked) {
                 strLastMsgID = cLastMsg.id;
                 adjustSize();
@@ -903,7 +835,7 @@ async function updateChat(contact, fSoft = false, fClicked = false) {
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
-        domChatContact.textContent = cProfile?.name || contact.substring(0, 10) + '…';
+        domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
 
         // Force wipe the 'Status' and it's styling
         domChatContactStatus.textContent = '';
@@ -918,29 +850,189 @@ async function updateChat(contact, fSoft = false, fClicked = false) {
 }
 
 /**
+ * Convert a Message in to a rendered HTML Element
+ * @param {Message} msg - the Message to be converted
+ * @param {Profile} sender - the Profile of the message sender
+ */
+function renderMessage(msg, sender) {
+    // Construct the message container (the DOM ID is the HEX Nostr Event ID)
+    const divMessage = document.createElement('div');
+    divMessage.id = msg.id;
+    // Render it appropriately depending on who sent it
+    divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+    // Render their avatar, if they have one
+    if (!msg.mine && sender?.avatar) {
+        const imgAvatar = document.createElement('img');
+        imgAvatar.src = sender.avatar;
+        divMessage.appendChild(imgAvatar);
+    }
+
+    // Prepare the message container
+    const pMessage = document.createElement('p');
+
+    // If we're replying to this, give it a glowing border
+    const fReplying = strCurrentReplyReference === msg.id;
+    const strEmojiCleaned = msg.content.replace(/\s/g, '');
+    const fEmojiOnly = isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
+    if (fReplying) {
+        // Only display if replying
+        pMessage.style.borderColor = `#ffffff`;
+    }
+
+    // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
+    if (msg.replied_to) {
+        // Try to find the referenced message
+        const cMsg = sender.messages.find(m => m.id === msg.replied_to);
+        if (cMsg) {
+            // Render the reply in a quote-like fashion
+            // TODO: add ability to click it for a shortcut
+            const spanRef = document.createElement('span');
+            spanRef.classList.add('msg-reply');
+
+            // Figure out the reply context
+            if (cMsg.content) {
+                // Reply to Text Message
+                spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
+                pMessage.appendChild(spanRef);
+            } else if (cMsg.attachments.length) {
+                // Reply to Attachment
+                spanRef.textContent = `Attachment`;
+                pMessage.appendChild(spanRef);
+            }
+        }
+    }
+
+    // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
+    const spanMessage = document.createElement('span');
+    if (fEmojiOnly || !msg.content) {
+        // Strip out unnecessary whitespace
+        spanMessage.textContent = strEmojiCleaned;
+        // Add an emoji-only CSS format
+        pMessage.classList.add('emoji-only');
+        spanMessage.classList.add('emoji-only-content');
+        // Align the emoji depending on who sent it
+        spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
+    } else {
+        // Render their text content (using our custom Markdown renderer)
+        // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
+        spanMessage.innerHTML = parseMarkdown(msg.content.trim());
+    }
+
+    // Append the message contents
+    pMessage.appendChild(spanMessage);
+
+    // Append attachments
+    for (const cAttachment of msg.attachments) {
+        if (cAttachment.downloaded) {
+            // Convert the absolute file path to a Tauri asset
+            const assetUrl = convertFileSrc(cAttachment.path);
+
+            // Render the attachment appropriately for it's type
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                const imgPreview = document.createElement('img');
+                imgPreview.style.width = `100%`;
+                imgPreview.style.height = `auto`;
+                imgPreview.style.borderRadius = `0`;
+                imgPreview.src = assetUrl;
+                pMessage.appendChild(imgPreview);
+            } else {
+                // Unknown attachment
+            }
+        } else {
+            // Display download prompt UI
+        }
+    }
+
+    // If the message is pending or failed, let's adjust it
+    if (msg.pending) {
+        divMessage.style.opacity = 0.75;
+    }
+    if (msg.failed) {
+        pMessage.style.color = 'red';
+    }
+
+    // Add message reactions
+    // TODO: while currently limited to one; add support for multi-reactions with a nice UX
+    const cReaction = msg.reactions[0];
+    let spanReaction;
+    if (cReaction) {
+        // Aggregate the 'reactions' of this reaction's type
+        const nReacts = msg.reactions.reduce((a, b) => b.emoji === cReaction.emoji ? a + 1 : a, 0);
+        spanReaction = document.createElement('span');
+        spanReaction.classList.add('reaction');
+        spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
+    } else if (!msg.mine) {
+        // No reaction on the contact's message, so let's display the 'Add Reaction' UI
+        spanReaction = document.createElement('span');
+        spanReaction.textContent = `☻`;
+        spanReaction.classList.add('add-reaction', 'hideable');
+    }
+
+    // Construct our "extras" (reactions, reply button, etc)
+    // TODO: placeholder style, looks awful, but works!
+    const divExtras = document.createElement('div');
+    divExtras.classList.add('msg-extras');
+
+    // These can ONLY be shown on fully sent messages (inherently does not apply to received msgs)
+    if (!msg.pending && !msg.failed) {
+        // Reactions
+        if (spanReaction) {
+            if (msg.mine) {
+                // My message: reactions on the left
+                spanReaction.style.left = '5px';
+            } else {
+                // Their message: reactions on the right
+                spanReaction.style.left = '-2px';
+                spanReaction.style.bottom = '-2px';
+            }
+            divExtras.append(spanReaction);
+        } else {
+            // No reactions: just render the message
+            divMessage.appendChild(pMessage);
+        }
+
+        // Reply Icon (if we're not already replying!)
+        if (!fReplying) {
+            const spanReply = document.createElement('span');
+            spanReply.classList.add('reply-btn', 'hideable');
+            spanReply.onclick = selectReplyingMessage;
+            spanReply.textContent = `R`;
+            divExtras.append(spanReply);
+        }
+    }
+
+    // Depending on who it is: render the extras appropriately
+    if (msg.mine) divMessage.append(divExtras, pMessage);
+    else divMessage.append(pMessage, divExtras);
+
+    return divMessage;
+}
+
+/**
  * Select a message to begin replying to
  * @param {MouseEvent} e 
  */
 function selectReplyingMessage(e) {
+    // Cancel any existing reply-focus
+    if (strCurrentReplyReference) {
+        document.getElementById(strCurrentReplyReference).querySelector('p').style.borderColor = ``;
+    }
     // Get the reply ID
-    strCurrentReplyReference = e.target.getAttribute('reply-to');
+    strCurrentReplyReference = e.target.parentElement.parentElement.id;
     // Display the cancel UI
     domChatMessageInputCancel.style.display = '';
     // Display a replying placeholder
     domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
     // Focus the message input
     domChatMessageInput.focus();
-    // Refresh the UI to add a reply-focus
-    updateChat(strOpenChat, false);
+    // Add a reply-focus
+    e.target.parentElement.parentElement.querySelector('p').style.borderColor = `#ffffff`;
 }
 
 /**
  * Cancel any ongoing replies and reset the messaging interface
  */
 function cancelReply() {
-    // Remove the reply ID
-    strCurrentReplyReference = '';
-
     // Reset the message UI
     domChatMessageInputCancel.style.display = 'none';
     domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
@@ -948,8 +1040,13 @@ function cancelReply() {
     // Focus the message input
     domChatMessageInput.focus();
 
-    // Update the UI to remove any reply-focus changes, if applicable
-    if (strOpenChat) updateChat(strOpenChat, false);
+    // Cancel any existing reply-focus
+    if (strCurrentReplyReference) {
+        document.getElementById(strCurrentReplyReference).querySelector('p').style.borderColor = ``;
+    }
+
+    // Remove the reply ID
+    strCurrentReplyReference = '';
 }
 
 /**
@@ -964,8 +1061,9 @@ function openChat(contact) {
     domSettingsBtn.style.display = 'none';
 
     // Render the current contact's messages
+    const cProfile = arrChats.find(p => p.id === contact);
     strOpenChat = contact;
-    updateChat(contact, false, true);
+    updateChat(cProfile, cProfile?.messages || [], true);
 }
 
 /**
@@ -983,16 +1081,17 @@ function openNewChat() {
  * Closes the current chat, taking the user back to the chat list
  */
 function closeChat() {
-    // Cancel any ongoing replies
-    cancelReply();
-
     // Reset the chat UI
+    domChatMessages.innerHTML = ``;
     domChats.style.display = '';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
     nLastTypingIndicator = 0;
+
+    // Cancel any ongoing replies
+    cancelReply();
 
     // Ensure the chat list re-adjusts to fit
     adjustSize();
