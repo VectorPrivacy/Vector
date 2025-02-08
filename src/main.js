@@ -510,13 +510,13 @@ async function setupRustListeners() {
         const nProfileIdx = arrChats.findIndex(p => p.id === evt.payload.chat_id);
 
         // Double-check we haven't received this twice (unless this is their first message)
-        if (arrChats[nProfileIdx].messages.length > 1 && arrChats[nProfileIdx].messages.some(m => m.id === evt.payload.message.id)) return;
+        const cFirstMsg = arrChats[nProfileIdx].messages[0];
+        if (arrChats[nProfileIdx].messages.length === 1 && cFirstMsg.id === evt.payload.message.id && !cFirstMsg.mine) return;
 
         // Reset their typing status
         arrChats[nProfileIdx].typing_until = 0;
 
         // Append new messages and prepend older messages
-        const cFirstMsg = arrChats[nProfileIdx].messages[0];
         if (cFirstMsg.at < evt.payload.message.at) {
             // New message
             arrChats[nProfileIdx].messages.push(evt.payload.message);
@@ -774,7 +774,7 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(profile, arrMessages = [], fClicked = false) {
-    if (profile.messages.length || arrMessages.length) {
+    if (profile?.messages.length || arrMessages.length) {
         // Prefer displaying their name, otherwise, npub
         domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
 
