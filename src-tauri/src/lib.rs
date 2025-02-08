@@ -259,7 +259,8 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
         let my_public_key = signer.get_public_key().await.unwrap();
 
         // Fetch GiftWraps related to us
-        let filter = Filter::new().pubkey(my_public_key).kind(Kind::GiftWrap);
+        // TODO: currently limited to around 1 week of history (give/take due to GiftWrap fake timestamps)
+        let filter = Filter::new().pubkey(my_public_key).kind(Kind::GiftWrap).since(Timestamp::from_secs(Timestamp::now().as_u64() - (60 * 60 * 24 * 7)));
         let events = client
             .fetch_events(filter, std::time::Duration::from_secs(120))
             .await
@@ -1118,14 +1119,18 @@ async fn notifs() -> Result<bool, String> {
     let filter = Filter::new().pubkey(pubkey).kind(Kind::GiftWrap).limit(0);
 
     // Subscribe to the filter and begin handling incoming events
-    match client.subscribe(filter, None).await {
-        Ok(_) => { /* Good! */ }
+    let sub_id = match client.subscribe(filter, None).await {
+        Ok(id) => id.val,
         Err(e) => return Err(e.to_string()),
-    }
+    };
+
+    // Begin watching for notifications from our subscription
     match client
         .handle_notifications(|notification| async {
-            if let RelayPoolNotification::Event { event, .. } = notification {
-                handle_event(*event, true).await;
+            if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
+                if subscription_id == sub_id {
+                    handle_event(*event, true).await;
+                }
             }
             Ok(false)
         })
@@ -1431,6 +1436,27 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             let app_handle = app.app_handle().clone();
+
+            // Setup a graceful shutdown for our Nostr subscriptions
+            let window = app.get_webview_window("main").unwrap();
+            window.on_window_event(move |event| {
+                match event {
+                    // This catches when the window is being closed
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        // Cleanly shutdown our Nostr client
+                        if let Some(nostr_client) = NOSTR_CLIENT.get() {
+                            tauri::async_runtime::block_on(async {
+                                // Unsubscribe from all relay subscriptions
+                                nostr_client.unsubscribe_all().await;
+                                // Shutdown the Nostr client
+                                nostr_client.shutdown().await;
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            });
+
             // Set as our accessible static app handle
             TAURI_APP.set(app_handle).unwrap();
             Ok(())

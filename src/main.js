@@ -336,30 +336,19 @@ let arrChats = [];
 let strOpenChat = "";
 
 /**
- * Fetch all messages from the client
+ * Synchronise all messages from the backend
  * 
- * **Note:** Setting 'init' simply starts an automatic re-call every half-second
- * to emulate a "live" feed, this could probably be improved later.
- * 
- * @param {boolean} init - Whether this is an Init call or not
  * @param {boolean} fHasConnected - Whether the client has immediately connected or not - allowing for quicker init by only fetching cache
  */
-async function fetchMessages(init = false, fHasConnected = false) {
-    // Fetch our full state cache from the backend
-    if (init) {
-        domChatList.textContent = `Loading DMs...`;
-        arrChats = await invoke("fetch_messages", { init: fHasConnected });
-        domChatList.textContent = ``;
-        renderChatlist();
-    }
+async function fetchMessages(fHasConnected = false) {
+    // Synchronise all historical messages at bootup
+    // TODO: this needs to be scrapped for incremental syncing
+    arrChats = await invoke("fetch_messages", { init: fHasConnected });
 
-    // Start a post-init refresh loop, which will frequently poll cached profiles and render chats from the client
-    if (init) {
-        setAsyncInterval(fetchMessages, 100);
-        fetchProfiles().finally(() => {
-            setAsyncInterval(fetchProfiles, 30000);
-        });
-    }
+    // Begin an asynchronous loop to refresh profile data
+    fetchProfiles().finally(() => {
+        setAsyncInterval(fetchProfiles, 45000);
+    });
 }
 
 /**
@@ -503,6 +492,9 @@ async function setupRustListeners() {
         } else {
             // Add the new profile
             arrChats.unshift(evt.payload);
+
+            // Sort by last-message-time in case of backwards incremental sync
+            arrChats.sort((a, b) => b?.messages[b.messages.length - 1]?.at - a?.messages[a?.messages.length - 1]?.at);
         }
         // If this user has an open chat, then soft-update the chat too
         if (strOpenChat === evt.payload.id) {
@@ -581,32 +573,36 @@ async function setupRustListeners() {
  */
 async function login() {
     if (strPubkey) {
+        // Connect to Nostr
+        // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip a full network sync
+        domLoginEncryptTitle.textContent = `Connecting to Nostr...`;
+        const fHasConnected = await invoke("connect");
+
+        // Setup our Rust Event listeners for efficient back<-->front sync
+        await setupRustListeners();
+
+        // Sync our profile data
+        domLoginEncryptTitle.textContent = `Syncing your profile...`;
+        await invoke("load_profile", { npub: strPubkey });
+
+        // Connect and sync historical messages
+        domLoginEncryptTitle.textContent = `Syncing your DMs...`;
+        await fetchMessages(fHasConnected);
+
         // Hide the login and encryption UI
         domLoginInput.value = "";
         domLogin.style.display = 'none';
         domLoginEncrypt.style.display = 'none';
         domSettingsBtn.style.display = '';
 
-        // Connect to Nostr
-        // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip a full network sync
-        domChatList.textContent = `Connecting to Nostr...`;
-        const fHasConnected = await invoke("connect");
-
-        // Setup our Rust Event listeners for efficient back<-->front sync
-        await setupRustListeners();
-
-        // Attempt to sync our profile data
-        domChatList.textContent = `Syncing your profile...`;
-        await invoke("load_profile", { npub: strPubkey });
+        // Render our profile
         const cProfile = arrChats.find(p => p.mine);
-
-        // Render it
         renderCurrentProfile(cProfile);
 
-        // Connect and fetch historical messages
-        await fetchMessages(true, fHasConnected);
+        // Render the chatlist
+        renderChatlist();
 
-         // Append a "Start New Chat" button
+        // Append a "Start New Chat" button
         const btnStartChat = document.createElement('button');
         btnStartChat.textContent = "Start New Chat";
         btnStartChat.onclick = openNewChat;
@@ -814,7 +810,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             }
 
             const domMsg = renderMessage(msg, profile);
-            if (!cLastRenderedMessage || cLastRenderedMessage.at <= msg.at) {
+            if (!cLastRenderedMessage || cLastRenderedMessage.at < msg.at) {
                 // If the message is newer than the last, append it
                 domChatMessages.appendChild(domMsg);
             } else {
