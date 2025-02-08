@@ -774,7 +774,7 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(profile, arrMessages = [], fClicked = false) {
-    if (arrMessages.length) {
+    if (profile.messages.length || arrMessages.length) {
         // Prefer displaying their name, otherwise, npub
         domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
 
@@ -786,6 +786,8 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         // Adjust our Contact Name class to manage space according to Status visibility
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
         domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
+
+        if (!arrMessages.length) return;
 
         // Efficiently append or prepend messages based on their time relative to the chat
         const cLastRenderedMessage = profile.messages.find(m => m.id === domChatMessages?.lastElementChild?.id);
