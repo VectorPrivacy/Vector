@@ -150,7 +150,7 @@ impl Profile {
                     msg.reactions.push(reaction);
 
                     // Update the frontend
-                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    let app_handle = TAURI_APP.get().unwrap();
                     app_handle.emit("message_update", MessageUpdateEvent { old_id: msg.id.clone(), message: msg.clone(), chat_id: self.id.clone() }).unwrap();
                 }
                 true
@@ -217,7 +217,7 @@ impl ChatState {
             self.profiles.push(profile.clone());
 
             // Update the frontend
-            let app_handle = TAURI_APP.get().unwrap().clone();
+            let app_handle = TAURI_APP.get().unwrap();
             app_handle.emit("profile_update", profile).unwrap();
         }
 
@@ -316,7 +316,7 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
     STATE.lock().await.add_message(receiver.clone(), msg.clone());
 
     // Send the pending message to our frontend
-    let app_handle = TAURI_APP.get().unwrap().clone();
+    let app_handle = TAURI_APP.get().unwrap();
     app_handle.emit("message_new", MessageEvent { message: msg.clone(), chat_id: receiver.clone() }).unwrap();
 
     // Grab our pubkey
@@ -351,7 +351,6 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
             let msg_attachment: &mut Attachment = message.attachments.iter_mut().nth(0).unwrap();
 
             // Store the nonce-based file name on-disk for future reference
-            let app_handle = TAURI_APP.get().unwrap().clone();
             let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
             let nonce_file_path = dir.join(format!("{}.{}", params.nonce.clone(), msg_attachment.extension.clone()));
 
@@ -411,7 +410,6 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                         failed_msg.failed = true;
 
                         // Update the frontend
-                        let app_handle = TAURI_APP.get().unwrap().clone();
                         app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: failed_msg.clone(), chat_id: receiver.clone() }).unwrap();
 
                         // Return the error
@@ -458,7 +456,6 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                     message.pending = false;
 
                     // Update the frontend
-                    let app_handle = TAURI_APP.get().unwrap().clone();
                     app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
                     return Ok(true);
                 }
@@ -476,7 +473,6 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                     message.pending = false;
 
                     // Update the frontend
-                    let app_handle = TAURI_APP.get().unwrap().clone();
                     app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
                     return Ok(true);
                 }
@@ -511,7 +507,7 @@ async fn paste_message(receiver: String, replied_to: String, file: Vec<u8>, mime
     };
 
     // Check if the file exists on our system already
-    let app_handle = TAURI_APP.get().unwrap().clone();
+    let app_handle = TAURI_APP.get().unwrap();
     let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
     let file_path = dir.join(format!("tmp.{}", extension));
 
@@ -670,7 +666,7 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
             profile_mutable.from_metadata(meta);
             // If there's any change between our Old and New profile, emit an update
             if *profile_mutable != old_profile {
-                let app_handle = TAURI_APP.get().unwrap().clone();
+                let app_handle = TAURI_APP.get().unwrap();
                 app_handle.emit("profile_update", profile_mutable.clone()).unwrap();
             }
             // And apply the current update time
@@ -731,7 +727,7 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
             profile_mutable.from_metadata(meta);
 
             // Update the frontend
-            let app_handle = TAURI_APP.get().unwrap().clone();
+            let app_handle = TAURI_APP.get().unwrap();
             app_handle.emit("profile_update", profile_mutable.clone()).unwrap();
             Ok(profile.clone())
         }
@@ -761,7 +757,7 @@ async fn update_status(status: String) -> Result<Profile, ()> {
             profile.status.title = status;
 
             // Update the frontend
-            let app_handle = TAURI_APP.get().unwrap().clone();
+            let app_handle = TAURI_APP.get().unwrap();
             app_handle.emit("profile_update", profile.clone()).unwrap();
             Ok(profile.clone())
         }
@@ -771,7 +767,7 @@ async fn update_status(status: String) -> Result<Profile, ()> {
 
 #[tauri::command]
 async fn upload_avatar(filepath: String) -> Result<String, String> {
-    let app_handle = TAURI_APP.get().unwrap().clone();
+    let app_handle = TAURI_APP.get().unwrap();
 
     // Grab the file
     return match app_handle.fs().read(std::path::Path::new(&filepath)) {
@@ -946,7 +942,7 @@ async fn handle_event(event: Event, is_new: bool) {
 
                 // Update the frontend
                 if is_new {
-                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    let app_handle = TAURI_APP.get().unwrap();
                     app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
                 }
             }
@@ -996,7 +992,7 @@ async fn handle_event(event: Event, is_new: bool) {
                 };
 
                 // Check if the file exists on our system already
-                let app_handle = TAURI_APP.get().unwrap().clone();
+                let app_handle = TAURI_APP.get().unwrap();
                 let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
                 let file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
                 if !file_path.exists() {
@@ -1054,7 +1050,7 @@ async fn handle_event(event: Event, is_new: bool) {
 
                 // Update the frontend
                 if is_new {
-                    let app_handle = TAURI_APP.get().unwrap().clone();
+                    let app_handle = TAURI_APP.get().unwrap();
                     app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
                 }
             }
@@ -1089,7 +1085,7 @@ async fn handle_event(event: Event, is_new: bool) {
                                                     profile.typing_until = expiry_timestamp;
 
                                                     // Update the frontend
-                                                    let app_handle = TAURI_APP.get().unwrap().clone();
+                                                    let app_handle = TAURI_APP.get().unwrap();
                                                     app_handle.emit("profile_update", profile.clone()).unwrap();
                                                 }
                                                 Err(_) => { /* Received a Typing Indicator from an unknown contact, ignoring... */
@@ -1142,7 +1138,7 @@ async fn notifs() -> Result<bool, String> {
 
 #[tauri::command]
 fn show_notification(title: String, content: String) {
-    let app_handle = TAURI_APP.get().unwrap().clone();
+    let app_handle = TAURI_APP.get().unwrap();
     // Only send notifications if the app is not focused
     // TODO: generalise this assumption - it's only used for Message Notifications at the moment
     if !app_handle
