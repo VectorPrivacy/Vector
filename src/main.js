@@ -489,6 +489,11 @@ async function setupRustListeners() {
         if (nProfileIdx >= 0) {
             // Update our frontend memory
             arrChats[nProfileIdx] = evt.payload;
+
+            // If this is our profile, make sure to render it's changes
+            if (arrChats[nProfileIdx].mine) {
+                renderCurrentProfile(arrChats[nProfileIdx]);
+            }
         } else {
             // Add the new profile
             arrChats.unshift(evt.payload);
