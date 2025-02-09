@@ -805,8 +805,8 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         if (!arrMessages.length) return;
 
         // Efficiently append or prepend messages based on their time relative to the chat
-        const cLastRenderedMessage = profile.messages.find(m => m.id === domChatMessages?.lastElementChild?.id);
-        let nLastMsgTime = cLastRenderedMessage?.at || Date.now() / 1000;
+        let cLastMsg = arrMessages.length > 1 ? arrMessages[0] : profile.messages.find(m => m.id === domChatMessages?.lastElementChild?.id);
+        let nLastMsgTime = cLastMsg?.at || Date.now() / 1000;
         for (const msg of arrMessages) {
             // If the last message was over 10 minutes ago, add an inline timestamp
             if (msg.at - nLastMsgTime > 600) {
@@ -827,7 +827,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             }
 
             const domMsg = renderMessage(msg, profile);
-            if (!cLastRenderedMessage || cLastRenderedMessage.at < msg.at) {
+            if (!cLastMsg || cLastMsg.at < msg.at) {
                 // If the message is newer than the last, append it
                 domChatMessages.appendChild(domMsg);
             } else {
