@@ -921,7 +921,7 @@ function renderMessage(msg, sender) {
 
     // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
     const spanMessage = document.createElement('span');
-    if (fEmojiOnly || !msg.content) {
+    if (fEmojiOnly) {
         // Strip out unnecessary whitespace
         spanMessage.textContent = strEmojiCleaned;
         // Add an emoji-only CSS format
@@ -939,6 +939,7 @@ function renderMessage(msg, sender) {
     pMessage.appendChild(spanMessage);
 
     // Append attachments
+    if (msg.attachments.length) pMessage.classList.add('no-background');
     for (const cAttachment of msg.attachments) {
         if (cAttachment.downloaded) {
             // Convert the absolute file path to a Tauri asset
@@ -946,14 +947,38 @@ function renderMessage(msg, sender) {
 
             // Render the attachment appropriately for it's type
             if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                // Images
                 const imgPreview = document.createElement('img');
-                imgPreview.style.width = `100%`;
+                imgPreview.style.width = `75%`;
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `0`;
                 imgPreview.src = assetUrl;
                 pMessage.appendChild(imgPreview);
+            } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
+                // Videos
+                const vidPreview = document.createElement('video');
+                vidPreview.setAttribute('controlsList', 'nodownload');
+                vidPreview.style.width = `75%`;
+                vidPreview.style.height = `auto`;
+                vidPreview.style.borderRadius = `0`;
+                vidPreview.style.cursor = `pointer`;
+                vidPreview.loop = true;
+                vidPreview.preload = true;
+                vidPreview.playsInline = true;
+                vidPreview.src = assetUrl;
+                vidPreview.onclick = () => {
+                    if (vidPreview.paused)
+                        vidPreview.play();
+                    else
+                        vidPreview.pause();
+                }
+                pMessage.appendChild(vidPreview);
             } else {
                 // Unknown attachment
+                const iUnknown = document.createElement('i');
+                iUnknown.classList.add('text-gradient');
+                iUnknown.textContent = `Previews not supported for "${cAttachment.extension}" files yet`;
+                pMessage.appendChild(iUnknown);
             }
         } else {
             // Display download prompt UI

@@ -376,10 +376,18 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
             Ok(conf) => {
                 // Format a Mime Type from the file extension
                 let mime_type = match file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+                    // Images
                     "png" => "image/png",
                     "jpg" | "jpeg" => "image/jpeg",
                     "gif" => "image/gif",
                     "webp" => "image/webp",
+                    // Videos
+                    "mp4" => "video/mp4",
+                    "webm" => "video/webm",
+                    "mov" => "video/quicktime",
+                    "avi" => "video/x-msvideo",
+                    "mkv" => "video/x-matroska",
+                    // Unknown
                     _ => "application/octet-stream",
                 };
 
@@ -983,11 +991,19 @@ async fn handle_event(event: Event, is_new: bool) {
                 // Figure out the file extension from the mime-type
                 let mime_type = rumor.tags.find(TagKind::Custom(Cow::Borrowed("file-type"))).unwrap().content().unwrap();
                 let extension = match mime_type.split('/').nth(1) {
+                    // Images
                     Some("png") => "png",
                     Some("jpeg") => "jpg",
                     Some("jpg") => "jpg",
                     Some("gif") => "gif",
                     Some("webp") => "webp",
+                    // Videos
+                    Some("mp4") => "mp4",
+                    Some("webm") => "webm",
+                    Some("quicktime") => "mov",
+                    Some("x-msvideo") => "avi",
+                    Some("x-matroska") => "mkv",
+                    // Fallback options
                     Some(ext) => ext,
                     None => "bin",
                 };

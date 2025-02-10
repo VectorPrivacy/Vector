@@ -296,6 +296,11 @@ body {
   line-height: 75px;
 }
 
+.no-background {
+  background: none !important;
+  border-color: transparent !important;
+}
+
 .msg-them {
   align-self: flex-start;
   display: flex;
