@@ -14,8 +14,8 @@ function pubkeyToAvatar(npub, username) {
     const gHex = strLastChars[1].charCodeAt(0).toString(16).padStart(2, '0');
     const bHex = strLastChars[2].charCodeAt(0).toString(16).padStart(2, '0');
 
-    // Create a gradient for it using Purple and their personalised HEX
-    divAvatar.style.background = `linear-gradient(-40deg, #${rHex}${gHex}${bHex}, 65%, purple)`;
+    // Create a gradient for it using Vector Green and their personalised HEX
+    divAvatar.style.background = `linear-gradient(-40deg, #${rHex}${gHex}${bHex}, 75%, #59fcb3)`;
 
     // If a username is given, extract Initials or First Letter to be added on-top
     if (username) {
