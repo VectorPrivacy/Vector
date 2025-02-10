@@ -108,6 +108,86 @@ function isYesterday(date) {
            date.getFullYear() === yesterday.getFullYear();
 }
 
+/** 
+ * Scroll to the bottom of a scrollable element
+ * @param {HTMLElement} domElement - The DOM element to scroll
+ * @param {boolean} [fSmooth=true] - Whether to use smooth scrolling (true) or instant scrolling (false)
+ */
+function scrollToBottom(domElement, fSmooth = true) {
+    domElement.scrollTo({
+        top: domElement.scrollHeight,
+        behavior: fSmooth ? 'smooth' : 'auto'
+    });
+}
+
+/**
+ * Creates a scroll handler that shows/hides a button based on scroll position within a div
+ * @param {HTMLElement} scrollableDiv - The div element that has scrollable content
+ * @param {HTMLElement} bottomButton - The button element to show/hide
+ * @param {Object} [options] - Configuration options
+ * @param {number} [options.threshold=250] - Scroll threshold in pixels from bottom to trigger button visibility
+ * @param {number} [options.throttleTime=150] - Throttle time in milliseconds
+ * @param {boolean} [options.smoothScroll=true] - Whether to use smooth scrolling
+ * @returns {Function} Cleanup function to remove event listeners
+ */
+function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
+    const SCROLL_THRESHOLD = options.threshold ?? 250;
+    const THROTTLE_TIME = options.throttleTime ?? 150;
+    const SMOOTH_SCROLL = options.smoothScroll ?? true;
+
+    /**
+     * Throttles a function call
+     * @param {Function} func - Function to throttle
+     * @param {number} limit - Milliseconds to wait between calls
+     * @returns {Function} Throttled function
+     */
+    function throttle(func, limit) {
+        let inThrottle;
+        return function(...args) {
+            if (!inThrottle) {
+                func.apply(this, args);
+                inThrottle = true;
+                setTimeout(() => inThrottle = false, limit);
+            }
+        };
+    }
+
+    /**
+     * Handles the scroll event and updates button visibility
+     * @private
+     */
+    const handleScroll = throttle(() => {
+        const currentScrollTop = scrollableDiv.scrollTop;
+        const maxScroll = scrollableDiv.scrollHeight - scrollableDiv.clientHeight;
+        const distanceFromBottom = maxScroll - currentScrollTop;
+        
+        if (distanceFromBottom > SCROLL_THRESHOLD) {
+            bottomButton.classList.add('visible');
+        } else {
+            bottomButton.classList.remove('visible');
+        }
+    }, THROTTLE_TIME);
+
+    /**
+     * Scrolls to bottom and hides the button
+     * @private
+     */
+    const handleButtonClick = () => {
+        scrollToBottom(scrollableDiv, SMOOTH_SCROLL);
+        bottomButton.classList.remove('visible');
+    };
+
+    // Add event listeners
+    scrollableDiv.addEventListener('scroll', handleScroll);
+    bottomButton.addEventListener('click', handleButtonClick);
+    
+    return () => {
+        scrollableDiv.removeEventListener('scroll', handleScroll);
+        bottomButton.removeEventListener('click', handleButtonClick);
+    };
+}
+
+
 function setAsyncInterval(callback, interval) {
     let timer = null;
     async function run() {

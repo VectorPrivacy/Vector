@@ -31,6 +31,7 @@ const domChatContact = document.getElementById('chat-contact');
 const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
+const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-return');
 const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
@@ -619,7 +620,10 @@ async function login() {
 
         // Append a "Start New Chat" button
         const btnStartChat = document.createElement('button');
-        btnStartChat.textContent = "Start New Chat";
+        btnStartChat.classList.add('corner-float', 'visible');
+        btnStartChat.style.bottom = `15px`;
+        btnStartChat.style.borderRadius = `100%`;
+        btnStartChat.textContent = "+";
         btnStartChat.onclick = openNewChat;
         domChats.appendChild(btnStartChat);
         adjustSize();
@@ -1177,6 +1181,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
     domChatMessageInputCancel.onclick = cancelReply;
 
+    // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
+    createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 })
+
     // Hook up an in-chat File Upload listener
     domChatMessageInputFile.onclick = async () => {
         let filepath = await selectFile();
@@ -1269,9 +1276,9 @@ window.addEventListener("DOMContentLoaded", async () => {
  */
 function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
-    // Note: no idea why the `- 75px` is needed below, magic numbers, I guess.
+    // Note: no idea why the `- 30px` is needed below, magic numbers, I guess.
     const rectAccount = domAccount.getBoundingClientRect();
-    domChatList.style.maxHeight = (window.innerHeight - rectAccount.height) - 75 + `px`;
+    domChatList.style.maxHeight = (window.innerHeight - rectAccount.height) - 30 + `px`;
 
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();

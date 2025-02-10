@@ -456,6 +456,7 @@ select {
 }
 
 button {
+  backdrop-filter: blur(6px);
   cursor: pointer;
 }
 
@@ -469,6 +470,22 @@ button:active {
 
 .btn:hover {
   opacity: 0.75;
+}
+
+.corner-float {
+  bottom: 80px;
+  right: 20px;
+  position: absolute;
+  padding: 2.5px 12.5px;
+  font-size: 30px;
+  transform: scale(0);
+  transition-property: transform;
+  transition-duration: 0.5s;
+  transition-timing-function: cubic-bezier();
+}
+
+.corner-float.visible {
+  transform: scale(1);
 }
 
 .divider {
