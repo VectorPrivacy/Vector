@@ -466,7 +466,7 @@ button {
 }
 
 button:active {
-  background-color: #0f0f0f69;
+  opacity: 0.75;
 }
 
 .btn {
