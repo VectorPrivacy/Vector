@@ -939,7 +939,12 @@ function renderMessage(msg, sender) {
     pMessage.appendChild(spanMessage);
 
     // Append attachments
-    if (msg.attachments.length) pMessage.classList.add('no-background');
+    if (msg.attachments.length) {
+        // Float the content depending on who's it is
+        pMessage.style.float = msg.mine ? 'right' : 'left';
+        // Remove any message bubbles
+        pMessage.classList.add('no-background');
+    }
     for (const cAttachment of msg.attachments) {
         if (cAttachment.downloaded) {
             // Convert the absolute file path to a Tauri asset
@@ -949,7 +954,7 @@ function renderMessage(msg, sender) {
             if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                 // Images
                 const imgPreview = document.createElement('img');
-                imgPreview.style.width = `75%`;
+                imgPreview.style.width = `100%`;
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `0`;
                 imgPreview.src = assetUrl;
@@ -958,7 +963,8 @@ function renderMessage(msg, sender) {
                 // Videos
                 const vidPreview = document.createElement('video');
                 vidPreview.setAttribute('controlsList', 'nodownload');
-                vidPreview.style.width = `75%`;
+                vidPreview.setAttribute("controls", "controls");
+                vidPreview.style.width = `100%`;
                 vidPreview.style.height = `auto`;
                 vidPreview.style.borderRadius = `0`;
                 vidPreview.style.cursor = `pointer`;
@@ -966,12 +972,6 @@ function renderMessage(msg, sender) {
                 vidPreview.preload = true;
                 vidPreview.playsInline = true;
                 vidPreview.src = assetUrl;
-                vidPreview.onclick = () => {
-                    if (vidPreview.paused)
-                        vidPreview.play();
-                    else
-                        vidPreview.pause();
-                }
                 pMessage.appendChild(vidPreview);
             } else {
                 // Unknown attachment
