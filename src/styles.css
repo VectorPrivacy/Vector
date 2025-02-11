@@ -175,7 +175,7 @@ body {
 }
 
 #chat-new {
-  padding: 5px;
+  padding: 30px;
 }
 
 .chats {
@@ -457,7 +457,7 @@ button {
 
 select {
   width: 150px;
-  font-size: 150px;
+  font-size: large;
 }
 
 button {
