@@ -77,6 +77,13 @@ struct Attachment {
     downloaded: bool,
 }
 
+/// A simple pre-upload format to associate a byte stream with a file extension
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct AttachmentFile {
+    bytes: Vec<u8>,
+    extension: String,
+}
+
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 struct Reaction {
     id: String,
@@ -281,19 +288,7 @@ async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
 }
 
 #[tauri::command]
-async fn message(receiver: String, content: String, replied_to: String, file_path: String) -> Result<bool, String> {
-    // If there's a file attached, build it's attachment
-    let mut attachments: Vec<Attachment> = Vec::new();
-    if !file_path.is_empty() {
-        let ext = file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase();
-        attachments.push(Attachment {
-            id: String::new(),
-            extension: ext.to_string(),
-            path: file_path.clone(),
-            downloaded: true
-        });
-    }
-
+async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<bool, String> {
     // Immediately add the message to our state as "Pending", we'll update it as either Sent (non-pending) or Failed in the future
     let pending_count = STATE
         .lock()
@@ -313,7 +308,7 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
-        attachments: attachments.clone(),
+        attachments: Vec::new(),
         reactions: Vec::new(),
         pending: true,
         failed: false,
@@ -334,19 +329,19 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
     let receiver_pubkey = PublicKey::from_bech32(receiver.clone().as_str()).unwrap();
 
     // Prepare the NIP-17 rumor
-    let mut rumor = if attachments.is_empty() {
+    let mut rumor = if file.is_none() {
         // Text Message
         EventBuilder::private_msg_rumor(receiver_pubkey, content.clone())
     } else {
-        // Load the file
-        let file = std::fs::read(file_path.as_str()).unwrap();
+        let attached_file = file.unwrap();
 
         // Encrypt the attachment
         let params = generate_encryption_params();
-        let enc_file = encrypt_data(file.as_slice(), &params).unwrap();
+        let enc_file = encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
 
         // Update the attachment in-state
         {
+            // Retrieve the Pending Message
             let mut state = STATE.lock().await;
             let chat = state
                         .profiles
@@ -354,23 +349,24 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
                         .find(|chat| chat.id == receiver)
                         .unwrap();
             let message = chat.get_message_mut(pending_id.clone()).unwrap();
-            let msg_attachment: &mut Attachment = message.attachments.iter_mut().nth(0).unwrap();
 
             // Store the nonce-based file name on-disk for future reference
             let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
-            let nonce_file_path = dir.join(format!("{}.{}", params.nonce.clone(), msg_attachment.extension.clone()));
+            let nonce_file_path = dir.join(format!("{}.{}", params.nonce.clone(), attached_file.extension.clone()));
 
             // Create the vector directory if it doesn't exist
             std::fs::create_dir_all(&dir).unwrap();
 
             // Save the nonce-named file
-            std::fs::write(&nonce_file_path, &file).unwrap();
+            std::fs::write(&nonce_file_path, &attached_file.bytes).unwrap();
 
-            // Update ID
-            msg_attachment.id = params.nonce.clone();
-
-            // Update file path
-            msg_attachment.path = nonce_file_path.to_string_lossy().to_string();
+            // Add the Attachment in-state (with our local path, to prevent re-downloading it accidentally from server)
+            message.attachments.push(Attachment {
+                id: params.nonce.clone(),
+                extension: attached_file.extension.clone(),
+                path: nonce_file_path.to_string_lossy().to_string(),
+                downloaded: true
+            });
 
             // Update the frontend
             app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
@@ -380,7 +376,7 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
         match get_server_config(Url::parse(TRUSTED_PRIVATE_NIP96).unwrap(), None).await {
             Ok(conf) => {
                 // Format a Mime Type from the file extension
-                let mime_type = match file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+                let mime_type = match attached_file.extension.to_lowercase().as_str() {
                     // Images
                     "png" => "image/png",
                     "jpg" | "jpeg" => "image/jpeg",
@@ -508,37 +504,36 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
 }
 
 #[tauri::command]
-async fn paste_message(receiver: String, replied_to: String, file: Vec<u8>, mime_type: String) -> Result<bool, String> {
-    // TODO: revamp the entire way we send files... the current method is clunky and highly limiting, hence this workaround
+async fn paste_message(receiver: String, replied_to: String, bytes: Vec<u8>, mime_type: String) -> Result<bool, String> {
     // Figure out the file extension from the mime-type
-    let extension = match mime_type.split('/').nth(1) {
-        Some("png") => "png",
-        Some("jpeg") => "jpg",
-        Some("jpg") => "jpg",
-        Some("gif") => "gif",
-        Some("webp") => "webp",
-        _ => return Err(String::from("Unsupported File Type!"))
+    let ext = mime_type.split('/').nth(1).unwrap_or("");
+
+    // Generate an Attachment File
+    let attachment_file = AttachmentFile {
+        bytes,
+        extension: ext.to_string()
     };
 
-    // Check if the file exists on our system already
-    let app_handle = TAURI_APP.get().unwrap();
-    let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
-    let file_path = dir.join(format!("tmp.{}", extension));
+    // Message the file to the intended user
+    message(receiver, String::new(), replied_to, Some(attachment_file)).await
+}
 
-    // Create the vector directory if it doesn't exist
-    std::fs::create_dir_all(&dir).unwrap();
+#[tauri::command]
+async fn file_message(receiver: String, replied_to: String, file_path: String) -> Result<bool, String> {
+    // Parse the file extension
+    let ext = file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase();
 
-    // Temp save the file to disk
-    std::fs::write(&file_path, &file).unwrap();
+    // Load the file
+    let bytes = std::fs::read(file_path.as_str()).unwrap();
+
+    // Generate an Attachment File
+    let attachment_file = AttachmentFile {
+        bytes,
+        extension: ext.to_string()
+    };
 
     // Message the file to the intended user
-    let msg_res = message(receiver, String::new(), replied_to, file_path.to_string_lossy().to_string()).await;
-
-    // Nuke the temporary save
-    std::fs::remove_file(file_path).unwrap();
-
-    // Return the message result
-    msg_res
+    message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
 #[tauri::command]
@@ -1486,6 +1481,7 @@ pub fn run() {
             fetch_messages,
             message,
             paste_message,
+            file_message,
             react,
             login,
             notifs,

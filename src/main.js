@@ -456,21 +456,22 @@ function renderContact(chat) {
  * @param {string} pubkey - The user's pubkey
  * @param {string} content - The content of the message
  * @param {string?} replied_to - The reference of the message, if any
- * @param {string?} file_path - The file to upload, if any
  */
-async function message(pubkey, content, replied_to, file_path) {
-    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to, filePath: file_path });
+async function message(pubkey, content, replied_to) {
+    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
 }
 
 /**
- * Send a file via NIP-96 server to the current chat
+ * Send a file via NIP-96 server to a Nostr user
+ * @param {string} pubkey - The user's pubkey
+ * @param {string?} replied_to - The reference of the message, if any
  * @param {string} filepath - The absolute file path
  */
-async function sendFile(filepath) {
+async function sendFile(pubkey, replied_to, filepath) {
     domChatMessageInput.setAttribute('placeholder', 'Uploading...');
     try {
         // Send the attachment file
-        await message(strOpenChat, "", strCurrentReplyReference, filepath);
+        await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
     } catch (e) {
         // Notify of an attachment send failure
         popupConfirm(e, '', true);
@@ -1213,7 +1214,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatMessageInputFile.onclick = async () => {
         let filepath = await selectFile();
         if (filepath) {
-            await sendFile(filepath);
+            await sendFile(strOpenChat, strCurrentReplyReference, filepath);
         }
     };
 
@@ -1225,9 +1226,6 @@ window.addEventListener("DOMContentLoaded", async () => {
                 if (item.type.startsWith('image/')) {
                     const blob = item.getAsFile();
                     if (blob) {
-                        const arrayBuffer = await blob.arrayBuffer();
-                        const uint8Array = new Uint8Array(arrayBuffer);
-
                         // Placeholder
                         domChatMessageInput.value = '';
                         domChatMessageInput.setAttribute('placeholder', 'Sending...');
@@ -1236,7 +1234,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                         await invoke('paste_message', {
                             receiver: strOpenChat,
                             repliedTo: strCurrentReplyReference,
-                            file: Array.from(uint8Array),
+                            // Convert our File Blob to a plain byte array that Tauri can handle
+                            bytes: [...new Uint8Array(await blob.arrayBuffer())],
                             mimeType: item.type
                         });
 
@@ -1285,7 +1284,7 @@ window.addEventListener("DOMContentLoaded", async () => {
             if (event.payload.type === 'over') {
                 // TODO: add hover effects
             } else if (event.payload.type === 'drop') {
-                await sendFile(event.payload.paths[0]);
+                await sendFile(strOpenChat, strCurrentReplyReference, event.payload.paths[0]);
             } else {
                 // TODO: remove hover effects
             }
