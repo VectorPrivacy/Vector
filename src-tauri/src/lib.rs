@@ -25,10 +25,15 @@ use tauri_plugin_fs::FsExt;
 /// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
 static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
 
-/// # Trusted NIP-96 Server
+/// # Trusted Public NIP-96 Server
 ///
-/// A temporary hardcoded NIP-96 server, handling file uploads
-static TRUSTED_NIP96: &str = "https://nostr.build";
+/// A temporary hardcoded NIP-96 server, handling file uploads for public files (Avatars, etc)
+static TRUSTED_PUBLIC_NIP96: &str = "https://nostr.build";
+
+/// # Trusted Private NIP-96 Server
+///
+/// A temporary hardcoded NIP-96 server, handling file uploads for encrypted files (in-chat)
+static TRUSTED_PRIVATE_NIP96: &str = "https://medea-small.jskitty.cat";
 
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
@@ -372,7 +377,7 @@ async fn message(receiver: String, content: String, replied_to: String, file_pat
         }
 
         // Upload the attachment
-        match get_server_config(Url::parse("https://medea-small.jskitty.cat").unwrap(), None).await {
+        match get_server_config(Url::parse(TRUSTED_PRIVATE_NIP96).unwrap(), None).await {
             Ok(conf) => {
                 // Format a Mime Type from the file extension
                 let mime_type = match file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
@@ -782,7 +787,7 @@ async fn upload_avatar(filepath: String) -> Result<String, String> {
     return match app_handle.fs().read(std::path::Path::new(&filepath)) {
         Ok(file) => {
             // Get our NIP-96 server config
-            return match get_server_config(Url::parse(TRUSTED_NIP96).unwrap(), None).await {
+            return match get_server_config(Url::parse(TRUSTED_PUBLIC_NIP96).unwrap(), None).await {
                 Ok(conf) => {
                     // Format a Mime Type from the file extension
                     let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
