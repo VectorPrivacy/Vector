@@ -29,7 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "SocialNetworking",
     "macOS": {
+      "entitlements": "./Entitlements.plist",
       "dmg": {
 				"background": "./assets/dmg_background.png",
 				"windowSize": {
