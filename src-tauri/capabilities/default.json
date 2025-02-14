@@ -11,6 +11,8 @@
     "notification:default",
     "store:default",
     "dialog:default",
-    "fs:default"
+    "fs:default",
+    "clipboard-manager:default",
+    "clipboard-manager:allow-read-image"
   ]
 }

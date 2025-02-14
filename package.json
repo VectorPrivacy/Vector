@@ -10,6 +10,7 @@
     "@tauri-apps/cli": "^2"
   },
   "dependencies": {
+    "@tauri-apps/plugin-clipboard-manager": "^2.2.1",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-fs": "^2.2.0",
     "@tauri-apps/plugin-store": "^2.2.0"

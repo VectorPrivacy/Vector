@@ -13,7 +13,7 @@ use aes_gcm::{
     AesGcm,
 };
 use generic_array::{GenericArray, typenum::U16};
-
+use ::image::{ImageEncoder, codecs::png::PngEncoder, ExtendedColorType::Rgba8};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
@@ -504,14 +504,23 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
 }
 
 #[tauri::command]
-async fn paste_message(receiver: String, replied_to: String, bytes: Vec<u8>, mime_type: String) -> Result<bool, String> {
-    // Figure out the file extension from the mime-type
-    let ext = mime_type.split('/').nth(1).unwrap_or("");
+async fn paste_message(receiver: String, replied_to: String, pixels: Vec<u8>, width: u32, height: u32) -> Result<bool, String> {
+    // Create the encoder directly with a Vec<u8>
+    let mut png_data = Vec::new();
+    let encoder = PngEncoder::new(&mut png_data);
+
+    // Encode directly from pixels to PNG bytes
+    encoder.write_image(
+        &pixels,            // raw pixels
+        width,              // width
+        height,             // height
+        Rgba8               // color type
+    ).map_err(|e| e.to_string()).unwrap();
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes,
-        extension: ext.to_string()
+        bytes: png_data,
+        extension: String::from("png")
     };
 
     // Message the file to the intended user
@@ -1445,6 +1454,7 @@ async fn decrypt(ciphertext: String, password: String) -> Result<String, ()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

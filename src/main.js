@@ -2,6 +2,7 @@ const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { listen } = window.__TAURI__.event;
+const { readImage } = window.__TAURI__.clipboardManager;
 
 const domVersion = document.getElementById('version');
 
@@ -1224,19 +1225,23 @@ window.addEventListener("DOMContentLoaded", async () => {
             for (const item of evt.clipboardData.items) {
                 // Check if the pasted content is an image
                 if (item.type.startsWith('image/')) {
-                    const blob = item.getAsFile();
+                    const blob = await readImage();
                     if (blob) {
                         // Placeholder
                         domChatMessageInput.value = '';
                         domChatMessageInput.setAttribute('placeholder', 'Sending...');
 
+                        // Convert Tauri Clipboard blob to image components
+                        const rgba = await blob.rgba();
+                        const size = await blob.size();
+
                         // Send raw bytes to Rust
                         await invoke('paste_message', {
                             receiver: strOpenChat,
                             repliedTo: strCurrentReplyReference,
-                            // Convert our File Blob to a plain byte array that Tauri can handle
-                            bytes: [...new Uint8Array(await blob.arrayBuffer())],
-                            mimeType: item.type
+                            pixels: rgba,
+                            width: size.width,
+                            height: size.height
                         });
 
                         // Reset placeholder
