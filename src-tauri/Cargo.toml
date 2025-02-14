@@ -39,3 +39,5 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2.2.1"
 image = { version = "0.25.5", default-features = false, features = ["png"] }
+cpal = "0.15"
+hound = "3.5"

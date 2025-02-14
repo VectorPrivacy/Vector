@@ -18,6 +18,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
 
+mod voice;
+use voice::AudioRecorder;
+
 /// # Trusted Relay
 ///
 /// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
@@ -382,6 +385,9 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     "jpg" | "jpeg" => "image/jpeg",
                     "gif" => "image/gif",
                     "webp" => "image/webp",
+                    // Audio
+                    "wav" => "audio/wav",
+                    "mp3" => "audio/mp3",
                     // Videos
                     "mp4" => "video/mp4",
                     "webm" => "video/webm",
@@ -521,6 +527,18 @@ async fn paste_message(receiver: String, replied_to: String, pixels: Vec<u8>, wi
     let attachment_file = AttachmentFile {
         bytes: png_data,
         extension: String::from("png")
+    };
+
+    // Message the file to the intended user
+    message(receiver, String::new(), replied_to, Some(attachment_file)).await
+}
+
+#[tauri::command]
+async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<bool, String> {
+    // Generate an Attachment File
+    let attachment_file = AttachmentFile {
+        bytes,
+        extension: String::from("wav")
     };
 
     // Message the file to the intended user
@@ -1006,6 +1024,11 @@ async fn handle_event(event: Event, is_new: bool) {
                     Some("jpg") => "jpg",
                     Some("gif") => "gif",
                     Some("webp") => "webp",
+                    // Audio
+                    Some("wav") => "wav",
+                    Some("x-wav") => "wav",
+                    Some("wave") => "wav",
+                    Some("mp3") => "mp3",
                     // Videos
                     Some("mp4") => "mp4",
                     Some("webm") => "webm",
@@ -1451,6 +1474,16 @@ async fn decrypt(ciphertext: String, password: String) -> Result<String, ()> {
     }
 }
 
+#[tauri::command]
+async fn start_recording() -> Result<(), String> {
+    AudioRecorder::global().start()
+}
+
+#[tauri::command]
+async fn stop_recording() -> Result<Vec<u8>, String> {
+    AudioRecorder::global().stop()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1491,6 +1524,7 @@ pub fn run() {
             fetch_messages,
             message,
             paste_message,
+            voice_message,
             file_message,
             react,
             login,
@@ -1502,7 +1536,9 @@ pub fn run() {
             start_typing,
             connect,
             encrypt,
-            decrypt
+            decrypt,
+            start_recording,
+            stop_recording
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

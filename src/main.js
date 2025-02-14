@@ -37,6 +37,7 @@ const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
+const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
@@ -961,17 +962,23 @@ function renderMessage(msg, sender) {
                 imgPreview.style.borderRadius = `0`;
                 imgPreview.src = assetUrl;
                 pMessage.appendChild(imgPreview);
+            } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
+                // Audio
+                const audPreview = document.createElement('audio');
+                audPreview.controls = true;
+                audPreview.preload = 'metadata';
+                audPreview.src = assetUrl;
+                pMessage.appendChild(audPreview);
             } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
                 // Videos
                 const vidPreview = document.createElement('video');
                 vidPreview.setAttribute('controlsList', 'nodownload');
-                vidPreview.setAttribute("controls", "controls");
+                vidPreview.controls = true;
                 vidPreview.style.width = `100%`;
                 vidPreview.style.height = `auto`;
                 vidPreview.style.borderRadius = `0`;
                 vidPreview.style.cursor = `pointer`;
-                vidPreview.loop = true;
-                vidPreview.preload = true;
+                vidPreview.preload = "metadata";
                 vidPreview.playsInline = true;
                 vidPreview.src = assetUrl;
                 pMessage.appendChild(vidPreview);
@@ -1293,6 +1300,54 @@ window.addEventListener("DOMContentLoaded", async () => {
             } else {
                 // TODO: remove hover effects
             }
+        }
+    });
+
+    // Initialize
+    const recorder = new VoiceRecorder(domChatMessageInputVoice);
+
+    // Example: Playing the recorded WAV
+    recorder.button.addEventListener('click', async () => {
+        if (recorder.isRecording) {
+            // Stop the recording and retrieve our WAV data
+            const wavData = await recorder.stop();
+
+            // Unhide our messaging UI
+            domChatMessageInputFile.style.display = '';
+            domChatMessageInput.style.display = '';
+            domChatMessageInputEmoji.style.display = '';
+            if (wavData) {
+                // Placeholder
+                domChatMessageInput.value = '';
+                domChatMessageInput.setAttribute('placeholder', 'Sending...');
+
+                // Send raw bytes to Rust, if the chat is still open
+                // Note: since the user could, for some reason, close the chat while recording - we need to check that it's still open
+                if (strOpenChat) {
+                    try {
+                        await invoke('voice_message', {
+                            receiver: strOpenChat,
+                            repliedTo: strCurrentReplyReference,
+                            bytes: wavData
+                        });
+                    } catch (e) {
+                        // Notify of an attachment send failure
+                        popupConfirm(e, '', true);
+                    }
+
+                    // Reset placeholder
+                    cancelReply();
+                    nLastTypingIndicator = 0;
+                }
+            }
+        } else {
+            // Hide our messaging UI
+            domChatMessageInputFile.style.display = 'none';
+            domChatMessageInput.style.display = 'none';
+            domChatMessageInputEmoji.style.display = 'none';
+
+            // Start recording
+            await recorder.start();
         }
     });
 });
