@@ -1133,6 +1133,19 @@ function openNewChat() {
  * Closes the current chat, taking the user back to the chat list
  */
 function closeChat() {
+    // Attempt to completely release memory (force garbage collection...) of in-chat media
+    for (const domChild of domChatMessages.querySelectorAll('img, audio, video')) {
+        // For streamable media (audio, video); we ensure they're fully unloaded
+        if (domChild instanceof HTMLMediaElement) {
+            domChild.pause();
+            domChild.src = ``;
+            domChild.load();
+        }
+
+        // Now we explicitly drop them
+        domChild.remove();
+    }
+
     // Reset the chat UI
     domChatMessages.innerHTML = ``;
     domChats.style.display = '';
