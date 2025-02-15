@@ -1134,12 +1134,23 @@ function openNewChat() {
  */
 function closeChat() {
     // Attempt to completely release memory (force garbage collection...) of in-chat media
-    for (const domChild of domChatMessages.querySelectorAll('img, audio, video')) {
+    for (const domChild of domChatMessages.children) {
+        // For clickable elements (message shortcuts); we remove all event listeners
+        const domClickables = domChild?.querySelector(`.msg-extras`)?.children;
+        if (domClickables) {
+            for (const domClickable of domClickables) {
+                domClickable.onclick = null;
+            }
+        }
+
         // For streamable media (audio, video); we ensure they're fully unloaded
-        if (domChild instanceof HTMLMediaElement) {
-            domChild.pause();
-            domChild.src = ``;
-            domChild.load();
+        const domMedias = domChild?.querySelectorAll('img, audio, video');
+        for (const domMedia of domMedias) {
+            if (domMedia instanceof HTMLMediaElement) {
+                domMedia.pause();
+                domMedia.src = ``;
+                domMedia.load();
+            }
         }
 
         // Now we explicitly drop them
