@@ -965,6 +965,7 @@ function renderMessage(msg, sender) {
             } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
                 // Audio
                 const audPreview = document.createElement('audio');
+                audPreview.setAttribute('controlsList', 'nodownload');
                 audPreview.controls = true;
                 audPreview.preload = 'metadata';
                 audPreview.src = assetUrl;
