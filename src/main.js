@@ -1328,10 +1328,8 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     });
 
-    // Initialize
+    // Hook up our voice message recorder listener
     const recorder = new VoiceRecorder(domChatMessageInputVoice);
-
-    // Example: Playing the recorded WAV
     recorder.button.addEventListener('click', async () => {
         if (recorder.isRecording) {
             // Stop the recording and retrieve our WAV data
