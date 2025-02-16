@@ -22,7 +22,7 @@ impl AudioRecorder {
         AudioRecorder {
             recording: Arc::new(AtomicBool::new(false)),
             samples: Arc::new(Mutex::new(Vec::new())),
-            sample_rate: Arc::new(Mutex::new(16000)),
+            sample_rate: Arc::new(Mutex::new(12000)),
             stop_tx: Arc::new(Mutex::new(None)),
         }
     }
