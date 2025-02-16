@@ -1135,13 +1135,18 @@ function closeChat() {
             }
         }
 
-        // For streamable media (audio, video); we ensure they're fully unloaded
+        // For media (images, audio, video); we ensure they're fully unloaded
         const domMedias = domChild?.querySelectorAll('img, audio, video');
         for (const domMedia of domMedias) {
+            // Streamable media (audio + video) should be paused, then force-unloaded
             if (domMedia instanceof HTMLMediaElement) {
                 domMedia.pause();
                 domMedia.src = ``;
                 domMedia.load();
+            }
+            // Static media (images) should simply be unloaded
+            if (domMedia instanceof HTMLImageElement) {
+                domMedia.src = ``;
             }
         }
 
