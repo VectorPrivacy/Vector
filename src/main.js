@@ -818,9 +818,9 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 
                 // Render the time contextually
                 if (isToday(messageDate)) {
-                    pTimestamp.textContent = messageDate.toLocaleTimeString();
+                    pTimestamp.textContent = messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
                 } else if (isYesterday(messageDate)) {
-                    pTimestamp.textContent = `Yesterday, ${messageDate.toLocaleTimeString()}`;
+                    pTimestamp.textContent = `Yesterday, ${messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}`;
                 } else {
                     pTimestamp.textContent = messageDate.toLocaleString();
                 }
