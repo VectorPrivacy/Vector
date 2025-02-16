@@ -474,6 +474,10 @@ button:active {
   opacity: 0.75;
 }
 
+audio {
+  width: 200px;
+}
+
 .btn {
   cursor: pointer;
 }
