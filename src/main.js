@@ -960,6 +960,11 @@ function renderMessage(msg, sender) {
                 audPreview.controls = true;
                 audPreview.preload = 'metadata';
                 audPreview.src = assetUrl;
+                // When the metadata loads, we run some maintenance tasks
+                audPreview.addEventListener('loadedmetadata', () => {
+                    // Auto-scroll to correct against the longer container
+                    scrollToBottom(domChatMessages, false);
+                }, { once: true });
                 pMessage.appendChild(audPreview);
             } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
                 // Videos
@@ -973,6 +978,13 @@ function renderMessage(msg, sender) {
                 vidPreview.preload = "metadata";
                 vidPreview.playsInline = true;
                 vidPreview.src = assetUrl;
+                // When the metadata loads, we run some maintenance tasks
+                vidPreview.addEventListener('loadedmetadata', () => {
+                    // Seek a tiny amount to force the frame 'poster' to load, without loading the entire video
+                    vidPreview.currentTime = 0.1;
+                    // Auto-scroll to correct against the longer container
+                    scrollToBottom(domChatMessages, false);
+                }, { once: true });
                 pMessage.appendChild(vidPreview);
             } else {
                 // Unknown attachment
