@@ -49,6 +49,21 @@
   border-left: solid rgb(215, 215, 215) 2px;
 }
 
+@keyframes highlightMessage {
+  0% {
+      box-shadow: 0 0 0 0 rgba(90, 252, 180, 0);
+  }
+  20% {
+      box-shadow: 0 0 8px 2px rgba(90, 252, 180, 0.5);
+  }
+  80% {
+      box-shadow: 0 0 8px 2px rgba(90, 252, 180, 0.5);
+  }
+  100% {
+      box-shadow: 0 0 0 0 rgba(90, 252, 180, 0);
+  }
+}
+
 .emoji-picker {
   background: #5afcb433;
   border-color: #5afcb400;

@@ -896,14 +896,14 @@ function renderMessage(msg, sender) {
         const cMsg = sender.messages.find(m => m.id === msg.replied_to);
         if (cMsg) {
             // Render the reply in a quote-like fashion
-            // TODO: add ability to click it for a shortcut
             const spanRef = document.createElement('span');
-            spanRef.classList.add('msg-reply');
+            spanRef.classList.add('msg-reply', 'btn');
+            spanRef.id = `r-${cMsg.id}`;
 
             // Figure out the reply context
             if (cMsg.content) {
                 // Reply to Text Message
-                spanRef.textContent = cMsg.content.length < 100 ? cMsg.content : cMsg.content.substring(0, 100) + '…';
+                spanRef.textContent = cMsg.content.length < 75 ? cMsg.content : cMsg.content.substring(0, 75) + '…';
                 pMessage.appendChild(spanRef);
             } else if (cMsg.attachments.length) {
                 // Reply to Attachment
@@ -1372,6 +1372,17 @@ document.addEventListener('click', (e) => {
 
     // If we're clicking a Reply button, begin a reply
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
+
+    // If we're clicking a Reply context, center the referenced message in view
+    if (e.target.classList.contains('msg-reply')) {
+        // Note: The `substring(2)` removes the `r-` prefix
+        const domMsg = document.getElementById(e.target.id.substring(2));
+        centerInView(domMsg);
+
+        // Run an animation to bring the user's eye to the message
+        domMsg.classList.add('highlight-animation');
+        return setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+    }
 
     // If we're clicking a Contact, open the chat with the embedded npub (ID)
     if (e.target.classList.contains("chatlist-contact")) return openChat(e.target.id);

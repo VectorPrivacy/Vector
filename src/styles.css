@@ -282,6 +282,11 @@ body {
   margin-bottom: 5px;
 }
 
+/* The `highlightMessage` animation is defined in `/themes/*` */
+.highlight-animation p {
+  animation: highlightMessage 1.5s ease-out forwards;
+}
+
 .emoji-only {
   /* Typically I recommend against !important, but this is the only style in `msg-*` we're force-overriding */
   background: none !important;

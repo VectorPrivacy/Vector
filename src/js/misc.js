@@ -187,6 +187,27 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
     };
 }
 
+/**
+ * Smoothly scrolls an Element into the center of its container view.
+ * 
+ * @param {HTMLElement} targetMessage - The element to center in view
+ */
+function centerInView(targetMessage) {
+    // Get the container and the target message
+    const container = targetMessage.parentElement;
+
+    // Get the container's height
+    const containerHeight = container.clientHeight;
+
+    // Calculate the scroll position needed to center the message
+    const scrollPosition = targetMessage.offsetTop - (containerHeight / 2) + (targetMessage.offsetHeight / 2);
+
+    // Smooth scroll to the calculated position
+    container.scrollTo({
+        top: scrollPosition,
+        behavior: 'smooth'
+    });
+}
 
 function setAsyncInterval(callback, interval) {
     let timer = null;
