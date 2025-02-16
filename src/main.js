@@ -855,9 +855,6 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         domChatContactStatus.textContent = '';
         domChatContact.classList.add('chat-contact');
         domChatContact.classList.remove('chat-contact-with-status');
-
-        // Nuke the message list
-        domChatMessages.innerHTML = ``;
     }
 
     adjustSize();
