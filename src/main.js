@@ -396,11 +396,10 @@ function renderChatlist() {
 }
 
 function renderContact(chat) {
-    // The Contact container
+    // The Contact container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
     divContact.classList.add('chatlist-contact');
-    divContact.onclick = () => { openChat(chat.id) };
-    divContact.id = `chatlist-${chat.id}`;
+    divContact.id = chat.id;
 
     // The Username + Message Preview container
     const divPreviewContainer = document.createElement('div');
@@ -441,6 +440,8 @@ function renderContact(chat) {
     divPreviewContainer.appendChild(pChatPreview);
 
     // Add the Chat Preview to the contact UI
+    // Note: as a hacky trick to make `divContact` receive all clicks, we set the z-index lower on it's children
+    divPreviewContainer.style.zIndex = `-1`;
     divContact.appendChild(divPreviewContainer);
 
     return divContact;
@@ -1126,14 +1127,8 @@ function openNewChat() {
  */
 function closeChat() {
     // Attempt to completely release memory (force garbage collection...) of in-chat media
-    for (const domChild of domChatMessages.children) {
-        // For clickable elements (message shortcuts); we remove all event listeners
-        const domClickables = domChild?.querySelector(`.msg-extras`)?.children;
-        if (domClickables) {
-            for (const domClickable of domClickables) {
-                domClickable.onclick = null;
-            }
-        }
+    while (domChatMessages.firstElementChild) {
+        const domChild = domChatMessages.firstElementChild;
 
         // For media (images, audio, video); we ensure they're fully unloaded
         const domMedias = domChild?.querySelectorAll('img, audio, video');
@@ -1155,7 +1150,6 @@ function closeChat() {
     }
 
     // Reset the chat UI
-    domChatMessages.innerHTML = ``;
     domChats.style.display = '';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
@@ -1381,6 +1375,9 @@ document.addEventListener('click', (e) => {
 
     // If we're clicking a Reply button, begin a reply
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
+
+    // If we're clicking a Contact, open the chat with the embedded npub (ID)
+    if (e.target.classList.contains("chatlist-contact")) return openChat(e.target.id);
 
     // Run the emoji panel open/close logic
     openEmojiPanel(e);
