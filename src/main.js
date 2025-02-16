@@ -141,13 +141,6 @@ function openEmojiPanel(e) {
     }
 }
 
-// Listen for Emoji Picker interactions
-document.addEventListener('click', (e) => {
-    // If we're clicking the emoji search, don't close it!
-    if (e.target === emojiSearch) return;
-    openEmojiPanel(e);
-});
-
 // Listen for emoji searches
 emojiSearch.addEventListener('input', (e) => {
     // Search for the requested emojis and render them, if it's empty, just use our favorites
@@ -1047,7 +1040,6 @@ function renderMessage(msg, sender) {
         if (!fReplying) {
             const spanReply = document.createElement('span');
             spanReply.classList.add('reply-btn', 'hideable');
-            spanReply.onclick = selectReplyingMessage;
             spanReply.textContent = `R`;
             divExtras.append(spanReply);
         }
@@ -1375,6 +1367,18 @@ window.addEventListener("DOMContentLoaded", async () => {
             await recorder.start();
         }
     });
+});
+
+// Listen for app-wide click interations
+document.addEventListener('click', (e) => {
+    // If we're clicking the emoji search, don't close it!
+    if (e.target === emojiSearch) return;
+
+    // If we're clicking a Reply button, begin a reply
+    if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
+
+    // Run the emoji panel open/close logic
+    openEmojiPanel(e);
 });
 
 /**
