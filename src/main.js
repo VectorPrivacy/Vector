@@ -1166,7 +1166,9 @@ function closeChat() {
     strOpenChat = "";
     nLastTypingIndicator = 0;
 
-    // Cancel any ongoing replies
+    // Cancel any ongoing replies or selections
+    strCurrentReactionReference = "";
+    strCurrentReplyReference = "";
     cancelReply();
 
     // Ensure the chat list re-adjusts to fit
