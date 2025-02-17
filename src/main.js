@@ -612,8 +612,11 @@ async function login() {
         // Finished boot!
         fInit = false;
 
-        // Render the chatlist
+        // Render the chatlist with an intro animation
+        domChatList.classList.add('intro-anim');
         renderChatlist();
+        setTimeout(() => domChatList.classList.remove('intro-anim'), 2000);
+        domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true })
 
         // Append a "Start New Chat" button
         const btnStartChat = document.createElement('button');

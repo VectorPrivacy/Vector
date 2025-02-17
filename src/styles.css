@@ -89,6 +89,15 @@ body {
   margin: 5px;
 }
 
+.intro-anim {
+  animation: Intro 2s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes Intro {
+  0% { opacity: 0; transform: translateY(50px); }
+  100% { opacity: inherit; transform: translateY(0px); }
+}
+
 .account {
   align-items: center;
 }
