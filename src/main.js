@@ -1421,6 +1421,12 @@ function adjustSize() {
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();
     domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+
+    // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
+    const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
+    if (pxFromBottom < 1000) {
+        scrollToBottom(domChatMessages, false);
+    }
 }
 
 window.onresize = adjustSize;
