@@ -564,7 +564,7 @@ async function setupRustListeners() {
             // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
             if (evt.payload.old_id.startsWith('pending')) {
                 strLastMsgID = evt.payload.message.id;
-                domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
+                scrollToBottom(domChatMessages, false);
             }
         }
 
@@ -847,7 +847,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             if (strLastMsgID !== cLastMsg.id || fClicked) {
                 strLastMsgID = cLastMsg.id;
                 adjustSize();
-                domChatMessages.scrollTo(0, domChatMessages.scrollHeight);
+                scrollToBottom(domChatMessages, false);
             }
         }
     } else {
