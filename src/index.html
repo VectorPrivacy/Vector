@@ -29,10 +29,10 @@
     </div>
 
     <main class="container">
-      <button id="settings-btn" class="settings-btn" style="display: none;">⚙</button>
+      <button id="settings-btn" class="settings-btn" style="display: none;"><span class="icon icon-settings"></span></button>
       <!-- The Global emoji picker popup -->
       <div class="emoji-picker" tabindex="-1">
-        <input id="emoji-search-input" placeholder="Search..." style="width: -webkit-fill-available; height: 12px; margin-bottom: 12px;">
+        <input id="emoji-search-input" placeholder="Search...">
         <div id="emoji-results"></div>
       </div>
 
@@ -50,15 +50,15 @@
         <div id="chat-messages" class="chat-messages">
 
         </div>
-        <button id="chat-scroll-return" class="corner-float" style="border-radius: 10px;">⬇︎</button>
+        <button id="chat-scroll-return" class="corner-float" style="border-radius: 100%; height: 45px; width: 45px;"><span class="icon icon-chevron-down"></span></button>
 
         <div class="row" id="chat-box">
-          <div style="width: 95%; align-items: center;" class="row">
-            <button id="chat-input-file" class="emoji-button">📂</button>
-            <button id="chat-input-cancel" class="emoji-button" style="display: none;">✕</button>
+          <div class="row chat-input-container">
+            <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
+            <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
-            <button id="chat-input-emoji" class="emoji-button">☻</button>
-            <button id="chat-input-voice" class="emoji-button">🔉</button>
+            <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>
+            <button id="chat-input-voice"><span class="icon icon-mic-on"></span></button>
           </div>
         </div>
       </div>

@@ -15,7 +15,7 @@ class VoiceRecorder {
         try {
             await invoke('start_recording');
             this.isRecording = true;
-            this.button.textContent = 'Recording 🔊';
+            this.button.innerHTML = '<span class="icon icon-mic-off"></span>';
         } catch (err) {
             console.error(err);
         }
@@ -25,7 +25,7 @@ class VoiceRecorder {
         try {
             const wavData = await invoke('stop_recording');
             this.isRecording = false;
-            this.button.textContent = '🔈';
+            this.button.innerHTML = '<span class="icon icon-mic-on"></span>';
             return new Uint8Array(wavData);
         } catch (err) {
             console.error(err);

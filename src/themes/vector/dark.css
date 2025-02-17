@@ -65,8 +65,9 @@
 }
 
 .emoji-picker {
-  background: #5afcb433;
-  border-color: #5afcb400;
+  background: rgba(11, 41, 28, 0.9);
+  border-width: 1px;
+  border-color: rgba(90, 252, 180, 0.36);
 }
 
 #chat-box {

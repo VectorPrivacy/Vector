@@ -78,7 +78,7 @@ let strCurrentReactionReference = "";
  * @param {MouseEvent?} e - An associated click event
  */
 function openEmojiPanel(e) {
-    const isDefaultPanel = e.target === domChatMessageInputEmoji;
+    const isDefaultPanel = e.target === domChatMessageInputEmoji || domChatMessageInputEmoji.contains(e.target);
 
     // Open or Close the panel depending on it's state
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
@@ -108,8 +108,11 @@ function openEmojiPanel(e) {
         // Compute it's position based on the element calling it (i.e: reactions are a floaty panel)
         const pickerRect = picker.getBoundingClientRect();
         if (isDefaultPanel) {
-            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height}px`
+            // Note: No idea why the 5px extra height is needed, but this prevents the picker from overlapping too much with the chat box
+            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height - 5}px`
             picker.classList.add('emoji-picker-message-type');
+            // Change the emoji button to a wink while the panel is open (removed on close)
+            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
         } else {
             picker.classList.remove('emoji-picker-message-type');
             const fLargeMessage = rect.y < rect.height;
@@ -138,6 +141,9 @@ function openEmojiPanel(e) {
         emojiSearch.value = '';
         picker.style.display = ``;
         strCurrentReactionReference = '';
+
+        // Change the emoji button to the regular face
+        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
     }
 }
 
@@ -218,6 +224,9 @@ emojiSearch.onkeydown = async (e) => {
         picker.style.display = ``;
         strCurrentReactionReference = '';
 
+        // Change the emoji button to the regular face
+        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+
         // Bring the focus back to the chat
         domChatMessageInput.focus();
     } else if (e.code === 'Escape') {
@@ -225,6 +234,9 @@ emojiSearch.onkeydown = async (e) => {
         emojiSearch.value = '';
         picker.style.display = ``;
         strCurrentReactionReference = '';
+
+        // Change the emoji button to the regular face
+        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
 
         // Bring the focus back to the chat
         domChatMessageInput.focus();
@@ -274,6 +286,9 @@ picker.addEventListener('click', (e) => {
         emojiSearch.value = '';
         picker.classList.remove('active');
         strCurrentReactionReference = '';
+
+        // Change the emoji button to the regular face
+        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
 
         // Bring the focus back to the chat
         domChatMessageInput.focus();
@@ -605,9 +620,12 @@ async function login() {
         domLoginEncrypt.style.display = 'none';
         domSettingsBtn.style.display = '';
 
-        // Render our profile
+        // Render our profile with an intro animation
         const cProfile = arrChats.find(p => p.mine);
         renderCurrentProfile(cProfile);
+        const domProfileDivider = document.getElementById('profile-divider');
+        domProfileDivider.classList.add('intro-anim-widen');
+        domProfileDivider.addEventListener('animationend', () => domProfileDivider.classList.remove('intro-anim-widen'), { once: true });
 
         // Finished boot!
         fInit = false;
@@ -615,15 +633,16 @@ async function login() {
         // Render the chatlist with an intro animation
         domChatList.classList.add('intro-anim');
         renderChatlist();
-        setTimeout(() => domChatList.classList.remove('intro-anim'), 2000);
-        domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true })
+        domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
 
         // Append a "Start New Chat" button
         const btnStartChat = document.createElement('button');
         btnStartChat.classList.add('corner-float', 'visible');
         btnStartChat.style.bottom = `15px`;
         btnStartChat.style.borderRadius = `100%`;
-        btnStartChat.textContent = "+";
+        btnStartChat.style.height = `50px`;
+        btnStartChat.style.width = `50px`;
+        btnStartChat.innerHTML = '<span class="icon icon-new-msg"></span>';
         btnStartChat.onclick = openNewChat;
         domChats.appendChild(btnStartChat);
         adjustSize();
@@ -678,6 +697,7 @@ function renderCurrentProfile(cProfile) {
     // Then add a divider to seperate it all visually from the Chatlist
     const divDivider = document.createElement('div');
     divDivider.classList.add('divider');
+    divDivider.id = `profile-divider`;
     domAccount.appendChild(divDivider);
 
     // Render our Share npub
@@ -833,6 +853,8 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             const domMsg = renderMessage(msg, profile);
             if (!cLastMsg || cLastMsg.at < msg.at) {
                 // If the message is newer than the last, append it
+                // Note: if it's an incoming single new message, then we animate it too
+                if (!msg.mine && arrMessages.length === 1) domMsg.classList.add('new-anim');
                 domChatMessages.appendChild(domMsg);
             } else {
                 // Otherwise, these are older messages, prepend them
@@ -1076,7 +1098,8 @@ function selectReplyingMessage(e) {
     }
     // Get the reply ID
     strCurrentReplyReference = e.target.parentElement.parentElement.id;
-    // Display the cancel UI
+    // Hide the File UI and Display the cancel UI
+    domChatMessageInputFile.style.display = 'none';
     domChatMessageInputCancel.style.display = '';
     // Display a replying placeholder
     domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
@@ -1091,6 +1114,7 @@ function selectReplyingMessage(e) {
  */
 function cancelReply() {
     // Reset the message UI
+    domChatMessageInputFile.style.display = '';
     domChatMessageInputCancel.style.display = 'none';
     domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
 
@@ -1341,9 +1365,6 @@ window.addEventListener("DOMContentLoaded", async () => {
             const wavData = await recorder.stop();
 
             // Unhide our messaging UI
-            domChatMessageInputFile.style.display = '';
-            domChatMessageInput.style.display = '';
-            domChatMessageInputEmoji.style.display = '';
             if (wavData) {
                 // Placeholder
                 domChatMessageInput.value = '';
@@ -1369,10 +1390,9 @@ window.addEventListener("DOMContentLoaded", async () => {
                 }
             }
         } else {
-            // Hide our messaging UI
-            domChatMessageInputFile.style.display = 'none';
-            domChatMessageInput.style.display = 'none';
-            domChatMessageInputEmoji.style.display = 'none';
+            // Display our recording status
+            domChatMessageInput.value = '';
+            domChatMessageInput.setAttribute('placeholder', 'Recording...');
 
             // Start recording
             await recorder.start();

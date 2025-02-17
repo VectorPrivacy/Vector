@@ -12,6 +12,57 @@
   font-style: italic;
 }
 
+.icon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: white;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  width: 65%;
+  height: 65%;
+  margin: auto;
+}
+
+.icon-new-msg {
+  mask-image: url("./icons/new-chat.svg");
+}
+
+.icon-add-file {
+  mask-image: url("./icons/add-file.svg");
+}
+
+.icon-mic-on {
+  mask-image: url("./icons/mic-on.svg");
+}
+
+.icon-mic-off {
+  mask-image: url("./icons/mic-off.svg");
+}
+
+.icon-smile-face {
+  mask-image: url("./icons/smile-face.svg");
+}
+
+.icon-wink-face {
+  mask-image: url("./icons/wink-face.svg");
+}
+
+.icon-chevron-down {
+  mask-image: url("./icons/chevron-down.svg");
+}
+
+.icon-cancel {
+  mask-image: url("./icons/cancel.svg");
+}
+
+.icon-settings {
+  mask-image: url("./icons/settings.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -46,12 +97,13 @@ body {
 
 .settings-btn {
   position: absolute;
-  height: 0px;
-  top: 0px;
-  right: 15px;
+  height: 50px;
+  width: 50px;
+  top: 0;
+  right: 0;
   padding: 0;
-  font-size: 40px;
   border: none;
+  background-color: transparent;
   opacity: 0.75;
 }
 
@@ -104,12 +156,23 @@ body {
 }
 
 .intro-anim {
-  animation: Intro 2s cubic-bezier(.46,.03,.52,.96) forwards;
+  animation: Intro 1s cubic-bezier(.46,.03,.52,.96) forwards;
 }
 
 @keyframes Intro {
   0% { opacity: 0; transform: translateY(50px); }
   100% { opacity: inherit; transform: translateY(0px); }
+}
+
+.intro-anim-widen {
+  animation: IntroWiden 1s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes IntroWiden {
+  0% { 
+    opacity: 0; 
+    transform: scaleX(0); 
+  }
 }
 
 .account {
@@ -315,6 +378,16 @@ body {
   animation: highlightMessage 1.5s ease-out forwards;
 }
 
+/* Used for "New" elements, like new incoming messages, or other new elements added to a list */
+.new-anim {
+  animation: SlideIn 0.75s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes SlideIn {
+  0% { opacity: 0; transform: translateY(100px) translateX(-100px) scale(0); }
+  100% { opacity: inherit; transform: translateY(0px) translateX(0px) scale(1); }
+}
+
 .emoji-only {
   /* Typically I recommend against !important, but this is the only style in `msg-*` we're force-overriding */
   background: none !important;
@@ -378,18 +451,40 @@ body {
 
 #chat-box {
   width: 100%;
-  background-color: #251134ff;
   height: 55px;
   position: absolute;
   bottom: 0;
 }
 
+.chat-input-container {
+  width: 100%;
+  align-items: center;
+  background-color: #0a0a0a;
+  height: 45px;
+  margin-top: auto;
+  margin-bottom: auto;
+  margin-left: 8px;
+  margin-right: 8px;
+  border-radius: 10px;
+}
+
+.chat-input-container button {
+  backdrop-filter: none;
+  width: 45px;
+  height: 45px;
+  position: relative;
+  background-color: transparent;
+  padding: 10px;
+}
+
 #chat-input {
-  width: 85%;
+  width: -webkit-fill-available;
+  line-height: inherit;
   resize: none;
   overflow: hidden;
   height: 20px;
   padding: 10px;
+  padding-left: 0;
 }
 
 .emoji-button {
@@ -404,15 +499,14 @@ body {
   display: none;
   position: absolute;
   z-index: 1000;
-  background: #251134e3;
   padding: 10px;
   width: 200px;
   max-height: 200px;
   overflow-y: auto;
   border-radius: 8px;
-  border-color: #1e0d2aff;
   border-style: solid;
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
 }
 
 .emoji-picker-message-type {
@@ -426,6 +520,7 @@ body {
   width: -webkit-fill-available;
   height: 12px;
   margin-bottom: 12px;
+  background-color: rgba(1, 1, 1, 0.5);
 }
 
 .emoji-picker span {
