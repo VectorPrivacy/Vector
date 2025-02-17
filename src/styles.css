@@ -1,3 +1,17 @@
+@font-face {
+  font-family: 'Rubik';
+  src: url('./fonts/Rubik.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'Rubik';
+  src: url('./fonts/Rubik-Italic.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: italic;
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -181,6 +195,8 @@ body {
   margin: 0;
   margin-left: 15px;
   text-align: left;
+  font-family: 'Rubik';
+  font-weight: 100;
 }
 
 #chat-new {
@@ -239,6 +255,7 @@ body {
   height: calc(100% - 100px);
   padding-left: 10px;
   padding-right: 10px;
+  font-family: 'Rubik';
 }
 
 .msg-inline-timestamp {
@@ -271,6 +288,7 @@ body {
   padding: 12px;
   border-bottom-right-radius: 0px;
   word-break: break-word;
+  font-weight: 100;
 }
 
 .msg-them p {
@@ -282,6 +300,7 @@ body {
   padding: 12px;
   border-bottom-left-radius: 0px;
   word-break: break-word;
+  font-weight: 100;
 }
 
 .msg-reply {
