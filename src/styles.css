@@ -161,7 +161,6 @@ body {
 
 @keyframes Intro {
   0% { opacity: 0; transform: translateY(50px); }
-  100% { opacity: inherit; transform: translateY(0px); }
 }
 
 .intro-anim-widen {
