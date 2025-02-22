@@ -1643,7 +1643,7 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
         // 5. fallback to /favicon.ico
         
         let favicon = favicon_candidates.iter()
-            .find(|(url, rel)| 
+            .find(|(_url, rel)| 
                 rel == "apple-touch-icon")
             .or_else(|| 
                 favicon_candidates.iter()
