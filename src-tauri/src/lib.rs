@@ -16,9 +16,11 @@ use generic_array::{GenericArray, typenum::U16};
 use ::image::{ImageEncoder, codecs::png::PngEncoder, ExtendedColorType::Rgba8};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_fs::FsExt;
+use scraper::{Html, Selector};
 
+mod util;
 mod voice;
+use util::extract_https_urls;
 use voice::AudioRecorder;
 
 /// # Trusted Relay
@@ -46,12 +48,49 @@ struct Message {
     id: String,
     content: String,
     replied_to: String,
+    preview_metadata: Option<SiteMetadata>,
     attachments: Vec<Attachment>,
     reactions: Vec<Reaction>,
     at: u64,
     pending: bool,
     failed: bool,
     mine: bool,
+}
+
+impl Message {
+    /// Load and Extract preview metadata (i.e: OpenGraph, etc) from the first valid URL.
+    /// 
+    /// Returns `true` if any metadata was successfully extracted, `false` otherwise.
+    async fn load_preview(&mut self) -> bool {
+        const MAX_URLS_TO_TRY: usize = 3;
+        
+        let urls = extract_https_urls(&self.content);
+        if urls.is_empty() {
+            return false;
+        }
+
+        // Only try the first few URLs
+        for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
+            match fetch_site_metadata(&url).await {
+                Ok(metadata) => {
+                    let has_content = metadata.og_title.is_some() 
+                        || metadata.og_description.is_some()
+                        || metadata.og_image.is_some()
+                        || metadata.title.is_some()
+                        || metadata.description.is_some();
+                    
+                    // Extracted metadata!
+                    if has_content {
+                        self.preview_metadata = Some(metadata);
+                        return true;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        
+        false
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -307,6 +346,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         id: pending_id.clone(),
         content: content.clone(),
         replied_to: replied_to.clone(),
+        preview_metadata: None,
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -965,6 +1005,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     id: rumor.id.unwrap().to_hex(),
                     content: rumor.content,
                     replied_to,
+                    preview_metadata: None,
                     at: rumor.created_at.as_u64(),
                     attachments: Vec::new(),
                     reactions: Vec::new(),
@@ -1086,6 +1127,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     id: rumor.id.unwrap().to_hex(),
                     content: String::new(),
                     replied_to: String::new(),
+                    preview_metadata: None,
                     at: rumor.created_at.as_u64(),
                     attachments: attachments,
                     reactions: Vec::new(),
@@ -1484,6 +1526,208 @@ async fn stop_recording() -> Result<Vec<u8>, String> {
     AudioRecorder::global().stop()
 }
 
+#[derive(serde::Serialize, Clone, PartialEq, Debug)]
+pub struct SiteMetadata {
+    domain: String,
+    og_title: Option<String>,
+    og_description: Option<String>,
+    og_image: Option<String>,
+    og_url: Option<String>,
+    og_type: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    favicon: Option<String>,  // New field
+}
+
+pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
+    // Extract and normalize domain
+    let domain = {
+        let parts: Vec<&str> = url.split('/').collect();
+        if parts.len() >= 3 {
+            let mut domain = format!("{}://{}", parts[0].trim_end_matches(':'), parts[2]);
+            if !domain.ends_with('/') {
+                domain.push('/');
+            }
+            domain
+        } else {
+            let mut domain = url.to_string();
+            if !domain.ends_with('/') {
+                domain.push('/');
+            }
+            domain
+        }
+    };
+    
+    let mut html_chunk = Vec::new();
+    
+    let client = reqwest::Client::new();
+    let mut response = client
+        .get(url)
+        .header("Range", "bytes=0-32768")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Read the response in chunks
+    loop {
+        let chunk = response.chunk().await.map_err(|e| e.to_string())?;
+        match chunk {
+            Some(data) => {
+                html_chunk.extend_from_slice(&data);
+                
+                if let Ok(current_html) = String::from_utf8(html_chunk.clone()) {
+                    if let Some(head_end) = current_html.find("</head>") {
+                        html_chunk.truncate(head_end + 7);
+                        break;
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+    
+    let html_string = String::from_utf8(html_chunk).map_err(|e| e.to_string())?;
+    let document = Html::parse_document(&html_string);
+    let meta_selector = Selector::parse("meta").unwrap();
+    let link_selector = Selector::parse("link").unwrap();
+    
+    let mut metadata = SiteMetadata {
+        domain: domain.clone(),
+        og_title: None,
+        og_description: None,
+        og_image: None,
+        og_url: Some(String::from(url)),
+        og_type: None,
+        title: None,
+        description: None,
+        favicon: None,
+    };
+    
+    // Process favicon links
+    let mut favicon_candidates = Vec::new();
+    for link in document.select(&link_selector) {
+        if let Some(rel) = link.value().attr("rel") {
+            if let Some(href) = link.value().attr("href") {
+                match rel.to_lowercase().as_str() {
+                    "icon" | "shortcut icon" | "apple-touch-icon" => {
+                        // Normalize the favicon URL
+                        let favicon_url = if href.starts_with("https://") {
+                            href.to_string()
+                        } else if href.starts_with("//") {
+                            format!("https:{}", href)
+                        } else if href.starts_with('/') {
+                            format!("{}{}", domain.trim_end_matches('/'), href)
+                        } else {
+                            format!("{}/{}", domain.trim_end_matches('/'), href)
+                        };
+                        
+                        favicon_candidates.push((favicon_url, rel.to_lowercase()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Set favicon with priority order
+    if favicon_candidates.is_empty() {
+        // If no favicon found in links, try the default /favicon.ico location
+        metadata.favicon = Some(format!("{}/favicon.ico", domain.trim_end_matches('/')));
+    } else {
+        // Priority order:
+        // 1. apple-touch-icon (highest quality)
+        // 2. icon with .png extension
+        // 3. shortcut icon with .png extension
+        // 4. any other icon
+        // 5. fallback to /favicon.ico
+        
+        let favicon = favicon_candidates.iter()
+            .find(|(url, rel)| 
+                rel == "apple-touch-icon")
+            .or_else(|| 
+                favicon_candidates.iter()
+                    .find(|(url, _)| 
+                        url.ends_with(".png")))
+            .or_else(|| 
+                favicon_candidates.iter()
+                    .find(|(_, rel)| 
+                        rel == "icon" || rel == "shortcut icon"))
+            .map(|(url, _)| url.clone())
+            .or_else(|| 
+                // Fallback to /favicon.ico
+                Some(format!("{}/favicon.ico", domain.trim_end_matches('/')))
+            );
+        
+        metadata.favicon = favicon;
+    }
+    
+    // Process meta tags (existing code)
+    for meta in document.select(&meta_selector) {
+        let element = meta.value();
+        
+        if let Some(property) = element.attr("property") {
+            if let Some(content) = element.attr("content") {
+                match property {
+                    "og:title" => metadata.og_title = Some(content.to_string()),
+                    "og:description" => metadata.og_description = Some(content.to_string()),
+                    "og:image" => {
+                        let image_url = if content.starts_with("https://") {
+                            content.to_string()
+                        } else if content.starts_with("//") {
+                            format!("https:{}", content)
+                        } else if content.starts_with('/') {
+                            format!("{}{}", domain.trim_end_matches('/'), content)
+                        } else {
+                            format!("{}{}", domain.trim_end_matches('/'), content)
+                        };
+                        metadata.og_image = Some(image_url);
+                    },
+                    "og:url" => metadata.og_url = Some(content.to_string()),
+                    "og:type" => metadata.og_type = Some(content.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        
+        if let Some(name) = element.attr("name") {
+            if let Some(content) = element.attr("content") {
+                match name {
+                    "description" => metadata.description = Some(content.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    // Extract title from title tag
+    if let Some(title_element) = document.select(&Selector::parse("title").unwrap()).next() {
+        metadata.title = Some(title_element.text().collect::<String>());
+    }
+    
+    Ok(metadata)
+}
+
+#[tauri::command]
+async fn fetch_msg_metadata(npub: String, msg: String) -> bool {
+    // Find the message we're extracting metadata from
+    let mut state = STATE.lock().await;
+    let chat = state
+                .profiles
+                .iter_mut()
+                .find(|chat| chat.id == npub)
+                .unwrap();
+    let message = chat.get_message_mut(msg.clone()).unwrap();
+
+    // Attempt to fetch it's metadata
+    if message.load_preview().await {
+        // On success: update the renderer
+        let app_handle = TAURI_APP.get().unwrap();
+        app_handle.emit("message_update", MessageUpdateEvent { old_id: msg, message: message.clone(), chat_id: npub }).unwrap();
+        return true
+    }
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1538,7 +1782,8 @@ pub fn run() {
             encrypt,
             decrypt,
             start_recording,
-            stop_recording
+            stop_recording,
+            fetch_msg_metadata
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

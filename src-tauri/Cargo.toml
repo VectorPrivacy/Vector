@@ -23,6 +23,7 @@ tokio = { version = "1.43.0", features = ["sync"] }
 tauri = { version = "2.2.5", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 reqwest = { version = "0.11", features = ["rustls-tls"] }
+scraper = "0.17"
 aes = "0.8.3"
 aes-gcm = "0.10.1"
 hex = "0.4.3"

@@ -3,6 +3,7 @@ const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { listen } = window.__TAURI__.event;
 const { readImage } = window.__TAURI__.clipboardManager;
+const { openUrl } = window.__TAURI__.opener;
 
 const domVersion = document.getElementById('version');
 
@@ -899,6 +900,7 @@ function renderMessage(msg, sender) {
     // Render their avatar, if they have one
     if (!msg.mine && sender?.avatar) {
         const imgAvatar = document.createElement('img');
+        imgAvatar.classList.add('avatar');
         imgAvatar.src = sender.avatar;
         divMessage.appendChild(imgAvatar);
     }
@@ -1020,6 +1022,42 @@ function renderMessage(msg, sender) {
             }
         } else {
             // Display download prompt UI
+        }
+    }
+
+    // Append Metadata Previews (i.e: OpenGraph data from URLs, etc)
+    if (!msg.pending && !msg.failed) {
+        if (msg.preview_metadata?.og_image) {
+            // Setup the Preview container
+            const divPrevContainer = document.createElement('div');
+            divPrevContainer.classList.add('msg-preview-container', 'btn');
+            divPrevContainer.setAttribute('url', msg.preview_metadata.og_url || msg.preview_metadata.domain);
+
+            // Setup the Favicon
+            const imgFavicon = document.createElement('img');
+            imgFavicon.classList.add('favicon');
+            imgFavicon.src = msg.preview_metadata.favicon;
+
+            // Add the title (prefixed with the Favicon)
+            const spanPreviewTitle = document.createElement('span');
+            spanPreviewTitle.appendChild(imgFavicon);
+            const spanText = document.createTextNode(msg.preview_metadata.title || msg.preview_metadata.og_title);
+            spanPreviewTitle.appendChild(spanText);
+            divPrevContainer.appendChild(spanPreviewTitle);
+
+            // Load the Preview image
+            const imgPreview = document.createElement('img');
+            imgPreview.classList.add('msg-preview-img');
+            imgPreview.src = msg.preview_metadata.og_image;
+            divPrevContainer.appendChild(imgPreview);
+
+            // Render the Preview
+            pMessage.appendChild(divPrevContainer);
+        } else if (!msg.preview_metadata) {
+            // Check if message is older than 6 hours, then try to sync metadata
+            if (msg.at > (Date.now() / 1000) - 21600) {
+                invoke("fetch_msg_metadata", { npub: sender.id, msg: msg.id });
+            }
         }
     }
 
@@ -1417,6 +1455,13 @@ document.addEventListener('click', (e) => {
         // Run an animation to bring the user's eye to the message
         domMsg.classList.add('highlight-animation');
         return setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+    }
+
+    // If we're clicking a Metadata Preview, open it's URL, if one is attached
+    if (e.target.classList.contains("msg-preview-container") || e.target.parentElement?.classList.contains("msg-preview-container")) {
+        const strURL = e.target.getAttribute('url') || e.target.parentElement.getAttribute('url');
+        if (strURL) openUrl(strURL);
+        return;
     }
 
     // If we're clicking a Contact, open the chat with the embedded npub (ID)

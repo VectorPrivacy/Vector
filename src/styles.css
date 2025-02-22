@@ -331,7 +331,7 @@ body {
   align-self: flex-end;
 }
 
-.msg-them img {
+.avatar {
   object-fit: cover;
   object-position: center;
   height: 50px;
@@ -409,6 +409,41 @@ body {
 .msg-them {
   align-self: flex-start;
   display: flex;
+}
+
+.msg-preview-container {
+  border-color: rgba(90, 252, 180, 0.43) !important;
+  border-top: solid;
+  border-width: 1px;
+  margin-top: 10px;
+  background-color: rgba(90, 252, 180, 0.12) !important;
+  border-radius: 14px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  padding: 5px 5px 0px 5px;
+}
+
+.msg-preview-container span {
+  padding: 5px;
+  font-weight: 400;
+  display: block;
+}
+
+.msg-preview-img {
+  width: 100%;
+  height: auto;
+  border-radius: 15px;
+  margin: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.favicon {
+  height: 15px;
+  width: auto;
+  margin-right: 8px;
+  position: relative;
+  top: 1px;
 }
 
 .msg-extras {
