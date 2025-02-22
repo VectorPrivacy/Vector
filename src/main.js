@@ -580,7 +580,7 @@ async function setupRustListeners() {
             // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
             if (evt.payload.old_id.startsWith('pending')) {
                 strLastMsgID = evt.payload.message.id;
-                scrollToBottom(domChatMessages, false);
+                softChatScroll();
             }
         }
 
@@ -870,6 +870,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             if (strLastMsgID !== cLastMsg.id || fClicked) {
                 strLastMsgID = cLastMsg.id;
                 adjustSize();
+                // Force an auto-scroll, given soft-scrolling won't accurately work when the entire list has just rendered
                 scrollToBottom(domChatMessages, false);
             }
         }
@@ -990,7 +991,7 @@ function renderMessage(msg, sender) {
                 // When the metadata loads, we run some maintenance tasks
                 audPreview.addEventListener('loadedmetadata', () => {
                     // Auto-scroll to correct against the longer container
-                    scrollToBottom(domChatMessages, false);
+                    softChatScroll();
                 }, { once: true });
                 pMessage.appendChild(audPreview);
             } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
@@ -1010,7 +1011,7 @@ function renderMessage(msg, sender) {
                     // Seek a tiny amount to force the frame 'poster' to load, without loading the entire video
                     vidPreview.currentTime = 0.1;
                     // Auto-scroll to correct against the longer container
-                    scrollToBottom(domChatMessages, false);
+                    softChatScroll();
                 }, { once: true });
                 pMessage.appendChild(vidPreview);
             } else {
@@ -1049,6 +1050,8 @@ function renderMessage(msg, sender) {
             const imgPreview = document.createElement('img');
             imgPreview.classList.add('msg-preview-img');
             imgPreview.src = msg.preview_metadata.og_image;
+            // Auto-scroll the chat to correct against container resizes
+            imgPreview.addEventListener('load', softChatScroll, { once: true });
             divPrevContainer.appendChild(imgPreview);
 
             // Render the Preview
@@ -1486,6 +1489,18 @@ function adjustSize() {
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();
     domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+
+    // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
+    softChatScroll();
+}
+
+/**
+ * Scrolls the chat to the bottom if the user has not already scrolled upwards substantially.
+ * 
+ * This is used to correct against container resizes, i.e: if an image loads, or a message is received.
+ */
+function softChatScroll() {
+    if (!strOpenChat) return;
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
