@@ -16,6 +16,7 @@ use generic_array::{GenericArray, typenum::U16};
 use ::image::{ImageEncoder, codecs::png::PngEncoder, ExtendedColorType::Rgba8};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_fs::FsExt;
 use scraper::{Html, Selector};
 
 mod util;
