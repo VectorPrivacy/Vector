@@ -58,42 +58,6 @@ struct Message {
     mine: bool,
 }
 
-impl Message {
-    /// Load and Extract preview metadata (i.e: OpenGraph, etc) from the first valid URL.
-    /// 
-    /// Returns `true` if any metadata was successfully extracted, `false` otherwise.
-    async fn load_preview(&mut self) -> bool {
-        const MAX_URLS_TO_TRY: usize = 3;
-        
-        let urls = extract_https_urls(&self.content);
-        if urls.is_empty() {
-            return false;
-        }
-
-        // Only try the first few URLs
-        for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
-            match fetch_site_metadata(&url).await {
-                Ok(metadata) => {
-                    let has_content = metadata.og_title.is_some() 
-                        || metadata.og_description.is_some()
-                        || metadata.og_image.is_some()
-                        || metadata.title.is_some()
-                        || metadata.description.is_some();
-                    
-                    // Extracted metadata!
-                    if has_content {
-                        self.preview_metadata = Some(metadata);
-                        return true;
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-        
-        false
-    }
-}
-
 #[derive(serde::Serialize, Clone)]
 struct MessageEvent {
     message: Message,
@@ -1711,20 +1675,54 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
 #[tauri::command]
 async fn fetch_msg_metadata(npub: String, msg: String) -> bool {
     // Find the message we're extracting metadata from
-    let mut state = STATE.lock().await;
-    let chat = state
-                .profiles
-                .iter_mut()
-                .find(|chat| chat.id == npub)
-                .unwrap();
-    let message = chat.get_message_mut(msg.clone()).unwrap();
+    let text = {
+        let mut state = STATE.lock().await;
+        let chat = state
+                    .profiles
+                    .iter_mut()
+                    .find(|chat| chat.id == npub)
+                    .unwrap();
+        let message = chat.get_message_mut(msg.clone()).unwrap();
+        message.content.clone()
+    };
 
-    // Attempt to fetch it's metadata
-    if message.load_preview().await {
-        // On success: update the renderer
-        let app_handle = TAURI_APP.get().unwrap();
-        app_handle.emit("message_update", MessageUpdateEvent { old_id: msg, message: message.clone(), chat_id: npub }).unwrap();
-        return true
+    // Extract URLs from the message
+    const MAX_URLS_TO_TRY: usize = 3;
+    let urls = extract_https_urls(text.as_str());
+    if urls.is_empty() {
+        return false;
+    }
+
+    // Only try the first few URLs
+    for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
+        match fetch_site_metadata(&url).await {
+            Ok(metadata) => {
+                let has_content = metadata.og_title.is_some() 
+                    || metadata.og_description.is_some()
+                    || metadata.og_image.is_some()
+                    || metadata.title.is_some()
+                    || metadata.description.is_some();
+
+                // Extracted metadata!
+                if has_content {
+                    // Re-fetch the message and add our metadata
+                    let mut state = STATE.lock().await;
+                    let chat = state
+                                .profiles
+                                .iter_mut()
+                                .find(|chat| chat.id == npub)
+                                .unwrap();
+                    let message = chat.get_message_mut(msg.clone()).unwrap();
+                    message.preview_metadata = Some(metadata);
+
+                    // Update the renderer
+                    let app_handle = TAURI_APP.get().unwrap();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: msg, message: message.clone(), chat_id: npub }).unwrap();
+                    return true;
+                }
+            }
+            Err(_) => continue,
+        }
     }
     false
 }
