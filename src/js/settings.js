@@ -96,14 +96,14 @@ async function selectFile() {
  * @param {string} theme - The theme name, i.e: `vector`, `chatstr`
  * @param {string} mode - The theme mode, i.e: `light`, `dark`
  */
-function setTheme(theme = 'vector', mode = 'dark') {
+async function setTheme(theme = 'vector', mode = 'dark') {
     domTheme.href = `/themes/${theme}/${mode}.css`;
 
     // Ensure the value of the Theme Selector matches (i.e: at bootup during theme load)
     domSettingsThemeSelect.value = theme;
 
     // Save the selection to DB
-    setKey('theme', theme);
+    await invoke('set_theme', { theme: theme });
 }
 
 // Apply Theme changes in real-time

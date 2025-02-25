@@ -1273,13 +1273,10 @@ let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
 window.addEventListener("DOMContentLoaded", async () => {
-    // Load the DB
-    store = await load('vector.json', { autoSave: true });
-
     // Immediately load and apply theme settings
-    const strTheme = await getKey('theme');
+    const strTheme = await invoke('get_theme');
     if (strTheme) {
-        setTheme(strTheme);
+        await setTheme(strTheme);
     }
 
     // If a local encrypted key exists, boot up the decryption UI

@@ -19,10 +19,13 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
 use scraper::{Html, Selector};
 
-mod util;
+mod db;
+
 mod voice;
-use util::extract_https_urls;
 use voice::AudioRecorder;
+
+mod util;
+use util::extract_https_urls;
 
 /// # Trusted Relay
 ///
@@ -1764,6 +1767,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            db::get_db,
+            db::get_theme,
+            db::set_theme,
+            db::get_pkey,
+            db::set_pkey,
+            db::remove_setting,
             fetch_messages,
             message,
             paste_message,
