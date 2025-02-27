@@ -4,14 +4,180 @@ use tauri_plugin_store::StoreBuilder;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::sync::Arc;
+use std::collections::HashMap;
+
+use crate::{Profile, Status, Attachment, Message, Reaction, SiteMetadata, internal_encrypt, internal_decrypt};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VectorDB {
+    pub db_version: Option<u64>,
     pub theme: Option<String>,
     pub pkey: Option<String>,
 }
 
 const DB_PATH: &str = "vector.json";
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SlimProfile {
+    pub id: String,
+    name: String,
+    avatar: String,
+    status: Status,
+    // Omitting: messages, last_updated, typing_until, mine
+}
+
+impl From<&Profile> for SlimProfile {
+    fn from(profile: &Profile) -> Self {
+        SlimProfile {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            avatar: profile.avatar.clone(),
+            status: profile.status.clone(),
+        }
+    }
+}
+
+impl SlimProfile {
+    // Convert back to full Profile
+    pub fn to_profile(&self) -> crate::Profile {
+        crate::Profile {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            avatar: self.avatar.clone(),
+            messages: Vec::new(), // Will be populated separately
+            status: self.status.clone(),
+            last_updated: 0,      // Default value
+            typing_until: 0,      // Default value
+            mine: false,          // Default value
+        }
+    }
+}
+
+// Function to get all profiles
+pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
+    let store = get_store(handle);
+    
+    // Get the encrypted profiles
+    let encrypted: String = match store.get("profiles") {
+        Some(value) if value.is_string() => value.as_str().unwrap().to_string(),
+        _ => return Ok(vec![]), // No profiles or wrong format
+    };
+    
+    // Decrypt
+    let json = internal_decrypt(encrypted, None).await
+        .expect("Failed to decrypt profiles");
+    
+    // Deserialize
+    let slim_profiles: Vec<SlimProfile> = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to deserialize profiles: {}", e))?;
+    
+    Ok(slim_profiles)
+}
+
+// Function to save all profiles
+async fn save_all_profiles<R: Runtime>(handle: &AppHandle<R>, profiles: Vec<SlimProfile>) -> Result<(), String> {
+    let store = get_store(handle);
+    
+    // Serialize to JSON
+    let json = serde_json::to_string(&profiles)
+        .map_err(|e| format!("Failed to serialize profiles: {}", e))?;
+    
+    // Encrypt the entire array
+    let encrypted = internal_encrypt(json, None).await;
+    
+    // Store in the DB
+    store.set("profiles".to_string(), serde_json::json!(encrypted));
+    
+    Ok(())
+}
+
+// Public command to set a profile
+#[command]
+pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> Result<(), String> {
+    // Get current profiles
+    let mut profiles = get_all_profiles(&handle).await?;
+    
+    // Convert the input profile to slim profile
+    let new_slim_profile = SlimProfile::from(&profile);
+    let profile_id = new_slim_profile.id.clone();
+    
+    // Find and replace the profile if it exists, or add it
+    if let Some(pos) = profiles.iter().position(|p| p.id == profile_id) {
+        profiles[pos] = new_slim_profile;
+    } else {
+        profiles.push(new_slim_profile);
+    }
+    
+    // Save all profiles
+    save_all_profiles(&handle, profiles).await
+}
+
+// Public command to get a profile
+#[command]
+pub async fn get_profile<R: Runtime>(handle: AppHandle<R>, profile_id: String) -> Result<Option<Profile>, String> {
+    let profiles = get_all_profiles(&handle).await?;
+    
+    // Find the profile
+    let profile_opt = profiles.into_iter().find(|p| p.id == profile_id);
+    
+    // Convert to full profile if found
+    match profile_opt {
+        Some(slim_profile) => Ok(Some(slim_profile.to_profile())),
+        None => Ok(None)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SlimMessage {
+    id: String,
+    content: String,
+    replied_to: String,
+    preview_metadata: Option<SiteMetadata>,
+    attachments: Vec<Attachment>,
+    reactions: Vec<Reaction>,
+    at: u64,
+    mine: bool,
+    contact: String,  // Reference to which contact/profile this message belongs to
+}
+
+impl From<(&Message, String)> for SlimMessage {
+    fn from((msg, contact_id): (&Message, String)) -> Self {
+        SlimMessage {
+            id: msg.id.clone(),
+            content: msg.content.clone(),
+            replied_to: msg.replied_to.clone(),
+            preview_metadata: msg.preview_metadata.clone(),
+            attachments: msg.attachments.clone(),
+            reactions: msg.reactions.clone(),
+            at: msg.at,
+            mine: msg.mine,
+            contact: contact_id.clone(),
+        }
+    }
+}
+
+impl SlimMessage {
+    // Convert back to full Message
+    pub fn to_message(&self) -> Message {
+        Message {
+            id: self.id.clone(),
+            content: self.content.clone(),
+            replied_to: self.replied_to.clone(),
+            preview_metadata: self.preview_metadata.clone(),
+            attachments: self.attachments.clone(),
+            reactions: self.reactions.clone(),
+            at: self.at,
+            pending: false, // Default values
+            failed: false,  // Default values
+            mine: self.mine,
+        }
+    }
+    
+    // Get the contact ID
+    pub fn contact(&self) -> &str {
+        &self.contact
+    }
+}
 
 fn get_store<R: Runtime>(handle: &AppHandle<R>) -> Arc<tauri_plugin_store::Store<R>> {
     StoreBuilder::new(handle, PathBuf::from(DB_PATH))
@@ -23,7 +189,13 @@ fn get_store<R: Runtime>(handle: &AppHandle<R>) -> Arc<tauri_plugin_store::Store
 #[command]
 pub fn get_db<R: Runtime>(handle: AppHandle<R>) -> Result<VectorDB, String> {
     let store = get_store(&handle);
-    
+
+    // Grab the DB version - giving us backwards-compat awareness and the ability to upgrade previous formats
+    let db_version = match store.get("dbver") {
+        Some(value) if value.is_number() => Some(value.as_number().unwrap().as_u64().unwrap()),
+        _ => None,
+    };
+
     // Extract optional fields
     let theme = match store.get("theme") {
         Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
@@ -36,9 +208,26 @@ pub fn get_db<R: Runtime>(handle: AppHandle<R>) -> Result<VectorDB, String> {
     };
     
     Ok(VectorDB {
+        db_version,
         theme,
         pkey,
     })
+}
+
+#[command]
+pub fn set_db_version<R: Runtime>(handle: AppHandle<R>, version: u64) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("dbver".to_string(), serde_json::json!(version));
+    Ok(())
+}
+
+#[command]
+pub fn get_db_version<R: Runtime>(handle: AppHandle<R>) -> Result<Option<u64>, String> {
+    let store = get_store(&handle);
+    match store.get("dbver") {
+        Some(value) if value.is_number() => Ok(value.as_number().unwrap().as_u64()),
+        _ => Ok(None),
+    }
 }
 
 #[command]
@@ -78,4 +267,85 @@ pub fn remove_setting<R: Runtime>(handle: AppHandle<R>, key: String) -> Result<b
     let store = get_store(&handle);
     let deleted = store.delete(&key);
     Ok(deleted)
+}
+
+#[command]
+pub async fn save_message<R: Runtime>(
+    handle: AppHandle<R>, 
+    message: Message, 
+    contact_id: String
+) -> Result<(), String> {
+    // 1. Convert to slim message with contact info
+    let slim_message = SlimMessage::from((&message, contact_id));
+    
+    // 2. Serialize to JSON
+    let json = serde_json::to_string(&slim_message)
+        .map_err(|e| format!("Failed to serialize message: {}", e))?;
+    
+    // 3. Encrypt the JSON
+    let encrypted = internal_encrypt(json, None).await;
+    
+    // 4. Store in the DB
+    let store = get_store(&handle);
+    
+    // Get the current messages map (or create empty one)
+    let mut messages: HashMap<String, String> = match store.get("messages") {
+        Some(value) => serde_json::from_value(value.clone())
+            .unwrap_or_default(),
+        None => HashMap::new(),
+    };
+    
+    // Add the message
+    messages.insert(message.id.clone(), encrypted);
+    
+    // Save back to store
+    store.set("messages".to_string(), serde_json::json!(messages));
+    
+    Ok(())
+}
+
+pub async fn get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(Message, String)>, String> {
+    let store = get_store(handle);
+    
+    // Get the messages map
+    let messages: HashMap<String, String> = match store.get("messages") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("Failed to deserialize messages map: {}", e))?,
+        None => return Ok(vec![]), // No messages stored
+    };
+    
+    let mut result = Vec::with_capacity(messages.len());
+    
+    // Process each message
+    for (_, encrypted) in messages.iter() {
+        // Decrypt
+        match internal_decrypt(encrypted.clone(), None).await {
+            Ok(json) => {
+                // Deserialize
+                match serde_json::from_str::<SlimMessage>(&json) {
+                    Ok(slim) => {
+                        // Extract the contact ID and message
+                        let contact_id = slim.contact().to_string();
+                        let message = slim.to_message();
+                        
+                        // Store both pieces of information
+                        result.push((message, contact_id));
+                    },
+                    Err(e) => {
+                        eprintln!("Error deserializing message: {}", e);
+                        // Continue processing other messages
+                    }
+                }
+            },
+            Err(_) => {
+                eprintln!("Error decrypting message...");
+                // Continue processing other messages
+            }
+        }
+    }
+    
+    // Sort by timestamp (oldest first)
+    result.sort_by(|a, b| a.0.at.cmp(&b.0.at));
+    
+    Ok(result)
 }

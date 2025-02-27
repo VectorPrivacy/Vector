@@ -25,6 +25,8 @@ const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
 
 const domChats = document.getElementById('chats');
 const domAccount = document.getElementById('account');
+const domSyncStatusContainer = document.getElementById('sync-status-container');
+const domSyncStatus = document.getElementById('sync-status');
 const domChatList = document.getElementById('chat-list');
 
 const domChat = document.getElementById('chat');
@@ -349,16 +351,14 @@ let strOpenChat = "";
 
 /**
  * Synchronise all messages from the backend
- * 
- * @param {boolean} fHasConnected - Whether the client has immediately connected or not - allowing for quicker init by only fetching cache
  */
-async function fetchMessages(fHasConnected = false) {
-    // Synchronise all historical messages at bootup
-    // TODO: this needs to be scrapped for incremental syncing
-    arrChats = await invoke("fetch_messages", { init: fHasConnected });
+async function init() {
+    // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
+    await invoke("fetch_messages", { init: true });
 
     // Begin an asynchronous loop to refresh profile data
-    fetchProfiles().finally(() => {
+    await invoke("load_profile", { npub: strPubkey });
+    fetchProfiles().finally(async () => {
         setAsyncInterval(fetchProfiles, 45000);
     });
 }
@@ -498,6 +498,31 @@ async function sendFile(pubkey, replied_to, filepath) {
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
+    // Listen for Synchronisation Finish updates
+    await listen('sync_finished', (_) => {
+        // Hide syncing UI
+        domSyncStatus.textContent = ``;
+        domSyncStatusContainer.style.display = `none`;
+        if (!strOpenChat) adjustSize();
+    });
+
+    // Listen for Synchronisation Slice updates
+    await listen('sync_slice_finished', (_) => {
+        // Continue synchronising until event `sync_finished` is emitted
+        invoke("fetch_messages", { init: false });
+    });
+
+    // Listen for Synchronisation Progress updates
+    await listen('sync_progress', (evt) => {
+        // Display the dates we're syncing between
+        const options = { month: 'short', day: 'numeric' };
+        const start = new Date(evt.payload.since * 1000).toLocaleDateString('en-US', options);
+        const end = new Date(evt.payload.until * 1000).toLocaleDateString('en-US', options);
+        domSyncStatusContainer.style.display = ``;
+        domSyncStatus.textContent = `Syncing Messages between ${start} - ${end}`;
+        if (!strOpenChat) adjustSize();
+    });
+
     // Listen for profile updates
     await listen('profile_update', (evt) => {
         // Check if the frontend is already aware
@@ -541,7 +566,7 @@ async function setupRustListeners() {
         if (cFirstMsg.at < evt.payload.message.at) {
             // New message
             arrChats[nProfileIdx].messages.push(evt.payload.message);
-            // Move the chat to the top of our chatlist (TODO: any way to optimise this?)
+            // Move the chat to the top of our chatlist
             if (nProfileIdx > 0) {
                 // Remove the profile at index and get it
                 const [profile] = arrChats.splice(nProfileIdx, 1);
@@ -600,56 +625,63 @@ let fInit = true;
 async function login() {
     if (strPubkey) {
         // Connect to Nostr
-        // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip a full network sync
-        domLoginEncryptTitle.textContent = `Connecting to Nostr...`;
+        // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip database decryption
         const fHasConnected = await invoke("connect");
 
         // Setup our Rust Event listeners for efficient back<-->front sync
         await setupRustListeners();
 
-        // Sync our profile data
-        domLoginEncryptTitle.textContent = `Syncing your profile...`;
-        await invoke("load_profile", { npub: strPubkey });
+        // Setup a Rust Listener for the backend's init finish
+        await listen('init_finished', (evt) => {
+            // Set our full Chat State
+            arrChats = evt.payload;
 
-        // Connect and sync historical messages
-        domLoginEncryptTitle.textContent = `Syncing your DMs...`;
-        await fetchMessages(fHasConnected);
+            // Hide the login and encryption UI
+            domLoginInput.value = "";
+            domLogin.style.display = 'none';
+            domLoginEncrypt.style.display = 'none';
+            domSettingsBtn.style.display = '';
 
-        // Hide the login and encryption UI
-        domLoginInput.value = "";
-        domLogin.style.display = 'none';
-        domLoginEncrypt.style.display = 'none';
-        domSettingsBtn.style.display = '';
+            // Render our profile with an intro animation
+            const cProfile = arrChats.find(p => p.mine);
+            renderCurrentProfile(cProfile);
+            const domProfileDivider = document.getElementById('profile-divider');
+            domProfileDivider.classList.add('intro-anim-widen');
+            domProfileDivider.addEventListener('animationend', () => domProfileDivider.classList.remove('intro-anim-widen'), { once: true });
 
-        // Render our profile with an intro animation
-        const cProfile = arrChats.find(p => p.mine);
-        renderCurrentProfile(cProfile);
-        const domProfileDivider = document.getElementById('profile-divider');
-        domProfileDivider.classList.add('intro-anim-widen');
-        domProfileDivider.addEventListener('animationend', () => domProfileDivider.classList.remove('intro-anim-widen'), { once: true });
+            // Display our Synchronisation Status
+            domSyncStatusContainer.classList.add('intro-anim');
+            domSyncStatusContainer.addEventListener('animationend', () => domSyncStatusContainer.classList.remove('intro-anim'), { once: true });
 
-        // Finished boot!
-        fInit = false;
+            // Finished boot!
+            fInit = false;
 
-        // Render the chatlist with an intro animation
-        domChatList.classList.add('intro-anim');
-        renderChatlist();
-        domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+            // Render the chatlist with an intro animation
+            domChatList.classList.add('intro-anim');
+            renderChatlist();
+            domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
 
-        // Append a "Start New Chat" button
-        const btnStartChat = document.createElement('button');
-        btnStartChat.classList.add('corner-float', 'visible');
-        btnStartChat.style.bottom = `15px`;
-        btnStartChat.style.borderRadius = `100%`;
-        btnStartChat.style.height = `50px`;
-        btnStartChat.style.width = `50px`;
-        btnStartChat.innerHTML = '<span class="icon icon-new-msg"></span>';
-        btnStartChat.onclick = openNewChat;
-        domChats.appendChild(btnStartChat);
-        adjustSize();
+            // Append a "Start New Chat" button
+            const btnStartChat = document.createElement('button');
+            btnStartChat.classList.add('corner-float', 'visible');
+            btnStartChat.style.bottom = `15px`;
+            btnStartChat.style.borderRadius = `100%`;
+            btnStartChat.style.height = `50px`;
+            btnStartChat.style.width = `50px`;
+            btnStartChat.innerHTML = '<span class="icon icon-new-msg"></span>';
+            btnStartChat.onclick = openNewChat;
+            domChats.appendChild(btnStartChat);
+            adjustSize();
 
-        // Setup a subscription for new websocket messages
-        invoke("notifs");
+            // Setup a subscription for new websocket messages
+            invoke("notifs");
+        });
+
+        // Load and Decrypt our database; fetching the full chat state from disk for immediate bootup
+        domLoginEncryptTitle.textContent = `Decrypting Database...`;
+
+        // Note: this also begins the Rust backend's iterative sync, thus, init should ONLY be called once, to initiate it
+        init();
     }
 }
 
@@ -717,7 +749,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
     // Track our pin entries ('Current' is what the user has currently typed)
     // ... while 'Last' holds a previous pin in memory for typo-checking purposes.
     let strPinLast = [];
-    let strPinCurrent = Array(5).fill('-');
+    let strPinCurrent = Array(6).fill('-');
 
     // If we're unlocking - display that
     if (fUnlock) domLoginEncryptTitle.textContent = `Enter your Decryption Pin`;
@@ -767,7 +799,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
 
                         // Wipe the current digits
                         for (const domPinToReset of arrPinDOMs) domPinToReset.value = ``;
-                        strPinCurrent = Array(5).fill('-');
+                        strPinCurrent = Array(6).fill('-');
                     }
                 } else {
                     // There's a pin set - let's make sure the re-type matches
@@ -783,7 +815,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                         } else {
                             // Wrong pin! Let's start again
                             domLoginEncryptTitle.textContent = `Pin doesn't match, re-try`;
-                            strPinCurrent = Array(5).fill(`-`);
+                            strPinCurrent = Array(6).fill(`-`);
                             strPinLast = [];
                         }
                         // Reset the pin inputs
@@ -1185,7 +1217,9 @@ function openChat(contact) {
     // Render the current contact's messages
     const cProfile = arrChats.find(p => p.id === contact);
     strOpenChat = contact;
-    updateChat(cProfile, cProfile?.messages || [], true);
+
+    // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
+    updateChat(cProfile, (cProfile?.messages || []).slice(-50), true);
 }
 
 /**
@@ -1281,8 +1315,21 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // If a local encrypted key exists, boot up the decryption UI
     if (await hasKey()) {
-        openEncryptionFlow(null, true);
+        // Check the DB is at least Version 1: otherwise, it's using old & inferior encryption
+        // TODO: nuke this by v1.0? Very few users are affected by the earliest VectorDB changes
+        if (await invoke('get_db_version') < 1) {
+            // Nuke old Private Key
+            await invoke('remove_setting', { key: 'pkey' });
+            // Alert user
+            await popupConfirm('Sorry! 👉👈', `I upgraded the DB with Profile + Message Storage and a 6-pin system.<br><br>You'll have to login again, but this should be the last time! (No promises)<br>- JSKitty`, true);
+        } else {
+            // Private Key is available and we have a good DB version, login screen!
+            openEncryptionFlow(null, true);
+        }
     }
+
+    // By this point, it should be safe to set our DB version
+    await invoke('set_db_version', { version: 1 });
 
     // Hook up our static buttons
     domSettingsBtn.onclick = openSettings;
@@ -1481,7 +1528,8 @@ function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
     // Note: no idea why the `- 30px` is needed below, magic numbers, I guess.
     const rectAccount = domAccount.getBoundingClientRect();
-    domChatList.style.maxHeight = (window.innerHeight - rectAccount.height) - 30 + `px`;
+    const rectSyncStatus = domSyncStatusContainer.getBoundingClientRect();
+    domChatList.style.maxHeight = (window.innerHeight - (rectAccount.height + rectSyncStatus.height)) - 30 + `px`;
 
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();

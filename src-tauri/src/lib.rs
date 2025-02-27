@@ -1,25 +1,25 @@
 use std::borrow::Cow;
 use argon2::{Argon2, Params, Version};
-use chacha20::cipher::{KeyIvInit, StreamCipher};
-use chacha20::ChaCha20;
 use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use tokio::sync::Mutex;
 use aes::Aes256;
-use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
-    AesGcm,
+use aes_gcm::AesGcm;
+use chacha20poly1305::{
+    aead::{Aead, AeadInPlace, KeyInit},
+    ChaCha20Poly1305, Nonce
 };
 use generic_array::{GenericArray, typenum::U16};
 use ::image::{ImageEncoder, codecs::png::PngEncoder, ExtendedColorType::Rgba8};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
 use scraper::{Html, Selector};
 
 mod db;
+use db::SlimProfile;
 
 mod voice;
 use voice::AudioRecorder;
@@ -44,11 +44,12 @@ static TRUSTED_PUBLIC_NIP96: &str = "https://nostr.build";
 /// A temporary hardcoded NIP-96 server, handling file uploads for encrypted files (in-chat)
 static TRUSTED_PRIVATE_NIP96: &str = "https://medea-small.jskitty.cat";
 
+static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
-struct Message {
+pub struct Message {
     id: String,
     content: String,
     replied_to: String,
@@ -75,8 +76,8 @@ struct MessageUpdateEvent {
     chat_id: String,
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
-struct Attachment {
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Attachment {
     /** The encryption Nonce as the unique file ID */
     id: String,
     /** The file extension */
@@ -94,8 +95,8 @@ struct AttachmentFile {
     extension: String,
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
-struct Reaction {
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Reaction {
     id: String,
     /** The HEX Event ID of the message being reacted to */
     reference_id: String,
@@ -106,7 +107,7 @@ struct Reaction {
 }
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
-struct Profile {
+pub struct Profile {
     id: String,
     name: String,
     avatar: String,
@@ -149,7 +150,7 @@ impl Profile {
         self.avatar = meta.picture.unwrap_or(self.avatar.clone());
     }
 
-    fn internal_add_message(&mut self, message: Message) {
+    fn internal_add_message(&mut self, message: Message) -> bool {
         // Make sure we don't add the same message twice
         if !self.messages.iter().any(|m| m.id == message.id) {
             // If it's their message; disable their typing indicator until further indicators are sent
@@ -160,6 +161,10 @@ impl Profile {
             // TODO: use appending/prepending and splicing, rather than sorting each message!
             // This is very expensive, but will do for now as a stop-gap.
             self.messages.sort_by(|a, b| a.at.cmp(&b.at));
+            true
+        } else {
+            // Message is already known by the state
+            false
         }
     }
 
@@ -174,16 +179,19 @@ impl Profile {
                     // Update the frontend
                     let app_handle = TAURI_APP.get().unwrap();
                     app_handle.emit("message_update", MessageUpdateEvent { old_id: msg.id.clone(), message: msg.clone(), chat_id: self.id.clone() }).unwrap();
+                    true
+                } else {
+                    // Reaction was already added previously
+                    false
                 }
-                true
             }
             Err(_) => false,
         }
     }
 }
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
-struct Status {
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Status {
     title: String,
     purpose: String,
     url: String,
@@ -202,12 +210,44 @@ impl Status {
 #[derive(serde::Serialize, Clone, Debug)]
 struct ChatState {
     profiles: Vec<Profile>,
+    days_to_sync: u8
 }
 
 impl ChatState {
     fn new() -> Self {
         Self {
             profiles: Vec::new(),
+            days_to_sync: 2
+        }
+    }
+
+    async fn from_db_profile(&mut self, slim: SlimProfile) {
+        // Check if profile already exists
+        if let Some(position) = self.profiles.iter().position(|profile| profile.id == slim.id) {
+            // Replace existing profile
+            let mut full_profile = slim.to_profile();
+
+            // Check if this is our profile: we need to mark it as such
+            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+            let signer = client.signer().await.unwrap();
+            let my_public_key = signer.get_public_key().await.unwrap();
+            let profile_pubkey = PublicKey::from_bech32(&full_profile.id).unwrap();
+            full_profile.mine = my_public_key == profile_pubkey;
+
+            // Preserve existing messages to avoid data loss
+            let existing_messages = std::mem::take(&mut self.profiles[position].messages);
+            self.profiles[position] = full_profile;
+            self.profiles[position].messages = existing_messages;
+        } else {
+            // Add new profile
+            self.profiles.push(slim.to_profile());
+        }
+    }
+    
+    // Optionally, add a method to merge multiple profiles at once
+    async fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>) {
+        for slim in slim_profiles {
+            self.from_db_profile(slim).await;
         }
     }
 
@@ -227,10 +267,11 @@ impl ChatState {
         }
     }
 
-    fn add_message(&mut self, npub: String, message: Message) {
+    fn add_message(&mut self, npub: String, message: Message) -> bool {
+        let is_msg_added: bool;
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == npub) {
             // Add the message to the existing profile
-            profile.internal_add_message(message);
+            is_msg_added = profile.internal_add_message(message);
         } else {
             // Generate the profile and add the message to it
             let mut profile = Profile::new();
@@ -241,6 +282,7 @@ impl ChatState {
             // Update the frontend
             let app_handle = TAURI_APP.get().unwrap();
             app_handle.emit("profile_update", profile).unwrap();
+            is_msg_added = true;
         }
 
         // Sort our profile positions based on last message time
@@ -252,6 +294,8 @@ impl ChatState {
             // Compare timestamps in reverse order (newest first)
             b_time.cmp(&a_time)
         });
+
+        is_msg_added
     }
 
     fn add_reaction(&mut self, npub: String, msg_id: String, reaction: Reaction) -> bool {
@@ -271,30 +315,132 @@ lazy_static! {
 }
 
 #[tauri::command]
-async fn fetch_messages(init: bool) -> Result<Vec<Profile>, ()> {
-    // If we don't have any messages - keep trying to find 'em
-    if init {
-        let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+async fn fetch_messages<R: Runtime>(
+    handle: AppHandle<R>,
+    init: bool
+) {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
-        // Grab our pubkey
-        let signer = client.signer().await.unwrap();
-        let my_public_key = signer.get_public_key().await.unwrap();
+    // Grab our pubkey
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
 
-        // Fetch GiftWraps related to us
-        // TODO: currently limited to around 1 week of history (give/take due to GiftWrap fake timestamps)
-        let filter = Filter::new().pubkey(my_public_key).kind(Kind::GiftWrap).since(Timestamp::from_secs(Timestamp::now().as_u64() - (60 * 60 * 24 * 7)));
-        let events = client
-            .fetch_events(filter, std::time::Duration::from_secs(120))
-            .await
-            .unwrap();
+    // Determine the time range to fetch
+    let days_to_search = STATE.lock().await.days_to_sync as u64;
+    let (since_timestamp, until_timestamp) = if init {
+        // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
+        let mut state = STATE.lock().await;
+        if state.profiles.len() == 1 {
+            let profiles = db::get_all_profiles(&handle).await.unwrap();
+            let msgs = db::get_all_messages(&handle).await.unwrap();
 
-        // Decrypt every GiftWrap and return their contents + senders
-        for event in events.into_iter() {
-            handle_event(event, false).await;
+            // Load our Profile Cache in to the state
+            state.merge_db_profiles(profiles).await;
+
+            // Add each message to the state, keeping the earliest known message
+            for (msg, npub) in msgs {
+                state.add_message(npub, msg);
+            }
+        }
+
+        // Send the state to our frontend to signal finalised init with a full state
+        handle.emit("init_finished", &state.profiles).unwrap();
+
+        // Now fetch messages from the given period, to fill any "gaps" since the app was last opened
+        (
+            Timestamp::from_secs(Timestamp::now().as_u64() - (60 * 60 * 24 * days_to_search)),
+            Timestamp::now()
+        )
+    } else {
+        // Find the oldest message timestamp from our state
+        match get_oldest_message_timestamp().await {
+            Some(oldest_ts) => {
+                // Fetch the period before our oldest message
+                let since = Timestamp::from_secs(oldest_ts - (60 * 60 * 24 * days_to_search));
+                let until = Timestamp::from_secs(oldest_ts);
+                (since, until)
+            },
+            None => {
+                // No messages in DB yet, do an initial fetch
+                (
+                    Timestamp::from_secs(Timestamp::now().as_u64() - (60 * 60 * 24 * days_to_search)),
+                    Timestamp::now()
+                )
+            }
+        }
+    };
+
+    // Emit our current "Sync Range" to the frontend
+    handle.emit("sync_progress", serde_json::json!({
+        "since": since_timestamp.as_u64(),
+        "until": until_timestamp.as_u64()
+    })).unwrap();
+
+    // Fetch GiftWraps related to us within the time window
+    let filter = Filter::new()
+        .pubkey(my_public_key)
+        .kind(Kind::GiftWrap)
+        .since(since_timestamp)
+        .until(until_timestamp);
+
+    let events = client
+        .fetch_events(filter, std::time::Duration::from_secs(30))
+        .await
+        .unwrap();
+
+    // Decrypt every GiftWrap and process their contents
+    let mut new_messages_count: u16 = 0;
+    for event in events.into_iter() {
+        // Count the amount of accepted (new) events
+        if handle_event(event, false).await {
+            new_messages_count += 1;
         }
     }
 
-    Ok(STATE.lock().await.profiles.clone())
+    // If no messages were retrieved; we bump our search radius until a maximum of 10 days
+    if new_messages_count == 0 {
+        STATE.lock().await.days_to_sync += 2;
+    } else {
+        STATE.lock().await.days_to_sync = 2;
+    }
+
+    // Once we've searched a 10-day slice without new messages; we give up and finish sync
+    if days_to_search == 10 {
+        handle.emit("sync_finished", serde_json::json!({
+            "since": since_timestamp.as_u64(),
+            "until": until_timestamp.as_u64()
+        })).unwrap();
+    } else {
+        // Keep synchronising
+        handle.emit("sync_slice_finished", ()).unwrap();
+    }
+}
+
+async fn get_oldest_message_timestamp() -> Option<u64> {
+    let state = STATE.lock().await;
+    let profiles = &state.profiles;
+    
+    let mut oldest_timestamp = None;
+    
+    // Check each profile's messages
+    for profile in profiles {
+        // If this profile has messages
+        if !profile.messages.is_empty() {
+            // Since messages are already ordered by time, the first one is the oldest
+            if let Some(oldest_msg) = profile.messages.first() {
+                match oldest_timestamp {
+                    None => oldest_timestamp = Some(oldest_msg.at),
+                    Some(current_oldest) => {
+                        if oldest_msg.at < current_oldest {
+                            oldest_timestamp = Some(oldest_msg.at);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    oldest_timestamp
 }
 
 #[tauri::command]
@@ -479,6 +625,10 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
 
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), message.clone(), receiver.clone()).await.unwrap();
+
                     // Update the frontend
                     app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
                     return Ok(true);
@@ -495,6 +645,10 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     let message = chat.get_message_mut(pending_id.clone()).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
+
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), message.clone(), receiver.clone()).await.unwrap();
 
                     // Update the frontend
                     app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
@@ -665,7 +819,7 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
         .kind(Kind::from_u16(30315))
         .limit(1);
     let status = match client
-        .fetch_events(status_filter, std::time::Duration::from_secs(10))
+        .fetch_events(status_filter, std::time::Duration::from_secs(15))
         .await
     {
         Ok(res) => {
@@ -695,7 +849,7 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
 
     // Attempt to fetch their Metadata profile
     match client
-        .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(10))
+        .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(15))
         .await
     {
         Ok(meta) => {
@@ -711,7 +865,10 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
             // If there's any change between our Old and New profile, emit an update
             if *profile_mutable != old_profile {
                 let app_handle = TAURI_APP.get().unwrap();
-                app_handle.emit("profile_update", profile_mutable.clone()).unwrap();
+                app_handle.emit("profile_update", &profile_mutable).unwrap();
+
+                // Cache this profile in our DB, too
+                db::set_profile(app_handle.clone(), profile_mutable.clone()).await.unwrap();
             }
             // And apply the current update time
             profile_mutable.last_updated = std::time::SystemTime::now()
@@ -891,7 +1048,7 @@ async fn start_typing(receiver: String) -> Result<bool, ()> {
 }
 
 #[tauri::command]
-async fn handle_event(event: Event, is_new: bool) {
+async fn handle_event(event: Event, is_new: bool) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
@@ -933,9 +1090,6 @@ async fn handle_event(event: Event, is_new: bool) {
                     .expect("Failed to convert sender's public key to bech32")
             };
 
-            // Grab our state Mutex
-            let mut state = STATE.lock().await;
-
             // Direct Message (NIP-17)
             if rumor.kind == Kind::PrivateDirectMessage {
                 // Check if the message replies to anything
@@ -954,7 +1108,7 @@ async fn handle_event(event: Event, is_new: bool) {
                 if !is_mine && is_new {
                     // Find the name of the sender, if we have it
                     let display_name: String;
-                    match state.get_profile(contact.clone()) {
+                    match STATE.lock().await.get_profile(contact.clone()) {
                         Ok(profile) => {
                             // We have a profile, just check for a name
                             display_name = match profile.name.is_empty() {
@@ -983,13 +1137,20 @@ async fn handle_event(event: Event, is_new: bool) {
                 };
 
                 // Add the message to the state
-                state.add_message(contact.clone(), msg.clone());
+                let was_msg_added_to_state = STATE.lock().await.add_message(contact.clone(), msg.clone());
 
-                // Update the frontend
-                if is_new {
+                // If accepted in-state: commit to the DB and emit to the frontend
+                if was_msg_added_to_state {
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), msg.clone(), contact.clone()).await.unwrap();
+
+                    // Send it to the frontend
                     let app_handle = TAURI_APP.get().unwrap();
                     app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
                 }
+
+                was_msg_added_to_state
             }
             // Emoji Reaction (NIP-25)
             else if rumor.kind == Kind::Reaction {
@@ -1007,12 +1168,9 @@ async fn handle_event(event: Event, is_new: bool) {
                         };
 
                         // Add the reaction
-                        match state.add_reaction(contact, reference_id.to_string(), reaction) {
-                            true => {}
-                            false => (/* Couldn't find the relevant Profile or Message */),
-                        }
+                        STATE.lock().await.add_reaction(contact, reference_id.to_string(), reaction)
                     }
-                    None => (/* No Reference (Note ID) supplied */),
+                    None => false /* No Reference (Note ID) supplied */,
                 }
             }
             // Files and Images
@@ -1060,7 +1218,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     if res.is_err() {
                         // TEMP: reaaaallly improve this area!
                         println!("Weird file: {}", content_url);
-                        return;
+                        return false;
                     }
                     let response = res.unwrap();
                     let file_contents = response.bytes().await.unwrap().to_vec();
@@ -1069,7 +1227,7 @@ async fn handle_event(event: Event, is_new: bool) {
                     let decryption = decrypt_data(file_contents.as_slice(), decryption_key, decryption_nonce);
                     if decryption.is_err() {
                         println!("Failed to decrypt: {}", content_url);
-                        return;
+                        return false;
                     }
                     let decrypted_file = decryption.unwrap();
 
@@ -1105,13 +1263,20 @@ async fn handle_event(event: Event, is_new: bool) {
                 };
 
                 // Add the message to the state
-                state.add_message(contact.clone(), msg.clone());
+                let was_msg_added_to_state = STATE.lock().await.add_message(contact.clone(), msg.clone());
 
-                // Update the frontend
-                if is_new {
+                // If accepted in-state: commit to the DB and emit to the frontend
+                if was_msg_added_to_state {
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), msg.clone(), contact.clone()).await.unwrap();
+
+                    // Send it to the frontend
                     let app_handle = TAURI_APP.get().unwrap();
                     app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
                 }
+
+                was_msg_added_to_state
             }
             // Vector-specific events (NIP-78)
             else if rumor.kind == Kind::ApplicationSpecificData {
@@ -1136,7 +1301,7 @@ async fn handle_event(event: Event, is_new: bool) {
                                             && expiry_timestamp > current_timestamp
                                         {
                                             // Now we apply the typing indicator to it's author profile
-                                            match state
+                                            match STATE.lock().await
                                                 .get_profile_mut(rumor.pubkey.to_bech32().unwrap())
                                             {
                                                 Ok(profile) => {
@@ -1146,22 +1311,30 @@ async fn handle_event(event: Event, is_new: bool) {
                                                     // Update the frontend
                                                     let app_handle = TAURI_APP.get().unwrap();
                                                     app_handle.emit("profile_update", profile.clone()).unwrap();
+                                                    true
                                                 }
-                                                Err(_) => { /* Received a Typing Indicator from an unknown contact, ignoring... */
-                                                }
-                                            };
+                                                Err(_) => false, /* Received a Typing Indicator from an unknown contact, ignoring... */
+                                            }
+                                        } else {
+                                            false
                                         }
                                     }
-                                    None => {}
+                                    None => false,
                                 }
+                            } else {
+                                false
                             }
+                        } else {
+                            false
                         }
                     }
-                    None => {}
+                    None => false,
                 }
+            } else {
+                false
             }
         }
-        Err(_e) => (),
+        Err(_e) => false,
     }
 }
 
@@ -1438,50 +1611,101 @@ async fn hash_pass(password: String) -> [u8; 32] {
     key
 }
 
-// Encrypt an Input with ChaCha20 and password-derived Argon2 key
-// Output format: <12-byte-rand-nonce><encrypted-payload>
-#[tauri::command]
-async fn encrypt(input: String, password: String) -> String {
+// Internal function for encryption logic
+pub async fn internal_encrypt(input: String, password: Option<String>) -> String {
     // Hash our password with ramped-up Argon2 and use it as the key
-    let key = hash_pass(password).await;
+    let key = if password.is_none() { 
+        ENCRYPTION_KEY.get().unwrap() 
+    } else { 
+        &hash_pass(password.unwrap()).await 
+    };
 
-    // Generate a nonce
+    // Generate a random 12-byte nonce
     let mut rng = rand::thread_rng();
-    let nonce: [u8; 12] = rng.gen();
-
-    // Prepend the nonce to our cipher output
-    let mut buffer: Vec<u8> = nonce.to_vec();
-
+    let nonce_bytes: [u8; 12] = rng.gen();
+    
+    // Create the cipher instance
+    let cipher = ChaCha20Poly1305::new_from_slice(key)
+        .expect("Key should be valid");
+    
+    // Create the nonce
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    
     // Encrypt the input
-    let mut cipher = ChaCha20::new(&key.into(), &nonce.into());
-    let mut cipher_buffer = string_to_bytes(&input);
-    cipher.apply_keystream(&mut cipher_buffer);
+    let plaintext = string_to_bytes(&input);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_ref())
+        .expect("Encryption should not fail");
+    
+    // Prepend the nonce to our ciphertext
+    let mut buffer = nonce_bytes.to_vec();
+    buffer.extend_from_slice(&ciphertext);
 
-    // Append the cipher buffer
-    buffer.append(&mut cipher_buffer);
+    // Save the Encryption Key locally so that we can continually encrypt data post-login
+    if ENCRYPTION_KEY.get().is_none() {
+        ENCRYPTION_KEY.set(*key).unwrap();
+    }
 
     // Convert the encrypted bytes to a hex string for safe storage/transmission
     bytes_to_hex_string(&buffer)
 }
 
-#[tauri::command]
-async fn decrypt(ciphertext: String, password: String) -> Result<String, ()> {
+// Internal function for decryption logic
+pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
     // Hash our password with ramped-up Argon2 and use it as the key
-    let key = hash_pass(password).await;
+    let key = if password.is_none() { 
+        ENCRYPTION_KEY.get().unwrap() 
+    } else { 
+        &hash_pass(password.unwrap()).await 
+    };
 
-    // Prepare our decryption buffer split it away from our prepended nonce
-    let mut nonce = hex_string_to_bytes(&ciphertext);
-    let mut buffer = nonce.split_off(12);
-
+    // Convert hex to bytes
+    let encrypted_data = match hex_string_to_bytes(&ciphertext) {
+        bytes if bytes.len() >= 12 => bytes,
+        _ => return Err(())
+    };
+    
+    // Extract nonce and encrypted data
+    let nonce_bytes = &encrypted_data[..12];
+    let actual_ciphertext = &encrypted_data[12..];
+    
+    // Create the cipher instance
+    let cipher = match ChaCha20Poly1305::new_from_slice(key) {
+        Ok(c) => c,
+        Err(_) => return Err(())
+    };
+    
+    // Create the nonce
+    let nonce = Nonce::from_slice(nonce_bytes);
+    
     // Decrypt
-    let mut cipher = ChaCha20::new(&key.into(), nonce.as_slice().into());
-    cipher.apply_keystream(&mut buffer);
+    let plaintext = match cipher.decrypt(nonce, actual_ciphertext) {
+        Ok(pt) => pt,
+        Err(_) => return Err(())
+    };
+
+    // Save the Encryption Key locally so that we can continually decrypt data post-login
+    if ENCRYPTION_KEY.get().is_none() {
+        ENCRYPTION_KEY.set(*key).unwrap();
+    }
 
     // Convert decrypted bytes back to string
-    match String::from_utf8(buffer) {
+    match String::from_utf8(plaintext) {
         Ok(decrypted) => Ok(decrypted),
         Err(_) => Err(()),
     }
+}
+
+// Tauri command that uses the internal function
+#[tauri::command]
+async fn encrypt(input: String, password: Option<String>) -> String {
+    internal_encrypt(input, password).await
+}
+
+// Tauri command that uses the internal function
+#[tauri::command]
+async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
+    internal_decrypt(ciphertext, password).await
 }
 
 #[tauri::command]
@@ -1494,7 +1718,7 @@ async fn stop_recording() -> Result<Vec<u8>, String> {
     AudioRecorder::global().stop()
 }
 
-#[derive(serde::Serialize, Clone, PartialEq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
 pub struct SiteMetadata {
     domain: String,
     og_title: Option<String>,
@@ -1768,6 +1992,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             db::get_db,
+            db::get_db_version,
+            db::set_db_version,
             db::get_theme,
             db::set_theme,
             db::get_pkey,
