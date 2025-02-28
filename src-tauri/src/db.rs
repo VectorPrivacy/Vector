@@ -269,6 +269,14 @@ pub fn remove_setting<R: Runtime>(handle: AppHandle<R>, key: String) -> Result<b
     Ok(deleted)
 }
 
+pub fn nuke<R: Runtime>(handle: AppHandle<R>) -> Result<(), tauri_plugin_store::Error>{
+    let store = get_store(&handle);
+    store.clear();
+
+    // We explicitly save to ensure the automated debounce isn't missed in case of immediate shutdown
+    store.save()
+}
+
 #[command]
 pub async fn save_message<R: Runtime>(
     handle: AppHandle<R>, 

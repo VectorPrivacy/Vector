@@ -50,6 +50,7 @@ const domSettings = document.getElementById('settings');
 const domSettingsBtn = document.getElementById('settings-btn');
 const domSettingsBackBtn = document.getElementById('settings-back-btn');
 const domSettingsThemeSelect = document.getElementById('theme-select');
+const domSettingsLogout = document.getElementById('logout-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');

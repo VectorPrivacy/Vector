@@ -110,3 +110,13 @@ async function setTheme(theme = 'vector', mode = 'dark') {
 domSettingsThemeSelect.onchange = (evt) => {
     setTheme(evt.target.value);
 };
+
+// Listen for Logout clicks
+domSettingsLogout.onclick = async (evt) => {
+    // Prompt for confirmation
+    const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?');
+    if (!fConfirm) return;
+
+    // Begin the logout sequence
+    await invoke('logout');
+}

@@ -1954,6 +1954,18 @@ async fn fetch_msg_metadata(npub: String, msg: String) -> bool {
     false
 }
 
+#[tauri::command]
+async fn logout<R: Runtime>(handle: AppHandle<R>) {
+    // Lock the state to ensure nothing is added to the DB before restart
+    let _guard = STATE.lock().await;
+
+    // Erase the Database completely for a clean logout
+    db::nuke(handle.clone()).unwrap();
+
+    // Restart the Core process
+    handle.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2017,7 +2029,8 @@ pub fn run() {
             decrypt,
             start_recording,
             stop_recording,
-            fetch_msg_metadata
+            fetch_msg_metadata,
+            logout
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
