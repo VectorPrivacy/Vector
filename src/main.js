@@ -780,6 +780,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                         if (fUnlock) {
                             // Attempt to decrypt our key with the pin
                             domLoginEncryptTitle.textContent = `Decrypting your keys...`;
+                            domLoginEncryptTitle.classList.add('text-gradient');
                             domLoginEncryptPinRow.style.display = `none`;
                             try {
                                 const decryptedPkey = await loadAndDecryptPrivateKey(strPinCurrent.join(''));
@@ -809,6 +810,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                         if (fMatching) {
                             // Encrypt and proceed
                             domLoginEncryptTitle.textContent = `Encrypting your keys...`;
+                            domLoginEncryptTitle.classList.add('text-gradient');
                             domLoginEncryptPinRow.style.display = `none`;
                             await saveAndEncryptPrivateKey(pkey, strPinLast.join(''));
                             login();

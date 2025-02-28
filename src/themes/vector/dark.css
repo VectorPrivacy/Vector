@@ -70,7 +70,7 @@
   border-color: rgba(90, 252, 180, 0.36);
 }
 
-#chat-box {
+.input-box {
   background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
   -webkit-box-shadow: 
     0 10px 20px 5px #59fcb33c,

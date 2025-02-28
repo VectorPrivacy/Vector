@@ -55,7 +55,7 @@
         </div>
         <button id="chat-scroll-return" class="corner-float" style="border-radius: 100%; height: 45px; width: 45px;"><span class="icon icon-chevron-down"></span></button>
 
-        <div class="row" id="chat-box">
+        <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
             <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
@@ -100,14 +100,17 @@
         <span class="intro-anim" id="version"></span>
         <div id="login-import">
           <h3 class="text-gradient" style="margin-top: 100px;">Private & Encrypted Messenger</h3>
-          <div class="row" style="position: absolute; bottom: 10px; width: 100%;">
-            <input type="password" style="width: 100%; margin-left: 10px;" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
-            <button style="margin-right: 10px;" id="login-btn">Login</button>
+          <div class="row input-box" style="position: absolute; bottom: 0px; width: 100%; height: 52px;">
+            <input type="password" style="width: 100%; margin-left: 10px; margin-top: 5px; margin-bottom: 5px; background-color: black;" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
+            <button style="margin-right: 10px; margin-top: 5px; margin-bottom: 5px;" id="login-btn">Login</button>
           </div>
         </div>
-        <div class="intro-anim" id="login-encrypt" style="width: 100%; bottom: 8px; display: none;">
-          <h3 id="login-encrypt-title" class="text-gradient" style="margin-top: 100px;">Choose an Encryption Pin</h3>
-          <div id="login-encrypt-pins" class="row pin-row">
+        <div id="login-encrypt" style="position: absolute; width: 100%; bottom: 0px; display: none;">
+          <div style="display: inline-flex;">
+            <img src="./icons/lock.svg" style="width: 35px; height: 35px;">
+            <h3 id="login-encrypt-title" style="margin-bottom: 25px; margin-top: 10px; margin-left: 8px;">Choose an Encryption Pin</h3>
+          </div>
+          <div id="login-encrypt-pins" class="row pin-row input-box">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-0">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-1">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-2">
