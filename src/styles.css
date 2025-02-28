@@ -172,6 +172,22 @@ body {
   0% { opacity: 0; transform: translateY(50px); }
 }
 
+.fadeout-anim {
+  animation: Fadeout 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes Fadeout {
+  100% { opacity: 0; }
+}
+
+.fadein-anim {
+  animation: Fadein 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes Fadein {
+  0% { opacity: 0; }
+}
+
 .intro-anim-widen {
   animation: IntroWiden 1s cubic-bezier(.46,.03,.52,.96) forwards;
 }

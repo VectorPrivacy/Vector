@@ -516,7 +516,7 @@ async function setupRustListeners() {
         const options = { month: 'short', day: 'numeric' };
         const start = new Date(evt.payload.since * 1000).toLocaleDateString('en-US', options);
         const end = new Date(evt.payload.until * 1000).toLocaleDateString('en-US', options);
-        domSyncStatusContainer.style.display = ``;
+        if (!fInit) domSyncStatusContainer.style.display = ``;
         domSyncStatus.textContent = `Syncing Messages between ${start} - ${end}`;
         if (!strOpenChat) adjustSize();
     });
@@ -623,8 +623,7 @@ let fInit = true;
 async function login() {
     if (strPubkey) {
         // Connect to Nostr
-        // Note: for quick re-login during development: `connect` will be `false` if already connected, letting us skip database decryption
-        const fHasConnected = await invoke("connect");
+        await invoke("connect");
 
         // Setup our Rust Event listeners for efficient back<-->front sync
         await setupRustListeners();
@@ -634,45 +633,59 @@ async function login() {
             // Set our full Chat State
             arrChats = evt.payload;
 
-            // Hide the login and encryption UI
-            domLoginInput.value = "";
-            domLogin.style.display = 'none';
-            domLoginEncrypt.style.display = 'none';
-            domSettingsBtn.style.display = '';
+            // Fadeout the login and encryption UI
+            domLogin.classList.add('fadeout-anim');
+            domLogin.addEventListener('animationend', async () => {
+                domLogin.classList.remove('fadeout-anim');
+                domLoginInput.value = "";
+                domLogin.style.display = 'none';
+                domLoginEncrypt.style.display = 'none';
 
-            // Render our profile with an intro animation
-            const cProfile = arrChats.find(p => p.mine);
-            renderCurrentProfile(cProfile);
-            const domProfileDivider = document.getElementById('profile-divider');
-            domProfileDivider.classList.add('intro-anim-widen');
-            domProfileDivider.addEventListener('animationend', () => domProfileDivider.classList.remove('intro-anim-widen'), { once: true });
+                // Fade-in the settings button
+                domSettingsBtn.style.display = '';
+                domSettingsBtn.classList.add('fadein-anim');
+                domSettingsBtn.addEventListener('animationend', () => domSettingsBtn.classList.remove('fadein-anim'), { once: true });
 
-            // Display our Synchronisation Status
-            domSyncStatusContainer.classList.add('intro-anim');
-            domSyncStatusContainer.addEventListener('animationend', () => domSyncStatusContainer.classList.remove('intro-anim'), { once: true });
+                // Render our profile with an intro animation
+                const cProfile = arrChats.find(p => p.mine);
+                renderCurrentProfile(cProfile);
+                domAccount.classList.add('fadein-anim');
+                domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
 
-            // Finished boot!
-            fInit = false;
+                const domProfileDivider = document.getElementById('profile-divider');
+                domProfileDivider.classList.add('intro-anim-widen');
+                domProfileDivider.addEventListener('animationend', () => domProfileDivider.classList.remove('intro-anim-widen'), { once: true });
 
-            // Render the chatlist with an intro animation
-            domChatList.classList.add('intro-anim');
-            renderChatlist();
-            domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+                // Display our Synchronisation Status
+                domSyncStatusContainer.classList.add('intro-anim');
+                domSyncStatusContainer.addEventListener('animationend', () => domSyncStatusContainer.classList.remove('intro-anim'), { once: true });
+                if (domSyncStatus.textContent) domSyncStatusContainer.style.display = ``;
 
-            // Append a "Start New Chat" button
-            const btnStartChat = document.createElement('button');
-            btnStartChat.classList.add('corner-float', 'visible');
-            btnStartChat.style.bottom = `15px`;
-            btnStartChat.style.borderRadius = `100%`;
-            btnStartChat.style.height = `50px`;
-            btnStartChat.style.width = `50px`;
-            btnStartChat.innerHTML = '<span class="icon icon-new-msg"></span>';
-            btnStartChat.onclick = openNewChat;
-            domChats.appendChild(btnStartChat);
-            adjustSize();
+                // Finished boot!
+                fInit = false;
 
-            // Setup a subscription for new websocket messages
-            invoke("notifs");
+                // Render the chatlist with an intro animation
+                domChatList.classList.add('intro-anim');
+                renderChatlist();
+                domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+
+                // Append and fade-in a "Start New Chat" button
+                const btnStartChat = document.createElement('button');
+                btnStartChat.classList.add('corner-float', 'visible');
+                btnStartChat.style.bottom = `15px`;
+                btnStartChat.style.borderRadius = `100%`;
+                btnStartChat.style.height = `50px`;
+                btnStartChat.style.width = `50px`;
+                btnStartChat.innerHTML = '<span class="icon icon-new-msg"></span>';
+                btnStartChat.onclick = openNewChat;
+                btnStartChat.classList.add('fadein-anim');
+                btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('fadein-anim'), { once: true });
+                domChats.appendChild(btnStartChat);
+                adjustSize();
+
+                // Setup a subscription for new websocket messages
+                invoke("notifs");
+            }, { once: true });
         });
 
         // Load and Decrypt our database; fetching the full chat state from disk for immediate bootup
@@ -1307,6 +1320,9 @@ let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
 window.addEventListener("DOMContentLoaded", async () => {
+    // Once login fade-in animation ends, remove it
+    domLogin.addEventListener('animationend', () => domLogin.classList.remove('fadein-anim'), { once: true });
+
     // Immediately load and apply theme settings
     const strTheme = await invoke('get_theme');
     if (strTheme) {
