@@ -14,6 +14,12 @@
   background-clip: text;
 }
 
+.startup-subtext-gradient {
+  background: linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%);
+  background-size: 200% 200%;
+  background-clip: text;
+}
+
 .back-btn {
   color: rgb(191, 191, 191);
 }

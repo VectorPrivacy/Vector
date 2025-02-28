@@ -136,6 +136,12 @@ body {
   animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
 }
 
+.startup-subtext-gradient {
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
+}
+
 @keyframes BreathingGradient {
   0% {background-position: 0% 50%;}
   50% {background-position: 100% 50%;}

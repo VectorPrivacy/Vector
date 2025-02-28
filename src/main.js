@@ -5,11 +5,9 @@ const { listen } = window.__TAURI__.event;
 const { readImage } = window.__TAURI__.clipboardManager;
 const { openUrl } = window.__TAURI__.opener;
 
-const domVersion = document.getElementById('version');
-
 // Display the current version
 getVersion().then(v => {
-    domVersion.textContent += `v${v}`;
+    // TODO: re-add this somewhere, settings?
 });
 
 const domTheme = document.getElementById('theme');
