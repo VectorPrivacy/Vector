@@ -397,6 +397,27 @@ body {
   margin-bottom: 5px;
 }
 
+.msg-payment {
+  display: flex;
+  padding: 10px;
+  border-radius: 16px;
+  margin-top: 10px;
+  border-style: solid;
+  border-width: 1px;
+}
+
+.msg-payment img {
+  height: 50px;
+  margin-top: auto;
+  margin-bottom: auto;
+  margin-right: 10px;
+}
+
+.msg-payment button {
+  margin-left: auto;
+  background-color: rgba(0, 0, 0, 0.4);
+}
+
 /* The `highlightMessage` animation is defined in `/themes/*` */
 .highlight-animation p {
   animation: highlightMessage 1.5s ease-out forwards;

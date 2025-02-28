@@ -1071,6 +1071,13 @@ function renderMessage(msg, sender) {
         }
     }
 
+    // Append Payment Shortcuts (i.e: Bitcoin Payment URIs, etc)
+    const cAddress = detectCryptoAddress(msg.content);
+    if (cAddress) {
+        // Render the Payment UI
+        pMessage.appendChild(renderCryptoAddress(cAddress));
+    }
+
     // Append Metadata Previews (i.e: OpenGraph data from URLs, etc)
     if (!msg.pending && !msg.failed) {
         if (msg.preview_metadata?.og_image) {
@@ -1525,6 +1532,11 @@ document.addEventListener('click', (e) => {
         const strURL = e.target.getAttribute('url') || e.target.parentElement.getAttribute('url');
         if (strURL) openUrl(strURL);
         return;
+    }
+
+    // If we're clicking a Payment URI, open it's URL
+    if (e.target.getAttribute('pay-uri')) {
+        return openUrl(e.target.getAttribute('pay-uri'));
     }
 
     // If we're clicking a Contact, open the chat with the embedded npub (ID)
