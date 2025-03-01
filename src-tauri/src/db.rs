@@ -112,21 +112,6 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
     save_all_profiles(&handle, profiles).await
 }
 
-// Public command to get a profile
-#[command]
-pub async fn get_profile<R: Runtime>(handle: AppHandle<R>, profile_id: String) -> Result<Option<Profile>, String> {
-    let profiles = get_all_profiles(&handle).await?;
-    
-    // Find the profile
-    let profile_opt = profiles.into_iter().find(|p| p.id == profile_id);
-    
-    // Convert to full profile if found
-    match profile_opt {
-        Some(slim_profile) => Ok(Some(slim_profile.to_profile())),
-        None => Ok(None)
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SlimMessage {
     id: String,
