@@ -799,6 +799,7 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
         .author(profile_pubkey)
         .kind(Kind::from_u16(30315))
         .limit(1);
+
     let status = match client
         .fetch_events(status_filter, std::time::Duration::from_secs(15))
         .await
@@ -821,11 +822,11 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
                     url: String::from(""),
                 }
             } else {
-                // No status
-                Status::new()
+                // Relays didn't find anything? We'll ignore this and use our previous status
+                profile.status.clone()
             }
         }
-        Err(_e) => Status::new(),
+        Err(_e) => profile.status.clone(),
     };
 
     // Attempt to fetch their Metadata profile
