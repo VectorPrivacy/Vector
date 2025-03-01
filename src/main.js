@@ -1106,6 +1106,7 @@ function renderMessage(msg, sender) {
             const imgFavicon = document.createElement('img');
             imgFavicon.classList.add('favicon');
             imgFavicon.src = msg.preview_metadata.favicon;
+            imgFavicon.addEventListener('load', softChatScroll, { once: true });
 
             // Add the title (prefixed with the Favicon)
             const spanPreviewTitle = document.createElement('span');
@@ -1125,9 +1126,9 @@ function renderMessage(msg, sender) {
             // Render the Preview
             pMessage.appendChild(divPrevContainer);
         } else if (!msg.preview_metadata) {
-            // Check if message is older than 6 hours, then try to sync metadata
-            if (msg.at > (Date.now() / 1000) - 21600) {
-                invoke("fetch_msg_metadata", { npub: sender.id, msg: msg.id });
+            // Grab the message's metadata (currently, only URLs can have extracted metadata)
+            if (msg.content && msg.content.includes('https')) {
+                invoke("fetch_msg_metadata", { npub: sender.id, msgId: msg.id });
             }
         }
     }

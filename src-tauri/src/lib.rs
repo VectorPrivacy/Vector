@@ -1931,8 +1931,11 @@ async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
                     message.preview_metadata = Some(metadata);
 
                     // Update the renderer
-                    let app_handle = TAURI_APP.get().unwrap();
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: msg_id, message: message.clone(), chat_id: npub }).unwrap();
+                    let handle = TAURI_APP.get().unwrap();
+                    handle.emit("message_update", MessageUpdateEvent { old_id: msg_id.clone(), message: message.clone(), chat_id: npub.clone() }).unwrap();
+
+                    // Save the new Metadata to the DB
+                    db::save_message(handle.clone(), message.clone(), npub).await.unwrap();
                     return true;
                 }
             }
