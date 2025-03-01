@@ -626,16 +626,16 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     sent_msg.id = built_rumor.id.unwrap().to_hex();
                     sent_msg.pending = false;
 
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), sent_msg.clone(), receiver.clone()).await.unwrap();
-
                     // Update the frontend
                     handle.emit("message_update", serde_json::json!({
                         "old_id": &pending_id,
                         "message": &sent_msg,
                         "chat_id": &receiver
                     })).unwrap();
+
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), sent_msg.clone(), receiver).await.unwrap();
                     return Ok(true);
                 }
                 Err(_) => {
@@ -647,16 +647,16 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     sent_ish_msg.id = built_rumor.id.unwrap().to_hex();
                     sent_ish_msg.pending = false;
 
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), sent_ish_msg.clone(), receiver.clone()).await.unwrap();
-
                     // Update the frontend
                     handle.emit("message_update", serde_json::json!({
                         "old_id": &pending_id,
                         "message": &sent_ish_msg,
                         "chat_id": &receiver
                     })).unwrap();
+
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), sent_ish_msg.clone(), receiver).await.unwrap();
                     return Ok(true);
                 }
             }
