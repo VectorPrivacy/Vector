@@ -64,20 +64,6 @@ pub struct Message {
     mine: bool,
 }
 
-#[derive(serde::Serialize, Clone)]
-struct MessageEvent {
-    message: Message,
-    chat_id: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct MessageUpdateEvent {
-    /// old_id is the reference to the previous message being updated, as `message` may have a new ID, i.e: pending to on-line rumor transitions
-    old_id: String,
-    message: Message,
-    chat_id: String,
-}
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Attachment {
     /// The encryption Nonce as the unique file ID
@@ -181,8 +167,12 @@ impl Profile {
                     msg.reactions.push(reaction);
 
                     // Update the frontend
-                    let app_handle = TAURI_APP.get().unwrap();
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: msg.id.clone(), message: msg.clone(), chat_id: self.id.clone() }).unwrap();
+                    let handle = TAURI_APP.get().unwrap();
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": &msg.id,
+                        "message": &msg,
+                        "chat_id": &self.id
+                    })).unwrap();
                     true
                 } else {
                     // Reaction was already added previously
@@ -279,8 +269,8 @@ impl ChatState {
                 profile.internal_add_message(message);
 
                 // Update the frontend
-                let app_handle = TAURI_APP.get().unwrap();
-                app_handle.emit("profile_update", &profile).unwrap();
+                let handle = TAURI_APP.get().unwrap();
+                handle.emit("profile_update", &profile).unwrap();
 
                 // Push to the Profile (after emission; to save on a clone)
                 self.profiles.push(profile);
@@ -477,8 +467,11 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     STATE.lock().await.add_message(&receiver, msg.clone());
 
     // Send the pending message to our frontend
-    let app_handle = TAURI_APP.get().unwrap();
-    app_handle.emit("message_new", MessageEvent { message: msg.clone(), chat_id: receiver.clone() }).unwrap();
+    let handle = TAURI_APP.get().unwrap();
+    handle.emit("message_new", serde_json::json!({
+        "message": &msg,
+        "chat_id": &receiver
+    })).unwrap();
 
     // Grab our pubkey
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -507,7 +500,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
             let message = chat.get_message_mut(&pending_id).unwrap();
 
             // Store the nonce-based file name on-disk for future reference
-            let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
+            let dir = handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
             let nonce_file_path = dir.join(format!("{}.{}", params.nonce.clone(), attached_file.extension.clone()));
 
             // Create the vector directory if it doesn't exist
@@ -525,7 +518,11 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
             });
 
             // Update the frontend
-            app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
+            handle.emit("message_update", serde_json::json!({
+                "old_id": &pending_id,
+                "message": &message,
+                "chat_id": &receiver
+            })).unwrap();
         }
 
         // Format a Mime Type from the file extension
@@ -573,7 +570,11 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                 failed_msg.failed = true;
 
                 // Update the frontend
-                app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: failed_msg.clone(), chat_id: receiver.clone() }).unwrap();
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &pending_id,
+                    "message": &failed_msg,
+                    "chat_id": &receiver
+                })).unwrap();
 
                 // Return the error
                 return Err(String::from("Failed to upload file"));
@@ -607,16 +608,20 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     // Mark the message as a success
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&receiver).unwrap();
-                    let message = chat.get_message_mut(&pending_id).unwrap();
-                    message.id = built_rumor.id.unwrap().to_hex();
-                    message.pending = false;
+                    let sent_msg = chat.get_message_mut(&pending_id).unwrap();
+                    sent_msg.id = built_rumor.id.unwrap().to_hex();
+                    sent_msg.pending = false;
 
                     // Save the message to our DB
                     let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), message.clone(), receiver.clone()).await.unwrap();
+                    db::save_message(handle.clone(), sent_msg.clone(), receiver.clone()).await.unwrap();
 
                     // Update the frontend
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id, message: message.clone(), chat_id: receiver }).unwrap();
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": &pending_id,
+                        "message": &sent_msg,
+                        "chat_id": &receiver
+                    })).unwrap();
                     return Ok(true);
                 }
                 Err(_) => {
@@ -624,16 +629,20 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     // We'll class it as sent, for now...
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&receiver).unwrap();
-                    let message = chat.get_message_mut(&pending_id).unwrap();
-                    message.id = built_rumor.id.unwrap().to_hex();
-                    message.pending = false;
+                    let sent_ish_msg = chat.get_message_mut(&pending_id).unwrap();
+                    sent_ish_msg.id = built_rumor.id.unwrap().to_hex();
+                    sent_ish_msg.pending = false;
 
                     // Save the message to our DB
                     let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), message.clone(), receiver.clone()).await.unwrap();
+                    db::save_message(handle.clone(), sent_ish_msg.clone(), receiver.clone()).await.unwrap();
 
                     // Update the frontend
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id, message: message.clone(), chat_id: receiver }).unwrap();
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": &pending_id,
+                        "message": &sent_ish_msg,
+                        "chat_id": &receiver
+                    })).unwrap();
                     return Ok(true);
                 }
             }
@@ -866,11 +875,11 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
             profile_mutable.from_metadata(meta);
             // If there's any change between our Old and New profile, emit an update
             if *profile_mutable != old_profile {
-                let app_handle = TAURI_APP.get().unwrap();
-                app_handle.emit("profile_update", &profile_mutable).unwrap();
+                let handle = TAURI_APP.get().unwrap();
+                handle.emit("profile_update", &profile_mutable).unwrap();
 
                 // Cache this profile in our DB, too
-                db::set_profile(app_handle.clone(), profile_mutable.clone()).await.unwrap();
+                db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
             }
             // And apply the current update time
             profile_mutable.last_updated = std::time::SystemTime::now()
@@ -930,9 +939,9 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
             profile_mutable.from_metadata(meta);
 
             // Update the frontend
-            let app_handle = TAURI_APP.get().unwrap();
-            app_handle.emit("profile_update", profile_mutable.clone()).unwrap();
-            Ok(profile.clone())
+            let handle = TAURI_APP.get().unwrap();
+            handle.emit("profile_update", &profile_mutable).unwrap();
+            Ok(profile_mutable.clone())
         }
         Err(_e) => Err(()),
     }
@@ -960,8 +969,8 @@ async fn update_status(status: String) -> Result<Profile, ()> {
             profile.status.title = status;
 
             // Update the frontend
-            let app_handle = TAURI_APP.get().unwrap();
-            app_handle.emit("profile_update", profile.clone()).unwrap();
+            let handle = TAURI_APP.get().unwrap();
+            handle.emit("profile_update", &profile).unwrap();
             Ok(profile.clone())
         }
         Err(_e) => Err(()),
@@ -970,10 +979,9 @@ async fn update_status(status: String) -> Result<Profile, ()> {
 
 #[tauri::command]
 async fn upload_avatar(filepath: String) -> Result<String, String> {
-    let app_handle = TAURI_APP.get().unwrap();
-
     // Grab the file
-    return match app_handle.fs().read(std::path::Path::new(&filepath)) {
+    let handle = TAURI_APP.get().unwrap();
+    return match handle.fs().read(std::path::Path::new(&filepath)) {
         Ok(file) => {
             // Format a Mime Type from the file extension
             let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
@@ -1142,8 +1150,11 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     db::save_message(handle.clone(), msg.clone(), contact.clone()).await.unwrap();
 
                     // Send it to the frontend
-                    let app_handle = TAURI_APP.get().unwrap();
-                    app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
+                    let handle = TAURI_APP.get().unwrap();
+                    handle.emit("message_new", serde_json::json!({
+                        "message": &msg,
+                        "chat_id": &contact
+                    })).unwrap();
                 }
 
                 was_msg_added_to_state
@@ -1204,8 +1215,8 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 };
 
                 // Check if the file exists on our system already
-                let app_handle = TAURI_APP.get().unwrap();
-                let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
+                let handle = TAURI_APP.get().unwrap();
+                let dir = handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
                 let file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
                 if !file_path.exists() {
                     // No file! Try fetching it
@@ -1268,8 +1279,11 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     db::save_message(handle.clone(), msg.clone(), contact.clone()).await.unwrap();
 
                     // Send it to the frontend
-                    let app_handle = TAURI_APP.get().unwrap();
-                    app_handle.emit("message_new", MessageEvent { message: msg, chat_id: contact }).unwrap();
+                    let handle = TAURI_APP.get().unwrap();
+                    handle.emit("message_new", serde_json::json!({
+                        "message": &msg,
+                        "chat_id": &contact
+                    })).unwrap();
                 }
 
                 was_msg_added_to_state
@@ -1305,8 +1319,8 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                                     profile.typing_until = expiry_timestamp;
 
                                                     // Update the frontend
-                                                    let app_handle = TAURI_APP.get().unwrap();
-                                                    app_handle.emit("profile_update", profile.clone()).unwrap();
+                                                    let handle = TAURI_APP.get().unwrap();
+                                                    handle.emit("profile_update", &profile).unwrap();
                                                     true
                                                 }
                                                 None => false, /* Received a Typing Indicator from an unknown contact, ignoring... */
@@ -1370,10 +1384,10 @@ async fn notifs() -> Result<bool, String> {
 
 #[tauri::command]
 fn show_notification(title: String, content: String) {
-    let app_handle = TAURI_APP.get().unwrap();
+    let handle = TAURI_APP.get().unwrap();
     // Only send notifications if the app is not focused
     // TODO: generalise this assumption - it's only used for Message Notifications at the moment
-    if !app_handle
+    if !handle
         .webview_windows()
         .iter()
         .next()
@@ -1382,7 +1396,7 @@ fn show_notification(title: String, content: String) {
         .is_focused()
         .unwrap()
     {
-        app_handle
+        handle
             .notification()
             .builder()
             .title(title)
@@ -1927,15 +1941,19 @@ async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
                     // Re-fetch the message and add our metadata
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&npub).unwrap();
-                    let message = chat.get_message_mut(&msg_id).unwrap();
-                    message.preview_metadata = Some(metadata);
+                    let msg = chat.get_message_mut(&msg_id).unwrap();
+                    msg.preview_metadata = Some(metadata);
 
                     // Update the renderer
                     let handle = TAURI_APP.get().unwrap();
-                    handle.emit("message_update", MessageUpdateEvent { old_id: msg_id.clone(), message: message.clone(), chat_id: npub.clone() }).unwrap();
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": &msg_id,
+                        "message": &msg,
+                        "chat_id": &npub
+                    })).unwrap();
 
                     // Save the new Metadata to the DB
-                    db::save_message(handle.clone(), message.clone(), npub).await.unwrap();
+                    db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
                     return true;
                 }
             }
@@ -1967,7 +1985,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
-            let app_handle = app.app_handle().clone();
+            let handle = app.app_handle().clone();
 
             // Setup a graceful shutdown for our Nostr subscriptions
             let window = app.get_webview_window("main").unwrap();
@@ -1990,7 +2008,7 @@ pub fn run() {
             });
 
             // Set as our accessible static app handle
-            TAURI_APP.set(app_handle).unwrap();
+            TAURI_APP.set(handle).unwrap();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
