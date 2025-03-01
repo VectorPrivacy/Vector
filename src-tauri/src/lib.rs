@@ -78,13 +78,13 @@ struct MessageUpdateEvent {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Attachment {
-    /** The encryption Nonce as the unique file ID */
+    /// The encryption Nonce as the unique file ID
     id: String,
-    /** The file extension */
+    /// The file extension
     extension: String,
-    /** The storage directory path (typically the ~/Downloads folder) */
+    /// The storage directory path (typically the ~/Downloads folder)
     path: String,
-    /** Whether the file has been downloaded or not */
+    /// Whether the file has been downloaded or not
     downloaded: bool,
 }
 
@@ -98,11 +98,11 @@ struct AttachmentFile {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Reaction {
     id: String,
-    /** The HEX Event ID of the message being reacted to */
+    /// The HEX Event ID of the message being reacted to
     reference_id: String,
-    /** The HEX ID of the author */
+    /// The HEX ID of the author
     author_id: String,
-    /** The emoji of the reaction */
+    /// The emoji of the reaction
     emoji: String,
 }
 
@@ -132,24 +132,25 @@ impl Profile {
         }
     }
 
-    // Helper method to get the last message timestamp
+    /// Get the last message timestamp
     fn last_message_time(&self) -> Option<u64> {
         self.messages.last().map(|msg| msg.at)
     }
 
-    fn get_message_mut(&mut self, id: String) -> Result<&mut Message, ()> {
-        if let Some(msg) = self.messages.iter_mut().find(|msg| msg.id == id) {
-            return Ok(msg);
-        } else {
-            return Err(());
-        }
+    /// Get a mutable message by ID
+    fn get_message_mut(&mut self, id: &str) -> Option<&mut Message> {
+        self.messages.iter_mut().find(|msg| msg.id == id)
     }
 
+    /// Merge Nostr Metadata with this Vector Profile
     fn from_metadata(&mut self, meta: Metadata) {
         self.name = meta.name.unwrap_or(self.name.clone());
         self.avatar = meta.picture.unwrap_or(self.avatar.clone());
     }
 
+    /// Add a Message to this Vector Profile
+    /// 
+    /// This method internally checks for and avoids duplicate messages.
     fn internal_add_message(&mut self, message: Message) -> bool {
         // Make sure we don't add the same message twice
         if !self.messages.iter().any(|m| m.id == message.id) {
@@ -168,10 +169,11 @@ impl Profile {
         }
     }
 
-    fn internal_add_reaction(&mut self, msg_id: String, reaction: Reaction) -> bool {
+    /// Add a Reaction to a Message
+    fn internal_add_reaction(&mut self, msg_id: &str, reaction: Reaction) -> bool {
         // Find the message being reacted to
         match self.get_message_mut(msg_id) {
-            Ok(msg) => {
+            Some(msg) => {
                 // Make sure we don't add the same reaction twice
                 if !msg.reactions.iter().any(|r| r.id == reaction.id) {
                     msg.reactions.push(reaction);
@@ -185,7 +187,7 @@ impl Profile {
                     false
                 }
             }
-            Err(_) => false,
+            None => false,
         }
     }
 }
@@ -221,6 +223,7 @@ impl ChatState {
         }
     }
 
+    /// Load a Vector Profile in to the state from our SlimProfile database format
     async fn from_db_profile(&mut self, slim: SlimProfile) {
         // Check if profile already exists
         if let Some(position) = self.profiles.iter().position(|profile| profile.id == slim.id) {
@@ -244,46 +247,44 @@ impl ChatState {
         }
     }
     
-    // Optionally, add a method to merge multiple profiles at once
+    /// Merge multiple Vector Profiles from SlimProfile format in to the state at once
     async fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>) {
         for slim in slim_profiles {
             self.from_db_profile(slim).await;
         }
     }
-
-    fn get_profile(&mut self, npub: String) -> Result<&Profile, ()> {
-        if let Some(profile) = self.profiles.iter().find(|profile| profile.id == npub) {
-            return Ok(profile);
-        } else {
-            return Err(());
-        }
+    
+    /// Get a profile by ID
+    fn get_profile(&self, id: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+    
+    /// Get a mutable profile by ID
+    fn get_profile_mut(&mut self, id: &str) -> Option<&mut Profile> {
+        self.profiles.iter_mut().find(|p| p.id == id)
     }
 
-    fn get_profile_mut(&mut self, npub: String) -> Result<&mut Profile, ()> {
-        if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == npub) {
-            return Ok(profile);
-        } else {
-            return Err(());
-        }
-    }
+    /// Add a message to a Vector Profile via it's ID
+    fn add_message(&mut self, npub: &str, message: Message) -> bool {
+        let is_msg_added = match self.get_profile_mut(npub) {
+            Some(profile) =>
+                // Add the message to the existing profile
+                profile.internal_add_message(message),
+            None => {
+                // Generate the profile and add the message to it
+                let mut profile = Profile::new();
+                profile.id = npub.to_string();
+                profile.internal_add_message(message);
 
-    fn add_message(&mut self, npub: String, message: Message) -> bool {
-        let is_msg_added: bool;
-        if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == npub) {
-            // Add the message to the existing profile
-            is_msg_added = profile.internal_add_message(message);
-        } else {
-            // Generate the profile and add the message to it
-            let mut profile = Profile::new();
-            profile.id = npub;
-            profile.internal_add_message(message);
-            self.profiles.push(profile.clone());
+                // Update the frontend
+                let app_handle = TAURI_APP.get().unwrap();
+                app_handle.emit("profile_update", &profile).unwrap();
 
-            // Update the frontend
-            let app_handle = TAURI_APP.get().unwrap();
-            app_handle.emit("profile_update", profile).unwrap();
-            is_msg_added = true;
-        }
+                // Push to the Profile (after emission; to save on a clone)
+                self.profiles.push(profile);
+                true
+            }
+        };
 
         // Sort our profile positions based on last message time
         self.profiles.sort_by(|a, b| {
@@ -298,14 +299,13 @@ impl ChatState {
         is_msg_added
     }
 
-    fn add_reaction(&mut self, npub: String, msg_id: String, reaction: Reaction) -> bool {
+    /// Add a Reaction to a Message in a Vector Profile
+    fn add_reaction(&mut self, npub: &str, msg_id: &str, reaction: Reaction) -> bool {
         // Get the profile
         match self.get_profile_mut(npub) {
-            Ok(profile) => {
-                // Add the reaction to the profile's message
-                profile.internal_add_reaction(msg_id, reaction)
-            }
-            Err(_) => false,
+            // If the profile is found; add the reaction to the profile's message
+            Some(profile) => profile.internal_add_reaction(msg_id, reaction),
+            None => false,
         }
     }
 }
@@ -339,7 +339,7 @@ async fn fetch_messages<R: Runtime>(
 
             // Add each message to the state, keeping the earliest known message
             for (msg, npub) in msgs {
-                state.add_message(npub, msg);
+                state.add_message(&npub, msg);
             }
         }
 
@@ -450,7 +450,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     let pending_count = STATE
         .lock()
         .await
-        .get_profile(receiver.clone())
+        .get_profile(&receiver)
         .unwrap_or(&Profile::new())
         .messages
         .iter()
@@ -472,7 +472,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         failed: false,
         mine: true,
     };
-    STATE.lock().await.add_message(receiver.clone(), msg.clone());
+    STATE.lock().await.add_message(&receiver, msg.clone());
 
     // Send the pending message to our frontend
     let app_handle = TAURI_APP.get().unwrap();
@@ -501,12 +501,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         {
             // Retrieve the Pending Message
             let mut state = STATE.lock().await;
-            let chat = state
-                        .profiles
-                        .iter_mut()
-                        .find(|chat| chat.id == receiver)
-                        .unwrap();
-            let message = chat.get_message_mut(pending_id.clone()).unwrap();
+            let chat = state.get_profile_mut(&receiver).unwrap();
+            let message = chat.get_message_mut(&pending_id).unwrap();
 
             // Store the nonce-based file name on-disk for future reference
             let dir = app_handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
@@ -572,12 +568,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     Err(_) => {
                         // The file upload failed: so we mark the message as failed and notify of an error
                         let mut state = STATE.lock().await;
-                        let chat = state
-                            .profiles
-                            .iter_mut()
-                            .find(|chat| chat.id == receiver)
-                            .unwrap();
-                        let failed_msg = chat.get_message_mut(pending_id.clone()).unwrap();
+                        let chat = state.get_profile_mut(&receiver).unwrap();
+                        let failed_msg = chat.get_message_mut(&pending_id).unwrap();
                         failed_msg.failed = true;
 
                         // Update the frontend
@@ -617,12 +609,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                 Ok(_) => {
                     // Mark the message as a success
                     let mut state = STATE.lock().await;
-                    let chat = state
-                        .profiles
-                        .iter_mut()
-                        .find(|chat| chat.id == receiver)
-                        .unwrap();
-                    let message = chat.get_message_mut(pending_id.clone()).unwrap();
+                    let chat = state.get_profile_mut(&receiver).unwrap();
+                    let message = chat.get_message_mut(&pending_id).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
 
@@ -631,19 +619,15 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     db::save_message(handle.clone(), message.clone(), receiver.clone()).await.unwrap();
 
                     // Update the frontend
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id, message: message.clone(), chat_id: receiver }).unwrap();
                     return Ok(true);
                 }
                 Err(_) => {
                     // This is an odd case; the message was sent to the receiver, but NOT ourselves
                     // We'll class it as sent, for now...
                     let mut state = STATE.lock().await;
-                    let chat = state
-                        .profiles
-                        .iter_mut()
-                        .find(|chat| chat.id == receiver)
-                        .unwrap();
-                    let message = chat.get_message_mut(pending_id.clone()).unwrap();
+                    let chat = state.get_profile_mut(&receiver).unwrap();
+                    let message = chat.get_message_mut(&pending_id).unwrap();
                     message.id = built_rumor.id.unwrap().to_hex();
                     message.pending = false;
 
@@ -652,7 +636,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     db::save_message(handle.clone(), message.clone(), receiver.clone()).await.unwrap();
 
                     // Update the frontend
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id, message: message.clone(), chat_id: receiver }).unwrap();
                     return Ok(true);
                 }
             }
@@ -660,12 +644,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         Err(_) => {
             // Mark the message as a failure, bad message, bad!
             let mut state = STATE.lock().await;
-            let chat = state
-                .profiles
-                .iter_mut()
-                .find(|chat| chat.id == receiver)
-                .unwrap();
-            let failed_msg = chat.get_message_mut(pending_id).unwrap();
+            let chat = state.get_profile_mut(&receiver).unwrap();
+            let failed_msg = chat.get_message_mut(&pending_id).unwrap();
             failed_msg.failed = true;
             return Ok(false);
         }
@@ -766,7 +746,7 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
             return Ok(STATE
                 .lock()
                 .await
-                .add_reaction(npub, reference_id, reaction));
+                .add_reaction(&npub, &reference_id, reaction));
         }
         Err(e) => {
             eprintln!("Error: {:?}", e);
@@ -791,14 +771,14 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
     let profile: Profile;
     {
         let mut state = STATE.lock().await;
-        profile = match state.get_profile(npub.clone()) {
-            Ok(p) => p,
-            Err(_) => {
+        profile = match state.get_profile(&npub) {
+            Some(p) => p,
+            None => {
                 // Create a new profile
                 let mut new_profile = Profile::new();
                 new_profile.id = npub.clone();
                 state.profiles.push(new_profile);
-                state.get_profile(npub.clone()).unwrap()
+                state.get_profile(&npub).unwrap()
             }
         }
         .clone();
@@ -856,7 +836,7 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
         Ok(meta) => {
             // If it's ours, mark it as such
             let mut state = STATE.lock().await;
-            let profile_mutable = state.get_profile_mut(npub).unwrap();
+            let profile_mutable = state.get_profile_mut(&npub).unwrap();
             let old_profile = profile_mutable.clone();
             profile_mutable.mine = my_public_key == profile_pubkey;
             // Update the Status
@@ -896,7 +876,7 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
     let mut meta: Metadata;
     let mut state = STATE.lock().await;
     let profile = state
-        .get_profile(my_public_key.to_bech32().unwrap())
+        .get_profile(&my_public_key.to_bech32().unwrap())
         .unwrap()
         .clone();
 
@@ -924,7 +904,7 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
         Ok(_event) => {
             // Apply our Metadata to our Profile
             let profile_mutable = state
-                .get_profile_mut(my_public_key.to_bech32().unwrap())
+                .get_profile_mut(&my_public_key.to_bech32().unwrap())
                 .unwrap();
             profile_mutable.from_metadata(meta);
 
@@ -953,7 +933,7 @@ async fn update_status(status: String) -> Result<Profile, ()> {
             // Add the status to our profile
             let mut state = STATE.lock().await;
             let profile = state
-                .get_profile_mut(my_public_key.to_bech32().unwrap())
+                .get_profile_mut(&my_public_key.to_bech32().unwrap())
                 .unwrap();
             profile.status.purpose = String::from("general");
             profile.status.title = status;
@@ -1108,18 +1088,17 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 // Send an OS notification for incoming messages
                 if !is_mine && is_new {
                     // Find the name of the sender, if we have it
-                    let display_name: String;
-                    match STATE.lock().await.get_profile(contact.clone()) {
-                        Ok(profile) => {
+                    let display_name = match STATE.lock().await.get_profile(&contact) {
+                        Some(profile) => {
                             // We have a profile, just check for a name
-                            display_name = match profile.name.is_empty() {
+                            match profile.name.is_empty() {
                                 true => String::from("New Message"),
                                 false => profile.name.clone(),
-                            };
+                            }
                         }
                         // No profile
-                        Err(_) => display_name = String::from("New Message"),
-                    }
+                        None => String::from("New Message"),
+                    };
                     show_notification(display_name, rumor.content.clone());
                 }
 
@@ -1138,7 +1117,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 };
 
                 // Add the message to the state
-                let was_msg_added_to_state = STATE.lock().await.add_message(contact.clone(), msg.clone());
+                let was_msg_added_to_state = STATE.lock().await.add_message(&contact, msg.clone());
 
                 // If accepted in-state: commit to the DB and emit to the frontend
                 if was_msg_added_to_state {
@@ -1169,7 +1148,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         };
 
                         // Add the reaction
-                        STATE.lock().await.add_reaction(contact, reference_id.to_string(), reaction)
+                        STATE.lock().await.add_reaction(&contact, &reference_id, reaction)
                     }
                     None => false /* No Reference (Note ID) supplied */,
                 }
@@ -1264,7 +1243,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 };
 
                 // Add the message to the state
-                let was_msg_added_to_state = STATE.lock().await.add_message(contact.clone(), msg.clone());
+                let was_msg_added_to_state = STATE.lock().await.add_message(&contact, msg.clone());
 
                 // If accepted in-state: commit to the DB and emit to the frontend
                 if was_msg_added_to_state {
@@ -1303,9 +1282,9 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                         {
                                             // Now we apply the typing indicator to it's author profile
                                             match STATE.lock().await
-                                                .get_profile_mut(rumor.pubkey.to_bech32().unwrap())
+                                                .get_profile_mut(&rumor.pubkey.to_bech32().unwrap())
                                             {
-                                                Ok(profile) => {
+                                                Some(profile) => {
                                                     // Apply typing indicator
                                                     profile.typing_until = expiry_timestamp;
 
@@ -1314,7 +1293,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                                     app_handle.emit("profile_update", profile.clone()).unwrap();
                                                     true
                                                 }
-                                                Err(_) => false, /* Received a Typing Indicator from an unknown contact, ignoring... */
+                                                None => false, /* Received a Typing Indicator from an unknown contact, ignoring... */
                                             }
                                         } else {
                                             false
@@ -1901,16 +1880,12 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
 }
 
 #[tauri::command]
-async fn fetch_msg_metadata(npub: String, msg: String) -> bool {
+async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
     // Find the message we're extracting metadata from
     let text = {
         let mut state = STATE.lock().await;
-        let chat = state
-                    .profiles
-                    .iter_mut()
-                    .find(|chat| chat.id == npub)
-                    .unwrap();
-        let message = chat.get_message_mut(msg.clone()).unwrap();
+        let chat = state.get_profile_mut(&npub).unwrap();
+        let message = chat.get_message_mut(&msg_id).unwrap();
         message.content.clone()
     };
 
@@ -1935,17 +1910,13 @@ async fn fetch_msg_metadata(npub: String, msg: String) -> bool {
                 if has_content {
                     // Re-fetch the message and add our metadata
                     let mut state = STATE.lock().await;
-                    let chat = state
-                                .profiles
-                                .iter_mut()
-                                .find(|chat| chat.id == npub)
-                                .unwrap();
-                    let message = chat.get_message_mut(msg.clone()).unwrap();
+                    let chat = state.get_profile_mut(&npub).unwrap();
+                    let message = chat.get_message_mut(&msg_id).unwrap();
                     message.preview_metadata = Some(metadata);
 
                     // Update the renderer
                     let app_handle = TAURI_APP.get().unwrap();
-                    app_handle.emit("message_update", MessageUpdateEvent { old_id: msg, message: message.clone(), chat_id: npub }).unwrap();
+                    app_handle.emit("message_update", MessageUpdateEvent { old_id: msg_id, message: message.clone(), chat_id: npub }).unwrap();
                     return true;
                 }
             }
