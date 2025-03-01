@@ -494,6 +494,18 @@ async function sendFile(pubkey, replied_to, filepath) {
 }
 
 /**
+ * A blocking function that continually polls NIP-96 servers for their configs.
+ * 
+ * Note: This function should only be called once, and COULD block for a very long time (i.e: if offline).
+ */
+async function warmupUploadServers() {
+    // This simple function continually polls Vector's NIP-96 servers until configs are cached, for faster file uploads later
+    while (true) {
+        if (await invoke('warmup_nip96_servers')) break;
+    }
+}
+
+/**
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
@@ -625,6 +637,9 @@ async function login() {
     if (strPubkey) {
         // Connect to Nostr
         await invoke("connect");
+
+        // Warmup our Upload Servers
+        warmupUploadServers();
 
         // Setup our Rust Event listeners for efficient back<-->front sync
         await setupRustListeners();

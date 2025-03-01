@@ -38,11 +38,13 @@ static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
 ///
 /// A temporary hardcoded NIP-96 server, handling file uploads for public files (Avatars, etc)
 static TRUSTED_PUBLIC_NIP96: &str = "https://nostr.build";
+static PUBLIC_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 
 /// # Trusted Private NIP-96 Server
 ///
 /// A temporary hardcoded NIP-96 server, handling file uploads for encrypted files (in-chat)
 static TRUSTED_PRIVATE_NIP96: &str = "https://medea-small.jskitty.cat";
+static PRIVATE_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 
 static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
@@ -526,61 +528,56 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
             app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: message.clone(), chat_id: receiver.clone() }).unwrap();
         }
 
-        // Upload the attachment
-        match get_server_config(Url::parse(TRUSTED_PRIVATE_NIP96).unwrap(), None).await {
-            Ok(conf) => {
-                // Format a Mime Type from the file extension
-                let mime_type = match attached_file.extension.to_lowercase().as_str() {
-                    // Images
-                    "png" => "image/png",
-                    "jpg" | "jpeg" => "image/jpeg",
-                    "gif" => "image/gif",
-                    "webp" => "image/webp",
-                    // Audio
-                    "wav" => "audio/wav",
-                    "mp3" => "audio/mp3",
-                    // Videos
-                    "mp4" => "video/mp4",
-                    "webm" => "video/webm",
-                    "mov" => "video/quicktime",
-                    "avi" => "video/x-msvideo",
-                    "mkv" => "video/x-matroska",
-                    // Unknown
-                    _ => "application/octet-stream",
-                };
+        // Format a Mime Type from the file extension
+        let mime_type = match attached_file.extension.to_lowercase().as_str() {
+            // Images
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            // Audio
+            "wav" => "audio/wav",
+            "mp3" => "audio/mp3",
+            // Videos
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            "mov" => "video/quicktime",
+            "avi" => "video/x-msvideo",
+            "mkv" => "video/x-matroska",
+            // Unknown
+            _ => "application/octet-stream",
+        };
 
-                // Upload the file to the server
-                let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-                let signer = client.signer().await.unwrap();
-                match upload_data(&signer, &conf, enc_file, Some(mime_type), None).await {
-                    Ok(url) => {
-                        // Create the attachment rumor
-                        let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
+        // Upload the file to the server
+        let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+        let signer = client.signer().await.unwrap();
+        let conf = PRIVATE_NIP96_CONFIG.wait();
+        match upload_data(&signer, &conf, enc_file, Some(mime_type), None).await {
+            Ok(url) => {
+                // Create the attachment rumor
+                let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
 
-                        // Append decryption keys and file metadata
-                        attachment_rumor
-                            .tag(Tag::public_key(receiver_pubkey))
-                            .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
-                            .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-                            .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
-                            .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
-                    },
-                    Err(_) => {
-                        // The file upload failed: so we mark the message as failed and notify of an error
-                        let mut state = STATE.lock().await;
-                        let chat = state.get_profile_mut(&receiver).unwrap();
-                        let failed_msg = chat.get_message_mut(&pending_id).unwrap();
-                        failed_msg.failed = true;
-
-                        // Update the frontend
-                        app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: failed_msg.clone(), chat_id: receiver.clone() }).unwrap();
-
-                        // Return the error
-                        return Err(String::from("Failed to upload file"));
-                    }
-                }
+                // Append decryption keys and file metadata
+                attachment_rumor
+                    .tag(Tag::public_key(receiver_pubkey))
+                    .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                    .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
+                    .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
+                    .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
             },
-            Err(_) => return Err(String::from("Failed to sync server configuration"))
+            Err(_) => {
+                // The file upload failed: so we mark the message as failed and notify of an error
+                let mut state = STATE.lock().await;
+                let chat = state.get_profile_mut(&receiver).unwrap();
+                let failed_msg = chat.get_message_mut(&pending_id).unwrap();
+                failed_msg.failed = true;
+
+                // Update the frontend
+                app_handle.emit("message_update", MessageUpdateEvent { old_id: pending_id.clone(), message: failed_msg.clone(), chat_id: receiver.clone() }).unwrap();
+
+                // Return the error
+                return Err(String::from("Failed to upload file"));
+            }
         }
     };
 
@@ -704,6 +701,29 @@ async fn file_message(receiver: String, replied_to: String, file_path: String) -
 
     // Message the file to the intended user
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
+}
+
+/// Pre-fetch the configs from our preferred NIP-96 servers to speed up uploads
+#[tauri::command]
+async fn warmup_nip96_servers() -> bool {
+    // Public Fileserver
+    if PUBLIC_NIP96_CONFIG.get().is_none() {
+        let _ = match get_server_config(Url::parse(TRUSTED_PUBLIC_NIP96).unwrap(), None).await {
+            Ok(conf) => PUBLIC_NIP96_CONFIG.set(conf),
+            Err(_) => return false
+        };
+    }
+
+    // Private Fileserver
+    if PRIVATE_NIP96_CONFIG.get().is_none() {
+        let _ = match get_server_config(Url::parse(TRUSTED_PRIVATE_NIP96).unwrap(), None).await {
+            Ok(conf) => PRIVATE_NIP96_CONFIG.set(conf),
+            Err(_) => return false
+        };
+    }
+
+    // We've got the configs for all our servers, nice!
+    true
 }
 
 #[tauri::command]
@@ -955,26 +975,21 @@ async fn upload_avatar(filepath: String) -> Result<String, String> {
     // Grab the file
     return match app_handle.fs().read(std::path::Path::new(&filepath)) {
         Ok(file) => {
-            // Get our NIP-96 server config
-            return match get_server_config(Url::parse(TRUSTED_PUBLIC_NIP96).unwrap(), None).await {
-                Ok(conf) => {
-                    // Format a Mime Type from the file extension
-                    let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        _ => "application/octet-stream",
-                    };
+            // Format a Mime Type from the file extension
+            let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => "application/octet-stream",
+            };
 
-                    // Upload the file to the server
-                    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-                    let signer = client.signer().await.unwrap();
-                    return match upload_data(&signer, &conf, file, Some(mime_type), None).await {
-                        Ok(url) => Ok(url.to_string()),
-                        Err(e) => Err(e.to_string())
-                    }
-                },
+            // Upload the file to the server
+            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+            let signer = client.signer().await.unwrap();
+            let conf = PUBLIC_NIP96_CONFIG.wait();
+            return match upload_data(&signer, &conf, file, Some(mime_type), None).await {
+                Ok(url) => Ok(url.to_string()),
                 Err(e) => Err(e.to_string())
             }
         },
@@ -1989,6 +2004,7 @@ pub fn run() {
             paste_message,
             voice_message,
             file_message,
+            warmup_nip96_servers,
             react,
             login,
             notifs,
