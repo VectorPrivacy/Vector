@@ -398,14 +398,15 @@ async fn fetch_messages<R: Runtime>(
     }
 
     // If no messages were retrieved; we bump our search radius until a maximum of 10 days
-    if new_messages_count == 0 {
+    let max_search_range_reached = days_to_search >= 10;
+    if new_messages_count == 0 && !max_search_range_reached {
         STATE.lock().await.days_to_sync += 2;
     } else {
         STATE.lock().await.days_to_sync = 2;
     }
 
     // Once we've searched a 10-day slice without new messages; we give up and finish sync
-    if days_to_search == 10 {
+    if max_search_range_reached {
         handle.emit("sync_finished", serde_json::json!({
             "since": since_timestamp.as_u64(),
             "until": until_timestamp.as_u64()
