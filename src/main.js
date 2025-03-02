@@ -985,20 +985,29 @@ function renderMessage(msg, sender) {
         const cMsg = sender.messages.find(m => m.id === msg.replied_to);
         if (cMsg) {
             // Render the reply in a quote-like fashion
-            const spanRef = document.createElement('span');
-            spanRef.classList.add('msg-reply', 'btn');
-            spanRef.id = `r-${cMsg.id}`;
+            const divRef = document.createElement('div');
+            divRef.classList.add('msg-reply', 'btn');
+            divRef.id = `r-${cMsg.id}`;
 
-            // Figure out the reply context
-            if (cMsg.content) {
-                // Reply to Text Message
-                spanRef.textContent = cMsg.content.length < 75 ? cMsg.content : cMsg.content.substring(0, 75) + '…';
-                pMessage.appendChild(spanRef);
-            } else if (cMsg.attachments.length) {
-                // Reply to Attachment
-                spanRef.textContent = `Attachment`;
-                pMessage.appendChild(spanRef);
-            }
+            // Name + Message
+            const spanName = document.createElement('span');
+            spanName.style.color = `rgba(255, 255, 255, 0.7)`;
+            const spanRef = document.createElement('span');
+            spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
+
+            // Name
+            const cSenderProfile = !cMsg.mine ? sender : arrChats.find(a => a.mine);
+            spanName.textContent = cSenderProfile.name ? cSenderProfile.name : cSenderProfile.id.substring(0, 10) + '…';
+
+            // Replied-to content (Text or Attachment)
+            if (cMsg.content)
+                spanRef.textContent = cMsg.content.length < 50 ? cMsg.content : cMsg.content.substring(0, 50) + '…';
+            else if (cMsg.attachments.length) spanRef.textContent = `Attachment`;
+
+            divRef.appendChild(spanName);
+            divRef.appendChild(document.createElement('br'));
+            divRef.appendChild(spanRef);
+            pMessage.appendChild(divRef);
         }
     }
 
@@ -1534,9 +1543,10 @@ document.addEventListener('click', (e) => {
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
 
     // If we're clicking a Reply context, center the referenced message in view
-    if (e.target.classList.contains('msg-reply')) {
+    if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')) {
         // Note: The `substring(2)` removes the `r-` prefix
-        const domMsg = document.getElementById(e.target.id.substring(2));
+        const strID = e.target.id || e.target.parentElement.id;
+        const domMsg = document.getElementById(strID.substring(2));
         centerInView(domMsg);
 
         // Run an animation to bring the user's eye to the message

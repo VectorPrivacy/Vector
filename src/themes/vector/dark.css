@@ -52,7 +52,7 @@
 }
 
 .msg-reply {
-  border-left: solid rgb(215, 215, 215) 2px;
+  border-left: solid rgba(255, 255, 255, 0.45) 2px;
 }
 
 @keyframes highlightMessage {
