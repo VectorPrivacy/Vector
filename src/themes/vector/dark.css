@@ -90,11 +90,15 @@
 input,
 textarea,
 button {
-  background-color: rgba(152, 255, 214, 0.25);
+  background-color: rgba(152, 255, 214, 0.2);
 }
 
 button:hover {
   background-color: (152, 255, 214, 0.5);
+}
+
+.corner-float {
+  border-color: rgba(90, 252, 180, 0.55);
 }
 
 .divider {

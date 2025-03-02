@@ -92,6 +92,10 @@ button {
   background-color: #593b6f99;
 }
 
+.corner-float {
+  border-color: rgba(161, 40, 253, 0.4);
+}
+
 .divider {
   background-color: rgba(128, 0, 128, 0.5);
 }
