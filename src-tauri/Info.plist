@@ -4,5 +4,7 @@
   <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>This is required for sending Voice Messages as well as other voice activities, such as calls.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>This is required to receive and save files.</string>
   </dict>
 </plist>

@@ -1230,7 +1230,15 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Check if the file exists on our system already
                 let handle = TAURI_APP.get().unwrap();
-                let dir = handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
+                // Choose the appropriate base directory based on platform
+                let base_directory = if cfg!(target_os = "ios") {
+                    tauri::path::BaseDirectory::Document
+                } else {
+                    tauri::path::BaseDirectory::Download
+                };
+
+                // Resolve the directory path using the determined base directory
+                let dir = handle.path().resolve("vector", base_directory).unwrap();
                 let file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
                 if !file_path.exists() {
                     // No file! Try fetching it

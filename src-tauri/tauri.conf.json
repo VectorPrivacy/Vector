@@ -22,7 +22,7 @@
       "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' https: asset: http://asset.localhost; media-src 'self' https: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$DOWNLOAD/vector/*"]
+        "scope": ["$DOWNLOAD/vector/*", "$DOCUMENT/vector/*"]
       }
     }
   },
