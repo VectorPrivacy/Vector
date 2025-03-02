@@ -372,7 +372,7 @@ body {
   border-radius: 15px;
   border-style: solid;
   border-width: 1px;
-  padding: 12px;
+  padding: 12px 15px;
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
@@ -384,7 +384,7 @@ body {
   border-radius: 15px;
   border-style: solid;
   border-width: 1px;
-  padding: 12px;
+  padding: 12px 15px;
   border-bottom-left-radius: 0px;
   word-break: break-word;
   font-weight: 100;
@@ -394,6 +394,7 @@ body {
   display: block;
   padding-left: 10px;
   margin-bottom: 5px;
+  line-height: 20px;
 }
 
 .msg-payment {
