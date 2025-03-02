@@ -432,6 +432,29 @@ body {
   100% { opacity: inherit; transform: translateY(0px) translateX(0px) scale(1); }
 }
 
+/* Used for "Expiring" elements, like finished statuses, etc */
+.slideout-anim {
+  overflow: hidden; /* Prevents content from spilling out during animation */
+  animation: SlideOut 0.75s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes SlideOut {
+  0% {
+    opacity: 1; /* Starting with full opacity */
+    height: var(--initial-height, auto); /* Starting with original height */
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0; /* Fade out completely */
+    height: 0; /* Collapse to zero height */
+    transform: translateY(-25px) scale(0);
+    margin-top: 0; /* Optional: remove margins too */
+    margin-bottom: 0;
+    padding-top: 0; /* Optional: remove padding too */
+    padding-bottom: 0;
+  }
+}
+
 .emoji-only {
   /* Typically I recommend against !important, but this is the only style in `msg-*` we're force-overriding */
   background: none !important;

@@ -510,10 +510,15 @@ async function warmupUploadServers() {
  */
 async function setupRustListeners() {
     // Listen for Synchronisation Finish updates
-    await listen('sync_finished', (_) => {
-        // Hide syncing UI
-        domSyncStatus.textContent = ``;
-        domSyncStatusContainer.style.display = `none`;
+    await listen('sync_finished', async (_) => {
+        // Display that we finished syncing
+        domSyncStatus.textContent = 'Synchronised';
+
+        // Wait 1 second, then slide out and hide when done
+        await slideout(domSyncStatusContainer, { delay: 1000 });
+
+        // Reset the text and adjust the UI if necessary
+        domSyncStatus.textContent = '';
         if (!strOpenChat) adjustSize();
     });
 

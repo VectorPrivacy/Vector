@@ -222,3 +222,48 @@ function setAsyncInterval(callback, interval) {
         clear: () => clearTimeout(timer)
     };
 }
+
+/**
+ * Slide out an element with animation and remove it from document flow
+ * @param {HTMLElement} element - The DOM element to slide out
+ * @param {Object} options - Optional configuration
+ * @param {string} options.animationClass - CSS class for animation (default: 'slideout-anim')
+ * @param {number} options.delay - Delay before starting animation in ms (default: 0)
+ * @param {boolean} options.removeAfter - Whether to set display:none after animation (default: true)
+ * @returns {Promise} Resolves when animation completes
+ */
+function slideout(element, options = {}) {
+    // Default options
+    const {
+        animationClass = 'slideout-anim',
+        delay = 0,
+        removeAfter = true
+    } = options;
+
+    return new Promise(resolve => {
+        // Store the initial height before starting animation
+        const initialHeight = element.offsetHeight;
+
+        // Optional delay before starting the animation
+        setTimeout(() => {
+            // Set the initial height as a CSS variable
+            element.style.setProperty('--initial-height', `${initialHeight}px`);
+
+            // Start the animation
+            element.classList.add(animationClass);
+
+            // Handle animation completion
+            element.addEventListener('animationend', () => {
+                // Clean up after animation
+                element.classList.remove(animationClass);
+                element.style.removeProperty('--initial-height');
+
+                // Optionally hide the element
+                if (removeAfter) element.style.display = 'none';
+
+                // Resolve the promise
+                resolve();
+            }, { once: true });
+        }, delay);
+    });
+}
