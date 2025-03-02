@@ -399,6 +399,9 @@ function renderChatlist() {
         }
     }
 
+    // Give the final element a bottom-margin boost to allow scrolling past the fadeout
+    fragment.lastElementChild.style.marginBottom = `50px`;
+
     // Add all elements at once for performance
     if (orderChanged) {
         // Nuke the existing list
@@ -407,6 +410,11 @@ function renderChatlist() {
         }
         // Append our new fragment
         domChatList.appendChild(fragment);
+
+        // Add a fade-in
+        const divFade = document.createElement('div');
+        divFade.classList.add(`fadeout-bottom`);
+        domChatList.appendChild(divFade);
     }
 }
 
