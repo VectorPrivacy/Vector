@@ -530,8 +530,17 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
             let chat = state.get_profile_mut(&receiver).unwrap();
             let message = chat.get_message_mut(&pending_id).unwrap();
 
+            // Choose the appropriate base directory based on platform
+            let base_directory = if cfg!(target_os = "ios") {
+                tauri::path::BaseDirectory::Document
+            } else {
+                tauri::path::BaseDirectory::Download
+            };
+
+            // Resolve the directory path using the determined base directory
+            let dir = handle.path().resolve("vector", base_directory).unwrap();
+
             // Store the nonce-based file name on-disk for future reference
-            let dir = handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
             let nonce_file_path = dir.join(format!("{}.{}", &params.nonce, &attached_file.extension));
 
             // Create the vector directory if it doesn't exist
