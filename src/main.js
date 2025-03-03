@@ -1065,8 +1065,9 @@ function renderMessage(msg, sender) {
     // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
     const spanMessage = document.createElement('span');
     if (fEmojiOnly) {
-        // Strip out unnecessary whitespace
-        spanMessage.textContent = strEmojiCleaned;
+        // Preserve linebreaks for creative emoji rendering (tophats on wolves)
+        spanMessage.textContent = msg.content;
+        spanMessage.style.whiteSpace = `pre-wrap`;
         // Add an emoji-only CSS format
         pMessage.classList.add('emoji-only');
         spanMessage.classList.add('emoji-only-content');

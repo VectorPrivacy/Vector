@@ -204,6 +204,13 @@ const arrEmojis = [
     { emoji: '🍗', name: 'poultry leg food meat chicken turkey' },
     { emoji: '🍖', name: 'meat on bone food meat rib' },
     { emoji: '🥩', name: 'cut of meat food steak beef' },
+    { emoji: '🍔', name: 'hamburger food burger fast food beef' },
+    { emoji: '🍟', name: 'french fries food potato chips fast food' },
+    { emoji: '🌭', name: 'hot dog food sausage fast food' },
+    { emoji: '🍕', name: 'pizza food cheese pepperoni italian' },
+    { emoji: '🌮', name: 'taco food mexican tortilla' },
+    { emoji: '🌯', name: 'burrito food mexican wrap' },
+    { emoji: '🥙', name: 'stuffed flatbread food gyro kebab' },
     { emoji: '🍤', name: 'fried shrimp food seafood tempura' },
     { emoji: '🍚', name: 'cooked rice food asian' },
     { emoji: '🍛', name: 'curry rice food spicy asian' },
@@ -230,7 +237,10 @@ const arrEmojis = [
     { emoji: '🍫', name: 'chocolate bar food sweet dessert snack' },
     { emoji: '🍩', name: 'doughnut food sweet dessert donut breakfast' },
     { emoji: '🍪', name: 'cookie food sweet dessert snack chocolate' },
+    { emoji: '☕', name: 'hot beverage coffee tea drink caffeine' },
+    { emoji: '🍵', name: 'teacup without handle tea drink hot green asian' },
     { emoji: '🥛', name: 'glass of milk food dairy breakfast drink' },
+    { emoji: '🍼', name: 'baby bottle milk food drink infant formula' },
     { emoji: '🍺', name: 'beer mug alcohol drink beverage pub' },
     { emoji: '🍻', name: 'clinking beer mugs drink alcohol cheers toast' },
     { emoji: '🥂', name: 'clinking glasses drink champagne toast celebration' },
@@ -257,7 +267,10 @@ const arrEmojis = [
     { emoji: '🫕', name: 'fondue food melted cheese pot' },
     { emoji: '🧋', name: 'bubble tea drink boba milk tea' },
     { emoji: '🧆', name: 'falafel food mediterranean chickpea' },
-    { emoji: '🧈', name: 'butter food dairy fat' },
+    { emoji: '🥠', name: 'fortune cookie food dessert prophecy chinese' },
+    { emoji: '🥡', name: 'takeout box food leftover chinese' },
+    { emoji: '🫘', name: 'beans food legumes protein' },
+    { emoji: '🫗', name: 'pouring liquid water drink pouring beverage' },
 
     // Animals
     { emoji: '🐨', name: 'koala animal australia marsupial' },
@@ -642,7 +655,6 @@ const arrEmojis = [
     { emoji: '⚡', name: 'high voltage lightning thunder electricity danger' },
     { emoji: '❄️', name: 'snowflake winter cold snow crystal' },
     { emoji: '☄️', name: 'comet space shooting star asteroid' },
-    { emoji: '🔥', name: 'fire hot flame burn lit' },
     { emoji: '💧', name: 'droplet water drip sweat tear' },
     { emoji: '💦', name: 'droplet water drip sweat tear splash' },
     { emoji: '🌊', name: 'water wave sea ocean tsunami surf' },
@@ -1343,9 +1355,22 @@ function getMostUsedEmojis() {
  * @returns {boolean} True if the string contains only emojis (ignoring whitespace), false otherwise.
  */
 function isEmojiOnly(str) {
-    // Regular expression to match any emoji character using Unicode property escapes, ignoring whitespace
-    const emojiRegex = /^[\s\p{Emoji}]+$/u;
+    // Remove all whitespace from the string
+    const strWithoutSpace = str.replace(/\s/g, '');
     
-    // Test if the string matches the emoji-only pattern
-    return emojiRegex.test(str);
+    // If the string is empty after removing whitespace, return false
+    if (strWithoutSpace.length === 0) return false;
+    
+    // Use Intl.Segmenter to properly split the string into graphemes (including emoji sequences)
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    const segments = [...segmenter.segment(strWithoutSpace)].map(s => s.segment);
+    
+    // Check if each segment is an emoji using a test for emoji presentation
+    return segments.every(segment => {
+        // Test for emoji property
+        return /\p{Emoji_Presentation}/u.test(segment) || 
+               // Handle basic emojis that need variation selectors
+               (/\p{Emoji}/u.test(segment) && 
+                !/\p{Number}|\p{Letter}/u.test(segment));
+    });
 }
