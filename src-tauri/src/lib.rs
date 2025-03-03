@@ -131,13 +131,26 @@ impl Profile {
     }
 
     /// Merge Nostr Metadata with this Vector Profile
-    fn from_metadata(&mut self, meta: Metadata) {
+    /// 
+    /// Returns `true` if any fields were updated, `false`` otherwise
+    fn from_metadata(&mut self, meta: Metadata) -> bool {
+        let mut changed = false;
+        
         if let Some(name) = meta.name {
-            self.name = name;
+            if self.name != name {
+                self.name = name;
+                changed = true;
+            }
         }
+        
         if let Some(picture) = meta.picture {
-            self.avatar = picture;
+            if self.avatar != picture {
+                self.avatar = picture;
+                changed = true;
+            }
         }
+        
+        changed
     }
 
     /// Add a Message to this Vector Profile
@@ -804,7 +817,7 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
 }
 
 #[tauri::command]
-async fn load_profile(npub: String) -> Result<bool, ()> {
+async fn load_profile(npub: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Convert the Bech32 String in to a PublicKey
@@ -814,32 +827,32 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
-    // Fetch an immutable profile from the cache (or, quickly generate a new one to pass to the fetching logic)
+    // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
     // Mutex Scope: we want to hold this lock as short as possible, given this function is "spammed" for very fast profile cache hit checks
-    let profile: Profile;
+    let old_status: Status;
     {
         let mut state = STATE.lock().await;
-        profile = match state.get_profile(&npub) {
-            Some(p) => p,
+        old_status = match state.get_profile(&npub) {
+            Some(p) => {
+                // If the profile has been refreshed in the last 30s, return it's cached version
+                if p.last_updated + 30 > std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    {
+                        return true;
+                    }
+                p.status.clone()
+            },
             None => {
                 // Create a new profile
                 let mut new_profile = Profile::new();
                 new_profile.id = npub.clone();
                 state.profiles.push(new_profile);
-                state.get_profile(&npub).unwrap()
+                Status::new()
             }
         }
         .clone();
-
-        // If the profile has been refreshed in the last 30s, return it's cached version
-        if profile.last_updated + 30
-            > std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        {
-            return Ok(true);
-        }
     }
 
     // Attempt to fetch their status, if one exists
@@ -871,10 +884,10 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
                 }
             } else {
                 // Relays didn't find anything? We'll ignore this and use our previous status
-                profile.status
+                old_status
             }
         }
-        Err(_) => profile.status,
+        Err(_) => old_status,
     };
 
     // Attempt to fetch their Metadata profile
@@ -886,29 +899,33 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
             // If it's ours, mark it as such
             let mut state = STATE.lock().await;
             let profile_mutable = state.get_profile_mut(&npub).unwrap();
-            let old_profile = profile_mutable.clone();
             profile_mutable.mine = my_public_key == profile_pubkey;
-            // Update the Status
+
+            // Update the Status, and track changes
+            let status_changed = profile_mutable.status != status;
             profile_mutable.status = status;
-            // Update the Metadata
-            profile_mutable.from_metadata(meta);
+
+            // Update the Metadata, and track changes
+            let metadata_changed = profile_mutable.from_metadata(meta);
+
+            // Apply the current update time
+            profile_mutable.last_updated = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
             // If there's any change between our Old and New profile, emit an update
-            if *profile_mutable != old_profile {
+            if status_changed || metadata_changed {
                 let handle = TAURI_APP.get().unwrap();
                 handle.emit("profile_update", &profile_mutable).unwrap();
 
                 // Cache this profile in our DB, too
                 db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
             }
-            // And apply the current update time
-            profile_mutable.last_updated = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            return Ok(true);
+            return true;
         }
         Err(_) => {
-            return Ok(false);
+            return false;
         }
     }
 }
@@ -926,8 +943,7 @@ async fn update_profile(name: String, avatar: String) -> bool {
     let mut state = STATE.lock().await;
     let profile = state
         .get_profile(&my_public_key.to_bech32().unwrap())
-        .unwrap()
-        .clone();
+        .unwrap();
 
     // We'll apply the changes to the previous profile and carry-on the rest
     meta = Metadata::new().name(if name.is_empty() {
