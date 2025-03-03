@@ -132,8 +132,12 @@ impl Profile {
 
     /// Merge Nostr Metadata with this Vector Profile
     fn from_metadata(&mut self, meta: Metadata) {
-        self.name = meta.name.unwrap_or(self.name.clone());
-        self.avatar = meta.picture.unwrap_or(self.avatar.clone());
+        if let Some(name) = meta.name {
+            self.name = name;
+        }
+        if let Some(picture) = meta.picture {
+            self.avatar = picture;
+        }
     }
 
     /// Add a Message to this Vector Profile
@@ -465,8 +469,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     let pending_id = String::from("pending-") + &pending_count.to_string();
     let msg = Message {
         id: pending_id.clone(),
-        content: content.clone(),
-        replied_to: replied_to.clone(),
+        content,
+        replied_to,
         preview_metadata: None,
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -498,7 +502,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     // Prepare the NIP-17 rumor
     let mut rumor = if file.is_none() {
         // Text Message
-        EventBuilder::private_msg_rumor(receiver_pubkey, content.clone())
+        EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
     } else {
         let attached_file = file.unwrap();
 
@@ -515,7 +519,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
 
             // Store the nonce-based file name on-disk for future reference
             let dir = handle.path().resolve("vector", tauri::path::BaseDirectory::Download).unwrap();
-            let nonce_file_path = dir.join(format!("{}.{}", params.nonce.clone(), attached_file.extension.clone()));
+            let nonce_file_path = dir.join(format!("{}.{}", &params.nonce, &attached_file.extension));
 
             // Create the vector directory if it doesn't exist
             std::fs::create_dir_all(&dir).unwrap();
@@ -540,7 +544,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         }
 
         // Format a Mime Type from the file extension
-        let mime_type = match attached_file.extension.to_lowercase().as_str() {
+        let mime_type = match attached_file.extension.as_str() {
             // Images
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -597,15 +601,16 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     };
 
     // If a reply reference is included, add the tag
-    if !replied_to.is_empty() {
+    if !msg.replied_to.is_empty() {
         rumor = rumor.tag(Tag::custom(
             TagKind::e(),
-            [replied_to, String::from(""), String::from("reply")],
+            [msg.replied_to, String::from(""), String::from("reply")],
         ));
     }
 
     // Build the rumor with our key (unsigned)
     let built_rumor = rumor.build(my_public_key);
+    let rumor_id = built_rumor.id.unwrap();
 
     // Send message to the real receiver
     match client
@@ -615,7 +620,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         Ok(_) => {
             // Send message to our own public key, to allow for message recovering
             match client
-                .gift_wrap(&my_public_key, built_rumor.clone(), [])
+                .gift_wrap(&my_public_key, built_rumor, [])
                 .await
             {
                 Ok(_) => {
@@ -623,7 +628,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&receiver).unwrap();
                     let sent_msg = chat.get_message_mut(&pending_id).unwrap();
-                    sent_msg.id = built_rumor.id.unwrap().to_hex();
+                    sent_msg.id = rumor_id.to_hex();
                     sent_msg.pending = false;
 
                     // Update the frontend
@@ -644,7 +649,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&receiver).unwrap();
                     let sent_ish_msg = chat.get_message_mut(&pending_id).unwrap();
-                    sent_ish_msg.id = built_rumor.id.unwrap().to_hex();
+                    sent_ish_msg.id = rumor_id.to_hex();
                     sent_ish_msg.pending = false;
 
                     // Update the frontend
@@ -766,7 +771,7 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
         reference_event,
         receiver_pubkey,
         Some(Kind::PrivateDirectMessage),
-        emoji.clone(),
+        &emoji,
     )
     .build(my_public_key);
 
@@ -866,10 +871,10 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
                 }
             } else {
                 // Relays didn't find anything? We'll ignore this and use our previous status
-                profile.status.clone()
+                profile.status
             }
         }
-        Err(_e) => profile.status.clone(),
+        Err(_) => profile.status,
     };
 
     // Attempt to fetch their Metadata profile
@@ -909,7 +914,7 @@ async fn load_profile(npub: String) -> Result<bool, ()> {
 }
 
 #[tauri::command]
-async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
+async fn update_profile(name: String, avatar: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
@@ -926,9 +931,9 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
 
     // We'll apply the changes to the previous profile and carry-on the rest
     meta = Metadata::new().name(if name.is_empty() {
-        profile.name.clone()
+        &profile.name
     } else {
-        name
+        &name
     });
 
     // Optional avatar
@@ -945,7 +950,7 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
 
     // Broadcast the profile update
     match client.set_metadata(&meta).await {
-        Ok(_event) => {
+        Ok(_) => {
             // Apply our Metadata to our Profile
             let profile_mutable = state
                 .get_profile_mut(&my_public_key.to_bech32().unwrap())
@@ -955,14 +960,14 @@ async fn update_profile(name: String, avatar: String) -> Result<Profile, ()> {
             // Update the frontend
             let handle = TAURI_APP.get().unwrap();
             handle.emit("profile_update", &profile_mutable).unwrap();
-            Ok(profile_mutable.clone())
+            true
         }
-        Err(_e) => Err(()),
+        Err(_) => false
     }
 }
 
 #[tauri::command]
-async fn update_status(status: String) -> Result<Profile, ()> {
+async fn update_status(status: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
@@ -973,7 +978,7 @@ async fn update_status(status: String) -> Result<Profile, ()> {
     let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
         .tag(Tag::custom(TagKind::d(), vec!["general"]));
     match client.send_event_builder(status_builder).await {
-        Ok(_event) => {
+        Ok(_) => {
             // Add the status to our profile
             let mut state = STATE.lock().await;
             let profile = state
@@ -985,9 +990,9 @@ async fn update_status(status: String) -> Result<Profile, ()> {
             // Update the frontend
             let handle = TAURI_APP.get().unwrap();
             handle.emit("profile_update", &profile).unwrap();
-            Ok(profile.clone())
+            true
         }
-        Err(_e) => Err(()),
+        Err(_) => false,
     }
 }
 
@@ -1020,7 +1025,7 @@ async fn upload_avatar(filepath: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn start_typing(receiver: String) -> Result<bool, ()> {
+async fn start_typing(receiver: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Convert our Bech32 receiver to a PublicKey
@@ -1056,13 +1061,13 @@ async fn start_typing(receiver: String) -> Result<bool, ()> {
         .gift_wrap_to(
             [TRUSTED_RELAY],
             &receiver_pubkey,
-            rumor.clone(),
+            rumor,
             [Tag::expiration(expiry_time)],
         )
         .await
     {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
+        Ok(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -1159,16 +1164,16 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // If accepted in-state: commit to the DB and emit to the frontend
                 if was_msg_added_to_state {
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), msg.clone(), contact.clone()).await.unwrap();
-
                     // Send it to the frontend
                     let handle = TAURI_APP.get().unwrap();
                     handle.emit("message_new", serde_json::json!({
                         "message": &msg,
                         "chat_id": &contact
                     })).unwrap();
+
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), msg, contact).await.unwrap();
                 }
 
                 was_msg_added_to_state
@@ -1185,7 +1190,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             id: rumor.id.unwrap().to_hex(),
                             reference_id: reference_id.to_string(),
                             author_id: sender.to_hex(),
-                            emoji: rumor.content.clone(),
+                            emoji: rumor.content,
                         };
 
                         // Add the reaction
@@ -1243,10 +1248,10 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 if !file_path.exists() {
                     // No file! Try fetching it
                     let req = reqwest::Client::new();
-                    let res = req.get(content_url.clone()).send().await;
+                    let res = req.get(&content_url).send().await;
                     if res.is_err() {
                         // TEMP: reaaaallly improve this area!
-                        println!("Weird file: {}", content_url);
+                        println!("Weird file: {}", &content_url);
                         return false;
                     }
                     let response = res.unwrap();
@@ -1255,7 +1260,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     // Decrypt the file
                     let decryption = decrypt_data(file_contents.as_slice(), decryption_key, decryption_nonce);
                     if decryption.is_err() {
-                        println!("Failed to decrypt: {}", content_url);
+                        println!("Failed to decrypt: {}", &content_url);
                         return false;
                     }
                     let decrypted_file = decryption.unwrap();
@@ -1296,16 +1301,16 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // If accepted in-state: commit to the DB and emit to the frontend
                 if was_msg_added_to_state {
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), msg.clone(), contact.clone()).await.unwrap();
-
                     // Send it to the frontend
                     let handle = TAURI_APP.get().unwrap();
                     handle.emit("message_new", serde_json::json!({
                         "message": &msg,
                         "chat_id": &contact
                     })).unwrap();
+
+                    // Save the message to our DB
+                    let handle = TAURI_APP.get().unwrap();
+                    db::save_message(handle.clone(), msg, contact).await.unwrap();
                 }
 
                 was_msg_added_to_state
@@ -1366,7 +1371,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 false
             }
         }
-        Err(_e) => false,
+        Err(_) => false,
     }
 }
 
