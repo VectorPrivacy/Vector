@@ -361,6 +361,10 @@ body {
   object-position: center;
   height: 50px;
   width: 50px;
+  min-width: 50px;
+  min-height: 50px;
+  max-width: 50px;
+  max-height: 50px;
   border-radius: 100%;
   margin-top: 15px;
   margin-right: 10px;
