@@ -903,6 +903,15 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 
         if (!arrMessages.length) return;
 
+        // If it doesn't already exist: add the fadeout to the top of the message list
+        if (!document.getElementById('msg-top-fade')) {
+            const divFade = document.createElement('div');
+            divFade.id = `msg-top-fade`;
+            divFade.classList.add(`fadeout-top-msgs`);
+            divFade.style.top = domChatMessages.offsetTop + 'px';
+            domChatMessages.appendChild(divFade);
+        }
+
         // Efficiently append or prepend messages based on their time relative to the chat
         let cLastMsg = arrMessages.length > 1 ? arrMessages[0] : profile.messages.find(m => m.id === domChatMessages?.lastElementChild?.id);
         let nLastMsgTime = cLastMsg?.at || Date.now() / 1000;
@@ -1602,6 +1611,14 @@ function adjustSize() {
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();
     domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+
+    // If the chat is open, and the fade-out exists, then position it correctly
+    if (strOpenChat) {
+        const divFade = document.getElementById('msg-top-fade');
+        if (divFade) {
+            divFade.style.top = domChatMessages.offsetTop + 'px';
+        }
+    }
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     softChatScroll();

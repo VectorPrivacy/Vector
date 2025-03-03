@@ -716,6 +716,16 @@ audio {
   opacity: 0.75;
 }
 
+.fadeout-top-msgs {
+  position: absolute;
+  /* top: is handled in JS to match the messaging UI's spacing dynamically */
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: linear-gradient(#0a0a0a, rgba(0, 0, 0, 0) 80%);
+  pointer-events: none;
+}
+
 .fadeout-bottom {
   position: absolute;
   bottom: 0;
