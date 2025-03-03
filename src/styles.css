@@ -51,6 +51,10 @@
   mask-image: url("./icons/wink-face.svg");
 }
 
+.icon-reply {
+  mask-image: url("./icons/reply.svg");
+}
+
 .icon-chevron-down {
   mask-image: url("./icons/chevron-down.svg");
 }
@@ -345,6 +349,16 @@ body {
   font-family: 'Rubik';
 }
 
+.chat-messages > div:first-child {
+  /* The first message should have extra margin from the top */
+  margin-top: 15px;
+}
+
+.chat-messages > div:last-child {
+  /* The last message should have extra margin from the bottom */
+  margin-bottom: 15px;
+}
+
 .msg-inline-timestamp {
   width: 100%;
   text-align: center;
@@ -377,6 +391,8 @@ body {
   border-style: solid;
   border-width: 1px;
   padding: 12px 15px;
+  margin-top: 0;
+  margin-bottom: 6px;
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
@@ -389,9 +405,15 @@ body {
   border-style: solid;
   border-width: 1px;
   padding: 12px 15px;
+  margin-top: 0;
+  margin-bottom: 6px;
   border-bottom-left-radius: 0px;
   word-break: break-word;
   font-weight: 100;
+}
+
+.msg-them .avatar {
+  margin-top: 0;
 }
 
 .msg-reply {
@@ -525,7 +547,11 @@ body {
 }
 
 .msg-extras span {
+  position: relative;
   cursor: pointer;
+  height: 20px;
+  width: 20px;
+  margin: 3px;
 }
 
 .msg-extras .hideable {
@@ -540,8 +566,8 @@ body {
 .reaction {
   cursor: default;
   position: relative;
-  height: fit-content;
-  width: 50px;
+  height: fit-content !important;
+  width: max-content !important;
 }
 
 .reply-btn {
