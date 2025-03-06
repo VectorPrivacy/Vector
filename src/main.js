@@ -593,7 +593,7 @@ async function setupRustListeners() {
             // If this user has an open chat, then update the rendered message
             if (strOpenChat === evt.payload.profile_id) {
                 const domMsg = document.getElementById(evt.payload.msg_id);
-                domMsg?.replaceWith(renderMessage(cMsg, cProfile));
+                domMsg?.replaceWith(renderMessage(cMsg, cProfile, evt.payload.msg_id));
 
                 // Scroll accordingly
                 softChatScroll();
@@ -749,7 +749,7 @@ async function setupRustListeners() {
         if (strOpenChat === evt.payload.chat_id) {
             // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
             const domMsg = document.getElementById(evt.payload.old_id);
-            domMsg?.replaceWith(renderMessage(evt.payload.message, cProfile));
+            domMsg?.replaceWith(renderMessage(evt.payload.message, cProfile, evt.payload.old_id));
 
             // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
             if (evt.payload.old_id.startsWith('pending')) {
@@ -1199,8 +1199,9 @@ function insertTimestamp(timestamp, parent = null) {
  * Convert a Message in to a rendered HTML Element
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
+ * @param {string?} editID - the ID of the message being edited, used for improved renderer context
  */
-function renderMessage(msg, sender) {
+function renderMessage(msg, sender, editID = '') {
     // Construct the message container (the DOM ID is the HEX Nostr Event ID)
     const divMessage = document.createElement('div');
     divMessage.id = msg.id;
@@ -1216,9 +1217,9 @@ function renderMessage(msg, sender) {
     const pMessage = document.createElement('p');
 
     // Prepare our message container - including avatars and contextual bubble rendering
-    const domMsg = domChatMessages.lastElementChild;
-    const fIsMsg = !!domMsg?.getAttribute('sender');
-    if (!domMsg || domMsg.getAttribute('sender') != strShortSenderID) {
+    const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling : domChatMessages.lastElementChild;
+    const fIsMsg = !!domPrevMsg?.getAttribute('sender');
+    if (!domPrevMsg || domPrevMsg.getAttribute('sender') != strShortSenderID) {
         // Add an avatar if this is not OUR message
         if (!msg.mine && sender?.avatar) {
             const imgAvatar = document.createElement('img');
@@ -1228,9 +1229,9 @@ function renderMessage(msg, sender) {
         }
 
         // If there is a message before them, and it isn't theirs, apply additional edits
-        if (domMsg && fIsMsg) {
+        if (domPrevMsg && fIsMsg) {
             // Curve their bottom-left border to encapsulate their message
-            const pMsg = domMsg.querySelector('p');
+            const pMsg = domPrevMsg.querySelector('p');
             if (pMsg) {
                 pMsg.style.borderBottomLeftRadius = `15px`;
             }
@@ -1245,7 +1246,7 @@ function renderMessage(msg, sender) {
         }
 
         // Flatten the top border to act as a visual continuation
-        const pMsg = domMsg.querySelector('p');
+        const pMsg = domPrevMsg.querySelector('p');
         if (pMsg) {
             if (msg.mine) {
                 pMessage.style.borderTopRightRadius = `0`;
