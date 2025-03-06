@@ -729,7 +729,7 @@ async function setupRustListeners() {
 
         // If this user has the open chat, then update the chat too
         if (strOpenChat === evt.payload.chat_id) {
-            updateChat(arrChats[0], [newMessage]);
+            updateChat(arrChats.find(p => p.id === evt.payload.chat_id), [newMessage]);
         }
 
         // Render the Chat List
