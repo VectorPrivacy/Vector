@@ -1068,6 +1068,9 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
                 continue;
             }
 
+            // If we're prepending, ensure there's no more than 50 existing messages at max
+            if (domChatMessages.childElementCount >= 50) break;
+
             // Get the oldest message in the DOM
             let oldestMsgElement = null;
             for (let i = 0; i < domChatMessages.children.length; i++) {
