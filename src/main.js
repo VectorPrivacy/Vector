@@ -31,6 +31,7 @@ const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
 const domChatContact = document.getElementById('chat-contact');
 const domChatContactStatus = document.getElementById('chat-contact-status');
+const domChatMessagesFade = document.getElementById('msg-top-fade');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-return');
@@ -1027,22 +1028,13 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 
         if (!arrMessages.length) return;
 
-        // If it doesn't already exist: add the fadeout to the top of the message list
-        if (!document.getElementById('msg-top-fade')) {
-            const divFade = document.createElement('div');
-            divFade.id = `msg-top-fade`;
-            divFade.classList.add(`fadeout-top-msgs`);
-            divFade.style.top = domChatMessages.offsetTop + 'px';
-            domChatMessages.appendChild(divFade);
-        }
-
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
         // Process each message for insertion
         for (const msg of arrMessages) {
             // Quick check for empty chat - simple append
-            if (domChatMessages.children.length <= 1) { // <=1 because of the fade element
+            if (domChatMessages.children.length === 0) {
                 domChatMessages.appendChild(renderMessage(msg, profile));
                 continue;
             }
@@ -1050,39 +1042,37 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             // Direct comparison with newest and oldest messages (most common cases)
             // This avoids expensive DOM operations for the common cases
 
-            // Get the newest message in the DOM (excluding the fade element)
+            // Get the newest message in the DOM
             const newestMsgElement = domChatMessages.lastElementChild;
-            if (newestMsgElement.id !== 'msg-top-fade') {
-                const newestMsg = profile.messages.find(m => m.id === newestMsgElement.id);
-                if (newestMsg && msg.at > newestMsg.at) {
-                    // It's the newest message, append it
+            const newestMsg = profile.messages.find(m => m.id === newestMsgElement.id);
+            if (newestMsg && msg.at > newestMsg.at) {
+                // It's the newest message, append it
 
-                    // Add timestamp if needed
-                    if (nLastMsgTime === null) {
-                        nLastMsgTime = newestMsg.at;
-                    }
-
-                    if (msg.at - nLastMsgTime > 600) {
-                        insertTimestamp(msg.at, domChatMessages);
-                        nLastMsgTime = msg.at;
-                    }
-
-                    // Render message post-time-insert for improved message rendering context
-                    const domMsg = renderMessage(msg, profile);
-                    if (!msg.mine && arrMessages.length === 1) {
-                        domMsg.classList.add('new-anim');
-                    }
-
-                    domChatMessages.appendChild(domMsg);
-                    continue;
+                // Add timestamp if needed
+                if (nLastMsgTime === null) {
+                    nLastMsgTime = newestMsg.at;
                 }
+
+                if (msg.at - nLastMsgTime > 600) {
+                    insertTimestamp(msg.at, domChatMessages);
+                    nLastMsgTime = msg.at;
+                }
+
+                // Render message post-time-insert for improved message rendering context
+                const domMsg = renderMessage(msg, profile);
+                if (!msg.mine && arrMessages.length === 1) {
+                    domMsg.classList.add('new-anim');
+                }
+
+                domChatMessages.appendChild(domMsg);
+                continue;
             }
 
-            // Get the oldest message in the DOM (excluding the fade element)
+            // Get the oldest message in the DOM
             let oldestMsgElement = null;
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
-                if (child.id !== 'msg-top-fade') {
+                if (child.getAttribute('sender')) {
                     oldestMsgElement = child;
                     break;
                 }
@@ -1107,7 +1097,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             let messageNodes = [];
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
-                if (child.id && child.id !== 'msg-top-fade') {
+                if (child.id && child.getAttribute('sender')) {
                     const childMsg = profile.messages.find(m => m.id === child.id);
                     if (childMsg) {
                         messageNodes.push({ element: child, message: childMsg });
@@ -1926,10 +1916,7 @@ function adjustSize() {
 
     // If the chat is open, and the fade-out exists, then position it correctly
     if (strOpenChat) {
-        const divFade = document.getElementById('msg-top-fade');
-        if (divFade) {
-            divFade.style.top = domChatMessages.offsetTop + 'px';
-        }
+        domChatMessagesFade.style.top = domChatMessages.offsetTop + 'px';
     }
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
