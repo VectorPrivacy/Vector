@@ -35,6 +35,10 @@
   mask-image: url("./icons/add-file.svg");
 }
 
+.icon-file-search {
+  mask-image: url("./icons/file-search.svg");
+}
+
 .icon-mic-on {
   mask-image: url("./icons/mic-on.svg");
 }
@@ -776,6 +780,16 @@ audio {
 
 .corner-float.visible {
   transform: scale(1) translateY(0px);
+}
+
+.progress-bar {
+  height: 10px;
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  border-radius: 16px;
+  margin-top: 3px;
+  transition-duration: 0.2s;
+  transition-property: width;
+  border-width: 1px;
 }
 
 .divider {

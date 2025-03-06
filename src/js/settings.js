@@ -1,5 +1,7 @@
 const { open } = window.__TAURI__.dialog;
 
+let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
+
 /**
  * A GUI wrapper to ask the user for a username, and apply it both
  * in-app and on the Nostr network.

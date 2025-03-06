@@ -224,6 +224,28 @@ function setAsyncInterval(callback, interval) {
 }
 
 /**
+ * Formats a number of bytes into a human-readable string with appropriate units.
+ * 
+ * @param {number} bytes - The number of bytes to format.
+ * @param {number} [decimals=2] - The number of decimal places to include in the formatted output.
+ * @returns {string} A formatted string representing the bytes in human-readable form.
+ */
+function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    
+    const units = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    let unitIndex = 0;
+    let value = bytes;
+    
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    
+    return value.toFixed(decimals).replace(/\.0+$|(\.[0-9]*[1-9])0+$/, '$1') + ' ' + units[unitIndex];
+  }
+
+/**
  * Slide out an element with animation and remove it from document flow
  * @param {HTMLElement} element - The DOM element to slide out
  * @param {Object} options - Optional configuration

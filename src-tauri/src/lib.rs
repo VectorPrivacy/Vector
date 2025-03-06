@@ -5,18 +5,17 @@ use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
 use rand::Rng;
 use tokio::sync::Mutex;
-use aes::Aes256;
-use aes_gcm::AesGcm;
 use chacha20poly1305::{
-    aead::{Aead, AeadInPlace, KeyInit},
+    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce
 };
-use generic_array::{GenericArray, typenum::U16};
 use ::image::{ImageEncoder, codecs::png::PngEncoder, ExtendedColorType::Rgba8};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
 use scraper::{Html, Selector};
+
+mod crypto;
 
 mod db;
 use db::SlimProfile;
@@ -24,8 +23,15 @@ use db::SlimProfile;
 mod voice;
 use voice::AudioRecorder;
 
+mod net;
+
 mod util;
 use util::extract_https_urls;
+
+/// The Maximum byte size that Vector will auto-download.
+/// 
+/// Files larger than this require explicit user permission to be downloaded.
+static MAX_AUTO_DOWNLOAD_BYTES: u64 = 10_485_760;
 
 /// # Trusted Relay
 ///
@@ -64,16 +70,55 @@ pub struct Message {
     mine: bool,
 }
 
+impl Message {
+    /// Get an attachment by ID
+    fn get_attachment(&self, id: &str) -> Option<&Attachment> {
+        self.attachments.iter().find(|p| p.id == id)
+    }
+
+    /// Get an attachment by ID
+    fn get_attachment_mut(&mut self, id: &str) -> Option<&mut Attachment> {
+        self.attachments.iter_mut().find(|p| p.id == id)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
 pub struct Attachment {
-    /// The encryption Nonce as the unique file ID
+    /// The encryption Nonce as a stringified unique file ID (TODO: change to SHA256 hash)
     id: String,
+    // The encryption key
+    key: String,
+    // The encryption nonce
+    nonce: String,
     /// The file extension
     extension: String,
+    /// The host URL, typically a NIP-96 server
+    url: String,
     /// The storage directory path (typically the ~/Downloads folder)
     path: String,
+    /// The download size of the encrypted file
+    size: u64,
+    /// Whether the file is currently being downloaded or not
+    downloading: bool,
     /// Whether the file has been downloaded or not
     downloaded: bool,
+}
+
+impl Default for Attachment {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            key: String::new(),
+            nonce: String::new(),
+            extension: String::new(),
+            url: String::new(),
+            path: String::new(),
+            size: 0,
+            downloading: false,
+            downloaded: true,
+        }
+    }
 }
 
 /// A simple pre-upload format to associate a byte stream with a file extension
@@ -123,6 +168,11 @@ impl Profile {
     /// Get the last message timestamp
     fn last_message_time(&self) -> Option<u64> {
         self.messages.last().map(|msg| msg.at)
+    }
+
+    /// Get a message by ID
+    fn get_message(&self, id: &str) -> Option<&Message> {
+        self.messages.iter().find(|msg| msg.id == id)
     }
 
     /// Get a mutable message by ID
@@ -520,8 +570,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         let attached_file = file.unwrap();
 
         // Encrypt the attachment
-        let params = generate_encryption_params();
-        let enc_file = encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
+        let params = crypto::generate_encryption_params();
+        let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
 
         // Update the attachment in-state
         {
@@ -551,9 +601,15 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
 
             // Add the Attachment in-state (with our local path, to prevent re-downloading it accidentally from server)
             message.attachments.push(Attachment {
+                // Temp: id will soon become a SHA256 hash of the file
                 id: params.nonce.clone(),
+                key: params.key.clone(),
+                nonce: params.nonce.clone(),
                 extension: attached_file.extension.clone(),
+                url: String::new(),
                 path: nonce_file_path.to_string_lossy().to_string(),
+                size: enc_file.len() as u64,
+                downloading: false,
                 downloaded: true
             });
 
@@ -589,6 +645,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
         let signer = client.signer().await.unwrap();
         let conf = PRIVATE_NIP96_CONFIG.wait();
+        let file_size = enc_file.len();
         match upload_data(&signer, &conf, enc_file, Some(mime_type), None).await {
             Ok(url) => {
                 // Create the attachment rumor
@@ -598,6 +655,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                 attachment_rumor
                     .tag(Tag::public_key(receiver_pubkey))
                     .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                    .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                     .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
                     .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
@@ -1270,40 +1328,49 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 // Resolve the directory path using the determined base directory
                 let dir = handle.path().resolve("vector", base_directory).unwrap();
                 let file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
-                if !file_path.exists() {
-                    // No file! Try fetching it
-                    let req = reqwest::Client::new();
-                    let res = req.get(&content_url).send().await;
-                    if res.is_err() {
-                        // TEMP: reaaaallly improve this area!
-                        println!("Weird file: {}", &content_url);
-                        return false;
-                    }
-                    let response = res.unwrap();
-                    let file_contents = response.bytes().await.unwrap().to_vec();
+                let size: u64;
+                let downloaded: bool;
 
-                    // Decrypt the file
-                    let decryption = decrypt_data(file_contents.as_slice(), decryption_key, decryption_nonce);
-                    if decryption.is_err() {
-                        println!("Failed to decrypt: {}", &content_url);
-                        return false;
-                    }
-                    let decrypted_file = decryption.unwrap();
+                // Grab the reported file size - it's noteworthy that this COULD be missing or wrong, so must be treated as an assumption or guide
+                let reported_size = rumor.tags
+                    .find(TagKind::Custom(Cow::Borrowed("size")))
+                    .map_or(0, |tag| tag.content().unwrap_or("0").parse().unwrap_or(0));
 
-                    // Create the vector directory if it doesn't exist
-                    std::fs::create_dir_all(&dir).unwrap();
-
-                    // Save the file to disk
-                    std::fs::write(&file_path, &decrypted_file).unwrap();
+                // Is the file already downloaded?
+                if file_path.exists() {
+                    size = reported_size;
+                    downloaded = true;
+                }
+                // Is the filesize known?
+                else if reported_size == 0 {
+                    size = 0;
+                    downloaded = false;
+                }
+                // Does it meet our autodownload policy?
+                else if reported_size > MAX_AUTO_DOWNLOAD_BYTES {
+                    // File size is either unknown, or too large
+                    downloaded = false;
+                    size = reported_size;
+                }
+                // File size is good; let's attempt to download it, if we don't already have it
+                else {
+                    // We'll adjust our metadata to let the frontend know this file is ready for download
+                    downloaded = false;
+                    size = reported_size;
                 }
 
                 // Create an attachment
                 let mut attachments = Vec::new();
                 let attachment = Attachment {
                     id: decryption_nonce.to_string(),
+                    key: decryption_key.to_string(),
+                    nonce: decryption_nonce.to_string(),
                     extension: extension.to_string(),
+                    url: content_url,
                     path: file_path.to_string_lossy().to_string(),
-                    downloaded: true
+                    size,
+                    downloading: false,
+                    downloaded
                 };
                 attachments.push(attachment);
 
@@ -1314,7 +1381,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     replied_to: String::new(),
                     preview_metadata: None,
                     at: rumor.created_at.as_u64(),
-                    attachments: attachments,
+                    attachments,
                     reactions: Vec::new(),
                     mine: is_mine,
                     pending: false,
@@ -1458,91 +1525,139 @@ fn show_notification(title: String, content: String) {
     }
 }
 
-/// Represents encryption parameters
-#[derive(Debug)]
-pub struct EncryptionParams {
-    pub key: String,    // Hex string
-    pub nonce: String,  // Hex string
-}
+#[tauri::command]
+async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+    // Grab the attachment's metadata
+    let attachment = {
+        let mut state = STATE.lock().await;
+        let mut_attachment = state
+            .get_profile_mut(&npub).unwrap()
+            .get_message_mut(&msg_id).unwrap()
+            .get_attachment_mut(&attachment_id).unwrap();
 
-/// Generates random encryption parameters (key and nonce)
-pub fn generate_encryption_params() -> EncryptionParams {
-    let mut rng = rand::thread_rng();
-    
-    // Generate 32 byte key (for AES-256)
-    let key: [u8; 32] = rng.gen();
-    // Generate 16 byte nonce (to match 0xChat)
-    let nonce: [u8; 16] = rng.gen();
-    
-    EncryptionParams {
-        key: hex::encode(key),
-        nonce: hex::encode(nonce),
+        // Check that we're not already downloading
+        if mut_attachment.downloading {
+            return false;
+        }
+
+        // Enable the downloading flag to prevent re-calls
+        mut_attachment.downloading = true;
+
+        // Return a clone to allow dropping the State Mutex lock during the download
+        mut_attachment.clone()
+    };
+
+    // Begin our download progress events
+    let handle = TAURI_APP.get().unwrap();
+    handle.emit("attachment_download_progress", serde_json::json!({
+        "id": &attachment.id,
+        "progress": 0
+    })).unwrap();
+
+    // Download dat biyatch!
+    let res = net::download(&attachment.url, handle, &attachment.id).await;
+
+    // If there's any errors: return them
+    if res.is_err() {
+        let mut state = STATE.lock().await;
+        let mut_profile = state.get_profile_mut(&npub).unwrap();
+
+        // Store all necessary IDs first
+        let profile_id = mut_profile.id.clone();
+        let msg_id_clone = msg_id.clone();
+        let attachment_id_clone = attachment_id.clone();
+
+        // Update the attachment status
+        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
+        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
+        mut_attachment.downloading = false;
+        mut_attachment.downloaded = false;
+
+        // Emit the error
+        handle.emit("attachment_download_result", serde_json::json!({
+            "profile_id": profile_id,
+            "msg_id": msg_id_clone,
+            "id": attachment_id_clone,
+            "success": false,
+            "result": res.unwrap_err()
+        })).unwrap();
+        return false;
     }
-}
 
-/// Encrypts data using AES-256-GCM with a 16-byte nonce
-pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, String> {
-    // Decode key and nonce from hex
-    let key_bytes = hex::decode(&params.key).unwrap();
-    let nonce_bytes = hex::decode(&params.nonce).unwrap();
-
-    // Initialize AES-GCM cipher
-    let cipher = AesGcm::<Aes256, U16>::new(
-        GenericArray::from_slice(&key_bytes)
-    );
-
-    // Prepare nonce
-    let nonce = GenericArray::from_slice(&nonce_bytes);
-
-    // Create output buffer
-    let mut buffer = data.to_vec();
-
-    // Encrypt in place and get authentication tag
-    let tag = cipher
-        .encrypt_in_place_detached(nonce, &[], &mut buffer)
-        .map_err(|_| String::from("Failed to Encrypt Data"))?;
-
-    // Append the authentication tag to the encrypted data
-    buffer.extend_from_slice(tag.as_slice());
-
-    Ok(buffer)
-}
-
-pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
-    // Verify minimum size requirements
-    if encrypted_data.len() < 16 {
-        return Err(String::from("Invalid Input"));
-    }
-
-    // Decode key and nonce from hex
-    let key_bytes = hex::decode(key_hex).unwrap();
-    let nonce_bytes = hex::decode(nonce_hex).unwrap();
-
-    // Split input into ciphertext and authentication tag
-    let (ciphertext, tag_bytes) = encrypted_data.split_at(encrypted_data.len() - 16);
-
-    // Initialize AES-GCM cipher
-    let cipher = AesGcm::<Aes256, U16>::new(
-        GenericArray::from_slice(&key_bytes)
-    );
-
-    // Prepare nonce and tag
-    let nonce = GenericArray::from_slice(&nonce_bytes);
-    let tag = aes_gcm::Tag::from_slice(tag_bytes);
-
-    // Create output buffer
-    let mut buffer = ciphertext.to_vec();
-
-    // Perform decryption
-    let decryption = cipher
-        .decrypt_in_place_detached(nonce, &[], &mut buffer, tag);
-
-    // Check that it went well
+    // Attempt to decrypt the attachment
+    let decryption = crypto::decrypt_data(res.unwrap().as_slice(), &attachment.key, &attachment.nonce);
     if decryption.is_err() {
-        return Err(decryption.unwrap_err().to_string());
+        let mut state = STATE.lock().await;
+        let mut_profile = state.get_profile_mut(&npub).unwrap();
+
+        // Store all necessary IDs first
+        let profile_id = mut_profile.id.clone();
+        let msg_id_clone = msg_id.clone();
+        let attachment_id_clone = attachment_id.clone();
+
+        // Update the attachment status
+        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
+        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
+        mut_attachment.downloading = false;
+        mut_attachment.downloaded = false;
+
+        // Emit the error
+        handle.emit("attachment_download_result", serde_json::json!({
+            "profile_id": profile_id,
+            "msg_id": msg_id_clone,
+            "id": attachment_id_clone,
+            "success": false,
+            "result": decryption.unwrap_err()
+        })).unwrap();
+        return false;
     }
 
-    Ok(buffer)
+    // Choose the appropriate base directory based on platform
+    let base_directory = if cfg!(target_os = "ios") {
+        tauri::path::BaseDirectory::Document
+    } else {
+        tauri::path::BaseDirectory::Download
+    };
+
+    // Resolve the directory path using the determined base directory
+    let dir = handle.path().resolve("vector", base_directory).unwrap();
+    let file_path = dir.join(format!("{}.{}", attachment.id, attachment.extension));
+
+    // Create the vector directory if it doesn't exist
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Save the file to disk
+    std::fs::write(&file_path, decryption.unwrap()).unwrap();
+
+    // Grab the in-memory attachment mutably
+    {
+        let mut state = STATE.lock().await;
+        let mut_profile = state.get_profile_mut(&npub).unwrap();
+
+        // Store all necessary IDs first
+        let profile_id = mut_profile.id.clone();
+        let msg_id_clone = msg_id.clone();
+        let attachment_id_clone = attachment_id.clone();
+
+        // Update the attachment status
+        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
+        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
+        mut_attachment.downloading = false;
+        mut_attachment.downloaded = true;
+
+        // Emit the finished download
+        handle.emit("attachment_download_result", serde_json::json!({
+            "profile_id": profile_id,
+            "msg_id": msg_id_clone,
+            "id": attachment_id_clone,
+            "success": true,
+        })).unwrap();
+
+        // Save to the DB
+        db::save_message(handle.clone(), mut_msg.clone(), npub).await.unwrap();
+    }
+
+    true
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1675,7 +1790,7 @@ async fn hash_pass(password: String) -> [u8; 32] {
 
 // Internal function for encryption logic
 pub async fn internal_encrypt(input: String, password: Option<String>) -> String {
-    // Hash our password with ramped-up Argon2 and use it as the key
+    // Hash our password with Argon2 and use it as the key
     let key = if password.is_none() { 
         ENCRYPTION_KEY.get().unwrap() 
     } else { 
@@ -1714,7 +1829,7 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
 
 // Internal function for decryption logic
 pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    // Hash our password with ramped-up Argon2 and use it as the key
+    // Hash our password with Argon2 and use it as the key
     let key = if password.is_none() { 
         ENCRYPTION_KEY.get().unwrap() 
     } else { 
@@ -2079,6 +2194,7 @@ pub fn run() {
             file_message,
             warmup_nip96_servers,
             react,
+            download_attachment,
             login,
             notifs,
             load_profile,

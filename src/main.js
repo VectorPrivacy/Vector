@@ -3,7 +3,7 @@ const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { listen } = window.__TAURI__.event;
 const { readImage } = window.__TAURI__.clipboardManager;
-const { openUrl } = window.__TAURI__.opener;
+const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
 // Display the current version
 getVersion().then(v => {
@@ -537,6 +537,78 @@ async function setupRustListeners() {
         if (!fInit) domSyncStatusContainer.style.display = ``;
         domSyncStatus.textContent = `Syncing Messages between ${start} - ${end}`;
         if (!strOpenChat) adjustSize();
+    });
+
+    // Listen for Attachment Download Progress events
+    await listen('attachment_download_progress', async (evt) => {
+        // Update the in-memory attachment
+        if (strOpenChat) {
+            let divDownload = document.getElementById(evt.payload.id);
+            if (divDownload) {
+                let divBar = divDownload.querySelector('.progress-bar');
+                if (divBar) {
+                    // Update the Title
+                    const iDownloading = divDownload.querySelector('i');
+                    iDownloading.textContent = `Downloading (${evt.payload.progress}%)`;
+
+                    // Update the Download Progress bar
+                    divBar.style.width = `${evt.payload.progress}%`;
+                } else {
+                    // Create the Download Progress container
+                    let newDivDownload = document.createElement('div');
+                    newDivDownload.id = evt.payload.id;
+                    newDivDownload.style.minWidth = `200px`;
+                    newDivDownload.style.textAlign = `center`;
+
+                    // Create the Download Progress title
+                    const iDownloading = document.createElement('i');
+                    iDownloading.textContent = `Downloading (0%)`;
+                    newDivDownload.appendChild(iDownloading);
+
+                    // Create the Download Progress bar
+                    divBar = document.createElement('div');
+                    divBar.classList.add('progress-bar');
+                    divBar.style.width = `0%`;
+                    newDivDownload.appendChild(divBar);
+
+                    // Replace the previous UI
+                    divDownload.replaceWith(newDivDownload);
+                }
+            }
+        }
+    });
+
+    // Listen for Attachment Download Results
+    await listen('attachment_download_result', async (evt) => {
+        // Update the in-memory attachment
+        let cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
+        let cMsg = cProfile.messages.find(m => m.id === evt.payload.msg_id);
+        let cAttachment = cMsg.attachments.find(a => a.id === evt.payload.id);
+
+        cAttachment.downloading = false;
+        if (evt.payload.success) {
+            cAttachment.downloaded = true;
+
+            // If this user has an open chat, then update the rendered message
+            if (strOpenChat === evt.payload.profile_id) {
+                const domMsg = document.getElementById(evt.payload.msg_id);
+                domMsg?.replaceWith(renderMessage(cMsg, cProfile));
+
+                // Scroll accordingly
+                softChatScroll();
+            }
+        } else {
+            // Display the reason the download failed and allow restarting it
+            const divDownload = document.getElementById(evt.payload.id);
+            const iFailed = document.createElement('i');
+            iFailed.id = evt.payload.id;
+            iFailed.toggleAttribute('download', true);
+            iFailed.setAttribute('npub', evt.payload.profile_id);
+            iFailed.setAttribute('msg', evt.payload.msg_id);
+            iFailed.classList.add('btn');
+            iFailed.textContent = `Retry Download (${evt.payload.result})`;
+            divDownload.replaceWith(iFailed);
+        }
     });
 
     // Listen for profile updates
@@ -1083,6 +1155,7 @@ function renderMessage(msg, sender) {
     pMessage.appendChild(spanMessage);
 
     // Append attachments
+    let strRevealAttachmentPath = '';
     if (msg.attachments.length) {
         // Float the content depending on who's it is
         pMessage.style.float = msg.mine ? 'right' : 'left';
@@ -1091,6 +1164,9 @@ function renderMessage(msg, sender) {
     }
     for (const cAttachment of msg.attachments) {
         if (cAttachment.downloaded) {
+            // Save the path for our File Explorer shortcut
+            strRevealAttachmentPath = cAttachment.path;
+
             // Convert the absolute file path to a Tauri asset
             const assetUrl = convertFileSrc(cAttachment.path);
 
@@ -1143,8 +1219,31 @@ function renderMessage(msg, sender) {
                 iUnknown.textContent = `Previews not supported for "${cAttachment.extension}" files yet`;
                 pMessage.appendChild(iUnknown);
             }
+        } else if (cAttachment.downloading) {
+            // Display download progression UI
+            const iDownloading = document.createElement('i');
+            iDownloading.id = cAttachment.id;
+            iDownloading.textContent = `Downloading`;
+            pMessage.appendChild(iDownloading);
         } else {
+            // Determine and display file size
+            let strSize = 'Unknown Size';
+            if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
+
             // Display download prompt UI
+            const iDownload = document.createElement('i');
+            iDownload.id = cAttachment.id;
+            iDownload.toggleAttribute('download', true);
+            iDownload.setAttribute('npub', sender.id);
+            iDownload.setAttribute('msg', msg.id);
+            iDownload.classList.add('btn');
+            iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
+            pMessage.appendChild(iDownload);
+
+            // If the size is known and within auto-download range; immediately begin downloading
+            if (cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES) {
+                invoke('download_attachment', { npub: sender.id, msgId: msg.id, attachmentId: cAttachment.id });
+            }
         }
     }
 
@@ -1244,6 +1343,14 @@ function renderMessage(msg, sender) {
             const spanReply = document.createElement('span');
             spanReply.classList.add('reply-btn', 'hideable', 'icon', 'icon-reply');
             divExtras.append(spanReply);
+        }
+
+        // File Reveal Icon (if a file was attached)
+        if (strRevealAttachmentPath) {
+            const spanReveal = document.createElement('span');
+            spanReveal.setAttribute('filepath', strRevealAttachmentPath);
+            spanReveal.classList.add('hideable', 'icon', 'icon-file-search');
+            divExtras.append(spanReveal);
         }
     }
 
@@ -1590,6 +1697,11 @@ document.addEventListener('click', (e) => {
     // If we're clicking a Reply button, begin a reply
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
 
+    // If we're clicking a File Reveal button, reveal the file with the OS File Explorer
+    if (e.target.getAttribute('filepath')) {
+        return revealItemInDir(e.target.getAttribute('filepath'));
+    }
+
     // If we're clicking a Reply context, center the referenced message in view
     if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')) {
         // Note: The `substring(2)` removes the `r-` prefix
@@ -1616,6 +1728,11 @@ document.addEventListener('click', (e) => {
 
     // If we're clicking a Contact, open the chat with the embedded npub (ID)
     if (e.target.classList.contains("chatlist-contact")) return openChat(e.target.id);
+
+    // If we're clicking an Attachment Download button, request the download
+    if (e.target.hasAttribute('download')) {
+        return invoke('download_attachment', { npub: e.target.getAttribute('npub'), msgId: e.target.getAttribute('msg'), attachmentId: e.target.id });
+    }
 
     // Run the emoji panel open/close logic
     openEmojiPanel(e);

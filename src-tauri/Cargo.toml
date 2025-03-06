@@ -20,9 +20,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 nostr-sdk = { version = "0.39.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
 tokio = { version = "1.43.0", features = ["sync"] }
+futures-util = "0.3.31"
 tauri = { version = "2.2.5", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
-reqwest = { version = "0.11", features = ["rustls-tls"] }
+reqwest = { version = "0.11", features = ["rustls-tls", "stream"] }
 scraper = "0.17"
 aes = "0.8.3"
 aes-gcm = "0.10.1"
