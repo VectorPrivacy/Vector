@@ -1039,6 +1039,11 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
                 continue;
             }
 
+            // Ensure there's no more than 50 existing messages at max
+            if (domChatMessages.childElementCount >= 50) {
+                domChatMessages.firstElementChild.remove();
+            }
+
             // Direct comparison with newest and oldest messages (most common cases)
             // This avoids expensive DOM operations for the common cases
 
