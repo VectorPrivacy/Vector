@@ -392,7 +392,7 @@ function renderChatlist() {
     }
 
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
-    fragment.lastElementChild.style.marginBottom = `50px`;
+    if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
 
     // Add all elements at once for performance
     if (orderChanged) {
