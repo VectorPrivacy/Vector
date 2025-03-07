@@ -1341,7 +1341,7 @@ function renderMessage(msg, sender, editID = '') {
                 const imgPreview = document.createElement('img');
                 imgPreview.style.width = `100%`;
                 imgPreview.style.height = `auto`;
-                imgPreview.style.borderRadius = `0`;
+                imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
                 pMessage.appendChild(imgPreview);
             } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
@@ -1364,7 +1364,7 @@ function renderMessage(msg, sender, editID = '') {
                 vidPreview.controls = true;
                 vidPreview.style.width = `100%`;
                 vidPreview.style.height = `auto`;
-                vidPreview.style.borderRadius = `0`;
+                vidPreview.style.borderRadius = `8px`;
                 vidPreview.style.cursor = `pointer`;
                 vidPreview.preload = "metadata";
                 vidPreview.playsInline = true;
