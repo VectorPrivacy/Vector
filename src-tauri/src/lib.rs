@@ -11,6 +11,7 @@ use chacha20poly1305::{
 };
 use ::image::{ImageEncoder, codecs::png::PngEncoder, ExtendedColorType::Rgba8};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_fs::FsExt;
 use scraper::{Html, Selector};
@@ -758,17 +759,20 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
 }
 
 #[tauri::command]
-async fn paste_message(receiver: String, replied_to: String, pixels: Vec<u8>, width: u32, height: u32) -> Result<bool, String> {
+async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String) -> Result<bool, String> {
+    // Copy the image from the clipboard
+    let img = handle.clipboard().read_image().unwrap();
+
     // Create the encoder directly with a Vec<u8>
     let mut png_data = Vec::new();
     let encoder = PngEncoder::new(&mut png_data);
 
     // Encode directly from pixels to PNG bytes
     encoder.write_image(
-        &pixels,            // raw pixels
-        width,              // width
-        height,             // height
-        Rgba8               // color type
+        img.rgba(),            // raw pixels
+        img.width(),           // width
+        img.height(),          // height
+        Rgba8                  // color type
     ).map_err(|e| e.to_string()).unwrap();
 
     // Generate an Attachment File

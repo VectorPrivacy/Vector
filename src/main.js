@@ -2,7 +2,6 @@ const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { listen } = window.__TAURI__.event;
-const { readImage } = window.__TAURI__.clipboardManager;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
 // Display the current version
@@ -1736,37 +1735,26 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
+        evt.preventDefault();
         if (strOpenChat) {
-            for (const item of evt.clipboardData.items) {
-                // Check if the pasted content is an image
-                if (item.type.startsWith('image/')) {
-                    const blob = await readImage();
-                    if (blob) {
-                        // Placeholder
-                        domChatMessageInput.value = '';
-                        domChatMessageInput.setAttribute('placeholder', 'Sending...');
+            // Check if the clipboard data contains an image
+            if (Array.from(evt.clipboardData.items).some(item => item.type.startsWith('image/'))) {
+                // Placeholder
+                domChatMessageInput.value = '';
+                domChatMessageInput.setAttribute('placeholder', 'Sending...');
 
-                        // Convert Tauri Clipboard blob to image components
-                        const rgba = await blob.rgba();
-                        const size = await blob.size();
+                // Tell the Rust backend to acquire the image from clipboard and send it to the current chat
+                await invoke('paste_message', {
+                    receiver: strOpenChat,
+                    repliedTo: strCurrentReplyReference
+                });
 
-                        // Send raw bytes to Rust
-                        await invoke('paste_message', {
-                            receiver: strOpenChat,
-                            repliedTo: strCurrentReplyReference,
-                            pixels: rgba,
-                            width: size.width,
-                            height: size.height
-                        });
-
-                        // Reset placeholder
-                        cancelReply();
-                        nLastTypingIndicator = 0;
-                    }
-                }
+                // Reset placeholder
+                cancelReply();
+                nLastTypingIndicator = 0;
             }
         }
-    }
+    };
 
     // Hook up an 'Enter' listener on the Message Box for sending messages
     domChatMessageInput.onkeydown = async (evt) => {
