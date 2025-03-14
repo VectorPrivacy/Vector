@@ -1735,10 +1735,11 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
-        evt.preventDefault();
         if (strOpenChat) {
             // Check if the clipboard data contains an image
             if (Array.from(evt.clipboardData.items).some(item => item.type.startsWith('image/'))) {
+                evt.preventDefault();
+
                 // Placeholder
                 domChatMessageInput.value = '';
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
