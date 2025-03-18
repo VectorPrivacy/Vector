@@ -967,33 +967,37 @@ async fn load_profile(npub: String) -> bool {
         .await
     {
         Ok(meta) => {
-            // If it's ours, mark it as such
-            let mut state = STATE.lock().await;
-            let profile_mutable = state.get_profile_mut(&npub).unwrap();
-            profile_mutable.mine = my_public_key == profile_pubkey;
+            if meta.is_some() {
+                // If it's ours, mark it as such
+                let mut state = STATE.lock().await;
+                let profile_mutable = state.get_profile_mut(&npub).unwrap();
+                profile_mutable.mine = my_public_key == profile_pubkey;
 
-            // Update the Status, and track changes
-            let status_changed = profile_mutable.status != status;
-            profile_mutable.status = status;
+                // Update the Status, and track changes
+                let status_changed = profile_mutable.status != status;
+                profile_mutable.status = status;
 
-            // Update the Metadata, and track changes
-            let metadata_changed = profile_mutable.from_metadata(meta);
+                // Update the Metadata, and track changes
+                let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
 
-            // Apply the current update time
-            profile_mutable.last_updated = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                // Apply the current update time
+                profile_mutable.last_updated = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
 
-            // If there's any change between our Old and New profile, emit an update
-            if status_changed || metadata_changed {
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("profile_update", &profile_mutable).unwrap();
+                // If there's any change between our Old and New profile, emit an update
+                if status_changed || metadata_changed {
+                    let handle = TAURI_APP.get().unwrap();
+                    handle.emit("profile_update", &profile_mutable).unwrap();
 
-                // Cache this profile in our DB, too
-                db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
+                    // Cache this profile in our DB, too
+                    db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
+                }
+                return true;
+            } else {
+                return false;
             }
-            return true;
         }
         Err(_) => {
             return false;

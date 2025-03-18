@@ -2794,6 +2794,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30bde2b3dc3671ae49d8e2e9f044c7c005836e7a023ee57cffa25ab82764bb9e"
 
 [[package]]
+name = "lru"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "227748d55f2f0ab4735d87fd623798cb6b664512fe979705f829c9f81c934465"
+
+[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3047,9 +3053,9 @@ dependencies = [
 
 [[package]]
 name = "nostr"
-version = "0.39.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d90b55eff1f0747d9e423972179672e1aacac3d3ccee4c1281147eaa90d6491e"
+checksum = "2f900ddcdc28395759fcd44b18a03255e7deee8858551bfe5d5d5a07311d82ea"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -3061,6 +3067,7 @@ dependencies = [
  "chacha20poly1305",
  "getrandom 0.2.15",
  "instant",
+ "regex",
  "reqwest 0.12.12",
  "scrypt",
  "secp256k1",
@@ -3072,23 +3079,25 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.39.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce07b47c77b8e5a856727885fe0ae47b9aa53d8d853a2190dd479b5a0d6e4f52"
+checksum = "714512e4653f4e7c4f4abb50a0ac82257541b22087dee780b9e3d787276e88d4"
 dependencies = [
+ "lru",
  "nostr",
  "tokio",
 ]
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.39.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211ac5bbdda1a8eec0c21814a838da832038767a5d354fe2fcc1ca438cae56fd"
+checksum = "90eb4f63f3f28d778f5f22dc1a916ed229f1db12db4ec8bc78ae321497faec5b"
 dependencies = [
  "async-utility",
  "async-wsocket",
  "atomic-destructor",
+ "lru",
  "negentropy 0.3.1",
  "negentropy 0.5.0",
  "nostr",
@@ -3099,9 +3108,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.39.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baca581deb810a88bb51c54d1d7980f4506a64a3e9a19270829b406e47adf31"
+checksum = "26238eee805d7dc3abcc8d570068c81cb4285b08e9db4d7999e54e20748c472e"
 dependencies = [
  "async-utility",
  "nostr",

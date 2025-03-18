@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-nostr-sdk = { version = "0.39.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+nostr-sdk = { version = "0.40.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
 tokio = { version = "1.43.0", features = ["sync"] }
 futures-util = "0.3.31"
 tauri = { version = "2.2.5", features = ["protocol-asset"] }
