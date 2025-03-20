@@ -2171,8 +2171,6 @@ pub fn run() {
                         // Cleanly shutdown our Nostr client
                         if let Some(nostr_client) = NOSTR_CLIENT.get() {
                             tauri::async_runtime::block_on(async {
-                                // Unsubscribe from all relay subscriptions
-                                nostr_client.unsubscribe_all().await;
                                 // Shutdown the Nostr client
                                 nostr_client.shutdown().await;
                             });
