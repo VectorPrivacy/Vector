@@ -1561,7 +1561,8 @@ function cancelReply() {
 
     // Cancel any existing reply-focus
     if (strCurrentReplyReference) {
-        document.getElementById(strCurrentReplyReference)?.querySelector('p')?.style.borderColor = ``;
+        let domMsg = document.getElementById(strCurrentReplyReference);
+        if (domMsg) domMsg.querySelector('p').style.borderColor = ``;
     }
 
     // Remove the reply ID
