@@ -81,6 +81,26 @@ impl Message {
     fn get_attachment_mut(&mut self, id: &str) -> Option<&mut Attachment> {
         self.attachments.iter_mut().find(|p| p.id == id)
     }
+
+    /// Add a Reaction - if it was not already added
+    fn add_reaction(&mut self, reaction: Reaction) -> bool {
+        // Make sure we don't add the same reaction twice
+        if !self.reactions.iter().any(|r| r.id == reaction.id) {
+            self.reactions.push(reaction);
+
+            // Update the frontend
+            let handle = TAURI_APP.get().unwrap();
+            handle.emit("message_update", serde_json::json!({
+                "old_id": &self.id,
+                "message": &self,
+                "chat_id": &self.id
+            })).unwrap();
+            true
+        } else {
+            // Reaction was already added previously
+            false
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -238,32 +258,6 @@ impl Profile {
         }
         true
     }
-
-    /// Add a Reaction to a Message
-    fn internal_add_reaction(&mut self, msg_id: &str, reaction: Reaction) -> bool {
-        // Find the message being reacted to
-        match self.get_message_mut(msg_id) {
-            Some(msg) => {
-                // Make sure we don't add the same reaction twice
-                if !msg.reactions.iter().any(|r| r.id == reaction.id) {
-                    msg.reactions.push(reaction);
-
-                    // Update the frontend
-                    let handle = TAURI_APP.get().unwrap();
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": &msg.id,
-                        "message": &msg,
-                        "chat_id": &self.id
-                    })).unwrap();
-                    true
-                } else {
-                    // Reaction was already added previously
-                    false
-                }
-            }
-            None => false,
-        }
-    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -388,16 +382,6 @@ impl ChatState {
         });
 
         is_msg_added
-    }
-
-    /// Add a Reaction to a Message in a Vector Profile
-    fn add_reaction(&mut self, npub: &str, msg_id: &str, reaction: Reaction) -> bool {
-        // Get the profile
-        match self.get_profile_mut(npub) {
-            // If the profile is found; add the reaction to the profile's message
-            Some(profile) => profile.internal_add_reaction(msg_id, reaction),
-            None => false,
-        }
     }
 }
 
@@ -997,10 +981,18 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
                 author_id: my_public_key.to_hex(),
                 emoji,
             };
-            return Ok(STATE
-                .lock()
-                .await
-                .add_reaction(&npub, &reference_id, reaction));
+
+            // Commit it to our local state
+            let mut state = STATE.lock().await;
+            let profile = state.get_profile_mut(&npub).unwrap();
+            let msg = profile.get_message_mut(&reference_id).unwrap();
+            let was_reaction_added_to_state = msg.add_reaction(reaction);
+            if was_reaction_added_to_state {
+                // Save the message's reaction to our DB
+                let handle = TAURI_APP.get().unwrap();
+                db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
+            }
+            return Ok(was_reaction_added_to_state);
         }
         Err(e) => {
             eprintln!("Error: {:?}", e);
@@ -1407,7 +1399,28 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         };
 
                         // Add the reaction
-                        STATE.lock().await.add_reaction(&contact, &reference_id, reaction)
+                        // TODO: since we typically sync "backwards", a reaction may be received before we have any
+                        // ... concept of the Profile or Message, sometime in the future, we need to track these "ahead"
+                        // ... reactions and re-apply them once sync has finished.
+                        let mut state = STATE.lock().await;
+                        let maybe_profile = state.get_profile_mut(&contact);
+                        if maybe_profile.is_some() {
+                            let maybe_msg = maybe_profile.unwrap().get_message_mut(&reference_id);
+                            if maybe_msg.is_some() {
+                                let msg = maybe_msg.unwrap();
+                                let was_reaction_added_to_state = msg.add_reaction(reaction);
+                                if was_reaction_added_to_state {
+                                    // Save the message's reaction to our DB
+                                    let handle = TAURI_APP.get().unwrap();
+                                    db::save_message(handle.clone(), msg.clone(), contact).await.unwrap();
+                                }
+                                was_reaction_added_to_state
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
                     }
                     None => false /* No Reference (Note ID) supplied */,
                 }
