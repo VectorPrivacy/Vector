@@ -447,7 +447,7 @@ function renderContact(chat) {
         pChatPreview.textContent = `Typing...`;
     } else if (!cLastMsg.content) {
         // Not typing, and no text; display as an attachment
-        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent an attachment';
+        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeDescription(cLastMsg.attachments[0].extension);
     } else {
         // Not typing; display their last message
         pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
@@ -1289,7 +1289,7 @@ function renderMessage(msg, sender, editID = '') {
             // Replied-to content (Text or Attachment)
             if (cMsg.content)
                 spanRef.textContent = cMsg.content.length < 50 ? cMsg.content : cMsg.content.substring(0, 50) + '…';
-            else if (cMsg.attachments.length) spanRef.textContent = `Attachment`;
+            else if (cMsg.attachments.length) spanRef.textContent = getFileTypeDescription(cMsg.attachments[0].extension);
 
             divRef.appendChild(spanName);
             divRef.appendChild(document.createElement('br'));

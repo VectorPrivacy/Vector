@@ -246,6 +246,36 @@ function formatBytes(bytes, decimals = 2) {
   }
 
 /**
+ * Returns a descriptive string for a given file extension
+ * @param {string} extension - The file extension (without the dot)
+ * @returns {string} A descriptive string of the file type
+ */
+function getFileTypeDescription(extension) {
+    const fileTypes = {
+      // Images
+      "png": "Picture",
+      "jpg": "Picture",
+      "jpeg": "Picture",
+      "gif": "GIF Animation",
+      "webp": "Picture",
+
+      // Audio
+      "wav": "Voice Message",
+      "mp3": "Audio Clip",
+
+      // Videos
+      "mp4": "Video",
+      "webm": "Video",
+      "mov": "Video",
+      "avi": "Video",
+      "mkv": "Video"
+    };
+
+    // Return the description if found, otherwise return "File"
+    return fileTypes[extension.toLowerCase()] || "File";
+}
+
+/**
  * Slide out an element with animation and remove it from document flow
  * @param {HTMLElement} element - The DOM element to slide out
  * @param {Object} options - Optional configuration
