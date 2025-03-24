@@ -964,6 +964,7 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
         &emoji,
     )
     .build(my_public_key);
+    let rumor_id = rumor.id.unwrap();
 
     // Send reaction to the real receiver
     client
@@ -973,10 +974,10 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
 
     // Send reaction to our own public key, to allow for recovering
     match client.gift_wrap(&my_public_key, rumor, []).await {
-        Ok(response) => {
+        Ok(_) => {
             // And add our reaction locally
             let reaction = Reaction {
-                id: response.id().to_hex(),
+                id: rumor_id.to_hex(),
                 reference_id: reference_id.clone(),
                 author_id: my_public_key.to_hex(),
                 emoji,
