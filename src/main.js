@@ -739,6 +739,7 @@ async function setupRustListeners() {
     await listen('message_update', (evt) => {
         // Find the message we're updating
         const cProfile = arrChats.find(p => p.id === evt.payload.chat_id);
+        if (!cProfile) return;
         const nMsgIdx = cProfile.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
 
