@@ -1561,7 +1561,7 @@ function cancelReply() {
 
     // Cancel any existing reply-focus
     if (strCurrentReplyReference) {
-        document.getElementById(strCurrentReplyReference).querySelector('p').style.borderColor = ``;
+        document.getElementById(strCurrentReplyReference)?.querySelector('p')?.style.borderColor = ``;
     }
 
     // Remove the reply ID
@@ -1831,6 +1831,13 @@ window.addEventListener("DOMContentLoaded", async () => {
                     cancelReply();
                     nLastTypingIndicator = 0;
                 }
+
+                /*
+                const blob = new Blob([wavData], { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.play();
+                */
             }
         } else {
             // Display our recording status
