@@ -246,33 +246,37 @@ function formatBytes(bytes, decimals = 2) {
   }
 
 /**
- * Returns a descriptive string for a given file extension
- * @param {string} extension - The file extension (without the dot)
- * @returns {string} A descriptive string of the file type
+ * Gets information about a file type based on its extension.
+ * @param {string} extension - The file extension (e.g., 'jpg', 'mp4', 'pdf')
+ * @returns {Object} An object containing information about the file type
  */
-function getFileTypeDescription(extension) {
+function getFileTypeInfo(extension) {
+    // Define file types with descriptions and appropriate icons
     const fileTypes = {
       // Images
-      "png": "Picture",
-      "jpg": "Picture",
-      "jpeg": "Picture",
-      "gif": "GIF Animation",
-      "webp": "Picture",
+      "png": { description: "Picture", icon: "image" },
+      "jpg": { description: "Picture", icon: "image" },
+      "jpeg": { description: "Picture", icon: "image" },
+      "gif": { description: "GIF Animation", icon: "video" },
+      "webp": { description: "Picture", icon: "image" },
 
       // Audio
-      "wav": "Voice Message",
-      "mp3": "Audio Clip",
+      "wav": { description: "Voice Message", icon: "mic-on" },
+      "mp3": { description: "Audio Clip", icon: "mic-on" },
 
       // Videos
-      "mp4": "Video",
-      "webm": "Video",
-      "mov": "Video",
-      "avi": "Video",
-      "mkv": "Video"
+      "mp4": { description: "Video", icon: "video" },
+      "webm": { description: "Video", icon: "video" },
+      "mov": { description: "Video", icon: "video" },
+      "avi": { description: "Video", icon: "video" },
+      "mkv": { description: "Video", icon: "video" }
     };
-
-    // Return the description if found, otherwise return "File"
-    return fileTypes[extension.toLowerCase()] || "File";
+  
+    // Normalize the extension to lowercase
+    const normalizedExt = extension.toLowerCase();
+    
+    // Return the file type info if found, otherwise return default values
+    return fileTypes[normalizedExt] || { description: "File", icon: "attachment" };
 }
 
 /**

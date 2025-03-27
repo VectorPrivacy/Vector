@@ -447,7 +447,7 @@ function renderContact(chat) {
         pChatPreview.textContent = `Typing...`;
     } else if (!cLastMsg.content) {
         // Not typing, and no text; display as an attachment
-        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeDescription(cLastMsg.attachments[0].extension);
+        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
     } else {
         // Not typing; display their last message
         pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
@@ -1281,17 +1281,41 @@ function renderMessage(msg, sender, editID = '') {
             // Name + Message
             const spanName = document.createElement('span');
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
-            const spanRef = document.createElement('span');
-            spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
 
             // Name
             const cSenderProfile = !cMsg.mine ? sender : arrChats.find(a => a.mine);
             spanName.textContent = cSenderProfile.name ? cSenderProfile.name : cSenderProfile.id.substring(0, 10) + '…';
 
             // Replied-to content (Text or Attachment)
-            if (cMsg.content)
+            let spanRef;
+            if (cMsg.content) {
+                spanRef = document.createElement('span');
+                spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
                 spanRef.textContent = cMsg.content.length < 50 ? cMsg.content : cMsg.content.substring(0, 50) + '…';
-            else if (cMsg.attachments.length) spanRef.textContent = getFileTypeDescription(cMsg.attachments[0].extension);
+            } else if (cMsg.attachments.length) {
+                // For Attachments, we display an additional icon for quickly inferring the replied-to content
+                spanRef = document.createElement('div');
+                spanRef.style.display = `flex`;
+                const cFileType = getFileTypeInfo(cMsg.attachments[0].extension);
+
+                // Icon
+                const spanIcon = document.createElement('span');
+                spanIcon.classList.add('icon', 'icon-' + cFileType.icon);
+                spanIcon.style.position = `relative`;
+                spanIcon.style.backgroundColor = `rgba(255, 255, 255, 0.45)`;
+                spanIcon.style.width = `18px`;
+                spanIcon.style.height = `18px`;
+                spanIcon.style.margin = `0px`;
+
+                // Description
+                const spanDesc = document.createElement('span');
+                spanDesc.style.color = `rgba(255, 255, 255, 0.45)`;
+                spanDesc.style.marginLeft = `5px`;
+                spanDesc.textContent = cFileType.description;
+
+                // Combine
+                spanRef.append(spanIcon, spanDesc);
+            }
 
             divRef.appendChild(spanName);
             divRef.appendChild(document.createElement('br'));
@@ -1867,9 +1891,9 @@ document.addEventListener('click', (e) => {
     }
 
     // If we're clicking a Reply context, center the referenced message in view
-    if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')) {
+    if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')  || e.target.parentElement?.parentElement?.classList.contains('msg-reply')) {
         // Note: The `substring(2)` removes the `r-` prefix
-        const strID = e.target.id || e.target.parentElement.id;
+        const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
         const domMsg = document.getElementById(strID.substring(2));
         centerInView(domMsg);
 

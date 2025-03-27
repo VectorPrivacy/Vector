@@ -31,8 +31,16 @@
   mask-image: url("./icons/new-chat.svg");
 }
 
+.icon-image {
+  mask-image: url("./icons/image.svg");
+}
+
 .icon-add-file {
   mask-image: url("./icons/add-file.svg");
+}
+
+.icon-attachment {
+  mask-image: url("./icons/attachment.svg");
 }
 
 .icon-file-search {
@@ -45,6 +53,10 @@
 
 .icon-mic-off {
   mask-image: url("./icons/mic-off.svg");
+}
+
+.icon-video {
+  mask-image: url("./icons/video.svg");
 }
 
 .icon-smile-face {
