@@ -1068,6 +1068,10 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
                 const domMsg = renderMessage(msg, profile);
                 if (!msg.mine && arrMessages.length === 1) {
                     domMsg.classList.add('new-anim');
+                    domMsg.addEventListener('animationend', () => {
+                        // Remove the animation class once it finishes
+                        domMsg?.classList?.remove('new-anim');
+                    }, { once: true });
                 }
 
                 domChatMessages.appendChild(domMsg);
