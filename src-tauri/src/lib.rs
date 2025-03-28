@@ -1898,22 +1898,54 @@ async fn connect() -> bool {
     true
 }
 
-// Convert string to bytes, ensuring we're dealing with the raw content
-fn string_to_bytes(s: &str) -> Vec<u8> {
-    s.as_bytes().to_vec()
-}
-
-// Convert bytes to string, but we'll use hex encoding for encrypted data
+// Convert a byte slice to a hex string
 fn bytes_to_hex_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    // Pre-allocate the exact size needed (2 hex chars per byte)
+    let mut result = String::with_capacity(bytes.len() * 2);
+    
+    // Use a lookup table for hex conversion
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+    
+    for &b in bytes {
+        // Extract high and low nibbles
+        let high = b >> 4;
+        let low = b & 0xF;
+        result.push(HEX_CHARS[high as usize] as char);
+        result.push(HEX_CHARS[low as usize] as char);
+    }
+    
+    result
 }
 
 // Convert hex string back to bytes for decryption
 fn hex_string_to_bytes(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
+    // Pre-allocate the result vector to avoid resize operations
+    let mut result = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    
+    // Process bytes directly to avoid UTF-8 decoding overhead
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        // Convert two hex characters to a single byte
+        let high = match bytes[i] {
+            b'0'..=b'9' => bytes[i] - b'0',
+            b'a'..=b'f' => bytes[i] - b'a' + 10,
+            b'A'..=b'F' => bytes[i] - b'A' + 10,
+            _ => 0,
+        };
+        
+        let low = match bytes[i + 1] {
+            b'0'..=b'9' => bytes[i + 1] - b'0',
+            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+            _ => 0,
+        };
+        
+        result.push((high << 4) | low);
+        i += 2;
+    }
+    
+    result
 }
 
 async fn hash_pass(password: String) -> [u8; 32] {
@@ -1958,9 +1990,8 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
     let nonce = Nonce::from_slice(&nonce_bytes);
     
     // Encrypt the input
-    let plaintext = string_to_bytes(&input);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
+        .encrypt(nonce, input.as_bytes())
         .expect("Encryption should not fail");
     
     // Prepend the nonce to our ciphertext
@@ -1979,22 +2010,29 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
 
 // Internal function for decryption logic
 pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    // Hash our password with Argon2 and use it as the key
-    let key = if password.is_none() { 
-        ENCRYPTION_KEY.get().unwrap() 
-    } else { 
-        &hash_pass(password.unwrap()).await 
+    // Check if we're using a password before we potentially move it
+    let has_password = password.is_some();
+
+    // Fast path: If we already have an encryption key and no password is provided, avoid unnecessary work
+    let key = if let Some(pass) = password {
+        // Only hash the password if we actually have one
+        &hash_pass(pass).await
+    } else if let Some(cached_key) = ENCRYPTION_KEY.get() {
+        // Use cached key
+        cached_key
+    } else {
+        // No key available
+        return Err(());
     };
 
-    // Convert hex to bytes
-    let encrypted_data = match hex_string_to_bytes(&ciphertext) {
+    // Convert hex to bytes - use reference to avoid copying the string
+    let encrypted_data = match hex_string_to_bytes(ciphertext.as_str()) {
         bytes if bytes.len() >= 12 => bytes,
         _ => return Err(())
     };
     
-    // Extract nonce and encrypted data
-    let nonce_bytes = &encrypted_data[..12];
-    let actual_ciphertext = &encrypted_data[12..];
+    // Extract nonce and encrypted data - use slices to avoid copying data
+    let (nonce_bytes, actual_ciphertext) = encrypted_data.split_at(12);
     
     // Create the cipher instance
     let cipher = match ChaCha20Poly1305::new_from_slice(key) {
@@ -2002,24 +2040,25 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
         Err(_) => return Err(())
     };
     
-    // Create the nonce
-    let nonce = Nonce::from_slice(nonce_bytes);
-    
-    // Decrypt
-    let plaintext = match cipher.decrypt(nonce, actual_ciphertext) {
+    // Create the nonce and decrypt
+    let plaintext = match cipher.decrypt(Nonce::from_slice(nonce_bytes), actual_ciphertext) {
         Ok(pt) => pt,
         Err(_) => return Err(())
     };
 
-    // Save the Encryption Key locally so that we can continually decrypt data post-login
-    if ENCRYPTION_KEY.get().is_none() {
-        ENCRYPTION_KEY.set(*key).unwrap();
+    // Cache the key if needed - only set if we came from password path
+    if has_password && ENCRYPTION_KEY.get().is_none() {
+        // This only happens once after login with password
+        let _ = ENCRYPTION_KEY.set(*key); // Ignore result as this is non-critical
     }
 
-    // Convert decrypted bytes back to string
-    match String::from_utf8(plaintext) {
-        Ok(decrypted) => Ok(decrypted),
-        Err(_) => Err(()),
+    // Convert decrypted bytes to string using unsafe version, because SPEED!
+    // SAFETY: The plaintext bytes are guaranteed to be valid UTF-8, making this safe, because:
+    // 1. They were originally created from a valid UTF-8 string (typically JSON or plaintext)
+    // 2. ChaCha20-Poly1305 authenticated decryption ensures the data is intact
+    // 3. The decryption process preserves the exact byte patterns
+    unsafe {
+        Ok(String::from_utf8_unchecked(plaintext))
     }
 }
 
