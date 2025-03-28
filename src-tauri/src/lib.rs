@@ -1964,7 +1964,8 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
         .expect("Encryption should not fail");
     
     // Prepend the nonce to our ciphertext
-    let mut buffer = nonce_bytes.to_vec();
+    let mut buffer = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+    buffer.extend_from_slice(&nonce_bytes);
     buffer.extend_from_slice(&ciphertext);
 
     // Save the Encryption Key locally so that we can continually encrypt data post-login
