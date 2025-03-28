@@ -151,12 +151,14 @@ body {
 }
 
 .text-gradient {
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
 }
 
 .startup-subtext-gradient {
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
