@@ -83,18 +83,20 @@ impl Message {
     }
 
     /// Add a Reaction - if it was not already added
-    fn add_reaction(&mut self, reaction: Reaction) -> bool {
+    fn add_reaction(&mut self, reaction: Reaction, chat_id: Option<&str>) -> bool {
         // Make sure we don't add the same reaction twice
         if !self.reactions.iter().any(|r| r.id == reaction.id) {
             self.reactions.push(reaction);
 
-            // Update the frontend
-            let handle = TAURI_APP.get().unwrap();
-            handle.emit("message_update", serde_json::json!({
-                "old_id": &self.id,
-                "message": &self,
-                "chat_id": &self.id
-            })).unwrap();
+            // Update the frontend if a Chat ID was provided
+            if let Some(chat) = chat_id {
+                let handle = TAURI_APP.get().unwrap();
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &self.id,
+                    "message": &self,
+                    "chat_id": chat
+                })).unwrap();
+            }
             true
         } else {
             // Reaction was already added previously
@@ -986,8 +988,9 @@ async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool
             // Commit it to our local state
             let mut state = STATE.lock().await;
             let profile = state.get_profile_mut(&npub).unwrap();
+            let chat_id = profile.id.clone();
             let msg = profile.get_message_mut(&reference_id).unwrap();
-            let was_reaction_added_to_state = msg.add_reaction(reaction);
+            let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
             if was_reaction_added_to_state {
                 // Save the message's reaction to our DB
                 let handle = TAURI_APP.get().unwrap();
@@ -1406,10 +1409,12 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         let mut state = STATE.lock().await;
                         let maybe_profile = state.get_profile_mut(&contact);
                         if maybe_profile.is_some() {
-                            let maybe_msg = maybe_profile.unwrap().get_message_mut(&reference_id);
+                            let profile = maybe_profile.unwrap();
+                            let chat_id = profile.id.clone();
+                            let maybe_msg = profile.get_message_mut(&reference_id);
                             if maybe_msg.is_some() {
                                 let msg = maybe_msg.unwrap();
-                                let was_reaction_added_to_state = msg.add_reaction(reaction);
+                                let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
                                 if was_reaction_added_to_state {
                                     // Save the message's reaction to our DB
                                     let handle = TAURI_APP.get().unwrap();
