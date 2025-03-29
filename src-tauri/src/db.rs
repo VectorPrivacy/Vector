@@ -337,8 +337,5 @@ pub async fn get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(
         }
     }
     
-    // Sort by timestamp (oldest first)
-    result.sort_by(|a, b| a.0.at.cmp(&b.0.at));
-    
     Ok(result)
 }
