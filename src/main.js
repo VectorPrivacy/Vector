@@ -25,6 +25,9 @@ const domAccount = document.getElementById('account');
 const domSyncStatusContainer = document.getElementById('sync-status-container');
 const domSyncStatus = document.getElementById('sync-status');
 const domChatList = document.getElementById('chat-list');
+const domNavbar = document.getElementById('navbar');
+const domSettingsBtn = document.getElementById('settings-btn');
+const domChatlistBtn = document.getElementById('chat-btn');
 
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
@@ -47,8 +50,6 @@ const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 const domSettings = document.getElementById('settings');
-const domSettingsBtn = document.getElementById('settings-btn');
-const domSettingsBackBtn = document.getElementById('settings-back-btn');
 const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsLogout = document.getElementById('logout-btn');
 
@@ -352,6 +353,15 @@ async function init() {
     fetchProfiles().finally(async () => {
         setAsyncInterval(fetchProfiles, 45000);
     });
+
+    // Run a very slow loop to update dynamic elements, like "last message time" and "typing status".
+    setInterval(() => {
+        // If the chatlist is open: re-render to update timestamps and typing statuses
+        if (domChats.style.display !== 'none') renderChatlist();
+
+        // If the chat is open; run a 'soft' render to update typing status
+        if (strOpenChat) updateChat(arrChats.find(a => a.id === strOpenChat), []);
+    }, 30000);
 }
 
 /**
@@ -406,6 +416,7 @@ function renderChatlist() {
         // Add a fade-in
         const divFade = document.createElement('div');
         divFade.classList.add(`fadeout-bottom`);
+        divFade.style.bottom = `65px`;
         domChatList.appendChild(divFade);
     }
 }
@@ -458,6 +469,12 @@ function renderContact(chat) {
     // Note: as a hacky trick to make `divContact` receive all clicks, we set the z-index lower on it's children
     divPreviewContainer.style.zIndex = `-1`;
     divContact.appendChild(divPreviewContainer);
+
+    // Display the "last message" time
+    const pTimeAgo = document.createElement('p');
+    pTimeAgo.classList.add('chatlist-contact-timestamp');
+    pTimeAgo.textContent = timeAgo(cLastMsg.at * 1000);
+    divContact.appendChild(pTimeAgo);
 
     return divContact;
 }
@@ -651,7 +668,7 @@ async function setupRustListeners() {
         if (arrChats[nProfileIdx].messages.length === 1 && cFirstMsg.id === newMessage.id && !cFirstMsg.mine) return;
 
         // Reset their typing status
-        arrChats[nProfileIdx].typing_until = 0;
+        if (!newMessage.mine) arrChats[nProfileIdx].typing_until = 0;
 
         // Find the correct position to insert the message based on timestamp
         const messages = arrChats[nProfileIdx].messages;
@@ -796,20 +813,17 @@ async function login() {
                 domLogin.style.display = 'none';
                 domLoginEncrypt.style.display = 'none';
 
-                // Fade-in the settings button
-                domSettingsBtn.style.display = '';
-                domSettingsBtn.classList.add('fadein-anim');
-                domSettingsBtn.addEventListener('animationend', () => domSettingsBtn.classList.remove('fadein-anim'), { once: true });
+                // Fade-in the navbar
+                domNavbar.style.display = '';
+                domNavbar.classList.add('fadein-anim');
+                domNavbar.addEventListener('animationend', () => domNavbar.classList.remove('fadein-anim'), { once: true });
 
                 // Render our profile with an intro animation
                 const cProfile = arrChats.find(p => p.mine);
                 renderCurrentProfile(cProfile);
+                domAccount.style.display = ``;
                 domAccount.classList.add('fadein-anim');
                 domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
-
-                const domProfileDivider = document.getElementById('profile-divider');
-                domProfileDivider.classList.add('intro-anim-widen');
-                domProfileDivider.addEventListener('animationend', () => domProfileDivider.classList.remove('intro-anim-widen'), { once: true });
 
                 // Display our Synchronisation Status
                 domSyncStatusContainer.classList.add('intro-anim');
@@ -826,16 +840,12 @@ async function login() {
 
                 // Append and fade-in a "Start New Chat" button
                 const btnStartChat = document.createElement('button');
-                btnStartChat.classList.add('corner-float', 'visible');
-                btnStartChat.style.bottom = `15px`;
-                btnStartChat.style.borderRadius = `100%`;
-                btnStartChat.style.height = `50px`;
-                btnStartChat.style.width = `50px`;
-                btnStartChat.innerHTML = '<span class="icon icon-new-msg"></span>';
+                btnStartChat.id = `new-chat-btn`;
+                btnStartChat.classList.add('new-chat-btn', 'btn', 'intro-anim');
+                btnStartChat.innerHTML = 'Start a New Chat<span class="icon icon-new-msg"></span>';
                 btnStartChat.onclick = openNewChat;
-                btnStartChat.classList.add('fadein-anim');
-                btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('fadein-anim'), { once: true });
-                domChats.appendChild(btnStartChat);
+                btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
+                domChatList.before(btnStartChat);
                 adjustSize();
 
                 // Setup a subscription for new websocket messages
@@ -877,27 +887,24 @@ function renderCurrentProfile(cProfile) {
     divRow.appendChild(domAvatar);
 
     // Render our username and npub
-    const h3Username = document.createElement('h3');
-    h3Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
-    h3Username.classList.add('btn', 'cutoff');
-    h3Username.onclick = askForUsername;
-    divRow.appendChild(h3Username);
+    const h2Username = document.createElement('h2');
+    h2Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
+    h2Username.classList.add('btn', 'cutoff');
+    h2Username.style.fontFamily = `Rubik`;
+    h2Username.style.marginTop = `auto`;
+    h2Username.style.marginBottom = `auto`;
+    h2Username.onclick = askForUsername;
+    divRow.appendChild(h2Username);
 
     // Add the username row
     domAccount.appendChild(divRow);
 
     // Render our status
-    const iStatus = document.createElement('i');
-    iStatus.textContent = cProfile?.status?.title || 'Set a Status';
-    iStatus.classList.add('btn', 'cutoff');
-    iStatus.onclick = askForStatus;
-    domAccount.appendChild(iStatus);
-
-    // Then add a divider to seperate it all visually from the Chatlist
-    const divDivider = document.createElement('div');
-    divDivider.classList.add('divider');
-    divDivider.id = `profile-divider`;
-    domAccount.appendChild(divDivider);
+    const pStatus = document.createElement('p');
+    pStatus.textContent = cProfile?.status?.title || 'Set a Status';
+    pStatus.classList.add('status', 'btn', 'cutoff');
+    pStatus.onclick = askForStatus;
+    domAccount.appendChild(pStatus);
 
     // Render our Share npub
     domShareNpub.textContent = strPubkey;
@@ -1610,6 +1617,9 @@ function openChat(contact) {
     domChat.style.display = '';
     domSettingsBtn.style.display = 'none';
 
+    // Hide the Navbar
+    domNavbar.style.display = `none`;
+
     // Render the current contact's messages
     const cProfile = arrChats.find(p => p.id === contact);
     strOpenChat = contact;
@@ -1624,9 +1634,11 @@ function openChat(contact) {
 function openNewChat() {
     // Display the UI
     domChatNew.style.display = '';
-    domSettingsBtn.style.display = 'none';
     domChats.style.display = 'none';
     domChat.style.display = 'none';
+
+    // Hide the Navbar
+    domNavbar.style.display = 'none';
 }
 
 /**
@@ -1664,6 +1676,9 @@ function closeChat() {
     strOpenChat = "";
     nLastTypingIndicator = 0;
 
+    // Display the Navbar
+    domNavbar.style.display = ``;
+
     // Cancel any ongoing replies or selections
     strCurrentReactionReference = "";
     strCurrentReplyReference = "";
@@ -1674,19 +1689,28 @@ function closeChat() {
 }
 
 function openSettings() {
+    navbarSelect('settings-btn');
     domSettings.style.display = '';
-    domSettingsBtn.style.display = 'none';
 
     // Close the Chat UI
     domChats.style.display = 'none';
 }
 
-function closeSettings() {
+function openChatlist() {
+    navbarSelect('chat-btn');
     domSettings.style.display = 'none';
-    domSettingsBtn.style.display = '';
 
     // Open the Chat UI
     domChats.style.display = '';
+}
+
+/**
+ * A utility to "select" one Navbar item, deselecting the rest automatically.
+ */
+function navbarSelect(strSelectionID = '') {
+    for (const navItem of domNavbar.querySelectorAll('div')) {
+        navItem.style.opacity = strSelectionID === navItem.id ? 1 : 0.5;
+    }
 }
 
 /**
@@ -1732,7 +1756,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Hook up our static buttons
     domSettingsBtn.onclick = openSettings;
-    domSettingsBackBtn.onclick = closeSettings;
+    domChatlistBtn.onclick = openChatlist;
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
@@ -1938,10 +1962,10 @@ document.addEventListener('click', (e) => {
  */
 function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
-    // Note: no idea why the `- 30px` is needed below, magic numbers, I guess.
-    const rectAccount = domAccount.getBoundingClientRect();
-    const rectSyncStatus = domSyncStatusContainer.getBoundingClientRect();
-    domChatList.style.maxHeight = (window.innerHeight - (rectAccount.height + rectSyncStatus.height)) - 30 + `px`;
+    // Note: no idea why the `- 50px` is needed below, magic numbers, I guess.
+    const nNewChatBtnHeight = document.getElementById('new-chat-btn')?.getBoundingClientRect().height || 0;
+    const nNavbarHeight = domNavbar.getBoundingClientRect().height;
+    domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
 
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();

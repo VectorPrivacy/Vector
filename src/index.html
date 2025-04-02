@@ -30,7 +30,6 @@
     </div>
 
     <main class="container">
-      <button id="settings-btn" class="settings-btn" style="display: none;"><span class="icon icon-settings"></span></button>
       <!-- The Global emoji picker popup -->
       <div class="emoji-picker" tabindex="-1">
         <input id="emoji-search-input" placeholder="Search...">
@@ -38,7 +37,7 @@
       </div>
 
       <div id="chats" class="chats">
-        <div id="account" class="account"></div>
+        <div id="account" class="account" style="display: none;"></div>
         <div id="sync-status-container" style="margin-bottom: 15px; display: none;">
           <p id="sync-status" class="text-gradient"></p>
         </div>
@@ -88,7 +87,6 @@
       </div>
 
       <div id="settings" style="display: none;">
-        <h4 class="back-btn" id="settings-back-btn">Back</h4>
         <h2 style="margin-top: 60px;">Choose your Theme</h2>
         <select id="theme-select">
           <option value="vector">Vector</option>
@@ -97,6 +95,17 @@
         <hr class="divider" style="margin-top: 25px; margin-bottom: 25px;">
         <h2 style="color: #ff2ea9;">Dangerzone</h2>
         <button id="logout-btn" style="backdrop-filter: none;">Logout</button>
+      </div>
+
+      <div id="navbar" class="row" style="position: absolute; bottom: 0px; height: 65px; width: 100%; background-color: #161616; justify-content: space-evenly; display: none;">
+        <div id="chat-btn" class="btn" style="margin-top: auto; margin-bottom: auto;">
+          <span class="icon icon-chats" style="width: 30px; margin: 0; height: 30px; position: relative; display: block; margin-left: auto; margin-right: auto;"></span>
+          <p style="font-size: 14px; margin-top: 0; margin-bottom: 0;">Chat</p>
+        </div>
+        <div id="settings-btn" class="btn" style="margin-top: auto; margin-bottom: auto; opacity: 0.5;">
+          <span class="icon icon-settings" style="width: 30px; margin: 0; height: 30px; position: relative; display: block; margin-left: auto; margin-right: auto;"></span>
+          <p style="font-size: 14px; margin-top: 0; margin-bottom: 0;">Settings</p>
+        </div>
       </div>
 
       <div id="login-form" class="fadein-anim">

@@ -87,6 +87,10 @@
   background-color: #0a0a0a;
 }
 
+#chat-box {
+  -webkit-box-shadow: none;
+}
+
 input,
 textarea,
 button {

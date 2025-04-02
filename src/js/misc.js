@@ -108,6 +108,62 @@ function isYesterday(date) {
            date.getFullYear() === yesterday.getFullYear();
 }
 
+/**
+ * Calculates time elapsed since a given timestamp and returns a human-readable string.
+ * @param {number|string|Date} timestamp - The timestamp to compare against current time
+ * @returns {string} A human-readable string representing time elapsed (e.g., "Now", "1 min", "2 hours")
+ */
+function timeAgo(timestamp) {
+    // Convert timestamp to Date object if it's not already
+    const pastDate = timestamp instanceof Date ? timestamp : new Date(timestamp);
+    const now = new Date();
+
+    // Calculate time difference in milliseconds
+    const diffMs = now - pastDate;
+
+    // Convert to seconds
+    const diffSec = Math.floor(diffMs / 1000);
+
+    // Less than a minute
+    if (diffSec < 60) {
+        return "Now";
+    }
+
+    // Minutes (less than an hour)
+    if (diffSec < 3600) {
+        const mins = Math.floor(diffSec / 60);
+        return `${mins} ${mins === 1 ? 'min' : 'mins'}`;
+    }
+
+    // Hours (less than a day)
+    if (diffSec < 86400) {
+        const hours = Math.floor(diffSec / 3600);
+        return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+    }
+
+    // Days (less than a week)
+    if (diffSec < 604800) {
+        const days = Math.floor(diffSec / 86400);
+        return `${days} ${days === 1 ? 'day' : 'days'}`;
+    }
+
+    // Weeks (less than a month - approximated as 30 days)
+    if (diffSec < 2592000) {
+        const weeks = Math.floor(diffSec / 604800);
+        return `${weeks} ${weeks === 1 ? 'week' : 'weeks'}`;
+    }
+
+    // Months (less than a year)
+    if (diffSec < 31536000) {
+        const months = Math.floor(diffSec / 2592000);
+        return `${months} ${months === 1 ? 'month' : 'months'}`;
+    }
+
+    // Years
+    const years = Math.floor(diffSec / 31536000);
+    return `${years} ${years === 1 ? 'year' : 'years'}`;
+}
+
 /** 
  * Scroll to the bottom of a scrollable element
  * @param {HTMLElement} domElement - The DOM element to scroll

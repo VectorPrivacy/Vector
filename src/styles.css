@@ -27,6 +27,10 @@
   margin: auto;
 }
 
+.icon-chats {
+  mask-image: url("./icons/chats.svg");
+}
+
 .icon-new-msg {
   mask-image: url("./icons/new-chat.svg");
 }
@@ -223,10 +227,19 @@ body {
 
 .account {
   align-items: center;
+  background-color: #161616;
+  padding: 10px;
+  margin-bottom: 15px;
 }
 
 .account .placeholder-avatar {
   margin-right: 10px;
+}
+
+.account .status {
+  font-size: smaller;
+  margin: 0;
+  margin-top: 5px;
 }
 
 .placeholder-avatar p {
@@ -235,20 +248,37 @@ body {
   position: relative;
   line-height: 0;
   font-size: 20px;
-  opacity: 0.75;
+  font-size: large !important;
+  color: rgba(255, 255, 255, 0.75);
 }
 
 .account img {
   object-fit: cover;
   object-position: center;
-  height: 50px;
-  width: 50px;
+  height: 35px;
+  width: 35px;
   margin-right: 10px;
   border-radius: 100%;
 }
 
+.new-chat-btn {
+  margin-bottom: 15px;
+  margin-left: 15px;
+  margin-right: 15px;
+  background-color: transparent;
+  border-color: rgba(128, 128, 128, 0.2);
+}
+
+.new-chat-btn .icon {
+  width: 50px;
+  margin-right: revert;
+  background-color: rgba(128, 255, 212, 0.75);
+}
+
 #chat-list {
   overflow-y: scroll;
+  padding-left: 15px;
+  padding-right: 15px;
 }
 
 .chatlist-contact {
@@ -263,11 +293,20 @@ body {
   margin-bottom: 10px;
 }
 
+.chatlist-contact p {
+  font-size: 15px;
+}
+
 .chatlist-contact-preview {
   margin-top: auto;
   margin-bottom: auto;
-  margin-right: 60px;
-  max-width: -webkit-fill-available;
+  width: calc(100% - 120px);
+}
+
+.chatlist-contact-timestamp {
+  margin-left: auto;
+  margin-right: auto;
+  color: rgba(255, 255, 255, 0.75);
 }
 
 .chatlist-contact img {
@@ -316,7 +355,6 @@ body {
   display: flex;
   justify-content: center;
   flex-direction: column;
-  padding: 15px;
 }
 
 .back-btn {
@@ -775,8 +813,8 @@ audio {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 80px;
-  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 1) 80%);
+  height: 40px;
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 1));
   pointer-events: none;
 }
 
