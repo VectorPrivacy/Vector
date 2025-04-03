@@ -132,36 +132,36 @@ function timeAgo(timestamp) {
     // Minutes (less than an hour)
     if (diffSec < 3600) {
         const mins = Math.floor(diffSec / 60);
-        return `${mins} ${mins === 1 ? 'min' : 'mins'}`;
+        return `${mins}m`;
     }
 
     // Hours (less than a day)
     if (diffSec < 86400) {
         const hours = Math.floor(diffSec / 3600);
-        return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+        return `${hours}h`;
     }
 
     // Days (less than a week)
     if (diffSec < 604800) {
         const days = Math.floor(diffSec / 86400);
-        return `${days} ${days === 1 ? 'day' : 'days'}`;
+        return `${days}d`;
     }
 
     // Weeks (less than a month - approximated as 30 days)
     if (diffSec < 2592000) {
         const weeks = Math.floor(diffSec / 604800);
-        return `${weeks} ${weeks === 1 ? 'week' : 'weeks'}`;
+        return `${weeks}w`;
     }
 
     // Months (less than a year)
     if (diffSec < 31536000) {
         const months = Math.floor(diffSec / 2592000);
-        return `${months} ${months === 1 ? 'month' : 'months'}`;
+        return `${months}mo`;
     }
 
     // Years
     const years = Math.floor(diffSec / 31536000);
-    return `${years} ${years === 1 ? 'year' : 'years'}`;
+    return `${years}y`;
 }
 
 /** 
