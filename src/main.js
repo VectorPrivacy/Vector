@@ -473,7 +473,8 @@ function renderContact(chat) {
     // Display the "last message" time
     const pTimeAgo = document.createElement('p');
     pTimeAgo.classList.add('chatlist-contact-timestamp');
-    pTimeAgo.textContent = timeAgo(cLastMsg.at * 1000) + ' ago';
+    pTimeAgo.textContent = timeAgo(cLastMsg.at * 1000);
+    if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
     divContact.appendChild(pTimeAgo);
 
     return divContact;
