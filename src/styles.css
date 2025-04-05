@@ -338,6 +338,19 @@ body {
   max-width: 50px;
 }
 
+.avatar-status-icon {
+  position: absolute;
+  bottom: 0px;
+  right: 0px;
+  width: 12px;
+  height: 12px;
+  /* Use "background-color" to explicitly set the Status Icon color */
+  border-radius: 100%;
+  border-width: 2px;
+  border-style: solid;
+  border-color: black;
+}
+
 .chatlist-contact-preview h4 {
   padding-left: 15px;
   padding-right: 15px;

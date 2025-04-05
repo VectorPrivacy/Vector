@@ -432,14 +432,44 @@ function renderContact(chat) {
     divPreviewContainer.classList.add('chatlist-contact-preview');
 
     // The avatar, if one exists
+    const divAvatarContainer = document.createElement('div');
+    divAvatarContainer.style.position = `relative`;
     if (chat?.avatar) {
         const imgAvatar = document.createElement('img');
         imgAvatar.src = chat?.avatar;
-        divContact.appendChild(imgAvatar);
+        divAvatarContainer.appendChild(imgAvatar);
     } else {
         // Otherwise, generate a Gradient Avatar
-        divContact.appendChild(pubkeyToAvatar(chat.id, chat?.name));
+        divAvatarContainer.appendChild(pubkeyToAvatar(chat.id, chat?.name));
     }
+
+    // Add the "Status Icon" to the avatar, then plug-in the avatar container
+    // TODO: currently, we "emulate" the status; messages in the last 5m are "online", messages in the last 30m are "away", otherwise; offline.
+    const divStatusIcon = document.createElement('div');
+    divStatusIcon.classList.add('avatar-status-icon');
+    
+    // Find the last message from the contact (not from the user)
+    let cLastContactMsg = null;
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+        if (!chat.messages[i].mine) {
+            cLastContactMsg = chat.messages[i];
+            break;
+        }
+    }
+    
+    if (cLastContactMsg && cLastContactMsg.at * 1000 > Date.now() - 60000 * 5) {
+        // set the divStatusIcon .backgroundColor to green (online)
+        divStatusIcon.style.backgroundColor = '#59fcb3';
+        divAvatarContainer.appendChild(divStatusIcon);
+    }
+    else if (cLastContactMsg && cLastContactMsg.at * 1000 > Date.now() - 60000 * 30) {
+        // set to orange (away)
+        divStatusIcon.style.backgroundColor = '#fce459';
+        divAvatarContainer.appendChild(divStatusIcon);
+    }
+    // offline... don't show status icon at all (no need to append the divStatusIcon)
+    
+    divContact.appendChild(divAvatarContainer);
 
     // Add the name (or, if missing metadata, their npub instead) to the chat preview
     const h4ContactName = document.createElement('h4');
