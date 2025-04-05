@@ -27,6 +27,10 @@
   margin: auto;
 }
 
+.icon-add-user {
+  mask-image: url("./icons/add-user.svg");
+}
+
 .icon-chats {
   mask-image: url("./icons/chats.svg");
 }
@@ -77,6 +81,10 @@
 
 .icon-chevron-down {
   mask-image: url("./icons/chevron-down.svg");
+}
+
+.icon-chevron-double-left {
+  mask-image: url("./icons/chevron-double-left.svg");
 }
 
 .icon-cancel {
@@ -346,10 +354,6 @@ body {
   text-align: left;
   font-family: 'Rubik';
   font-weight: 100;
-}
-
-#chat-new {
-  padding: 30px;
 }
 
 .chats {

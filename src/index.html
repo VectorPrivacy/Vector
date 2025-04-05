@@ -68,22 +68,29 @@
       </div>
 
       <div id="chat-new" style="display: none;">
-        <h4 class="back-btn" id="chat-new-back-btn">Back</h4>
-        <center>
-          <h2 style="margin-top: 50px; margin-bottom: 5px;">Share your Contact</h2>
-          <span style="opacity: 0.75;">Your 'npub' key can be shared with anyone to give them a way of messaging you.</span>
-        </center>
-        <br>
-        <div style="padding-left: 20px; padding-right: 20px;">
-          <code class="text-gradient" style="line-break: anywhere; font-size: 14px;" id="share-npub"></code>
+        <div style="background-color: #161616; height: 65px; display: flex;">
+          <div id="chat-new-back-btn" class="btn" style="display: flex; align-items: center;">
+            <span class="icon icon-chevron-double-left" style="width: 30px; height: 30px; position: relative; margin-left: 10px; background-color: #59fcb3;"></span>
+            <p style="font-size: 18px; line-height: normal; margin-left: 2px;">Back</p>
+          </div>
         </div>
-        <hr class="divider" style="margin-top: 55px; margin-bottom: 50px;">
-        <center>
-          <h2 style="margin-bottom: 5px;">Chat with someone</h2>
-          <span style="opacity: 0.75;">Use your friend's 'npub' to begin a conversation with them.</span>
+        <center style="margin-left: 25px; margin-right: 25px;">
+          <h2 style="margin-top: 25px; margin-bottom: 5px; text-align: left; font-weight: 500; letter-spacing: 1px;">My nPub Key</h2>
+          <hr class="divider" style="margin-top: 8px; margin-bottom: 10px;">
+          <span style="opacity: 0.75; font-size: 14px; display: block; line-break: anywhere;" id="share-npub"></span>
         </center>
-        <input style="margin-top: 15px;" id="chat-new-input" placeholder="Enter npub..." />
-        <button style="margin-top: 10px;" id="chat-new-btn">Start Chat</button>
+        <center style="position: absolute; bottom: 90px; width: 100%;">
+          <span class="icon icon-add-user" style="width: 140px; margin: 0; height: 140px; position: relative; display: block; margin-left: auto; margin-right: auto; opacity: 0.35;"></span>
+          <h2 style="margin-bottom: 10px; letter-spacing: 1px;">Start a New Chat</h2>
+          <hr class="divider" style="margin-top: 8px; margin-bottom: 10px; width: 325px;">
+          <div style="margin-left: 25px; margin-right: 25px;">
+            <span style="opacity: 0.75; font-size: 14px; line-height: 18px !important;">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
+          </div>
+        </center>
+        <div class="row input-box" style="position: absolute; bottom: 0; width: 100%;">
+          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container" style="margin-top: 8px; height: auto; margin-bottom: 8px;">
+          <span id="chat-new-btn" class="icon icon-add-user btn" style="width: 50px; margin: 0; height: 50px; position: relative; display: block; margin-left: auto; margin-right: 8px; margin-bottom: auto; margin-top: auto;"></span>
+        </div>
       </div>
 
       <div id="settings" style="display: none;">
