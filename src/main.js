@@ -1974,7 +1974,10 @@ document.addEventListener('click', (e) => {
     }
 
     // If we're clicking a Contact, open the chat with the embedded npub (ID)
-    if (e.target.classList.contains("chatlist-contact")) return openChat(e.target.id);
+    if (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact")) {
+        const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
+        return openChat(strID);
+    }
 
     // If we're clicking an Attachment Download button, request the download
     if (e.target.hasAttribute('download')) {
