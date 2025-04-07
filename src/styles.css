@@ -153,6 +153,7 @@ body {
 
 .popup {
   position: absolute;
+  z-index: 100;
   /* Too many weird WebKit filter issues - disabling and going solid for now */
   /* backdrop-filter: blur(10px); */
   border-style: solid;
