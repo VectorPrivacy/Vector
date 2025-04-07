@@ -910,7 +910,7 @@ async function setupRustListeners() {
     // Note: this API seems unavailable in Tauri's Rust backend, so we're using the JS API as a workaround
     await listen('update_overlay_icon', async (evt) => {
         // Enable or Disable our notification badge Overlay Icon
-        await getCurrentWindow().setOverlayIcon(evt.payload.enable ? "/icons/icon_badge_notification.png" : undefined);
+        await getCurrentWindow().setOverlayIcon(evt.payload.enable ? "icons/icon_badge_notification.png" : undefined);
     });
 }
 
