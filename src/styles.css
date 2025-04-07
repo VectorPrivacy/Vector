@@ -115,8 +115,23 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 0px;
-  background: transparent;
+  width: 10px;
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #474747;
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(180, 180, 180, 0.8);
 }
 
 .container {
