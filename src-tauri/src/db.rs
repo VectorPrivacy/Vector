@@ -18,12 +18,26 @@ pub struct VectorDB {
 const DB_PATH: &str = "vector.json";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct SlimProfile {
     pub id: String,
     name: String,
     avatar: String,
+    last_read: String,
     status: Status,
     // Omitting: messages, last_updated, typing_until, mine
+}
+
+impl Default for SlimProfile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            avatar: String::new(),
+            last_read: String::new(),
+            status: Status::new(),
+        }
+    }
 }
 
 impl From<&Profile> for SlimProfile {
@@ -32,6 +46,7 @@ impl From<&Profile> for SlimProfile {
             id: profile.id.clone(),
             name: profile.name.clone(),
             avatar: profile.avatar.clone(),
+            last_read: profile.last_read.clone(),
             status: profile.status.clone(),
         }
     }
@@ -45,6 +60,7 @@ impl SlimProfile {
             name: self.name.clone(),
             avatar: self.avatar.clone(),
             messages: Vec::new(), // Will be populated separately
+            last_read: self.last_read.clone(),
             status: self.status.clone(),
             last_updated: 0,      // Default value
             typing_until: 0,      // Default value

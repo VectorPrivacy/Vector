@@ -163,15 +163,23 @@ pub struct Reaction {
 }
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
 pub struct Profile {
     id: String,
     name: String,
     avatar: String,
     messages: Vec<Message>,
+    last_read: String,
     status: Status,
     last_updated: u64,
     typing_until: u64,
     mine: bool,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Profile {
@@ -181,6 +189,7 @@ impl Profile {
             name: String::new(),
             avatar: String::new(),
             messages: Vec::new(),
+            last_read: String::new(),
             status: Status::new(),
             last_updated: 0,
             typing_until: 0,
@@ -201,6 +210,21 @@ impl Profile {
     /// Get a mutable message by ID
     fn get_message_mut(&mut self, id: &str) -> Option<&mut Message> {
         self.messages.iter_mut().find(|msg| msg.id == id)
+    }
+
+    /// Set the Last Received message as the "Last Read" message
+    fn set_as_read(&mut self) -> bool {
+        // Ensure we have at least one message received from them
+        for msg in self.messages.iter().rev() {
+            if !msg.mine {
+                // Found the most recent message from them
+                self.last_read = msg.id.clone();
+                return true;
+            }
+        }
+        
+        // No messages from them, can't mark anything as read
+        false
     }
 
     /// Merge Nostr Metadata with this Vector Profile
@@ -384,6 +408,44 @@ impl ChatState {
         });
 
         is_msg_added
+    }
+    
+    /// Count unread messages across all profiles
+    fn count_unread_messages(&self) -> u32 {
+        let mut total_unread = 0;
+         
+        for profile in &self.profiles {
+            // Skip own profile (mine == true)
+            if profile.mine {
+                continue;
+            }
+            
+            // If last_read is empty, all messages are unread
+            if profile.last_read.is_empty() {
+                // Only count messages from others (not mine)
+                total_unread += profile.messages.iter()
+                    .filter(|msg| !msg.mine)
+                    .count() as u32;
+                continue;
+            }
+            
+            // Start from newest message, work backwards until we hit last_read
+            let mut unread_count = 0;
+            for msg in profile.messages.iter().rev() {
+                // Only count messages from others, not our own
+                if !msg.mine {
+                    if msg.id == profile.last_read {
+                        // Found the last read message, stop counting
+                        break;
+                    }
+                    unread_count += 1;
+                }
+            }
+            
+            total_unread += unread_count;
+        }
+        
+        total_unread
     }
 }
 
@@ -2331,6 +2393,87 @@ async fn logout<R: Runtime>(handle: AppHandle<R>) {
     handle.restart();
 }
 
+/// Marks a specific message as read
+#[tauri::command]
+async fn mark_as_read(npub: String) -> bool {
+    // Only mark as read if the Window is focused (user may have the chat open but the app in the background)
+    let handle = TAURI_APP.get().unwrap();
+    if !handle
+        .webview_windows()
+        .iter()
+        .next()
+        .unwrap()
+        .1
+        .is_focused()
+        .unwrap() {
+            // Update the counter to allow for background badge handling of in-chat messages
+            update_unread_counter(handle.clone()).await;
+            return false;
+        }
+
+    // Get a mutable reference to the profile
+    let result = {
+        let mut state = STATE.lock().await;
+        match state.get_profile_mut(&npub) {
+            Some(profile) => profile.set_as_read(),
+            None => false
+        }
+    };
+    
+    // Update the unread counter if the marking was successful
+    if result {
+        // Update the badge count
+        update_unread_counter(handle.clone()).await;
+
+        // Save the "Last Read" marker to the DB
+        db::set_profile(handle.clone(), STATE.lock().await.get_profile(&npub).unwrap().clone()).await.unwrap();
+    }
+    
+    result
+}
+
+/// Updates the OS taskbar badge with the count of unread messages
+#[tauri::command]
+async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
+    // Get the count of unread messages from the state
+    let unread_count = {
+        let state = STATE.lock().await;
+        state.count_unread_messages()
+    };
+    
+    // Get the main window
+    if let Some(window) = handle.get_webview_window("main") {
+        if unread_count > 0 {
+            // Platform-specific badge/overlay handling
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows, use overlay icon instead of badge
+                // But I have no idea how to do this using Tauri APIs yet, so... later.
+            }
+            
+            #[cfg(not(target_os = "windows"))]
+            {
+                // On macOS, Linux, etc. use the badge if available
+                let _ = window.set_badge_count(Some(unread_count as i64));
+            }
+        } else {
+            // Clear badge/overlay when no unread messages
+            #[cfg(target_os = "windows")]
+            {
+                // Remove the overlay icon on Windows
+            }
+            
+            #[cfg(not(target_os = "windows"))]
+            {
+                // Clear the badge on other platforms
+                let _ = window.set_badge_count(None);
+            }
+        }
+    }
+    
+    unread_count
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2395,6 +2538,8 @@ pub fn run() {
             start_recording,
             stop_recording,
             fetch_msg_metadata,
+            mark_as_read,
+            update_unread_counter,
             logout
         ])
         .run(tauri::generate_context!())
