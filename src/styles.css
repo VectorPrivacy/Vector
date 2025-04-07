@@ -108,6 +108,8 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+
+  overscroll-behavior: none;
 }
 
 body {
@@ -437,6 +439,8 @@ body {
   padding-left: 10px;
   padding-right: 10px;
   font-family: 'Rubik';
+
+  overscroll-behavior-y: contain;
 }
 
 .chat-messages > div:first-child {
