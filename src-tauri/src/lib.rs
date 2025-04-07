@@ -2448,9 +2448,8 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
             #[cfg(target_os = "windows")]
             {
                 // On Windows, use overlay icon instead of badge
-                // Note: we'll try using the Tauri JS API as a workaround for the missing Rust Overlay API
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("update_overlay_icon", serde_json::json!({ "enable": true })).unwrap();
+                let icon = tauri::include_image!("./icons/icon_badge_notification.png");
+                let _ = window.set_overlay_icon(Some(icon));
             }
             
             #[cfg(not(target_os = "windows"))]
@@ -2463,8 +2462,7 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
             #[cfg(target_os = "windows")]
             {
                 // Remove the overlay icon on Windows
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("update_overlay_icon", serde_json::json!({ "enable": false })).unwrap();
+                let _ = window.set_overlay_icon(None);
             }
             
             #[cfg(not(target_os = "windows"))]
