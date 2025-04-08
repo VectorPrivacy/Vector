@@ -1948,8 +1948,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     document.onpaste = async (evt) => {
         if (strOpenChat) {
             // Check if the clipboard data contains an image
-            if (Array.from(evt.clipboardData.items).some(item => item.type.startsWith('image/'))) {
+            const arrItems = Array.from(evt.clipboardData.items);
+            if (arrItems.some(item => item.type.startsWith('image/'))) {
                 evt.preventDefault();
+
+                // Determine if this image supports Transparency or not
+                // Note: this is necessary to account for the accidental "zeroing" of Alpha values
+                // ... in non-PNG/GIF formats, which led to completely blank JPEGs.
+                const fTransparent = arrItems.some(item => ['image/png', 'image/gif'].includes(item.type));
 
                 // Placeholder
                 domChatMessageInput.value = '';
@@ -1958,7 +1964,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Tell the Rust backend to acquire the image from clipboard and send it to the current chat
                 await invoke('paste_message', {
                     receiver: strOpenChat,
-                    repliedTo: strCurrentReplyReference
+                    repliedTo: strCurrentReplyReference,
+                    transparent: fTransparent
                 });
 
                 // Reset placeholder

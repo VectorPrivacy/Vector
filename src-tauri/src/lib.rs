@@ -929,7 +929,7 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
 }
 
 #[tauri::command]
-async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String) -> Result<bool, String> {
+async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String, transparent: bool) -> Result<bool, String> {
     // Copy the image from the clipboard
     let img = handle.clipboard().read_image().unwrap();
 
@@ -937,9 +937,23 @@ async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, repli
     let mut png_data = Vec::new();
     let encoder = PngEncoder::new(&mut png_data);
 
+    // Get original pixels
+    let original_pixels = img.rgba();
+
+    // For non-transparent images: we need to manually account for the zero'ing out of the Alpha channel
+    let pixels = if !transparent {
+        // Only clone if we need to modify
+        let mut modified = original_pixels.to_vec();
+        modified.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
+        Cow::Owned(modified)
+    } else {
+        // No modification needed, use the original data
+        Cow::Borrowed(original_pixels)
+    };
+
     // Encode directly from pixels to PNG bytes
     encoder.write_image(
-        img.rgba(),            // raw pixels
+        &pixels,               // raw pixels
         img.width(),           // width
         img.height(),          // height
         Rgba8                  // color type
