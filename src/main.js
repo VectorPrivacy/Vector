@@ -1955,7 +1955,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Determine if this image supports Transparency or not
                 // Note: this is necessary to account for the accidental "zeroing" of Alpha values
                 // ... in non-PNG/GIF formats, which led to completely blank JPEGs.
-                const fTransparent = arrItems.some(item => ['image/png', 'image/gif'].includes(item.type));
+                const fTransparent = arrItems.some(item => item.type.includes('png') || item.type.includes('gif'));
 
                 // Placeholder
                 domChatMessageInput.value = '';

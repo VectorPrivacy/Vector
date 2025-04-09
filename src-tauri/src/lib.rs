@@ -940,8 +940,15 @@ async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, repli
     // Get original pixels
     let original_pixels = img.rgba();
 
+    // Windows: check that every image has a non-zero-ish Alpha channel, if not, this is probably a non-PNG/GIF which has had it's Alpha channel nuked
+    let mut _transparency_bug_search = false;
+    #[cfg(target_os = "windows")]
+    {
+        _transparency_bug_search = original_pixels.iter().skip(3).step_by(4).all(|&a| a <= 2);
+    }
+
     // For non-transparent images: we need to manually account for the zero'ing out of the Alpha channel
-    let pixels = if !transparent {
+    let pixels = if !transparent || _transparency_bug_search {
         // Only clone if we need to modify
         let mut modified = original_pixels.to_vec();
         modified.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
