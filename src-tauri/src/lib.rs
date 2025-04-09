@@ -2473,7 +2473,7 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
                 let _ = window.set_overlay_icon(Some(icon));
             }
             
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "ios", target_os = "android")))]
             {
                 // On macOS, Linux, etc. use the badge if available
                 let _ = window.set_badge_count(Some(unread_count as i64));
@@ -2486,7 +2486,7 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
                 let _ = window.set_overlay_icon(None);
             }
             
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "ios", target_os = "android")))]
             {
                 // Clear the badge on other platforms
                 let _ = window.set_badge_count(None);
