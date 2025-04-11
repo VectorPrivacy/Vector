@@ -1591,6 +1591,25 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     size = reported_size;
                 }
 
+                // Send an OS notification for incoming files
+                if !is_mine && is_new {
+                    // Find the name of the sender, if we have it
+                    let display_name = match STATE.lock().await.get_profile(&contact) {
+                        Some(profile) => {
+                            // We have a profile, just check for a name
+                            match profile.name.is_empty() {
+                                true => String::from("New Message"),
+                                false => profile.name.clone(),
+                            }
+                        }
+                        // No profile
+                        None => String::from("New Message"),
+                    };
+
+                    // Create a "description" of the attachment file
+                    show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(extension));
+                }
+
                 // Create an attachment
                 let mut attachments = Vec::new();
                 let attachment = Attachment {
