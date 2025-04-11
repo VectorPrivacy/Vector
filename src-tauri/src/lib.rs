@@ -27,7 +27,7 @@ use voice::AudioRecorder;
 mod net;
 
 mod util;
-use util::extract_https_urls;
+use util::{extract_https_urls, get_file_type_description};
 
 /// The Maximum byte size that Vector will auto-download.
 /// 
