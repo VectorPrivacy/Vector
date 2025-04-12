@@ -2518,6 +2518,13 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    {
+        // WebKitGTK can be quite funky cross-platform: as a result, we'll fallback to a more compatible renderer
+        // In theory, this will make Vector run more consistently across a wider range of Linux Desktop distros.
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
