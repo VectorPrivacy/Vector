@@ -4,13 +4,119 @@ use serde_json::json;
 use std::cmp::min;
 use tauri::{AppHandle, Emitter};
 
-/// Downloads the file in-memory at the given URL with progress reporting via Tauri events
+/// Trait for reporting download progress
+pub trait ProgressReporter {
+    /// Report progress of a download
+    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>) -> Result<(), &'static str>;
+    
+    /// Report completion of a download
+    fn report_complete(&self) -> Result<(), &'static str>;
+}
+
+/// A no-op progress reporter that does nothing when progress is reported
+pub struct NoOpProgressReporter;
+
+impl NoOpProgressReporter {
+    /// Create a new NoOpProgressReporter
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl ProgressReporter for NoOpProgressReporter {
+    fn report_progress(&self, _percentage: Option<u8>, _bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+        // Do nothing
+        Ok(())
+    }
+    
+    fn report_complete(&self) -> Result<(), &'static str> {
+        // Do nothing
+        Ok(())
+    }
+}
+
+/// Tauri implementation of ProgressReporter
+pub struct TauriProgressReporter<'a, R: tauri::Runtime> {
+    handle: &'a AppHandle<R>,
+    attachment_id: &'a str,
+}
+
+impl<'a, R: tauri::Runtime> TauriProgressReporter<'a, R> {
+    /// Create a new TauriProgressReporter
+    pub fn new(handle: &'a AppHandle<R>, attachment_id: &'a str) -> Self {
+        Self { handle, attachment_id }
+    }
+}
+
+impl<'a, R: tauri::Runtime> ProgressReporter for TauriProgressReporter<'a, R> {
+    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+        let mut payload = json!({
+            "id": self.attachment_id
+        });
+        
+        if let Some(p) = percentage {
+            payload["progress"] = json!(p);
+        } else {
+            payload["progress"] = json!(-1); // Use -1 to indicate unknown progress
+        }
+        
+        if let Some(bytes) = bytes_downloaded {
+            payload["bytesDownloaded"] = json!(bytes);
+        }
+        
+        self.handle
+            .emit("attachment_download_progress", payload)
+            .map_err(|_| "Failed to emit event")
+    }
+    
+    fn report_complete(&self) -> Result<(), &'static str> {
+        self.handle
+            .emit(
+                "attachment_download_progress",
+                json!({
+                    "id": self.attachment_id,
+                    "progress": 100
+                }),
+            )
+            .map_err(|_| "Failed to emit event")
+    }
+}
+
+/// Downloads the file in-memory at the given URL with progress reporting
 pub async fn download<R: tauri::Runtime>(
     content_url: &str,
     handle: &AppHandle<R>,
     attachment_id: &str,
+    timeout: Option<std::time::Duration>,
 ) -> Result<Vec<u8>, &'static str> {
-    let client = Client::new();
+    let reporter = TauriProgressReporter::new(handle, attachment_id);
+    download_with_reporter(content_url, &reporter, timeout).await
+}
+
+/// Downloads the file in-memory at the given URL without progress reporting
+pub async fn download_silent(
+    content_url: &str, 
+    timeout: Option<std::time::Duration>,
+) -> Result<Vec<u8>, &'static str> {
+    let reporter = NoOpProgressReporter::new();
+    download_with_reporter(content_url, &reporter, timeout).await
+}
+
+/// Generic download function that works with any progress reporter
+pub async fn download_with_reporter(
+    content_url: &str,
+    reporter: &impl ProgressReporter,
+    timeout: Option<std::time::Duration>,
+) -> Result<Vec<u8>, &'static str> {
+    // Create a client with the specified timeout
+    let client = if let Some(duration) = timeout {
+        Client::builder()
+            .timeout(duration)
+            .build()
+            .map_err(|_| "Failed to create HTTP client")?
+    } else {
+        Client::new()
+    };
     let mut total_size: Option<u64> = None;
 
     // Method 1: Try HEAD request
@@ -56,15 +162,15 @@ pub async fn download<R: tauri::Runtime>(
     match total_size {
         Some(size) if supports_range(content_url, &client).await => {
             // Use range-based download with progress
-            download_with_ranges(&client, content_url, size, handle, attachment_id).await
+            download_with_ranges(&client, content_url, size, reporter).await
         }
         Some(size) => {
             // Use streaming download with known size
-            download_with_streaming(&client, content_url, Some(size), handle, attachment_id).await
+            download_with_streaming(&client, content_url, Some(size), reporter).await
         }
         None => {
             // Use streaming download without known size
-            download_with_streaming(&client, content_url, None, handle, attachment_id).await
+            download_with_streaming(&client, content_url, None, reporter).await
         }
     }
 }
@@ -87,13 +193,12 @@ async fn supports_range(url: &str, client: &Client) -> bool {
     false
 }
 
-/// Downloads using HTTP range requests with Tauri event progress
-async fn download_with_ranges<R: tauri::Runtime>(
+/// Downloads using HTTP range requests with progress reporting
+async fn download_with_ranges(
     client: &Client,
     url: &str,
     total_size: u64,
-    handle: &AppHandle<R>,
-    attachment_id: &str,
+    reporter: &impl ProgressReporter,
 ) -> Result<Vec<u8>, &'static str> {
     let mut result = Vec::with_capacity(total_size as usize);
     let mut downloaded: u64 = 0;
@@ -130,41 +235,23 @@ async fn download_with_ranges<R: tauri::Runtime>(
 
         // Only emit events when percentage changes (to reduce events)
         if current_percentage > last_emitted_percentage {
-            handle
-                .emit(
-                    "attachment_download_progress",
-                    json!({
-                        "id": attachment_id,
-                        "progress": current_percentage
-                    }),
-                )
-                .map_err(|_| "Failed to emit event")?;
-
+            reporter.report_progress(Some(current_percentage), Some(downloaded))?;
             last_emitted_percentage = current_percentage;
         }
     }
 
     // Ensure 100% is emitted at the end
-    handle
-        .emit(
-            "attachment_download_progress",
-            json!({
-                "id": attachment_id,
-                "progress": 100
-            }),
-        )
-        .map_err(|_| "Failed to emit event")?;
+    reporter.report_complete()?;
 
     Ok(result)
 }
 
-/// Downloads using a streaming approach with Tauri event progress
-async fn download_with_streaming<R: tauri::Runtime>(
+/// Downloads using a streaming approach with progress reporting
+async fn download_with_streaming(
     client: &Client,
     url: &str,
     total_size: Option<u64>,
-    handle: &AppHandle<R>,
-    attachment_id: &str,
+    reporter: &impl ProgressReporter,
 ) -> Result<Vec<u8>, &'static str> {
     let res = client
         .get(url)
@@ -196,35 +283,16 @@ async fn download_with_streaming<R: tauri::Runtime>(
 
             // Only emit events when percentage changes (to reduce events)
             if current_percentage > last_emitted_percentage {
-                handle
-                    .emit(
-                        "attachment_download_progress",
-                        json!({
-                            "id": attachment_id,
-                            "progress": current_percentage
-                        }),
-                    )
-                    .map_err(|_| "Failed to emit event")?;
-
+                reporter.report_progress(Some(current_percentage), Some(downloaded))?;
                 last_emitted_percentage = current_percentage;
             }
         } else {
             // Unknown size, emit progress updates at reasonable intervals
             // For example, every 256KB
             if downloaded - last_bytes_update >= 256 * 1024 {
-                // We can't calculate percentage, but we can still show activity
-                // Emit event with bytes downloaded instead of percentage
-                handle
-                    .emit(
-                        "attachment_download_progress",
-                        json!({
-                            "id": attachment_id,
-                            "bytesDownloaded": downloaded,
-                            // Don't include progress percentage since we don't know the total
-                            "progress": -1 // Use -1 to indicate unknown progress
-                        }),
-                    )
-                    .map_err(|_| "Failed to emit event")?;
+            // We can't calculate percentage, but we can still show activity
+            // Report with bytes downloaded instead of percentage
+            reporter.report_progress(None, Some(downloaded))?;
 
                 last_bytes_update = downloaded;
             }
@@ -232,15 +300,7 @@ async fn download_with_streaming<R: tauri::Runtime>(
     }
 
     // Final event with complete status
-    handle
-        .emit(
-            "attachment_download_progress",
-            json!({
-                "id": attachment_id,
-                "progress": 100
-            }),
-        )
-        .map_err(|_| "Failed to emit event")?;
+    reporter.report_complete()?;
 
     Ok(result)
 }

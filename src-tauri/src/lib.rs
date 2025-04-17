@@ -1584,7 +1584,39 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     downloaded = false;
                     size = reported_size;
                 }
-                // File size is good; let's attempt to download it, if we don't already have it
+                // Is it small enough to auto-download during sync? (to avoid blocking the sync thread too long)
+                else if is_new && reported_size <= 262144 { // 256 KB or less
+                    // Small file, download immediately
+                    let small_attachment = Attachment {
+                        id: decryption_nonce.to_string(),
+                        key: decryption_key.to_string(),
+                        nonce: decryption_nonce.to_string(),
+                        extension: extension.to_string(),
+                        url: content_url.clone(),
+                        path: file_path.to_string_lossy().to_string(),
+                        size: reported_size,
+                        downloading: false,
+                        downloaded: false
+                    };
+                    
+                    // Download silently (no progress reporting) with a 5-second timeout
+                    if let Ok(encrypted_data) = net::download_silent(&content_url, Some(std::time::Duration::from_secs(5))).await {
+                        // Decrypt and save the file
+                        if let Ok(_) = decrypt_and_save_attachment(handle, &encrypted_data, &small_attachment).await {
+                            // Successfully downloaded and decrypted
+                            downloaded = true;
+                        } else {
+                            // Failed to decrypt
+                            downloaded = false;
+                        }
+                    } else {
+                        // Failed to download
+                        downloaded = false;
+                    }
+                    
+                    size = reported_size;
+                }
+                // File size is good but larger than our auto-sync threshold
                 else {
                     // We'll adjust our metadata to let the frontend know this file is ready for download
                     downloaded = false;
@@ -1788,6 +1820,38 @@ fn show_notification(title: String, content: String) {
     }
 }
 
+/// Decrypts and saves an attachment to disk
+/// 
+/// Returns the path to the decrypted file if successful, or an error message if unsuccessful
+async fn decrypt_and_save_attachment<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
+    encrypted_data: &[u8],
+    attachment: &Attachment
+) -> Result<std::path::PathBuf, String> {
+    // Attempt to decrypt the attachment
+    let decrypted_data = crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
+        .map_err(|e| e.to_string())?;
+    
+    // Choose the appropriate base directory based on platform
+    let base_directory = if cfg!(target_os = "ios") {
+        tauri::path::BaseDirectory::Document
+    } else {
+        tauri::path::BaseDirectory::Download
+    };
+
+    // Resolve the directory path using the determined base directory
+    let dir = handle.path().resolve("vector", base_directory).unwrap();
+    let file_path = dir.join(format!("{}.{}", attachment.id, attachment.extension));
+
+    // Create the vector directory if it doesn't exist
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    // Save the file to disk
+    std::fs::write(&file_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
+    
+    Ok(file_path)
+}
+
 #[tauri::command]
 async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
     // Grab the attachment's metadata
@@ -1817,82 +1881,69 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
         "progress": 0
     })).unwrap();
 
-    // Download dat biyatch!
-    let res = net::download(&attachment.url, handle, &attachment.id).await;
+    // Download the file - no timeout, allow large downloads to complete
+    let encrypted_data = match net::download(&attachment.url, handle, &attachment.id, None).await {
+        Ok(data) => data,
+        Err(error) => {
+            // Handle download error
+            let mut state = STATE.lock().await;
+            let mut_profile = state.get_profile_mut(&npub).unwrap();
 
-    // If there's any errors: return them
-    if res.is_err() {
-        let mut state = STATE.lock().await;
-        let mut_profile = state.get_profile_mut(&npub).unwrap();
+            // Store all necessary IDs first
+            let profile_id = mut_profile.id.clone();
+            let msg_id_clone = msg_id.clone();
+            let attachment_id_clone = attachment_id.clone();
 
-        // Store all necessary IDs first
-        let profile_id = mut_profile.id.clone();
-        let msg_id_clone = msg_id.clone();
-        let attachment_id_clone = attachment_id.clone();
+            // Update the attachment status
+            let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
+            let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
+            mut_attachment.downloading = false;
+            mut_attachment.downloaded = false;
 
-        // Update the attachment status
-        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
-        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
-        mut_attachment.downloading = false;
-        mut_attachment.downloaded = false;
-
-        // Emit the error
-        handle.emit("attachment_download_result", serde_json::json!({
-            "profile_id": profile_id,
-            "msg_id": msg_id_clone,
-            "id": attachment_id_clone,
-            "success": false,
-            "result": res.unwrap_err()
-        })).unwrap();
-        return false;
-    }
-
-    // Attempt to decrypt the attachment
-    let decryption = crypto::decrypt_data(res.unwrap().as_slice(), &attachment.key, &attachment.nonce);
-    if decryption.is_err() {
-        let mut state = STATE.lock().await;
-        let mut_profile = state.get_profile_mut(&npub).unwrap();
-
-        // Store all necessary IDs first
-        let profile_id = mut_profile.id.clone();
-        let msg_id_clone = msg_id.clone();
-        let attachment_id_clone = attachment_id.clone();
-
-        // Update the attachment status
-        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
-        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
-        mut_attachment.downloading = false;
-        mut_attachment.downloaded = false;
-
-        // Emit the error
-        handle.emit("attachment_download_result", serde_json::json!({
-            "profile_id": profile_id,
-            "msg_id": msg_id_clone,
-            "id": attachment_id_clone,
-            "success": false,
-            "result": decryption.unwrap_err()
-        })).unwrap();
-        return false;
-    }
-
-    // Choose the appropriate base directory based on platform
-    let base_directory = if cfg!(target_os = "ios") {
-        tauri::path::BaseDirectory::Document
-    } else {
-        tauri::path::BaseDirectory::Download
+            // Emit the error
+            handle.emit("attachment_download_result", serde_json::json!({
+                "profile_id": profile_id,
+                "msg_id": msg_id_clone,
+                "id": attachment_id_clone,
+                "success": false,
+                "result": error
+            })).unwrap();
+            return false;
+        }
     };
 
-    // Resolve the directory path using the determined base directory
-    let dir = handle.path().resolve("vector", base_directory).unwrap();
-    let file_path = dir.join(format!("{}.{}", attachment.id, attachment.extension));
+    // Decrypt and save the file
+    let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment).await;
+    
+    // Process the result
+    if let Err(error) = result {
+        // Handle decryption/saving error
+        let mut state = STATE.lock().await;
+        let mut_profile = state.get_profile_mut(&npub).unwrap();
 
-    // Create the vector directory if it doesn't exist
-    std::fs::create_dir_all(&dir).unwrap();
+        // Store all necessary IDs first
+        let profile_id = mut_profile.id.clone();
+        let msg_id_clone = msg_id.clone();
+        let attachment_id_clone = attachment_id.clone();
 
-    // Save the file to disk
-    std::fs::write(&file_path, decryption.unwrap()).unwrap();
+        // Update the attachment status
+        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
+        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
+        mut_attachment.downloading = false;
+        mut_attachment.downloaded = false;
 
-    // Grab the in-memory attachment mutably
+        // Emit the error
+        handle.emit("attachment_download_result", serde_json::json!({
+            "profile_id": profile_id,
+            "msg_id": msg_id_clone,
+            "id": attachment_id_clone,
+            "success": false,
+            "result": error
+        })).unwrap();
+        return false;
+    }
+
+    // Update state with successful download
     {
         let mut state = STATE.lock().await;
         let mut_profile = state.get_profile_mut(&npub).unwrap();
