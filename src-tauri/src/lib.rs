@@ -1591,6 +1591,18 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     size = reported_size;
                 }
 
+                // Check if the message replies to anything
+                let mut replied_to = String::new();
+                match rumor.tags.find(TagKind::e()) {
+                    Some(tag) => {
+                        if tag.is_reply() {
+                            // Add the referred Event ID to our `replied_to` field
+                            replied_to = tag.content().unwrap().to_string();
+                        }
+                    }
+                    None => (),
+                };
+
                 // Send an OS notification for incoming files
                 if !is_mine && is_new {
                     // Find the name of the sender, if we have it
@@ -1629,7 +1641,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
                     content: String::new(),
-                    replied_to: String::new(),
+                    replied_to,
                     preview_metadata: None,
                     at: rumor.created_at.as_u64(),
                     attachments,
