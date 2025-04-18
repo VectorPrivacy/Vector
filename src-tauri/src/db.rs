@@ -22,7 +22,14 @@ const DB_PATH: &str = "vector.json";
 pub struct SlimProfile {
     pub id: String,
     name: String,
+    display_name: String,
+    lud06: String,
+    lud16: String,
+    banner: String,
     avatar: String,
+    about: String,
+    website: String,
+    nip05: String,
     last_read: String,
     status: Status,
     // Omitting: messages, last_updated, typing_until, mine
@@ -33,7 +40,14 @@ impl Default for SlimProfile {
         Self {
             id: String::new(),
             name: String::new(),
+            display_name: String::new(),
+            lud06: String::new(),
+            lud16: String::new(),
+            banner: String::new(),
             avatar: String::new(),
+            about: String::new(),
+            website: String::new(),
+            nip05: String::new(),
             last_read: String::new(),
             status: Status::new(),
         }
@@ -45,7 +59,14 @@ impl From<&Profile> for SlimProfile {
         SlimProfile {
             id: profile.id.clone(),
             name: profile.name.clone(),
+            display_name: profile.display_name.clone(),
+            lud06: profile.lud06.clone(),
+            lud16: profile.lud16.clone(),
+            banner: profile.banner.clone(),
             avatar: profile.avatar.clone(),
+            about: profile.about.clone(),
+            website: profile.website.clone(),
+            nip05: profile.nip05.clone(),
             last_read: profile.last_read.clone(),
             status: profile.status.clone(),
         }
@@ -58,7 +79,14 @@ impl SlimProfile {
         crate::Profile {
             id: self.id.clone(),
             name: self.name.clone(),
+            display_name: self.display_name.clone(),
+            lud06: self.lud06.clone(),
+            lud16: self.lud16.clone(),
+            banner: self.banner.clone(),
             avatar: self.avatar.clone(),
+            about: self.about.clone(),
+            website: self.website.clone(),
+            nip05: self.nip05.clone(),
             messages: Vec::new(), // Will be populated separately
             last_read: self.last_read.clone(),
             status: self.status.clone(),

@@ -167,7 +167,14 @@ pub struct Reaction {
 pub struct Profile {
     id: String,
     name: String,
+    display_name: String,
+    lud06: String,
+    lud16: String,
+    banner: String,
     avatar: String,
+    about: String,
+    website: String,
+    nip05: String,
     messages: Vec<Message>,
     last_read: String,
     status: Status,
@@ -187,7 +194,14 @@ impl Profile {
         Self {
             id: String::new(),
             name: String::new(),
+            display_name: String::new(),
+            lud06: String::new(),
+            lud16: String::new(),
+            banner: String::new(),
             avatar: String::new(),
+            about: String::new(),
+            website: String::new(),
+            nip05: String::new(),
             messages: Vec::new(),
             last_read: String::new(),
             status: Status::new(),
@@ -233,16 +247,74 @@ impl Profile {
     fn from_metadata(&mut self, meta: Metadata) -> bool {
         let mut changed = false;
         
+        // Name
         if let Some(name) = meta.name {
             if self.name != name {
                 self.name = name;
                 changed = true;
             }
         }
+
+        // Display Name
+        if let Some(name) = meta.display_name {
+            if self.display_name != name {
+                self.display_name = name;
+                changed = true;
+            }
+        }
+
+        // lud06 (LNURL)
+        if let Some(lud06) = meta.lud06 {
+            if self.lud06 != lud06 {
+                self.lud06 = lud06;
+                changed = true;
+            }
+        }
+
+        // lud16 (Lightning Address)
+        if let Some(lud16) = meta.lud16 {
+            if self.lud16 != lud16 {
+                self.lud16 = lud16;
+                changed = true;
+            }
+        }
+
+        // Banner
+        if let Some(banner) = meta.banner {
+            if self.banner != banner {
+                self.banner = banner;
+                changed = true;
+            }
+        }
         
+        // Picture (Vector Avatar)
         if let Some(picture) = meta.picture {
             if self.avatar != picture {
                 self.avatar = picture;
+                changed = true;
+            }
+        }
+
+        // About (Vector Bio)
+        if let Some(about) = meta.about {
+            if self.about != about {
+                self.about = about;
+                changed = true;
+            }
+        }
+
+        // Website
+        if let Some(website) = meta.website {
+            if self.website != website {
+                self.website = website;
+                changed = true;
+            }
+        }
+
+        // NIP-05
+        if let Some(nip05) = meta.nip05 {
+            if self.nip05 != nip05 {
+                self.nip05 = nip05;
                 changed = true;
             }
         }
@@ -1238,6 +1310,41 @@ async fn update_profile(name: String, avatar: String) -> bool {
             })
             .unwrap(),
         );
+    }
+
+    // Add display_name
+    if !profile.display_name.is_empty() {
+        meta = meta.display_name(&profile.display_name);
+    }
+
+    // Add about
+    if !profile.about.is_empty() {
+        meta = meta.about(&profile.about);
+    }
+
+    // Add website
+    if !profile.website.is_empty() {
+        meta = meta.website(Url::parse(&profile.website).unwrap());
+    }
+
+    // Add banner
+    if !profile.banner.is_empty() {
+        meta = meta.banner(Url::parse(&profile.banner).unwrap());
+    }
+
+    // Add nip05
+    if !profile.nip05.is_empty() {
+        meta = meta.nip05(&profile.nip05);
+    }
+
+    // Add lud06
+    if !profile.lud06.is_empty() {
+        meta = meta.lud06(&profile.lud06);
+    }
+
+    // Add lud16
+    if !profile.lud16.is_empty() {
+        meta = meta.lud16(&profile.lud16);
     }
 
     // Broadcast the profile update
