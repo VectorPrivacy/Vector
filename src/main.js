@@ -105,29 +105,53 @@ function openEmojiPanel(e) {
         /** @type {DOMRect} */
         const rect = (isDefaultPanel ? domChatContact : e.target).getBoundingClientRect();
 
-        // Display and stick it to the right side
+        // Display the picker
         picker.style.display = `block`;
-        picker.style.right = `0px`;
 
-        // Compute it's position based on the element calling it (i.e: reactions are a floaty panel)
+        // Compute its position based on the element calling it
         const pickerRect = picker.getBoundingClientRect();
         if (isDefaultPanel) {
             // Note: No idea why the 5px extra height is needed, but this prevents the picker from overlapping too much with the chat box
             picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height - 5}px`
             picker.classList.add('emoji-picker-message-type');
+            // Set it to the right side always for the default panel
+            picker.style.right = `0px`;
             // Change the emoji button to a wink while the panel is open (removed on close)
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
         } else {
             picker.classList.remove('emoji-picker-message-type');
             const fLargeMessage = rect.y < rect.height;
+            
+            // Calculate the vertical position of the picker
             const yAxisTarget = fLargeMessage ? rect.y : rect.y - rect.height;
             const yAxisCorrection = fLargeMessage ? 0 : pickerRect.height / 2;
-            picker.style.top = `${yAxisTarget + yAxisCorrection}px`;
-            // TODO: this could be more intelligent (aim for the 'e.target' location)
-            // ... however, you need to compute when the picker will overflow the app
-            // ... and prevent it, so, I'm just glue-ing it to the right for now with
-            // ... some 'groundwork' code that shouldn't be too hard to modify.
-            //picker.style.left = `${document.body.clientWidth - pickerRect.width}px`
+            
+            // Calculate if the picker would overflow the bottom of the app window
+            const pickerBottomPos = yAxisTarget + yAxisCorrection + pickerRect.height;
+            const appBottomBoundary = document.body.clientHeight;
+            const willOverflowBottom = pickerBottomPos > appBottomBoundary;
+            
+            // Set vertical position - if it will overflow the bottom, position it above the target
+            if (willOverflowBottom) {
+                picker.style.top = `${rect.y - pickerRect.height}px`;
+            } else {
+                picker.style.top = `${yAxisTarget + yAxisCorrection}px`;
+            }
+            
+            // Calculate horizontal position
+            // Try to position it next to the element that triggered it
+            const xPos = rect.x + rect.width;
+            const willOverflowRight = xPos + pickerRect.width > document.body.clientWidth;
+            
+            // If it would overflow the right side, align to right edge
+            if (willOverflowRight) {
+                picker.style.right = `0px`;
+                picker.style.left = ``;
+            } else {
+                // Position it next to the triggering element
+                picker.style.left = `${xPos}px`;
+                picker.style.right = ``;
+            }
         }
 
         // If this is a Reaction, let's cache the Reference ID
