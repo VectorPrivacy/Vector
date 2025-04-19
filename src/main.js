@@ -530,9 +530,12 @@ function renderContact(chat) {
     if (fIsTyping) {
         // Typing; display the glowy indicator!
         pChatPreview.textContent = `Typing...`;
-    } else if (!cLastMsg.content) {
+    } else if (!cLastMsg.content && !cLastMsg.pending) {
         // Not typing, and no text; display as an attachment
         pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+    } else if (cLastMsg.pending) {
+        // A message is pending: thus, we're still sending one
+        pChatPreview.textContent = `Sending...`;
     } else {
         // Not typing; display their last message
         pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
@@ -677,6 +680,17 @@ async function setupRustListeners() {
         if (!fInit) domSyncStatusContainer.style.display = ``;
         domSyncStatus.textContent = `Syncing Messages between ${start} - ${end}`;
         if (!strOpenChat) adjustSize();
+    });
+
+    // Listen for Attachment Upload Progress events
+    await listen('attachment_upload_progress', async (evt) => {
+        if (strOpenChat) {
+            let divUpload = document.getElementById(evt.payload.id + '_file');
+            if (divUpload) {
+                // Update the Download Progress bar
+                divUpload.style.width = `${evt.payload.progress}%`;
+            }
+        }
     });
 
     // Listen for Attachment Download Progress events
@@ -1235,6 +1249,9 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
                 }
 
                 domChatMessages.appendChild(domMsg);
+
+                // If this was our pending message, then snap the view to the bottom
+                if (msg.mine && msg.pending) scrollToBottom(domChatMessages, false);
                 continue;
             }
 
@@ -1573,6 +1590,23 @@ function renderMessage(msg, sender, editID = '') {
                 iUnknown.textContent = `Previews not supported for "${cAttachment.extension}" files yet`;
                 pMessage.appendChild(iUnknown);
             }
+
+            // If the message is mine, and pending: display an uploading status
+            if (msg.mine && msg.pending) {
+                // Lower the attachment opacity
+                pMessage.lastElementChild.style.opacity = 0.25;
+
+                // Create the Progress Bar
+                const divBar = document.createElement('div');
+                divBar.id = msg.id + '_file';
+                divBar.classList.add('progress-bar');
+                divBar.style.width = `100%`;
+                divBar.style.height = `5px`;
+                divBar.style.marginTop = `0`;
+                divBar.style.transitionDuration = `0.75s`;
+                divBar.style.width = `0%`;
+                pMessage.appendChild(divBar);
+            }
         } else if (cAttachment.downloading) {
             // Display download progression UI
             const iDownloading = document.createElement('i');
@@ -1648,7 +1682,7 @@ function renderMessage(msg, sender, editID = '') {
     }
 
     // If the message is pending or failed, let's adjust it
-    if (msg.pending) {
+    if (msg.pending && !msg.attachments.length) {
         divMessage.style.opacity = 0.75;
     }
     if (msg.failed) {

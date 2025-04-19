@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 use argon2::{Argon2, Params, Version};
 use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
@@ -25,6 +26,9 @@ mod voice;
 use voice::AudioRecorder;
 
 mod net;
+
+mod upload;
+use upload::{upload_data_with_progress, ProgressCallback};
 
 mod util;
 use util::{extract_https_urls, get_file_type_description};
@@ -772,9 +776,10 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         .iter()
         .filter(|m| m.pending)
         .count();
-    let pending_id = String::from("pending-") + &pending_count.to_string();
+    // Create persistent pending_id that will live for the entire function
+    let pending_id = Arc::new(String::from("pending-") + &pending_count.to_string());
     let msg = Message {
-        id: pending_id.clone(),
+        id: pending_id.as_ref().clone(),
         content,
         replied_to,
         preview_metadata: None,
@@ -790,13 +795,6 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     };
     STATE.lock().await.add_message(&receiver, msg.clone());
 
-    // Send the pending message to our frontend
-    let handle = TAURI_APP.get().unwrap();
-    handle.emit("message_new", serde_json::json!({
-        "message": &msg,
-        "chat_id": &receiver
-    })).unwrap();
-
     // Grab our pubkey
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
@@ -806,7 +804,14 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
     let receiver_pubkey = PublicKey::from_bech32(receiver.clone().as_str()).unwrap();
 
     // Prepare the NIP-17 rumor
+    let handle = TAURI_APP.get().unwrap();
     let mut rumor = if file.is_none() {
+        // Send the text message to our frontend
+        handle.emit("message_new", serde_json::json!({
+            "message": &msg,
+            "chat_id": &receiver
+        })).unwrap();
+
         // Text Message
         EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
     } else {
@@ -818,10 +823,13 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
 
         // Update the attachment in-state
         {
+            // Use a clone of the Arc for this block
+            let pending_id_clone = Arc::clone(&pending_id);
+            
             // Retrieve the Pending Message
             let mut state = STATE.lock().await;
             let chat = state.get_profile_mut(&receiver).unwrap();
-            let message = chat.get_message_mut(&pending_id).unwrap();
+            let message = chat.get_message_mut(pending_id_clone.as_ref()).unwrap();
 
             // Choose the appropriate base directory based on platform
             let base_directory = if cfg!(target_os = "ios") {
@@ -856,9 +864,8 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                 downloaded: true
             });
 
-            // Update the frontend
-            handle.emit("message_update", serde_json::json!({
-                "old_id": &pending_id,
+            // Send the pending file upload to our frontend
+            handle.emit("message_new", serde_json::json!({
                 "message": &message,
                 "chat_id": &receiver
             })).unwrap();
@@ -889,7 +896,21 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         let signer = client.signer().await.unwrap();
         let conf = PRIVATE_NIP96_CONFIG.wait();
         let file_size = enc_file.len();
-        match upload_data(&signer, &conf, enc_file, Some(mime_type), None).await {
+        // Clone the Arc outside the closure for use inside a seperate-threaded progress callback
+        let pending_id_for_callback = Arc::clone(&pending_id);
+        // Create a progress callback for file uploads
+        let progress_callback: ProgressCallback = Box::new(move |percentage, _| {
+                // This is a simple callback that logs progress but could be enhanced to emit events
+                if let Some(pct) = percentage {
+                    handle.emit("attachment_upload_progress", serde_json::json!({
+                        "id": pending_id_for_callback.as_ref(),
+                        "progress": pct
+                    })).unwrap();
+                }
+            Ok(())
+        });
+
+        match upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback).await {
             Ok(url) => {
                 // Create the attachment rumor
                 let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
@@ -905,14 +926,15 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
             },
             Err(_) => {
                 // The file upload failed: so we mark the message as failed and notify of an error
+                let pending_id_for_failure = Arc::clone(&pending_id);
                 let mut state = STATE.lock().await;
                 let chat = state.get_profile_mut(&receiver).unwrap();
-                let failed_msg = chat.get_message_mut(&pending_id).unwrap();
+                let failed_msg = chat.get_message_mut(pending_id_for_failure.as_ref()).unwrap();
                 failed_msg.failed = true;
 
                 // Update the frontend
                 handle.emit("message_update", serde_json::json!({
-                    "old_id": &pending_id,
+                    "old_id": pending_id_for_failure.as_ref(),
                     "message": &failed_msg,
                     "chat_id": &receiver
                 })).unwrap();
@@ -948,15 +970,16 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
             {
                 Ok(_) => {
                     // Mark the message as a success
+                    let pending_id_for_success = Arc::clone(&pending_id);
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&receiver).unwrap();
-                    let sent_msg = chat.get_message_mut(&pending_id).unwrap();
+                    let sent_msg = chat.get_message_mut(pending_id_for_success.as_ref()).unwrap();
                     sent_msg.id = rumor_id.to_hex();
                     sent_msg.pending = false;
 
                     // Update the frontend
                     handle.emit("message_update", serde_json::json!({
-                        "old_id": &pending_id,
+                        "old_id": pending_id_for_success.as_ref(),
                         "message": &sent_msg,
                         "chat_id": &receiver
                     })).unwrap();
@@ -969,15 +992,16 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
                 Err(_) => {
                     // This is an odd case; the message was sent to the receiver, but NOT ourselves
                     // We'll class it as sent, for now...
+                    let pending_id_for_partial = Arc::clone(&pending_id);
                     let mut state = STATE.lock().await;
                     let chat = state.get_profile_mut(&receiver).unwrap();
-                    let sent_ish_msg = chat.get_message_mut(&pending_id).unwrap();
+                    let sent_ish_msg = chat.get_message_mut(pending_id_for_partial.as_ref()).unwrap();
                     sent_ish_msg.id = rumor_id.to_hex();
                     sent_ish_msg.pending = false;
 
                     // Update the frontend
                     handle.emit("message_update", serde_json::json!({
-                        "old_id": &pending_id,
+                        "old_id": pending_id_for_partial.as_ref(),
                         "message": &sent_ish_msg,
                         "chat_id": &receiver
                     })).unwrap();
@@ -991,9 +1015,10 @@ async fn message(receiver: String, content: String, replied_to: String, file: Op
         }
         Err(_) => {
             // Mark the message as a failure, bad message, bad!
+            let pending_id_for_final = Arc::clone(&pending_id);
             let mut state = STATE.lock().await;
             let chat = state.get_profile_mut(&receiver).unwrap();
-            let failed_msg = chat.get_message_mut(&pending_id).unwrap();
+            let failed_msg = chat.get_message_mut(pending_id_for_final.as_ref()).unwrap();
             failed_msg.failed = true;
             return Ok(false);
         }
