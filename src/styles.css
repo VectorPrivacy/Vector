@@ -329,6 +329,16 @@ body {
   width: calc(100% - 120px);
 }
 
+.chatlist-contact-preview .emoji {
+  object-fit: cover;
+  object-position: none !important;
+  width: 15px !important;
+  border-radius: 0;
+  min-width: unset;
+  min-height: unset;
+  vertical-align: -3px;
+}
+
 .chatlist-contact-timestamp {
   margin-left: auto;
   margin-right: auto;
@@ -585,14 +595,29 @@ body {
   margin-bottom: 25px;
 }
 
-.emoji-only-content {
-  font-size: 75px;
-  line-height: 75px;
+.emoji-only-content .emoji {
+  width: 75px !important;
+  height: 75px !important;
+}
+
+.msg-me .emoji {
+  width: 17px;
+  height: 17px;
+  vertical-align: -3px;
+}
+
+.msg-them .emoji {
+  width: 17px;
+  height: 17px;
+  vertical-align: -3px;
 }
 
 .no-background {
   background: none !important;
   border-color: transparent !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  padding-bottom: 0 !important;
 }
 
 .msg-them {
@@ -660,8 +685,16 @@ body {
 .reaction {
   cursor: default;
   position: relative;
-  height: fit-content !important;
+  height: 18px !important;
   width: max-content !important;
+  display: flex;
+  line-height: normal;
+}
+
+.reaction .emoji {
+  margin-right: 5px;
+  width: 20px !important;
+  height: 20px !important;
 }
 
 .reply-btn {
@@ -754,7 +787,8 @@ body {
   cursor: pointer;
   opacity: 1;
   padding: 6px;
-  font-size: 30px;
+  width: 30px;
+  height: 30px;
   border-radius: 100%;
   display: inline-block;
 }

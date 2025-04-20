@@ -1374,3 +1374,11 @@ function isEmojiOnly(str) {
                 !/\p{Number}|\p{Letter}/u.test(segment));
     });
 }
+
+/**
+ * Convert all Unicode emojis in the given DOM element to Twemoji SVGs
+ * @param {HTMLElement} domElement 
+ */
+function twemojify(domElement) {
+    twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
+}
