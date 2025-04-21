@@ -22,6 +22,7 @@ const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
 const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
 
 const domChats = document.getElementById('chats');
+const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
 const domAccount = document.getElementById('account');
 const domSyncStatusContainer = document.getElementById('sync-status-container');
 const domSyncStatus = document.getElementById('sync-status');
@@ -453,6 +454,9 @@ function renderChatlist() {
     const fragment = document.createDocumentFragment();
     for (const chat of arrChats) {
         if (chat.messages.length === 0) continue;
+
+        // Do not render our own profile: it is accessible via the Bookmarks/Notes section
+        if (chat.mine) continue;
 
         // If the chat order changed; append to fragment instead of directly to the DOM for full list re-render efficiency
         const divContact = renderContact(chat);
@@ -995,7 +999,14 @@ async function login() {
                 // Fade-in the navbar
                 domNavbar.style.display = '';
                 domNavbar.classList.add('fadein-anim');
-                domNavbar.addEventListener('animationend', () => domNavbar.classList.remove('fadein-anim'), { once: true });
+                domNavbar.addEventListener('animationend', () => {
+                    domNavbar.classList.remove('fadein-anim');
+
+                    // Fade-in the bookmarks icon
+                    domChatBookmarksBtn.style.display = 'flex';
+                    domChatBookmarksBtn.classList.add('fadein-anim');
+                    domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
+                }, { once: true });
 
                 // Render our profile with an intro animation
                 const cProfile = arrChats.find(p => p.mine);
@@ -1075,6 +1086,7 @@ function renderCurrentProfile(cProfile) {
     h2Username.style.fontFamily = `Rubik`;
     h2Username.style.marginTop = `auto`;
     h2Username.style.marginBottom = `auto`;
+    h2Username.style.maxWidth = `calc(100% - 150px)`;
     h2Username.onclick = askForUsername;
     if (cProfile?.name) twemojify(h2Username);
     divRow.appendChild(h2Username);
@@ -1206,19 +1218,30 @@ let strCurrentReplyReference = "";
  */
 async function updateChat(profile, arrMessages = [], fClicked = false) {
     if (profile?.messages.length || arrMessages.length) {
+        // If this chat is our own npub: then we consider this our Bookmarks/Notes section
+        const fNotes = strOpenChat === strPubkey;
+
         // Prefer displaying their name, otherwise, npub
-        domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
-        if (profile?.name) twemojify(domChatContact);
+        if (fNotes) {
+            domChatContact.textContent = 'Notes';
+        } else {
+            domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
+            if (profile?.name) twemojify(domChatContact);
+        }
 
         // Display either their Status or Typing Indicator
-        const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
-        if (fIsTyping) {
-            domChatContactStatus.textContent = `${profile?.name || 'User'} is typing...`;
-            domChatContactStatus.classList.add('text-gradient');
+        if (fNotes) {
+            domChatContactStatus.textContent = 'Encrypted Notes to Self';
         } else {
-            domChatContactStatus.textContent = profile?.status?.title || '';
-            domChatContactStatus.classList.remove('text-gradient');
-            twemojify(domChatContactStatus);
+            const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
+            if (fIsTyping) {
+                domChatContactStatus.textContent = `${profile?.name || 'User'} is typing...`;
+                domChatContactStatus.classList.add('text-gradient');
+            } else {
+                domChatContactStatus.textContent = profile?.status?.title || '';
+                domChatContactStatus.classList.remove('text-gradient');
+                twemojify(domChatContactStatus);
+            }
         }
 
         // Adjust our Contact Name class to manage space according to Status visibility
@@ -2011,6 +2034,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     }
     domChatBackBtn.onclick = closeChat;
+    domChatBookmarksBtn.onclick = () => {
+        openChat(strPubkey);
+    };
     domChatNewBackBtn.onclick = closeChat;
     domChatNewStartBtn.onclick = () => {
         openChat(domChatNewInput.value.trim());

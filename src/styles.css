@@ -79,6 +79,10 @@
   mask-image: url("./icons/reply.svg");
 }
 
+.icon-bookmark {
+  mask-image: url("./icons/bookmark.svg");
+}
+
 .icon-chevron-down {
   mask-image: url("./icons/chevron-down.svg");
 }
