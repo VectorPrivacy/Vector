@@ -268,6 +268,22 @@ body {
   margin-top: 5px;
 }
 
+.account .status .emoji {
+  height: 15px;
+  width: 15px;
+  border-radius: 0;
+  vertical-align: -3px;
+  margin-right: unset;
+}
+
+.account h2 .emoji {
+  height: 22px;
+  width: 22px;
+  border-radius: 0;
+  vertical-align: -3px;
+  margin-right: unset;
+}
+
 .placeholder-avatar p {
   top: 25px;
   margin: 0;
@@ -428,6 +444,14 @@ body {
   margin-bottom: 12px;
 }
 
+.chat h3 img {
+  height: 20px;
+  width: 20px;
+  border-radius: 0;
+  vertical-align: -3px;
+  margin-right: unset;
+}
+
 #chat-contact-status {
   opacity: 0.8;
   font-style: oblique;
@@ -437,6 +461,12 @@ body {
   width: 60%;
   margin-left: auto;
   margin-right: auto;
+}
+
+#chat-contact-status .emoji {
+  width: 17px;
+  height: 17px;
+  vertical-align: -3px;
 }
 
 .chat-messages {
@@ -606,6 +636,10 @@ body {
   vertical-align: -3px;
 }
 
+.msg-me .reaction .emoji {
+  margin-left: 15px;
+}
+
 .msg-them .emoji {
   width: 17px;
   height: 17px;
@@ -695,10 +729,6 @@ body {
   margin-right: 5px;
   width: 20px !important;
   height: 20px !important;
-}
-
-.msg-me .emoji {
-  margin-left: 15px;
 }
 
 .reply-btn {

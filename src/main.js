@@ -1076,6 +1076,7 @@ function renderCurrentProfile(cProfile) {
     h2Username.style.marginTop = `auto`;
     h2Username.style.marginBottom = `auto`;
     h2Username.onclick = askForUsername;
+    if (cProfile?.name) twemojify(h2Username);
     divRow.appendChild(h2Username);
 
     // Add the username row
@@ -1086,6 +1087,7 @@ function renderCurrentProfile(cProfile) {
     pStatus.textContent = cProfile?.status?.title || 'Set a Status';
     pStatus.classList.add('status', 'btn', 'cutoff');
     pStatus.onclick = askForStatus;
+    twemojify(pStatus);
     domAccount.appendChild(pStatus);
 
     // Render our Share npub
@@ -1206,11 +1208,18 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
     if (profile?.messages.length || arrMessages.length) {
         // Prefer displaying their name, otherwise, npub
         domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
+        if (profile?.name) twemojify(domChatContact);
 
         // Display either their Status or Typing Indicator
         const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
-        domChatContactStatus.textContent = fIsTyping ? `${profile?.name || 'User'} is typing...` : profile?.status?.title || '';
-        domChatContactStatus.classList.toggle('text-gradient', fIsTyping);
+        if (fIsTyping) {
+            domChatContactStatus.textContent = `${profile?.name || 'User'} is typing...`;
+            domChatContactStatus.classList.add('text-gradient');
+        } else {
+            domChatContactStatus.textContent = profile?.status?.title || '';
+            domChatContactStatus.classList.remove('text-gradient');
+            twemojify(domChatContactStatus);
+        }
 
         // Adjust our Contact Name class to manage space according to Status visibility
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
@@ -1497,7 +1506,12 @@ function renderMessage(msg, sender, editID = '') {
 
             // Name
             const cSenderProfile = !cMsg.mine ? sender : arrChats.find(a => a.mine);
-            spanName.textContent = cSenderProfile.name ? cSenderProfile.name : cSenderProfile.id.substring(0, 10) + '…';
+            if (cSenderProfile.name) {
+                spanName.textContent = cSenderProfile.name;
+                twemojify(spanName);
+            } else {
+                spanName.textContent = cSenderProfile.id.substring(0, 10) + '…';
+            }
 
             // Replied-to content (Text or Attachment)
             let spanRef;
