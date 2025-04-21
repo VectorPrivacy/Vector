@@ -697,6 +697,10 @@ body {
   height: 20px !important;
 }
 
+.msg-me .emoji {
+  margin-left: 15px;
+}
+
 .reply-btn {
   font-size: 25px;
 }
