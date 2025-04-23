@@ -1217,10 +1217,10 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(profile, arrMessages = [], fClicked = false) {
-    if (profile?.messages.length || arrMessages.length) {
-        // If this chat is our own npub: then we consider this our Bookmarks/Notes section
-        const fNotes = strOpenChat === strPubkey;
+    // If this chat is our own npub: then we consider this our Bookmarks/Notes section
+    const fNotes = strOpenChat === strPubkey;
 
+    if (profile?.messages.length || arrMessages.length) {
         // Prefer displaying their name, otherwise, npub
         if (fNotes) {
             domChatContact.textContent = 'Notes';
@@ -1405,12 +1405,16 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
-        domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
+        if (fNotes) {
+            domChatContact.textContent = 'Notes';
+        } else {
+            domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
+        }
 
         // Force wipe the 'Status' and it's styling
-        domChatContactStatus.textContent = '';
-        domChatContact.classList.add('chat-contact');
-        domChatContact.classList.remove('chat-contact-with-status');
+        domChatContactStatus.textContent = fNotes ? domChatContactStatus.textContent = 'Encrypted Notes to Self' : '';
+        domChatContact.classList.add('chat-contact-with-status');
+        domChatContact.classList.remove('chat-contact');
     }
 
     adjustSize();
