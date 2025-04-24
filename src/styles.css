@@ -308,6 +308,8 @@ body {
 }
 
 .new-chat-btn {
+  display: flex;
+  align-items: center;
   margin-bottom: 15px;
   margin-left: 15px;
   margin-right: 15px;
@@ -316,7 +318,12 @@ body {
 }
 
 .new-chat-btn .icon {
-  width: 50px;
+  display: inline-block;
+  position: relative;
+  width: 30px;
+  height: 30px;
+  /* Negate the space use of the icon - thereby keeping the button text centered - by adding a negative margin */
+  margin: -30px;
   margin-right: revert;
   background-color: rgba(128, 255, 212, 0.75);
 }

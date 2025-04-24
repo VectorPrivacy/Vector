@@ -1032,7 +1032,7 @@ async function login() {
                 const btnStartChat = document.createElement('button');
                 btnStartChat.id = `new-chat-btn`;
                 btnStartChat.classList.add('new-chat-btn', 'btn', 'intro-anim');
-                btnStartChat.innerHTML = 'Start a New Chat<span class="icon icon-new-msg"></span>';
+                btnStartChat.innerHTML = '<span style="width: 100%">Start a New Chat</span><span class="icon icon-new-msg"></span>';
                 btnStartChat.onclick = openNewChat;
                 btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
                 domChatList.before(btnStartChat);
