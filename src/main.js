@@ -2213,6 +2213,12 @@ document.addEventListener('click', (e) => {
     // If we're clicking the emoji search, don't close it!
     if (e.target === emojiSearch) return;
 
+    // If we're clicking an <a> link, handle it with our openUrl function
+    if (e.target.tagName === 'A' && e.target.href) {
+        e.preventDefault();
+        return openUrl(e.target.href);
+    }
+
     // If we're clicking a Reply button, begin a reply
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
 

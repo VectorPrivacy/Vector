@@ -84,8 +84,17 @@ function internalParseMarkdown(md, prevLinks) {
         }
         // Links:
         else if (token[10]) {
-            out = out.replace('<a>', `<a href="${encodeAttr(token[11] || links[prev.toLowerCase()])}">`);
-            chunk = flush() + '</a>';
+            // Get the URL from either direct URL or reference
+            const url = token[11] || links[prev.toLowerCase()];
+            if (url) {
+                // Only create a link if there's actually a URL
+                out = out.replace('<a>', `<a href="${encodeAttr(url)}">`);
+                chunk = flush() + '</a>';
+            } else {
+                // If no URL, replace the opening <a> tag with the original bracket text
+                out = out.replace('<a>', '[');
+                chunk = flush() + ']';
+            }
         }
         else if (token[9]) {
             chunk = '<a>';
