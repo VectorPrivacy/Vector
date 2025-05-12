@@ -922,7 +922,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(#0a0a0a, rgba(0, 0, 0, 0) 80%);
+  background: linear-gradient(#060606, #00000000 80%);
   pointer-events: none;
 }
 
@@ -932,7 +932,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 1));
+  background: linear-gradient(#06060600, #060606);
   pointer-events: none;
 }
 
