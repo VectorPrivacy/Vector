@@ -57,6 +57,8 @@ static PUBLIC_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 static TRUSTED_PRIVATE_NIP96: &str = "https://medea-small.jskitty.cat";
 static PRIVATE_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 
+
+static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
 static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
@@ -2362,7 +2364,19 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
 // Tauri command that uses the internal function
 #[tauri::command]
 async fn encrypt(input: String, password: Option<String>) -> String {
-    internal_encrypt(input, password).await
+    let res = internal_encrypt(input, password).await;
+
+    // If we have one; save the in-memory seedphrase in an encrypted at-rest format
+    match MNEMONIC_SEED.get() {
+        Some(seed) => {
+            // Save the seed phrase to the database
+            let handle = TAURI_APP.get().unwrap();
+            let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+        }
+        _ => ()
+    }
+
+    res
 }
 
 // Tauri command that uses the internal function
@@ -2628,6 +2642,40 @@ async fn logout<R: Runtime>(handle: AppHandle<R>) {
     handle.restart();
 }
 
+/// Creates a new Nostr keypair derived from a BIP39 Seed Phrase
+#[tauri::command]
+async fn create_account() -> Result<LoginKeyPair, String> {
+    // Generate a BIP39 Mnemonic Seed Phrase
+    let mnemonic = bip39::Mnemonic::generate(12).map_err(|e| e.to_string())?;
+    let mnemonic_string = mnemonic.to_string();
+
+    // Derive our nsec from our Mnemonic
+    let keys = Keys::from_mnemonic(mnemonic_string.clone(), None).map_err(|e| e.to_string())?;
+
+    // Initialise the Nostr client
+    let client = Client::builder()
+        .signer(keys.clone())
+        .opts(Options::new().gossip(false))
+        .build();
+    NOSTR_CLIENT.set(client).unwrap();
+
+    // Add our profile (at least, the npub of it) to our state
+    let npub = keys.public_key.to_bech32().map_err(|e| e.to_string())?;
+    let mut profile = Profile::new();
+    profile.id = npub.clone();
+    profile.mine = true;
+    STATE.lock().await.profiles.push(profile);
+
+    // Save the seed in memory, ready for post-pin-setup encryption
+    let _ = MNEMONIC_SEED.set(mnemonic_string);
+
+    // Return the keypair in the same format as the login function
+    Ok(LoginKeyPair {
+        public: npub,
+        private: keys.secret_key().to_bech32().map_err(|e| e.to_string())?,
+    })
+}
+
 /// Marks a specific message as read
 #[tauri::command]
 async fn mark_as_read(npub: String) -> bool {
@@ -2760,6 +2808,8 @@ pub fn run() {
             db::set_theme,
             db::get_pkey,
             db::set_pkey,
+            db::get_seed,
+            db::set_seed,
             db::remove_setting,
             fetch_messages,
             message,
@@ -2784,7 +2834,8 @@ pub fn run() {
             fetch_msg_metadata,
             mark_as_read,
             update_unread_counter,
-            logout
+            logout,
+            create_account
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

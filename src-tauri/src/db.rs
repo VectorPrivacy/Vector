@@ -13,6 +13,7 @@ pub struct VectorDB {
     pub db_version: Option<u64>,
     pub theme: Option<String>,
     pub pkey: Option<String>,
+    pub seed: Option<String>,
 }
 
 const DB_PATH: &str = "vector.json";
@@ -236,10 +237,16 @@ pub fn get_db<R: Runtime>(handle: AppHandle<R>) -> Result<VectorDB, String> {
         _ => None,
     };
     
+    let seed = match store.get("seed") {
+        Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
+        _ => None,
+    };
+    
     Ok(VectorDB {
         db_version,
         theme,
         pkey,
+        seed,
     })
 }
 
@@ -287,6 +294,31 @@ pub fn get_pkey<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Stri
     let store = get_store(&handle);
     match store.get("pkey") {
         Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub async fn set_seed<R: Runtime>(handle: AppHandle<R>, seed: String) -> Result<(), String> {
+    let store = get_store(&handle);
+    // Encrypt the seed phrase before storing it
+    let encrypted_seed = crate::internal_encrypt(seed, None).await;
+    store.set("seed".to_string(), serde_json::json!(encrypted_seed));
+    Ok(())
+}
+
+#[command]
+pub async fn get_seed<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
+    let store = get_store(&handle);
+    match store.get("seed") {
+        Some(value) if value.is_string() => {
+            let encrypted_seed = value.as_str().unwrap().to_string();
+            // Decrypt the seed phrase
+            match crate::internal_decrypt(encrypted_seed, None).await {
+                Ok(decrypted) => Ok(Some(decrypted)),
+                Err(_) => Err("Failed to decrypt seed phrase".to_string()),
+            }
+        },
         _ => Ok(None),
     }
 }

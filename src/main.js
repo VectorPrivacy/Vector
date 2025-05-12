@@ -12,6 +12,9 @@ getVersion().then(v => {
 
 const domTheme = document.getElementById('theme');
 
+const domLoginStart = document.getElementById('login-start');
+const domLoginAccountCreationBtn = document.getElementById('start-account-creation-btn');
+const domLoginAccountBtn = document.getElementById('start-login-btn');
 const domLogin = document.getElementById('login-form');
 const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
@@ -1112,6 +1115,7 @@ function renderCurrentProfile(cProfile) {
  * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one
  */
 function openEncryptionFlow(pkey, fUnlock = false) {
+    domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
     domLoginEncrypt.style.display = '';
 
@@ -2025,6 +2029,21 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Hook up our static buttons
     domSettingsBtn.onclick = openSettings;
     domChatlistBtn.onclick = openChatlist;
+    domLoginAccountCreationBtn.onclick = async () => {
+        try {
+            const { public, private } = await invoke("create_account");
+            strPubkey = public;
+            // Open the Encryption Flow
+            openEncryptionFlow(private);
+        } catch (e) {
+            // Display the backend error
+            popupConfirm(e, '', true);
+        }
+    };
+    domLoginAccountBtn.onclick = () => {
+        domLoginImport.style.display = '';
+        domLoginStart.style.display = 'none';
+    };
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {

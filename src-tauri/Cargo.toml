@@ -19,6 +19,7 @@ tauri-build = { version = "2.2.0", features = [] }
 
 [dependencies]
 nostr-sdk = { version = "0.41.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+bip39 = { version = "2.1.0", features = ["rand"] }
 tokio = { version = "1.44.1", features = ["sync"] }
 futures-util = "0.3.31"
 tauri = { version = "2.5.0", features = ["protocol-asset", "image-png"] }

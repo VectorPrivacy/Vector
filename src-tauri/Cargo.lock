@@ -455,6 +455,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33415e24172c1b7d6066f6d999545375ab8e1d95421d6784bdfff9496f292387"
 dependencies = [
  "bitcoin_hashes 0.13.0",
+ "rand 0.7.3",
+ "rand_core 0.5.1",
  "serde",
  "unicode-normalization",
 ]
@@ -5953,6 +5955,7 @@ dependencies = [
  "aes",
  "aes-gcm",
  "argon2",
+ "bip39",
  "chacha20poly1305",
  "cpal",
  "deranged",
