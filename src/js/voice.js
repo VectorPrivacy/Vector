@@ -49,7 +49,6 @@ class VoiceTranscriptionUI {
     }
 
     initUI() {
-        // Create settings section if it doesn't exist
         if (!document.querySelector('.settings-section-voice')) {
             const settingsSection = document.createElement('div');
             settingsSection.className = 'settings-section settings-section-voice';
@@ -89,6 +88,11 @@ class VoiceTranscriptionUI {
             document.getElementById('transcribe-btn').addEventListener('click', async () => {
                 await this.transcribeRecording();
             });
+             // Ensure the dropdown visually matches our selected model
+        const dropdown = document.getElementById('whisper-model');
+        if (dropdown) {
+            dropdown.value = this.selectedModel;
+        }
         }
         
         this.updateModelStatus();
