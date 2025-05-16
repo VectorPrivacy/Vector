@@ -36,130 +36,18 @@ class VoiceRecorder {
 
 class VoiceTranscriptionUI {
     constructor() {
-        this.models = [
-            { id: 'tiny', name: 'Tiny', description: 'Fastest, least accurate', downloaded: false, downloading: false },
-            { id: 'base', name: 'Base', description: 'Fast, decent accuracy', downloaded: false, downloading: false },
-            { id: 'small', name: 'Small', description: 'Slower, better accuracy', downloaded: false, downloading: false },
-            { id: 'medium', name: 'Medium', description: 'Slow, good accuracy', downloaded: false, downloading: false },
-            { id: 'large', name: 'Large', description: 'Very slow, best accuracy', downloaded: false, downloading: false }
-        ];
-        this.selectedModel = 'base'; // Default model  
-        this.initUI();
-        this.checkDownloadedModels();
+        this.selectedModel = 'base'; // Default model
     }
 
-    initUI() {
-        // voice settings section
-        const voiceSection = document.getElementById('settings-voice');
-        if (voiceSection) {
-            voiceSection.style.display = 'block';
-            
-            // Add event listeners
-            document.getElementById('whisper-model').addEventListener('change', (e) => {
-                this.selectedModel = e.target.value;
-                this.updateModelStatus();
-            });
-            
-            document.getElementById('download-model').addEventListener('click', () => {
-                this.downloadModel(this.selectedModel);
-            });
-            
-            document.getElementById('transcribe-btn').addEventListener('click', async () => {
-                await this.transcribeRecording();
-            });
+    async transcribeRecording(wavData) {
+        if (!wavData) {
+            throw new Error("No audio data to transcribe");
         }
         
-        this.updateModelStatus();
-    }
-
-    async checkDownloadedModels() {
-        try {
-            const downloadedModels = await invoke('get_downloaded_models');
-            this.models.forEach(model => {
-                model.downloaded = downloadedModels.includes(model.id);
-            });
-            this.updateModelStatus();
-        } catch (err) {
-            console.error('Error checking downloaded models:', err);
-        }
-    }
-
-    updateModelStatus() {
-        const statusElement = document.getElementById('model-status');
-        if (!statusElement) return;
-        
-        const model = this.models.find(m => m.id === this.selectedModel);
-        if (!model) return;
-        
-        if (model.downloading) {
-            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.name} model...</div>`;
-            return;
-        }
-        
-        if (model.downloaded) {
-            statusElement.innerHTML = `<div class="alert alert-success">${model.name} model is downloaded and ready</div>`;
-        } else {
-            statusElement.innerHTML = `<div class="alert alert-warning">${model.name} model is not downloaded</div>`;
-        }
-    }
-
-    async downloadModel(modelId) {
-        const model = this.models.find(m => m.id === modelId);
-        if (!model || model.downloading || model.downloaded) return;
-        
-        model.downloading = true;
-        this.updateModelStatus();
-        
-        try {
-            await invoke('download_model', { modelId });
-            model.downloaded = true;
-        } catch (err) {
-            console.error('Error downloading model:', err);
-        } finally {
-            model.downloading = false;
-            this.updateModelStatus();
-        }
-    }
-
-    async transcribeRecording() {
-        const resultElement = document.getElementById('transcription-result');
-        const transcribeBtn = document.getElementById('transcribe-btn');
-        
-        if (!resultElement || !transcribeBtn) return;
-        
-        resultElement.innerHTML = '<div class="alert alert-info">Transcribing...</div>';
-        transcribeBtn.disabled = true;
-        
-        try {
-             // Get the recorded audio from the existing voice recorder
-            if (!window.voiceRecorder) {
-                throw new Error("Voice recorder not available");
-            }
-            
-            const wavData = await window.voiceRecorder.stop();
-            if (!wavData) {
-                resultElement.innerHTML = '<div class="alert alert-danger">No audio data to transcribe</div>';
-                return;
-            }
-            
-             // Transcribe using the selected model
-            const transcription = await invoke('transcribe_audio', {
-                audioData: Array.from(wavData),
-                modelId: this.selectedModel
-            });
-            
-            resultElement.innerHTML = `
-                <div class="alert alert-success">
-                    <strong>Transcription:</strong>
-                    <p>${transcription}</p>
-                </div>
-            `;
-        } catch (err) {
-            console.error('Transcription error:', err);
-            resultElement.innerHTML = `<div class="alert alert-danger">Error: ${err.message || err}</div>`;
-        } finally {
-            transcribeBtn.disabled = false;
-        }
+        return await invoke('transcribe_audio', {
+            audioData: Array.from(wavData),
+            modelId: this.selectedModel
+        });
     }
 
     async transcribeAudioFile(filePath) {
@@ -170,9 +58,9 @@ class VoiceTranscriptionUI {
     }
 }
 
-// Initialize when DOM is ready - ONLY initialize the transcription UI
+// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-    // Initialize transcription UI
+    // Initialize voice transcription with default model
     window.voiceTranscriptionUI = new VoiceTranscriptionUI();
 });
 
@@ -188,10 +76,6 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         audPreview.src = assetUrl;
         audPreview.addEventListener('loadedmetadata', () => softChatScroll(), { once: true });
 
-
-
-
-
         // Add transcribe button for voice messages
         const transcribeBtn = document.createElement('button');
         transcribeBtn.classList.add('btn', 'btn-transcribe');
@@ -202,7 +86,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         transcriptionContainer.classList.add('transcription-container', 'hidden');
 
         transcribeBtn.addEventListener('click', async () => {
-             // Show loading state
+            // Show loading state
             transcribeBtn.disabled = true;
             transcribeBtn.innerHTML = '<span class="spinner"></span> Transcribing...';
 
@@ -219,11 +103,10 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
                 transcriptionContainer.classList.remove('hidden');
             } catch (err) {
                 console.error('Transcription error:', err);
-                transcriptionContainer.innerHTML = `
-                    <div class="transcription-error">
+                transcriptionContainer.innerHTML = 
+                    `<div class="transcription-error">
                         Error: ${err.message || 'Transcription failed'}
-                    </div>
-                `;
+                    </div>`;
                 transcriptionContainer.classList.remove('hidden');
             } finally {
                 transcribeBtn.innerHTML = '<span class="icon icon-mic"></span> Transcribe';
