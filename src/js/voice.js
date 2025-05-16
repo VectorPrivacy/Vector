@@ -88,11 +88,12 @@ class VoiceTranscriptionUI {
             document.getElementById('transcribe-btn').addEventListener('click', async () => {
                 await this.transcribeRecording();
             });
-             // Ensure the dropdown visually matches our selected model
-        const dropdown = document.getElementById('whisper-model');
-        if (dropdown) {
-            dropdown.value = this.selectedModel;
-        }
+            
+           // Ensure the dropdown visually matches our selected model
+            const dropdown = document.getElementById('whisper-model');
+            if (dropdown) {
+                dropdown.value = this.selectedModel;
+            }
         }
         
         this.updateModelStatus();
@@ -157,8 +158,12 @@ class VoiceTranscriptionUI {
         transcribeBtn.disabled = true;
         
         try {
-            // Get the recorded audio 
-            const wavData = await voiceRecorder.stop();
+            // Get the recorded audio from the existing voice recorder
+            if (!window.voiceRecorder) {
+                throw new Error("Voice recorder not available");
+            }
+            
+            const wavData = await window.voiceRecorder.stop();
             if (!wavData) {
                 resultElement.innerHTML = '<div class="alert alert-danger">No audio data to transcribe</div>';
                 return;
@@ -185,14 +190,8 @@ class VoiceTranscriptionUI {
     }
 }
 
-// Initialize when DOM is ready
+// Initialize when DOM is ready - ONLY initialize the transcription UI
 document.addEventListener('DOMContentLoaded', () => {
-    // Initialize voice recorder if not already done
-    const micButton = document.querySelector('.mic-button'); // Adjust selector
-    if (micButton && !window.voiceRecorder) {
-        window.voiceRecorder = new VoiceRecorder(micButton);
-    }
-    
     // Initialize transcription UI
     window.voiceTranscriptionUI = new VoiceTranscriptionUI();
 });
@@ -205,12 +204,11 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         audPreview.preload = 'metadata';
         audPreview.src = assetUrl;
         
-         // Create container for audio player and transcribe button
+        // Create container for audio player and transcribe button
         const audioContainer = document.createElement('div');
         audioContainer.classList.add('audio-message-container');
 
         audPreview.addEventListener('loadedmetadata', () => {
-            // Auto-scroll to correct against the longer container
             softChatScroll();
         }, { once: true });
 
