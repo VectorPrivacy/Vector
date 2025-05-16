@@ -29,10 +29,6 @@ class VoiceSettings {
                 this.downloadModel(window.voiceTranscription.selectedModel);
             });
             
-            document.getElementById('transcribe-btn').addEventListener('click', async () => {
-                await this.transcribeRecording();
-            });
-            
             await this.checkDownloadedModels();
             this.updateModelStatus();
         }
@@ -84,41 +80,6 @@ class VoiceSettings {
         } finally {
             model.downloading = false;
             this.updateModelStatus();
-        }
-    }
-
-    async transcribeRecording() {
-        const resultElement = document.getElementById('transcription-result');
-        const transcribeBtn = document.getElementById('transcribe-btn');
-        
-        if (!resultElement || !transcribeBtn) return;
-        
-        resultElement.innerHTML = '<div class="alert alert-info">Transcribing...</div>';
-        transcribeBtn.disabled = true;
-        
-        try {
-            if (!window.voiceRecorder) {
-                throw new Error("Voice recorder not available");
-            }
-            
-            const wavData = await window.voiceRecorder.stop();
-            if (!wavData) {
-                resultElement.innerHTML = '<div class="alert alert-danger">No audio data to transcribe</div>';
-                return;
-            }
-            
-            const transcription = await window.voiceTranscription.transcribeRecording(wavData);
-            
-            resultElement.innerHTML = 
-                `<div class="alert alert-success">
-                    <strong>Transcription:</strong>
-                    <p>${transcription}</p>
-                </div>`;
-        } catch (err) {
-            console.error('Transcription error:', err);
-            resultElement.innerHTML = `<div class="alert alert-danger">Error: ${err.message || err}</div>`;
-        } finally {
-            transcribeBtn.disabled = false;
         }
     }
 }

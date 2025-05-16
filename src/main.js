@@ -1631,20 +1631,10 @@ function renderMessage(msg, sender, editID = '') {
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
                 pMessage.appendChild(imgPreview);
-            } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
-                // Audio
-                const audPreview = document.createElement('audio');
-                audPreview.setAttribute('controlsList', 'nodownload');
-                audPreview.controls = true;
-                audPreview.preload = 'metadata';
-                audPreview.src = assetUrl;
-                // When the metadata loads, we run some maintenance tasks
-                audPreview.addEventListener('loadedmetadata', () => {
-                    // Auto-scroll to correct against the longer container
-                    softChatScroll();
-                }, { once: true });
-                pMessage.appendChild(audPreview);
-            } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
+                } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
+                // Audio - use the enhanced handler with transcription
+                handleAudioAttachment(cAttachment, assetUrl, pMessage);
+                } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
                 // Videos
                 const vidPreview = document.createElement('video');
                 vidPreview.setAttribute('controlsList', 'nodownload');
