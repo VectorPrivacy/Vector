@@ -107,6 +107,30 @@
           <option value="chatstr">Chatstr</option>
         </select>
         <hr class="divider" style="margin-top: 25px; margin-bottom: 25px;">
+
+        <!-- Voice Settings Section -->
+        <div id="settings-voice" class="settings-section settings-section-voice" style="display: none;">
+        <h3>Voice Settings</h3>
+        <div class="form-group">
+          <label for="whisper-model">Whisper Model</label>
+          <select id="whisper-model" class="form-control">
+            <option value="tiny">Tiny (Fastest, least accurate)</option>
+            <option value="base" selected>Base (Fast, decent accuracy)</option>
+            <option value="small">Small (Slower, better accuracy)</option>
+            <option value="medium">Medium (Slow, good accuracy)</option>
+            <option value="large">Large (Very slow, best accuracy)</option>
+          </select>
+          <div id="model-status" class="model-status"></div>
+        </div>
+        <div class="form-group">
+          <button id="download-model" class="btn btn-primary">Download Selected Model</button>
+        </div>
+        <div class="form-group">
+          <button id="transcribe-btn" class="btn btn-success">Transcribe Recording</button>
+          <div id="transcription-result" class="transcription-result"></div>
+        </div>
+      </div>
+
         <h2 style="color: #ff2ea9;">Dangerzone</h2>
         <button id="logout-btn" style="backdrop-filter: none;">Logout</button>
       </div>

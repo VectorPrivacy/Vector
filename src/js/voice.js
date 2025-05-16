@@ -43,37 +43,16 @@ class VoiceTranscriptionUI {
             { id: 'medium', name: 'Medium', description: 'Slow, good accuracy', downloaded: false, downloading: false },
             { id: 'large', name: 'Large', description: 'Very slow, best accuracy', downloaded: false, downloading: false }
         ];
-        this.selectedModel = 'base'; // Default model
+        this.selectedModel = 'base'; // Default model  
         this.initUI();
         this.checkDownloadedModels();
     }
 
     initUI() {
-        if (!document.querySelector('.settings-section-voice')) {
-            const settingsSection = document.createElement('div');
-            settingsSection.className = 'settings-section settings-section-voice';
-            settingsSection.innerHTML = `
-                <h3>Voice Settings</h3>
-                <div class="form-group">
-                    <label for="whisper-model">Whisper Model</label>
-                    <select id="whisper-model" class="form-control">
-                        ${this.models.map(model => 
-                            `<option value="${model.id}">${model.name} (${model.description})</option>`
-                        ).join('')}
-                    </select>
-                    <div id="model-status" class="model-status"></div>
-                </div>
-                <div class="form-group">
-                    <button id="download-model" class="btn btn-primary">Download Selected Model</button>
-                </div>
-                <div class="form-group">
-                    <button id="transcribe-btn" class="btn btn-success">Transcribe Recording</button>
-                    <div id="transcription-result" class="transcription-result"></div>
-                </div>
-            `;
-            
-            // Insert into settings container (adjust selector as needed)
-            document.querySelector('.settings-container').appendChild(settingsSection);
+        // voice settings section
+        const voiceSection = document.getElementById('settings-voice');
+        if (voiceSection) {
+            voiceSection.style.display = 'block';
             
             // Add event listeners
             document.getElementById('whisper-model').addEventListener('change', (e) => {
@@ -88,12 +67,6 @@ class VoiceTranscriptionUI {
             document.getElementById('transcribe-btn').addEventListener('click', async () => {
                 await this.transcribeRecording();
             });
-            
-           // Ensure the dropdown visually matches our selected model
-            const dropdown = document.getElementById('whisper-model');
-            if (dropdown) {
-                dropdown.value = this.selectedModel;
-            }
         }
         
         this.updateModelStatus();
@@ -158,7 +131,7 @@ class VoiceTranscriptionUI {
         transcribeBtn.disabled = true;
         
         try {
-            // Get the recorded audio from the existing voice recorder
+             // Get the recorded audio from the existing voice recorder
             if (!window.voiceRecorder) {
                 throw new Error("Voice recorder not available");
             }
@@ -169,7 +142,7 @@ class VoiceTranscriptionUI {
                 return;
             }
             
-            // Transcribe using the selected model
+             // Transcribe using the selected model
             const transcription = await invoke('transcribe_audio', {
                 audioData: Array.from(wavData),
                 modelId: this.selectedModel
@@ -188,6 +161,13 @@ class VoiceTranscriptionUI {
             transcribeBtn.disabled = false;
         }
     }
+
+    async transcribeAudioFile(filePath) {
+        return await invoke('transcribe_audio_file', {
+            filePath: filePath,
+            modelId: this.selectedModel
+        });
+    }
 }
 
 // Initialize when DOM is ready - ONLY initialize the transcription UI
@@ -198,50 +178,44 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
     if (['wav', 'mp4'].includes(cAttachment.extension)) {
+        const audioContainer = document.createElement('div');
+        audioContainer.classList.add('audio-message-container');
+
         const audPreview = document.createElement('audio');
         audPreview.setAttribute('controlsList', 'nodownload');
         audPreview.controls = true;
         audPreview.preload = 'metadata';
         audPreview.src = assetUrl;
-        
-        // Create container for audio player and transcribe button
-        const audioContainer = document.createElement('div');
-        audioContainer.classList.add('audio-message-container');
+        audPreview.addEventListener('loadedmetadata', () => softChatScroll(), { once: true });
 
-        audPreview.addEventListener('loadedmetadata', () => {
-            softChatScroll();
-        }, { once: true });
 
-        audioContainer.appendChild(audPreview);
-        
+
+
+
         // Add transcribe button for voice messages
         const transcribeBtn = document.createElement('button');
         transcribeBtn.classList.add('btn', 'btn-transcribe');
         transcribeBtn.innerHTML = '<span class="icon icon-mic"></span> Transcribe';
-        
+
         // Create container for transcription result
         const transcriptionContainer = document.createElement('div');
         transcriptionContainer.classList.add('transcription-container', 'hidden');
 
         transcribeBtn.addEventListener('click', async () => {
-            // Show loading state
+             // Show loading state
             transcribeBtn.disabled = true;
             transcribeBtn.innerHTML = '<span class="spinner"></span> Transcribing...';
 
             try {
                 // Get the audio file path and send to backend for transcription
-                const transcription = await invoke('transcribe_audio_file', {
-                    filePath: cAttachment.path,
-                    modelId: window.voiceTranscriptionUI?.selectedModel || 'base'
-                });
-
-                // Display transcription result
-                transcriptionContainer.innerHTML = `
-                    <div class="transcription-result">
-                        <strong>Transcription:</strong>
-                        <p>${transcription}</p>
-                    </div>
-                `;
+                const transcription = await window.voiceTranscriptionUI.transcribeAudioFile(cAttachment.path);
+                
+                const resultDiv = document.createElement('div');
+                resultDiv.classList.add('transcription-result');
+                resultDiv.innerHTML = `<strong>Transcription:</strong><p>${transcription}</p>`;
+                
+                transcriptionContainer.innerHTML = '';
+                transcriptionContainer.appendChild(resultDiv);
                 transcriptionContainer.classList.remove('hidden');
             } catch (err) {
                 console.error('Transcription error:', err);
@@ -258,6 +232,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
             }
         });
 
+        audioContainer.appendChild(audPreview);
         audioContainer.appendChild(transcribeBtn);
         audioContainer.appendChild(transcriptionContainer);
         pMessage.appendChild(audioContainer);
