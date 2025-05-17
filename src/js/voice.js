@@ -51,9 +51,9 @@ class VoiceTranscriptionUI {
     }
 
     async transcribeAudioFile(filePath) {
-        return await invoke('transcribe_audio_file', {
+        return await invoke('transcribe', {
             filePath: filePath,
-            modelId: this.selectedModel
+            modelName: this.selectedModel
         });
     }
 }
@@ -61,7 +61,7 @@ class VoiceTranscriptionUI {
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     // Initialize voice transcription with default model
-    window.voiceTranscriptionUI = new VoiceTranscriptionUI();
+    cTranscriber = new VoiceTranscriptionUI();
 });
 
 function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
@@ -83,12 +83,20 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         // Add view transcription button
         const transcribeBtn = document.createElement('button');
         transcribeBtn.classList.add('btn', 'btn-transcribe');
+        transcribeBtn.style.display = `flex`;
         
         const transcribeIcon = document.createElement('span');
-        transcribeIcon.classList.add('icon', 'icon-mic');
+        transcribeIcon.classList.add('icon', 'icon-mic-on');
+        transcribeIcon.style.position = `relative`;
+        transcribeIcon.style.backgroundColor = `rgba(255, 255, 255, 0.45)`;
+        transcribeIcon.style.width = `19px`;
+        transcribeIcon.style.height = `19px`;
         transcribeBtn.appendChild(transcribeIcon);
         
-        const transcribeText = document.createTextNode(' View Transcription');
+        const transcribeText = document.createElement('span');
+        transcribeText.textContent = `Transcribe`;
+        transcribeText.style.color = `rgba(255, 255, 255, 0.45)`;
+        transcribeText.style.marginLeft = `5px`;
         transcribeBtn.appendChild(transcribeText);
         
         // Create container for transcription result
@@ -109,7 +117,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
 
             try {
                 // Get the audio file path and send to backend for transcription
-                const transcription = await window.voiceTranscriptionUI.transcribeAudioFile(cAttachment.path);
+                const transcription = await cTranscriber.transcribeAudioFile(cAttachment.path);
                 
                 // Clear any existing content
                 while (transcriptionResult.firstChild) {
@@ -120,11 +128,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
                 const transcriptionText = document.createElement('div');
                 transcriptionText.classList.add('transcription-text');
                 
-                const strong = document.createElement('strong');
-                strong.textContent = 'Transcription:';
-                transcriptionText.appendChild(strong);
-                
-                const p = document.createElement('p');
+                const p = document.createElement('span');
                 p.textContent = transcription;
                 transcriptionText.appendChild(p);
                 

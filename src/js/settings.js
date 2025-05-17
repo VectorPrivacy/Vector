@@ -2,6 +2,11 @@ const { open } = window.__TAURI__.dialog;
 
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
 
+/**
+ * @type {VoiceSettings}
+ */
+let cTranscriber = null;
+
 class VoiceSettings {
     constructor() {
         this.models = [
@@ -9,7 +14,7 @@ class VoiceSettings {
             { id: 'base', name: 'Base', description: 'Fast, decent accuracy', downloaded: false, downloading: false },
             { id: 'small', name: 'Small', description: 'Slower, better accuracy', downloaded: false, downloading: false },
             { id: 'medium', name: 'Medium', description: 'Slow, good accuracy', downloaded: false, downloading: false },
-            { id: 'large', name: 'Large', description: 'Very slow, best accuracy', downloaded: false, downloading: false }
+            { id: 'large-v3', name: 'Large', description: 'Very slow, best accuracy', downloaded: false, downloading: false }
         ];
         this.initVoiceSettings();
     }
@@ -21,12 +26,12 @@ class VoiceSettings {
             
             // Add event listeners
             document.getElementById('whisper-model').addEventListener('change', (e) => {
-                window.voiceTranscription.selectedModel = e.target.value;
+                cTranscriber.selectedModel = e.target.value;
                 this.updateModelStatus();
             });
             
             document.getElementById('download-model').addEventListener('click', () => {
-                this.downloadModel(window.voiceTranscription.selectedModel);
+                this.downloadModel(cTranscriber.selectedModel);
             });
             
             await this.checkDownloadedModels();
@@ -36,9 +41,9 @@ class VoiceSettings {
 
     async checkDownloadedModels() {
         try {
-            const downloadedModels = await invoke('get_downloaded_models');
+            const downloadedModels = await invoke('list_models');
             this.models.forEach(model => {
-                model.downloaded = downloadedModels.includes(model.id);
+                model.downloaded = downloadedModels.find(m => m.name === model.id).downloaded;
             });
             this.updateModelStatus();
         } catch (err) {
@@ -50,7 +55,7 @@ class VoiceSettings {
         const statusElement = document.getElementById('model-status');
         if (!statusElement) return;
         
-        const model = this.models.find(m => m.id === window.voiceTranscription.selectedModel);
+        const model = this.models.find(m => m.id === cTranscriber.selectedModel);
         if (!model) return;
         
         if (model.downloading) {
@@ -60,8 +65,10 @@ class VoiceSettings {
         
         if (model.downloaded) {
             statusElement.innerHTML = `<div class="alert alert-success">${model.name} model is downloaded and ready</div>`;
+            document.getElementById('download-model').style.display = 'none';
         } else {
             statusElement.innerHTML = `<div class="alert alert-warning">${model.name} model is not downloaded</div>`;
+            document.getElementById('download-model').style.display = '';
         }
     }
 
