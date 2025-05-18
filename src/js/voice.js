@@ -104,20 +104,26 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         transcriptionResult.classList.add('transcription-result', 'hidden');
 
         transcribeBtn.addEventListener('click', async () => {
+            if (transcribeBtn.disabled) return;
+
             // If already transcribed, just toggle visibility
             if (transcriptionResult.textContent.trim()) {
-                transcriptionResult.classList.toggle('hidden');
-                softChatScroll();
-                return;
+                return transcriptionResult.classList.toggle('hidden');
             }
 
             // Show loading state
             transcribeBtn.disabled = true;
-            transcribeIcon.classList.replace('icon-mic', 'spinner');
+            transcribeText.textContent = `Transcribing`;
+            transcribeBtn.style.cursor = 'default';
+            transcribeIcon.classList.replace('icon-mic-on', 'icon-loading');
+            transcribeIcon.classList.add('spin');
 
             try {
                 // Get the audio file path and send to backend for transcription
                 const transcription = await cTranscriber.transcribeAudioFile(cAttachment.path);
+
+                // Remove the loading state (or, currently, the entire button)
+                transcribeBtn.remove();
                 
                 // Clear any existing content
                 while (transcriptionResult.firstChild) {
@@ -148,9 +154,8 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
                 transcriptionResult.appendChild(errorDiv);
                 transcriptionResult.classList.remove('hidden');
             } finally {
-                transcribeIcon.classList.replace('spinner', 'icon-mic');
+                transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
                 transcribeBtn.disabled = false;
-                softChatScroll();
             }
         });
 

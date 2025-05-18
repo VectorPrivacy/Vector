@@ -55,6 +55,10 @@
   mask-image: url("./icons/file-search.svg");
 }
 
+.icon-loading {
+  mask-image: url("./icons/loading.svg");
+}
+
 .icon-mic-on {
   mask-image: url("./icons/mic-on.svg");
 }
@@ -202,6 +206,27 @@ body {
   0% {background-position: 0% 50%;}
   50% {background-position: 100% 50%;}
   100% {background-position: 0% 50%;}
+}
+
+/* Spin the element smoothly around its own center */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  /* keep the element in the normal document flow */
+  display: inline-block;
+
+  /* pivot in the middle rather than a corner */
+  transform-origin: center center;
+
+  /* drive the animation */
+  animation: spin 2s linear infinite;
 }
 
 #version {
