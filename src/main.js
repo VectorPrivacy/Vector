@@ -1576,7 +1576,7 @@ function renderMessage(msg, sender, editID = '') {
     } else {
         // Add additional margin to simulate avatar space
         if (!msg.mine && sender?.avatar) {
-            pMessage.style.marginLeft = `60px`;
+            pMessage.style.marginLeft = `45px`;
         }
 
         // Flatten the top border to act as a visual continuation

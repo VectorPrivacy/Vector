@@ -559,6 +559,12 @@ body {
 
 .msg-them .avatar {
   margin-top: 0;
+  height: 35px;
+  width: 35px;
+  min-height: 35px;
+  min-width: 35px;
+  max-height: 35px;
+  max-width: 35px;
 }
 
 .msg-reply {
