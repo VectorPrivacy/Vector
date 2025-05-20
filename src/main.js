@@ -661,7 +661,6 @@ async function message(pubkey, content, replied_to) {
  * @param {string} filepath - The absolute file path
  */
 async function sendFile(pubkey, replied_to, filepath) {
-    domChatMessageInput.setAttribute('placeholder', 'Uploading...');
     try {
         // Send the attachment file
         await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
@@ -669,9 +668,6 @@ async function sendFile(pubkey, replied_to, filepath) {
         // Notify of an attachment send failure
         popupConfirm(e, '', true);
     }
-
-    // Reset the placeholder and typing indicator timestamp
-    cancelReply();
     nLastTypingIndicator = 0;
 }
 
@@ -2152,7 +2148,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatMessageInputFile.onclick = async () => {
         let filepath = await selectFile();
         if (filepath) {
-            await sendFile(strOpenChat, strCurrentReplyReference, filepath);
+            // Reset reply selection while passing a copy of the reference to the backend
+            const strReplyRef = strCurrentReplyReference;
+            cancelReply();
+            await sendFile(strOpenChat, strReplyRef, filepath);
         }
     };
 
@@ -2169,19 +2168,17 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // ... in non-PNG/GIF formats, which led to completely blank JPEGs.
                 const fTransparent = arrItems.some(item => item.type.includes('png') || item.type.includes('gif'));
 
-                // Placeholder
-                domChatMessageInput.value = '';
-                domChatMessageInput.setAttribute('placeholder', 'Sending...');
+                // Reset reply selection while passing a copy of the reference to the backend
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
 
                 // Tell the Rust backend to acquire the image from clipboard and send it to the current chat
                 await invoke('paste_message', {
                     receiver: strOpenChat,
-                    repliedTo: strCurrentReplyReference,
+                    repliedTo: strReplyRef,
                     transparent: fTransparent
                 });
 
-                // Reset placeholder
-                cancelReply();
                 nLastTypingIndicator = 0;
             }
         }
@@ -2200,12 +2197,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                 domChatMessageInput.value = '';
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
                 try {
-                    await message(strOpenChat, strMessage, strCurrentReplyReference, "");
+                    // Reset reply selection while passing a copy of the reference to the backend
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await message(strOpenChat, strMessage, strReplyRef, "");
+                    nLastTypingIndicator = 0;
                 } catch(_) {}
-
-                // Reset the placeholder and typing indicator timestamp
-                cancelReply();
-                nLastTypingIndicator = 0;
             }
         } else {
             // Send a Typing Indicator
@@ -2223,7 +2220,10 @@ window.addEventListener("DOMContentLoaded", async () => {
             if (event.payload.type === 'over') {
                 // TODO: add hover effects
             } else if (event.payload.type === 'drop') {
-                await sendFile(strOpenChat, strCurrentReplyReference, event.payload.paths[0]);
+                // Reset reply selection while passing a copy of the reference to the backend
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
+                await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
             } else {
                 // TODO: remove hover effects
             }
@@ -2272,9 +2272,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Note: since the user could, for some reason, close the chat while recording - we need to check that it's still open
                 if (strOpenChat) {
                     try {
+                        // Reset reply selection while passing a copy of the reference to the backend
+                        const strReplyRef = strCurrentReplyReference;
+                        cancelReply();
                         await invoke('voice_message', {
                             receiver: strOpenChat,
-                            repliedTo: strCurrentReplyReference,
+                            repliedTo: strReplyRef,
                             bytes: wavData
                         });
                     } catch (e) {
@@ -2282,17 +2285,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                         popupConfirm(e, '', true);
                     }
 
-                    // Reset placeholder
-                    cancelReply();
                     nLastTypingIndicator = 0;
                 }
-
-                /*
-                const blob = new Blob([wavData], { type: 'audio/wav' });
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                audio.play();
-                */
             }
         } else {
             // Display our recording status
