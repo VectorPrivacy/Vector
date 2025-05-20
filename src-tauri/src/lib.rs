@@ -768,27 +768,18 @@ async fn get_oldest_message_timestamp() -> Option<u64> {
 
 #[tauri::command]
 async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<bool, String> {
-    // Immediately add the message to our state as "Pending", we'll update it as either Sent (non-pending) or Failed in the future
-    let pending_count = STATE
-        .lock()
-        .await
-        .get_profile(&receiver)
-        .unwrap_or(&Profile::new())
-        .messages
-        .iter()
-        .filter(|m| m.pending)
-        .count();
+    // Immediately add the message to our state as "Pending" with an ID derived from the current nanosecond, we'll update it as either Sent (non-pending) or Failed in the future
+    let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
     // Create persistent pending_id that will live for the entire function
-    let pending_id = Arc::new(String::from("pending-") + &pending_count.to_string());
+    let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
     let msg = Message {
         id: pending_id.as_ref().clone(),
         content,
         replied_to,
         preview_metadata: None,
-        at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        at: current_time.as_secs(),
         attachments: Vec::new(),
         reactions: Vec::new(),
         pending: true,
