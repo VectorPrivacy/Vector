@@ -2784,6 +2784,15 @@ async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_n
     }
 }
 
+#[tauri::command]
+async fn download_whisper_model<R: Runtime>(handle: AppHandle<R>, model_name: String) -> Result<String, String> {
+    // Download (or simply return the cached path of) a Whisper Model
+    match whisper::download_whisper_model(&handle, &model_name).await {
+        Ok(path) => Ok(path),
+        Err(e) => Err(format!("Model Download error: {}", e.to_string()))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -2862,6 +2871,7 @@ pub fn run() {
             logout,
             create_account,
             transcribe,
+            download_whisper_model,
             whisper::list_models
         ])
         .run(tauri::generate_context!())

@@ -59,7 +59,7 @@ class VoiceSettings {
         if (!model) return;
         
         if (model.downloading) {
-            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.name} model...</div>`;
+            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.name} model... <span id="voice-model-download-progression">(0%)</span></div>`;
             return;
         }
         
@@ -80,7 +80,7 @@ class VoiceSettings {
         this.updateModelStatus();
         
         try {
-            await invoke('download_model', { modelId });
+            await invoke('download_whisper_model', { modelName: modelId });
             model.downloaded = true;
         } catch (err) {
             console.error('Error downloading model:', err);

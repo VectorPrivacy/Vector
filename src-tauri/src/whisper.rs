@@ -4,7 +4,7 @@ use hound::{WavReader, SampleFormat};
 use rubato::*;
 use futures_util::StreamExt;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
-use tauri::{AppHandle, Runtime, Manager};
+use tauri::{AppHandle, Runtime, Manager, Emitter};
 use serde::Serialize;
 
 /// Whisper model information
@@ -334,6 +334,9 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
                 
                 // Print a progress message every 5MB
                 if chunk_count % 50 == 0 {
+                    handle.emit("whisper_download_progress", serde_json::json!({
+                        "progress": (downloaded * 100) / total_size
+                    })).unwrap();
                     println!("\nProgress update: Downloaded {} MB so far...", 
                              downloaded / (1024 * 1024));
                 }

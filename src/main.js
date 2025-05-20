@@ -959,6 +959,13 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
+    // Listen for Vector Voice AI (Whisper) model download progression updates
+    await listen('whisper_download_progress', async (evt) => {
+        // Update the progression UI
+        const spanProgression = document.getElementById('voice-model-download-progression');
+        if (spanProgression) spanProgression.textContent = `(${evt.payload.progress}%)`;
+    });
+
     // Listen for Windows-specific Overlay Icon update requests
     // Note: this API seems unavailable in Tauri's Rust backend, so we're using the JS API as a workaround
     await listen('update_overlay_icon', async (evt) => {
