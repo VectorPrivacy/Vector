@@ -37,9 +37,63 @@ class VoiceRecorder {
 class VoiceTranscriptionUI {
     constructor() {
         this.selectedModel = 'base'; // Default model
+        this.isSettingUp = false;
+    }
+
+        async ensureModelReady() {
+        if (this.isSettingUp) return false;
+        
+        const model = window.voiceSettings?.models?.find(m => m.name === this.selectedModel);
+        if (model?.downloaded) return true;
+        
+        this.isSettingUp = true;
+        const progressContainer = document.getElementById('voice-progress-container');
+        const progressFill = document.querySelector('.voice-progress-fill');
+        const progressText = document.querySelector('.voice-progress-text');
+        
+        progressContainer.style.display = 'block';
+        progressText.textContent = 'Downloading voice model...';
+        
+        try {
+            // Set up progress listener
+            const unlisten = await window.__TAURI__.event.listen(
+                'whisper_download_progress', 
+                (event) => {
+                    const progress = event.payload.progress;
+                    progressFill.style.width = `${progress}%`;
+                    progressText.textContent = `Downloading voice model... ${progress}%`;
+                }
+            );
+
+            await window.voiceSettings.downloadModel(this.selectedModel);
+            unlisten();
+            
+            progressText.textContent = 'Voice model ready!';
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+                progressFill.style.width = '0%';
+            }, 1000);
+            
+            return true;
+        } catch (error) {
+            progressText.textContent = `Download failed: ${error}`;
+            progressFill.style.background = '#ff5e5e';
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+                progressFill.style.width = '0%';
+                progressFill.style.background = 'linear-gradient(90deg, #59fcb3, #00d4ff)';
+            }, 3000);
+            return false;
+        } finally {
+            this.isSettingUp = false;
+        }
     }
 
     async transcribeRecording(wavData) {
+        if (!await this.ensureModelReady()) {
+            throw new Error("Voice model setup failed");
+        }
+
         if (!wavData) {
             throw new Error("No audio data to transcribe");
         }
@@ -51,6 +105,10 @@ class VoiceTranscriptionUI {
     }
 
     async transcribeAudioFile(filePath) {
+        if (!await this.ensureModelReady()) {
+            throw new Error("Voice model setup failed");
+        }
+
         return await invoke('transcribe', {
             filePath: filePath,
             modelName: this.selectedModel
@@ -84,7 +142,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         const transcribeBtn = document.createElement('button');
         transcribeBtn.classList.add('btn', 'btn-transcribe');
         transcribeBtn.style.display = `flex`;
-        
+
         const transcribeIcon = document.createElement('span');
         transcribeIcon.classList.add('icon', 'icon-mic-on');
         transcribeIcon.style.position = `relative`;
@@ -104,7 +162,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         transcriptionResult.classList.add('transcription-result', 'hidden');
 
         transcribeBtn.addEventListener('click', async () => {
-            if (transcribeBtn.disabled) return;
+            if (transcribeBtn.classList.contains('loading')) return;
 
             // If already transcribed, just toggle visibility
             if (transcriptionResult.textContent.trim()) {
@@ -112,7 +170,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
             }
 
             // Show loading state
-            transcribeBtn.disabled = true;
+            transcribeBtn.classList.add('loading');
             transcribeText.textContent = `Transcribing`;
             transcribeBtn.style.cursor = 'default';
             transcribeIcon.classList.replace('icon-mic-on', 'icon-loading');
@@ -121,11 +179,11 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
             try {
                 // Get the audio file path and send to backend for transcription
                 const transcription = await cTranscriber.transcribeAudioFile(cAttachment.path);
-
+              
                 // Remove the loading state (or, currently, the entire button)
                 transcribeBtn.remove();
                 
-                // Clear any existing content
+// Clear any existing content
                 while (transcriptionResult.firstChild) {
                     transcriptionResult.removeChild(transcriptionResult.firstChild);
                 }
