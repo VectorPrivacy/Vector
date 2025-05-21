@@ -9,45 +9,73 @@ let cTranscriber = null;
 
 class VoiceSettings {
     constructor() {
-        this.models = [
-            { id: 'tiny', name: 'Tiny', description: 'Fastest, least accurate', downloaded: false, downloading: false },
-            { id: 'base', name: 'Base', description: 'Fast, decent accuracy', downloaded: false, downloading: false },
-            { id: 'small', name: 'Small', description: 'Slower, better accuracy', downloaded: false, downloading: false },
-            { id: 'medium', name: 'Medium', description: 'Slow, good accuracy', downloaded: false, downloading: false },
-            { id: 'large-v3', name: 'Large', description: 'Very slow, best accuracy', downloaded: false, downloading: false }
-        ];
+        this.models = [];
         this.initVoiceSettings();
     }
 
     async initVoiceSettings() {
         const voiceSection = document.getElementById('settings-voice');
         if (voiceSection) {
+            // Show the section immediately (remove display:none)
             voiceSection.style.display = 'block';
             
+            // Load models right away since we're showing the section
+            await this.loadWhisperModels();
+
             // Add event listeners
             document.getElementById('whisper-model').addEventListener('change', (e) => {
                 cTranscriber.selectedModel = e.target.value;
                 this.updateModelStatus();
             });
             
-            document.getElementById('download-model').addEventListener('click', () => {
-                this.downloadModel(cTranscriber.selectedModel);
+            document.getElementById('download-model').addEventListener('click', async () => {
+                const modelSelect = document.getElementById('whisper-model');
+                const modelName = modelSelect.value;
+                
+                if (!modelName) {
+                    alert('Please select a model first');
+                    return;
+                }
+
+                await this.downloadModel(modelName);
             });
-            
-            await this.checkDownloadedModels();
-            this.updateModelStatus();
         }
     }
 
-    async checkDownloadedModels() {
+    async loadWhisperModels() {
+        const modelSelect = document.getElementById('whisper-model');
+        const modelStatus = document.getElementById('model-status');
+        
         try {
-            const downloadedModels = await invoke('list_models');
+            modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
+            
+            this.models = await invoke('list_models');
+            modelSelect.innerHTML = ''; // Clear loading message
+            
+            if (this.models.length === 0) {
+                modelSelect.innerHTML = '<option value="" disabled>No models available</option>';
+                return;
+            }
+            
             this.models.forEach(model => {
-                model.downloaded = downloadedModels.find(m => m.name === model.id).downloaded;
+                const option = document.createElement('option');
+                option.value = model.name;
+                option.textContent = `${model.name} (${model.size}MB)${model.downloaded ? ' ✔' : ''}`;
+                                if (model.downloaded) {
+                    option.selected = true;
+                    // Set the transcriber's selected model
+                    if (cTranscriber) {
+                        cTranscriber.selectedModel = model.name;
+                    }
+                }
+                modelSelect.appendChild(option);
             });
-            this.updateModelStatus();
-        } catch (err) {
-            console.error('Error checking downloaded models:', err);
+            
+            modelStatus.textContent = `${this.models.filter(m => m.downloaded).length}/${this.models.length} models downloaded`;
+        } catch (error) {
+            modelSelect.innerHTML = '<option value="" disabled>Error loading models</option>';
+            modelStatus.textContent = `Error: ${error.message}`;
+            console.error('Failed to load models:', error);
         }
     }
 
@@ -55,7 +83,7 @@ class VoiceSettings {
         const statusElement = document.getElementById('model-status');
         if (!statusElement) return;
         
-        const model = this.models.find(m => m.id === cTranscriber.selectedModel);
+        const model = this.models.find(m => m.name === cTranscriber?.selectedModel);
         if (!model) return;
         
         if (model.downloading) {
@@ -72,21 +100,27 @@ class VoiceSettings {
         }
     }
 
-    async downloadModel(modelId) {
-        const model = this.models.find(m => m.id === modelId);
-        if (!model || model.downloading || model.downloaded) return;
+    async downloadModel(modelName) {
+        const model = this.models.find(m => m.name === modelName);
+        if (!model || model.downloaded) return;
         
-        model.downloading = true;
-        this.updateModelStatus();
+        const modelStatus = document.getElementById('model-status');
+        modelStatus.textContent = `Downloading ${modelName} model...`;
         
         try {
-            await invoke('download_whisper_model', { modelName: modelId });
-            model.downloaded = true;
-        } catch (err) {
-            console.error('Error downloading model:', err);
-        } finally {
-            model.downloading = false;
+            model.downloading = true;
             this.updateModelStatus();
+            
+            await invoke('download_whisper_model', { modelName });
+            model.downloaded = true;
+            model.downloading = false;
+            
+            modelStatus.textContent = `Successfully downloaded ${modelName} model!`;
+            await this.loadWhisperModels(); // Refresh the list
+        } catch (error) {
+            model.downloading = false;
+            modelStatus.textContent = `Error downloading model: ${error}`;
+            console.error('Download failed:', error);
         }
     }
 }
@@ -101,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
  * in-app and on the Nostr network.
  */
 async function askForUsername() {
-    const strUsername = await popupConfirm('Choose a Username', `This lets Vector users identify you easier!`, false, 'New Username');
+    const strUsername = await popupConfirm('Choose a Username', 'This lets Vector users identify you easier!', false, 'New Username');
     if (!strUsername) return;
 
     // Display the change immediately
@@ -160,7 +194,7 @@ async function askForAvatar() {
  * in-app and on the Nostr network.
  */
 async function askForStatus() {
-    const strStatus = await popupConfirm('Status', `Set a public status for everyone to see`, false, 'Custom Status');
+    const strStatus = await popupConfirm('Status', 'Set a public status for everyone to see', false, 'Custom Status');
     if (!strStatus) return;
 
     // Display the change immediately
@@ -170,7 +204,7 @@ async function askForStatus() {
 
     // Send out the metadata update
     try {
-        await invoke("update_status", { status: strStatus, });
+        await invoke("update_status", { status: strStatus });
     } catch (e) {
         await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true);
     }
@@ -189,8 +223,8 @@ async function selectFile() {
 
 /**
  * Set the theme of the app by hot-swapping theme CSS files
- * @param {string} theme - The theme name, i.e: `vector`, `chatstr`
- * @param {string} mode - The theme mode, i.e: `light`, `dark`
+ * @param {string} theme - The theme name, i.e: vector, chatstr
+ * @param {string} mode - The theme mode, i.e: light, dark
  */
 async function setTheme(theme = 'vector', mode = 'dark') {
     domTheme.href = `/themes/${theme}/${mode}.css`;
@@ -215,4 +249,4 @@ domSettingsLogout.onclick = async (evt) => {
 
     // Begin the logout sequence
     await invoke('logout');
-}
+};
