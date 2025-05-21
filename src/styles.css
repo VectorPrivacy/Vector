@@ -998,3 +998,175 @@ audio {
 #login-input {
   margin-right: 5px;
 }
+
+/* Voice Settings Section Styles */
+.settings-section-voice {
+  padding: 20px;
+  background: rgba(22, 22, 22, 0.8);
+  border-radius: 12px;
+  margin-top: 15px;
+  animation: fadeIn 0.5s ease-out;
+}
+
+/* Model Dropdown Styles */
+#whisper-model {
+  width: 100%;
+  padding: 12px 15px;
+  border-radius: 8px;
+  border: 1px solid #59fcb3;
+  background: rgba(0, 0, 0, 0.5);
+  color: white;
+  font-size: 14px;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2359fcb3'%3e%3cpath d='M7 10l5 5 5-5z'/%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 20px;
+  transition: all 0.3s ease;
+  margin-bottom: 15px;
+}
+
+#whisper-model:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.3);
+}
+
+#whisper-model option {
+  background: #161616;
+  padding: 10px;
+}
+
+/* Download Button Styles */
+#download-model {
+  background: linear-gradient(135deg, #59fcb3 0%, #00d4ff 100%);
+  color: #000;
+  border: none;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  width: 100%;
+}
+
+#download-model:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 5px 15px rgba(89, 252, 179, 0.3);
+}
+
+#download-model:active {
+  transform: translateY(0);
+}
+
+/* Model Status Styles */
+.model-status {
+  margin-top: 15px;
+  font-size: 14px;
+  color: #59fcb3;
+  min-height: 20px;
+}
+
+/* Progress Bar Container */
+.download-progress-container {
+  margin-top: 20px;
+  position: relative;
+  height: 40px;
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Progress Track */
+.progress-bar-track {
+  position: relative;
+  height: 12px;
+  width: 100%;
+  background: rgba(30, 30, 30, 0.8);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(89, 252, 179, 0.1);
+}
+
+/* Progress Fill */
+.progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, 
+    #59fcb3 0%, 
+    #00d4ff 100%);
+  border-radius: 6px;
+  position: relative;
+  transition: width 0.3s cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+/* Animated Glow Effect */
+.progress-bar-glow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 20px;
+  background: linear-gradient(90deg, 
+    rgba(255, 255, 255, 0.8) 0%, 
+    rgba(255, 255, 255, 0) 100%);
+  animation: glowSlide 2s infinite linear;
+  opacity: 0.7;
+  transform: translateX(-100%);
+}
+
+/* Pulse Animation */
+.progress-pulse {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: rgba(89, 252, 179, 0.3);
+  transform: translateY(-50%);
+  border-radius: 50%;
+  filter: blur(1px);
+  animation: pulse 1.5s infinite ease-out;
+}
+
+/* Percentage Text */
+.progress-text {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: white;
+  font-size: 11px;
+  font-weight: bold;
+  text-shadow: 0 0 5px rgba(89, 252, 179, 0.7);
+  font-family: 'Courier New', monospace;
+}
+
+/* Animations */
+@keyframes glowSlide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(calc(100vw + 20px)); }
+}
+
+@keyframes pulse {
+  0% { 
+    opacity: 0.6;
+    transform: translateY(-50%) scale(0.95);
+  }
+  50% {
+    opacity: 0.3;
+    transform: translateY(-50%) scale(1.05);
+  }
+  100% {
+    opacity: 0.6;
+    transform: translateY(-50%) scale(0.95);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}

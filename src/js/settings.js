@@ -101,28 +101,69 @@ class VoiceSettings {
     }
 
     async downloadModel(modelName) {
-        const model = this.models.find(m => m.name === modelName);
-        if (!model || model.downloaded) return;
+    const model = this.models.find(m => m.name === modelName);
+    if (!model || model.downloaded) return;
+
+    const modelStatus = document.getElementById('model-status');
+    const progressContainer = document.querySelector('.download-progress-container');
+    const progressFill = document.querySelector('.progress-bar-fill');
+    const progressText = document.querySelector('.progress-text');
+
+    // Initialize UI
+    modelStatus.textContent = `Downloading ${modelName} model...`;
+    progressContainer.style.display = 'block';
+    progressFill.style.width = '0%';
+    progressText.textContent = '0%';
+
+    try {
+        model.downloading = true;
+        this.updateModelStatus();
+
+        // Set up progress listener
+        const unlisten = await window.__TAURI__.event.listen(
+            'whisper_download_progress', 
+            (event) => {
+                const progress = event.payload.progress;
+                progressFill.style.width = `${progress}%`;
+                progressText.textContent = `${progress}%`;
+            }
+        );
+
+        await invoke('download_whisper_model', { modelName });
+
+        // Clean up listener
+        unlisten();
+
+        model.downloaded = true;
+        model.downloading = false;
+        modelStatus.textContent = `Successfully downloaded ${modelName} model!`;
         
-        const modelStatus = document.getElementById('model-status');
-        modelStatus.textContent = `Downloading ${modelName} model...`;
+        // Add completion animation
+        progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
+        progressContainer.style.animation = 'none';
+        void progressContainer.offsetWidth; // Trigger reflow
+        progressContainer.style.animation = 'fadeIn 0.3s ease-out';
         
-        try {
-            model.downloading = true;
-            this.updateModelStatus();
-            
-            await invoke('download_whisper_model', { modelName });
-            model.downloaded = true;
-            model.downloading = false;
-            
-            modelStatus.textContent = `Successfully downloaded ${modelName} model!`;
-            await this.loadWhisperModels(); // Refresh the list
-        } catch (error) {
-            model.downloading = false;
-            modelStatus.textContent = `Error downloading model: ${error}`;
-            console.error('Download failed:', error);
-        }
+        await this.loadWhisperModels();
+    } catch (error) {
+        model.downloading = false;
+        modelStatus.textContent = `Error downloading model: ${error}`;
+        console.error('Download failed:', error);
+        
+        // Error state styling
+        progressFill.style.background = 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
+        progressText.textContent = 'Failed';
+    } finally {
+        // Hide progress bar after delay
+        setTimeout(() => {
+            progressContainer.style.display = 'none';
+            // Reset progress bar for next use
+            progressFill.style.width = '0%';
+            progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
+            progressText.textContent = '0%';
+        }, 3000);
     }
+}
 }
 
 // Initialize voice settings when DOM is ready
