@@ -38,10 +38,16 @@ class VoiceTranscriptionUI {
     constructor() {
         this.selectedModel = 'base'; // Default model
         this.isSettingUp = false;
+        this.autoTranslate = false;
+        this.autoTranscript = false;
     }
 
         async ensureModelReady() {
         if (this.isSettingUp) return false;
+
+        // Get current settings from localStorage
+        this.autoTranslate = localStorage.getItem('autoTranslate') === 'true';
+        this.autoTranscript = localStorage.getItem('autoTranscript') === 'true';
         
         const model = window.voiceSettings?.models?.find(m => m.name === this.selectedModel);
         if (model?.downloaded) return true;
@@ -100,7 +106,8 @@ class VoiceTranscriptionUI {
         
         return await invoke('transcribe_audio', {
             audioData: Array.from(wavData),
-            modelId: this.selectedModel
+            modelId: this.selectedModel,
+            autoTranslate: this.autoTranslate
         });
     }
 
@@ -111,7 +118,8 @@ class VoiceTranscriptionUI {
 
         return await invoke('transcribe', {
             filePath: filePath,
-            modelName: this.selectedModel
+            modelName: this.selectedModel,
+            autoTranslate: this.autoTranslate
         });
     }
 }

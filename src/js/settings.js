@@ -10,6 +10,8 @@ let cTranscriber = null;
 class VoiceSettings {
     constructor() {
         this.models = [];
+        this.autoTranslate = false;
+        this.autoTranscript = false;
         this.initVoiceSettings();
     }
 
@@ -21,6 +23,14 @@ class VoiceSettings {
             
             // Load models right away since we're showing the section
             await this.loadWhisperModels();
+
+            // Load saved toggle states from localStorage
+            this.autoTranslate = localStorage.getItem('autoTranslate') === 'true';
+            this.autoTranscript = localStorage.getItem('autoTranscript') === 'true';
+            
+            // Set initial toggle states
+            document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
+            document.getElementById('auto-transcript-toggle').checked = this.autoTranscript;
 
             // Add event listeners
             document.getElementById('whisper-model').addEventListener('change', (e) => {
@@ -38,6 +48,18 @@ class VoiceSettings {
                 }
 
                 await this.downloadModel(modelName);
+
+               // Add toggle event listeners
+                document.getElementById('auto-translate-toggle').addEventListener('change', (e) => {
+                this.autoTranslate = e.target.checked;
+                localStorage.setItem('autoTranslate', this.autoTranslate);
+                });
+
+                document.getElementById('auto-transcript-toggle').addEventListener('change', (e) => {
+                this.autoTranscript = e.target.checked;
+                localStorage.setItem('autoTranscript', this.autoTranscript);
+                });
+
             });
         }
     }
