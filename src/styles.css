@@ -1383,3 +1383,20 @@ select:focus::-ms-value {
   appearance: none;
   -webkit-appearance: none;
 }
+
+/* Disabled select styles for visual feedback */
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.5);
+  border-color: rgba(89, 252, 179, 0.3);
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23666666'%3e%3cpath d='M7 10l5 5 5-5z'/%3e%3c/svg%3e");
+  pointer-events: none;
+  transition: all 0.3s ease;
+}
+
+select:disabled:hover {
+  box-shadow: none;
+  transform: none;
+}

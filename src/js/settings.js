@@ -16,57 +16,47 @@ class VoiceSettings {
 
     async initVoiceSettings() {
         const voiceSection = document.getElementById('settings-voice');
-        if (voiceSection) {
-            // Show the section immediately (remove display:none)
-            voiceSection.style.display = 'block';
+        if (!voiceSection) return;
 
-            // Load saved toggle states from localStorage
-            this.autoTranslate = localStorage.getItem('autoTranslate') === 'true';
-            this.autoTranscript = localStorage.getItem('autoTranscript') === 'true';
-            
-            // Set initial toggle states
-            document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
-            document.getElementById('auto-transcript-toggle').checked = this.autoTranscript;
+        voiceSection.style.display = 'block';
+        
+        // Set initial toggle states (will be loaded from backend DB in future)
+        document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
+        document.getElementById('auto-transcript-toggle').checked = this.autoTranscript;
 
-            // Initialise the model status
+        this.updateModelStatus();
+        this.setupEventListeners();
+    }
+
+    setupEventListeners() {
+        // Model selection change
+        document.getElementById('whisper-model').addEventListener('change', (e) => {
+            cTranscriber.selectedModel = e.target.value;
             this.updateModelStatus();
+            this.updateDeleteButton();
+        });
+        
+        // Model download
+        document.getElementById('download-model').addEventListener('click', async () => {
+            const modelName = document.getElementById('whisper-model').value;
+            await this.downloadModel(modelName);
+        });
 
-            // Add event listeners
-            document.getElementById('whisper-model').addEventListener('change', (e) => {
-                cTranscriber.selectedModel = e.target.value;
-                this.updateModelStatus();
-                this.updateDeleteButton();
-            });
-            
-            document.getElementById('download-model').addEventListener('click', async () => {
-                const modelSelect = document.getElementById('whisper-model');
-                const modelName = modelSelect.value;
-                
-                if (!modelName) {
-                    alert('Please select a model first');
-                    return;
-                }
+        // Toggle event listeners
+        document.getElementById('auto-translate-toggle').addEventListener('change', (e) => {
+            this.autoTranslate = e.target.checked;
+            // TODO: Save to backend DB when implemented
+        });
 
-                await this.downloadModel(modelName);
+        document.getElementById('auto-transcript-toggle').addEventListener('change', (e) => {
+            this.autoTranscript = e.target.checked;
+            // TODO: Save to backend DB when implemented
+        });
 
-               // Add toggle event listeners
-                document.getElementById('auto-translate-toggle').addEventListener('change', (e) => {
-                    this.autoTranslate = e.target.checked;
-                    localStorage.setItem('autoTranslate', this.autoTranslate);
-                });
-
-                document.getElementById('auto-transcript-toggle').addEventListener('change', (e) => {
-                    this.autoTranscript = e.target.checked;
-                    localStorage.setItem('autoTranscript', this.autoTranscript);
-                });
-
-            });
-
-            const deleteBtn = document.getElementById('delete-model');
-            console.log(deleteBtn)
-            if (deleteBtn) {
-                deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
-            }
+        // Model deletion
+        const deleteBtn = document.getElementById('delete-model');
+        if (deleteBtn) {
+            deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
         }
     }
 
@@ -75,28 +65,57 @@ class VoiceSettings {
         const modelStatus = document.getElementById('model-status');
         
         try {
+            // Store the currently selected model before rebuilding the dropdown
+            const currentSelection = modelSelect.value;
+            
+            // Show loading state while fetching models from backend
             modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
             
+            // Fetch available models from Tauri backend
             this.models = await invoke('list_models');
             modelSelect.innerHTML = ''; // Clear loading message
             
+            // Track if we need to select a fallback model
+            let foundCurrentSelection = false;
+            let fallbackModel = null; // First downloaded model to use as fallback
+            
+            // Populate dropdown with all available models
             this.models.forEach(modelState => {
                 const option = document.createElement('option');
                 option.value = modelState.model.name;
-                option.textContent = `${modelState.model.display_name}`;
-                if (modelState.downloaded) {
+                option.textContent = modelState.model.display_name;
+                
+                // If this was the previously selected model and it's still downloaded, keep it selected
+                if (currentSelection === modelState.model.name && modelState.downloaded) {
+                    foundCurrentSelection = true;
                     option.selected = true;
-                    // Set the transcriber's selected model
-                    if (cTranscriber) {
-                        cTranscriber.selectedModel = modelState.model.name;
-                    }
                 }
+                
+                // Track the first downloaded model as a fallback option
+                if (modelState.downloaded && !fallbackModel) {
+                    fallbackModel = modelState;
+                }
+                
                 modelSelect.appendChild(option);
             });
             
+            // If the previously selected model is no longer available, select the first downloaded model
+            if (!foundCurrentSelection && fallbackModel) {
+                const fallbackOption = Array.from(modelSelect.options).find(opt => opt.value === fallbackModel.model.name);
+                if (fallbackOption) {
+                    fallbackOption.selected = true;
+                    // Update the transcriber to use the fallback model
+                    if (cTranscriber) {
+                        cTranscriber.selectedModel = fallbackModel.model.name;
+                    }
+                }
+            }
+            
+            // Update UI elements based on the selected model
             this.updateDeleteButton();
-            modelStatus.textContent = ``;
+            modelStatus.textContent = '';
         } catch (error) {
+            // Handle errors by showing error state in UI
             modelSelect.innerHTML = '<option value="" disabled>Error loading models</option>';
             modelStatus.textContent = `Error: ${error.message}`;
             console.error('Failed to load models:', error);
@@ -108,21 +127,25 @@ class VoiceSettings {
         const deleteBtn = document.getElementById('delete-model');
         const selectedModel = modelSelect.value;
         
+        // Hide delete button if no model is selected
         if (!selectedModel) {
             deleteBtn.style.display = 'none';
             return;
         }
         
+        // Find the model data for the selected model
         const model = this.models.find(m => m.model.name === selectedModel);
+        
+        // Only show delete button for downloaded models (can't delete what isn't there)
         if (model?.downloaded) {
-        deleteBtn.style.display = 'block';
-        deleteBtn.classList.add('downloaded');
-        deleteBtn.title = `Delete ${model.model.display_name}`;
+            deleteBtn.style.display = 'block';
+            deleteBtn.classList.add('downloaded');
+            deleteBtn.title = `Delete ${model.model.display_name}`;
         } else {
-        deleteBtn.style.display = 'none';
-        deleteBtn.classList.remove('downloaded');
+            deleteBtn.style.display = 'none';
+            deleteBtn.classList.remove('downloaded');
+        }
     }
-}
 
     async deleteSelectedModel() {
         const modelSelect = document.getElementById('whisper-model');
@@ -173,25 +196,32 @@ class VoiceSettings {
     }
 
     async downloadModel(modelName) {
+        // Find the model in our cached list and validate it's not already downloaded
         const model = this.models.find(m => m.model.name === modelName);
         if (!model || model.downloaded) return;
 
+        // Get UI elements for progress display
         const modelStatus = document.getElementById('model-status');
         const progressContainer = document.querySelector('.download-progress-container');
         const progressFill = document.querySelector('.progress-bar-fill');
         const progressText = document.querySelector('.progress-text');
 
-        // Initialize UI
+        // Initialize download UI state
         modelStatus.textContent = `Downloading AI model...`;
         progressContainer.style.display = 'block';
         progressFill.style.width = '0%';
         progressText.textContent = '0%';
+        
+        // Disable UI during download to prevent user interference
+        document.getElementById('download-model').style.display = 'none';
+        document.getElementById('whisper-model').disabled = true;
 
         try {
+            // Mark model as downloading and update status display
             model.downloading = true;
             this.updateModelStatus();
 
-            // Set up progress listener
+            // Set up Tauri event listener for download progress updates
             const unlisten = await window.__TAURI__.event.listen(
                 'whisper_download_progress', 
                 (event) => {
@@ -201,35 +231,51 @@ class VoiceSettings {
                 }
             );
 
+            // Start the actual download via Tauri backend
             await invoke('download_whisper_model', { modelName });
 
-            // Clean up listener
+            // Clean up event listener to prevent memory leaks
             unlisten();
 
+            // Update model state to reflect successful download
             model.downloaded = true;
             model.downloading = false;
+            
+            // Set this as the active model for the transcriber
+            if (cTranscriber) {
+                cTranscriber.selectedModel = modelName;
+            }
+            
             modelStatus.textContent = `Successfully downloaded AI model!`;
             
-            // Add completion animation
+            // Show success animation with green gradient
+            progressFill.style.width = `100%`;
+            progressText.textContent = `100%`;
             progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
             progressContainer.style.animation = 'none';
-            void progressContainer.offsetWidth; // Trigger reflow
+            void progressContainer.offsetWidth; // Force reflow to reset animation
             progressContainer.style.animation = 'fadeIn 0.3s ease-out';
             
+            // Refresh the models dropdown and update UI state
             await this.loadWhisperModels();
+            this.updateModelStatus();
         } catch (error) {
+            // Handle download failures
             model.downloading = false;
             modelStatus.textContent = `Error downloading model: ${error}`;
             console.error('Download failed:', error);
             
-            // Error state styling
+            // Show error state with red gradient
             progressFill.style.background = 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
             progressText.textContent = 'Failed';
         } finally {
-            // Hide progress bar after delay
+            // Re-enable model selector after download completes
+            document.getElementById('whisper-model').disabled = false;
+            
+            // Clean up progress bar after a delay, regardless of success/failure
             setTimeout(() => {
                 progressContainer.style.display = 'none';
-                // Reset progress bar for next use
+                // Reset progress bar styling for next download
                 progressFill.style.width = '0%';
                 progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
                 progressText.textContent = '0%';
