@@ -1306,3 +1306,21 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
     0 0 12px rgba(0, 212, 255, 0.5),
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
+
+/* Remove default focus outline and apply custom styling */
+#theme-select:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.3);
+}
+
+/* Style options to match whisper model */
+#theme-select option {
+  background: #161616;
+  padding: 10px;
+}
+
+/* For Windows specifically, override the forced focus color */
+select:focus::-ms-value {
+  background-color: transparent;
+  color: white;
+}
