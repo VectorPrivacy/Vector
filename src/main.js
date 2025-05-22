@@ -661,7 +661,6 @@ async function message(pubkey, content, replied_to) {
  * @param {string} filepath - The absolute file path
  */
 async function sendFile(pubkey, replied_to, filepath) {
-    domChatMessageInput.setAttribute('placeholder', 'Uploading...');
     try {
         // Send the attachment file
         await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
@@ -669,9 +668,6 @@ async function sendFile(pubkey, replied_to, filepath) {
         // Notify of an attachment send failure
         popupConfirm(e, '', true);
     }
-
-    // Reset the placeholder and typing indicator timestamp
-    cancelReply();
     nLastTypingIndicator = 0;
 }
 
@@ -1117,96 +1113,174 @@ function renderCurrentProfile(cProfile) {
 }
 
 /**
- * Display the Encryption/Decryption flow, depending on the passed options
- * @param {string} pkey - A private key to encrypt
- * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one
+ * Display the Encryption/Decryption flow.
+ * @param {string} pkey - A private key to encrypt.
+ * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one.
  */
 function openEncryptionFlow(pkey, fUnlock = false) {
     domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
     domLoginEncrypt.style.display = '';
 
-    // Track our pin entries ('Current' is what the user has currently typed)
-    // ... while 'Last' holds a previous pin in memory for typo-checking purposes.
-    let strPinLast = [];
-    let strPinCurrent = Array(6).fill('-');
+    let strPinLast = []; // Stores the first entered PIN for confirmation
+    let strPinCurrent = Array(6).fill('-'); // Current PIN being entered, '-' represents an empty digit
 
-    // If we're unlocking - display that
-    if (fUnlock) domLoginEncryptTitle.textContent = `Enter your Decryption Pin`;
+    // Reusable Message Constants
+    const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
+    const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
+    const RE_ENTER_PROMPT = `Re-enter your Pin`;
+    const DECRYPTING_MSG = `Decrypting your keys...`;
+    const ENCRYPTING_MSG = `Encrypting your keys...`;
+    const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
+    const MISMATCH_PIN_MSG = `Pin doesn't match, re-try`;
 
-    // Track our pin inputs
-    const arrPinDOMs = document.querySelectorAll(`.pin-row input`);
-    arrPinDOMs.item(0).focus();
-    for (const domPin of arrPinDOMs) {
-        domPin.addEventListener('input', async function (e) {
-            this.value = this.value.replace(/[^0-9]/g, '');
-            if (this.value) {
-                // Find the index of this pin entry
-                const nIndex = Number(this.id.slice(-1));
+    const arrPinDOMs = document.querySelectorAll('.pin-row input');
+    const pinContainer = arrPinDOMs[0].closest('.pin-row');
 
-                // Focus the next entry
-                const domNextEntry = arrPinDOMs.item(nIndex + 1);
-                if (domNextEntry) domNextEntry.focus();
-                else arrPinDOMs.item(0).focus();
-
-                // Set the current digit entry
-                strPinCurrent[nIndex] = this.value;
-
-                // Figure out which Pin Array we're working with
-                if (strPinLast.length === 0) {
-                    // There's no set pin, so we're still setting the initial one
-                    // Check if we've filled this pin entry
-                    if (!strPinCurrent.includes(`-`)) {
-                        if (fUnlock) {
-                            // Attempt to decrypt our key with the pin
-                            domLoginEncryptTitle.textContent = `Decrypting your keys...`;
-                            domLoginEncryptTitle.classList.add('text-gradient');
-                            domLoginEncryptPinRow.style.display = `none`;
-                            try {
-                                const decryptedPkey = await loadAndDecryptPrivateKey(strPinCurrent.join(''));
-                                const { public, _private } = await invoke("login", { importKey: decryptedPkey });
-                                strPubkey = public;
-                                login();
-                            } catch (e) {
-                                // Decrypt failed - let's re-try
-                                domLoginEncryptPinRow.style.display = ``;
-                                domLoginEncryptTitle.textContent = `Incorrect pin, try again`;
-                            }
-                        } else {
-                            // No more empty entries - let's reset for typo checking!
-                            strPinLast = [...strPinCurrent];
-                            domLoginEncryptTitle.textContent = `Re-enter your Pin`;
-                        }
-
-                        // Wipe the current digits
-                        for (const domPinToReset of arrPinDOMs) domPinToReset.value = ``;
-                        strPinCurrent = Array(6).fill('-');
-                    }
-                } else {
-                    // There's a pin set - let's make sure the re-type matches
-                    if (!strPinCurrent.includes(`-`)) {
-                        // Do they match?
-                        const fMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
-                        if (fMatching) {
-                            // Encrypt and proceed
-                            domLoginEncryptTitle.textContent = `Encrypting your keys...`;
-                            domLoginEncryptTitle.classList.add('text-gradient');
-                            domLoginEncryptPinRow.style.display = `none`;
-                            await saveAndEncryptPrivateKey(pkey, strPinLast.join(''));
-                            login();
-                        } else {
-                            // Wrong pin! Let's start again
-                            domLoginEncryptTitle.textContent = `Pin doesn't match, re-try`;
-                            strPinCurrent = Array(6).fill(`-`);
-                            strPinLast = [];
-                        }
-                        // Reset the pin inputs
-                        for (const domPinToReset of arrPinDOMs) domPinToReset.value = ``;
-                    }
-                }
-            }
-        });
+    /** Updates the status message displayed to the user. */
+    function updateStatusMessage(message, isProcessing = false) {
+        domLoginEncryptTitle.textContent = message;
+        if (isProcessing) {
+            domLoginEncryptTitle.classList.add('text-gradient');
+            domLoginEncryptPinRow.style.display = 'none'; // Hide PIN inputs during processing
+        } else {
+            domLoginEncryptTitle.classList.remove('text-gradient');
+            domLoginEncryptPinRow.style.display = ''; // Ensure PIN inputs are visible
+        }
     }
+
+    /** Resets the PIN input fields and optionally reverts the title from an error state. */
+    function resetPinDisplay(focusFirst = true, revertTitleFromErrorState = true) {
+        strPinCurrent = Array(6).fill('-');
+        arrPinDOMs.forEach(input => input.value = '');
+
+        if (revertTitleFromErrorState) {
+            const currentTitle = domLoginEncryptTitle.textContent;
+            // If an error message is shown, change it back to the appropriate prompt
+            if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
+                const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+                updateStatusMessage(newTitle);
+            }
+        }
+        if (focusFirst && arrPinDOMs.length > 0) {
+            arrPinDOMs[0].focus();
+        }
+    }
+
+    /** Focuses the PIN input at the specified index. */
+    function focusPinInput(index) {
+        if (index >= 0 && index < arrPinDOMs.length) {
+            arrPinDOMs[index].focus();
+        } else if (index >= arrPinDOMs.length && arrPinDOMs.length > 0) { // Wrap to first on last input
+            arrPinDOMs[0].focus(); // Reached end, focus first (or handle submission if all filled)
+        }
+        // If index < 0 (e.g., backspace from the first input), focus remains on the current (first) input.
+    }
+
+    /** Handles the logic once all PIN digits have been entered. */
+    async function handleFullPinEntered() {
+        const currentPinString = strPinCurrent.join('');
+
+        if (strPinLast.length === 0) { // Initial PIN entry (for decryption or first step of new encryption)
+            if (fUnlock) {
+                updateStatusMessage(DECRYPTING_MSG, true);
+                try {
+                    const decryptedPkey = await loadAndDecryptPrivateKey(currentPinString);
+                    const { public: pubKey /*, _private: privKey */ } = await invoke("login", { importKey: decryptedPkey });
+                    strPubkey = pubKey; // Store public key
+                    login(); // Proceed to login
+                } catch (e) {
+                    updateStatusMessage(INCORRECT_PIN_MSG);
+                    resetPinDisplay(true, false); // Keep error message, reset input fields
+                }
+            } else { // First PIN entry for new encryption
+                strPinLast = [...strPinCurrent]; // Store the entered PIN
+                updateStatusMessage(RE_ENTER_PROMPT);
+                resetPinDisplay(true, false); // Keep "Re-enter" message, reset input fields
+            }
+        } else { // Second PIN entry (confirmation for new encryption)
+            const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
+            if (isMatching) {
+                updateStatusMessage(ENCRYPTING_MSG, true);
+                await saveAndEncryptPrivateKey(pkey, strPinLast.join(''));
+                login(); // Proceed to login
+            } else {
+                updateStatusMessage(MISMATCH_PIN_MSG);
+                strPinLast = []; // Clear the stored first PIN, requiring user to start over
+                resetPinDisplay(true, true); // Reset inputs and revert title from error to the initial prompt
+            }
+        }
+    }
+
+    // --- Event Handlers (Delegated to pinContainer) ---
+
+    /** Handles keydown events, primarily for Backspace and preventing non-numeric input. */
+    function handleKeyDown(event) {
+        const targetInput = event.target;
+        // Ensure the event target is one of our designated PIN input fields
+        if (!Array.from(arrPinDOMs).includes(targetInput)) {
+            return;
+        }
+
+        const nIndex = Array.from(arrPinDOMs).indexOf(targetInput);
+
+        if (event.key === 'Backspace') {
+            event.preventDefault(); // Prevent default browser backspace behavior (e.g., navigation)
+
+            // If an error message is currently displayed, revert it to the relevant prompt for clarity
+            const currentTitle = domLoginEncryptTitle.textContent;
+            if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
+                const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+                updateStatusMessage(newTitle);
+            }
+
+            targetInput.value = ''; // Clear the input field's value
+            strPinCurrent[nIndex] = '-'; // Update the current PIN state
+            if (nIndex > 0) {
+                focusPinInput(nIndex - 1); // Move focus to the previous input field
+            }
+        } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
+            // Prevent single character non-numeric keys (allows Tab, Shift, Ctrl, Meta, etc.)
+            event.preventDefault();
+        }
+    }
+
+    /** Handles input events for digit entry, sanitization, and moving focus forward. */
+    async function handleInput(event) {
+        const targetInput = event.target;
+        if (!Array.from(arrPinDOMs).includes(targetInput)) {
+            return;
+        }
+
+        const nIndex = Array.from(arrPinDOMs).indexOf(targetInput);
+        let sanitizedValue = targetInput.value.replace(/[^0-9]/g, ''); // Keep only digits
+
+        if (sanitizedValue.length > 1) { // If multiple digits were pasted, use only the first
+            sanitizedValue = sanitizedValue.charAt(0);
+        }
+        targetInput.value = sanitizedValue; // Update the input field with the sanitized value
+
+        if (sanitizedValue) { // If there's a digit
+            strPinCurrent[nIndex] = sanitizedValue;
+            focusPinInput(nIndex + 1); // Move focus to the next input field or wrap around
+        } else {
+            // If input became empty (e.g., via 'Delete' key or invalid paste), update state
+            strPinCurrent[nIndex] = '-';
+        }
+
+        // Check if all PIN digits have been entered
+        if (!strPinCurrent.includes('-')) {
+            await handleFullPinEntered();
+        }
+    }
+
+    // --- Initial Setup ---
+    updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+    resetPinDisplay(true, false); // Ensure inputs are clear, set focus, keep initial message
+
+    // Attach the event listeners to the common parent container
+    pinContainer.addEventListener('keydown', handleKeyDown);
+    pinContainer.addEventListener('input', handleInput);
 }
 
 
@@ -1505,7 +1579,7 @@ function renderMessage(msg, sender, editID = '') {
     } else {
         // Add additional margin to simulate avatar space
         if (!msg.mine && sender?.avatar) {
-            pMessage.style.marginLeft = `60px`;
+            pMessage.style.marginLeft = `45px`;
         }
 
         // Flatten the top border to act as a visual continuation
@@ -2077,7 +2151,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatMessageInputFile.onclick = async () => {
         let filepath = await selectFile();
         if (filepath) {
-            await sendFile(strOpenChat, strCurrentReplyReference, filepath);
+            // Reset reply selection while passing a copy of the reference to the backend
+            const strReplyRef = strCurrentReplyReference;
+            cancelReply();
+            await sendFile(strOpenChat, strReplyRef, filepath);
         }
     };
 
@@ -2094,19 +2171,17 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // ... in non-PNG/GIF formats, which led to completely blank JPEGs.
                 const fTransparent = arrItems.some(item => item.type.includes('png') || item.type.includes('gif'));
 
-                // Placeholder
-                domChatMessageInput.value = '';
-                domChatMessageInput.setAttribute('placeholder', 'Sending...');
+                // Reset reply selection while passing a copy of the reference to the backend
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
 
                 // Tell the Rust backend to acquire the image from clipboard and send it to the current chat
                 await invoke('paste_message', {
                     receiver: strOpenChat,
-                    repliedTo: strCurrentReplyReference,
+                    repliedTo: strReplyRef,
                     transparent: fTransparent
                 });
 
-                // Reset placeholder
-                cancelReply();
                 nLastTypingIndicator = 0;
             }
         }
@@ -2125,12 +2200,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                 domChatMessageInput.value = '';
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
                 try {
-                    await message(strOpenChat, strMessage, strCurrentReplyReference, "");
+                    // Reset reply selection while passing a copy of the reference to the backend
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await message(strOpenChat, strMessage, strReplyRef, "");
+                    nLastTypingIndicator = 0;
                 } catch(_) {}
-
-                // Reset the placeholder and typing indicator timestamp
-                cancelReply();
-                nLastTypingIndicator = 0;
             }
         } else {
             // Send a Typing Indicator
@@ -2148,7 +2223,10 @@ window.addEventListener("DOMContentLoaded", async () => {
             if (event.payload.type === 'over') {
                 // TODO: add hover effects
             } else if (event.payload.type === 'drop') {
-                await sendFile(strOpenChat, strCurrentReplyReference, event.payload.paths[0]);
+                // Reset reply selection while passing a copy of the reference to the backend
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
+                await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
             } else {
                 // TODO: remove hover effects
             }
@@ -2197,9 +2275,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Note: since the user could, for some reason, close the chat while recording - we need to check that it's still open
                 if (strOpenChat) {
                     try {
+                        // Reset reply selection while passing a copy of the reference to the backend
+                        const strReplyRef = strCurrentReplyReference;
+                        cancelReply();
                         await invoke('voice_message', {
                             receiver: strOpenChat,
-                            repliedTo: strCurrentReplyReference,
+                            repliedTo: strReplyRef,
                             bytes: wavData
                         });
                     } catch (e) {
@@ -2207,17 +2288,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                         popupConfirm(e, '', true);
                     }
 
-                    // Reset placeholder
-                    cancelReply();
                     nLastTypingIndicator = 0;
                 }
-
-                /*
-                const blob = new Blob([wavData], { type: 'audio/wav' });
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                audio.play();
-                */
             }
         } else {
             // Display our recording status
