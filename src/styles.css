@@ -1324,3 +1324,62 @@ select:focus::-ms-value {
   background-color: transparent;
   color: white;
 }
+
+/* Model select container styles */
+.model-select-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Delete model button with trash bin icon */
+.btn-delete-model {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: all 0.2s ease;
+  display: none; /* Hidden by default */
+}
+
+.btn-delete-model:hover {
+  opacity: 1;
+}
+
+.icon-trash {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  background-color: transparent;
+  mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>') no-repeat center;
+  mask-size: contain;
+  background-color: #59fcb3;
+}
+
+/* For downloaded models - make it more prominent */
+.btn-delete-model.downloaded {
+  opacity: 0.8;
+  display: block;
+}
+
+.btn-delete-model.downloaded:hover {
+  opacity: 1;
+  transform: translateY(-50%) scale(1.1);
+}
+
+/* Adjust select to accommodate delete button */
+#whisper-model {
+  padding-right: 30px;
+  appearance: none;
+  -webkit-appearance: none;
+}

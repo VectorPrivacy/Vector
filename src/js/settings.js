@@ -13,6 +13,14 @@ class VoiceSettings {
         this.autoTranslate = false;
         this.autoTranscript = false;
         this.initVoiceSettings();
+        
+        // Add delete button event listener
+        document.addEventListener('DOMContentLoaded', () => {
+            const deleteBtn = document.getElementById('delete-model');
+            if (deleteBtn) {
+                deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
+            }
+        });
     }
 
     async initVoiceSettings() {
@@ -36,6 +44,7 @@ class VoiceSettings {
             document.getElementById('whisper-model').addEventListener('change', (e) => {
                 cTranscriber.selectedModel = e.target.value;
                 this.updateModelStatus();
+                this.updateDeleteButton();
             });
             
             document.getElementById('download-model').addEventListener('click', async () => {
@@ -51,13 +60,13 @@ class VoiceSettings {
 
                // Add toggle event listeners
                 document.getElementById('auto-translate-toggle').addEventListener('change', (e) => {
-                this.autoTranslate = e.target.checked;
-                localStorage.setItem('autoTranslate', this.autoTranslate);
+                    this.autoTranslate = e.target.checked;
+                    localStorage.setItem('autoTranslate', this.autoTranslate);
                 });
 
                 document.getElementById('auto-transcript-toggle').addEventListener('change', (e) => {
-                this.autoTranscript = e.target.checked;
-                localStorage.setItem('autoTranscript', this.autoTranscript);
+                    this.autoTranscript = e.target.checked;
+                    localStorage.setItem('autoTranscript', this.autoTranscript);
                 });
 
             });
@@ -78,7 +87,7 @@ class VoiceSettings {
                 const option = document.createElement('option');
                 option.value = modelState.model.name;
                 option.textContent = `${modelState.model.display_name}`;
-                                if (modelState.downloaded) {
+                if (modelState.downloaded) {
                     option.selected = true;
                     // Set the transcriber's selected model
                     if (cTranscriber) {
@@ -88,11 +97,60 @@ class VoiceSettings {
                 modelSelect.appendChild(option);
             });
             
+            this.updateDeleteButton();
             modelStatus.textContent = ``;
         } catch (error) {
             modelSelect.innerHTML = '<option value="" disabled>Error loading models</option>';
             modelStatus.textContent = `Error: ${error.message}`;
             console.error('Failed to load models:', error);
+        }
+    }
+
+    updateDeleteButton() {
+        const modelSelect = document.getElementById('whisper-model');
+        const deleteBtn = document.getElementById('delete-model');
+        const selectedModel = modelSelect.value;
+        
+        if (!selectedModel) {
+            deleteBtn.style.display = 'none';
+            return;
+        }
+        
+        const model = this.models.find(m => m.model.name === selectedModel);
+        if (model?.downloaded) {
+        deleteBtn.style.display = 'block';
+        deleteBtn.classList.add('downloaded');
+        deleteBtn.title = `Delete ${model.model.display_name}`;
+        } else {
+        deleteBtn.style.display = 'none';
+        deleteBtn.classList.remove('downloaded');
+    }
+}
+
+    async deleteSelectedModel() {
+        const modelSelect = document.getElementById('whisper-model');
+        const modelName = modelSelect.value;
+        
+        if (!modelName) {
+            return;
+        }
+        
+        // Confirm deletion
+        const confirmDelete = await popupConfirm(
+            'Delete Model?', 
+            `Are you sure you want to delete the "${modelName}" model? This will free up disk space but you'll need to download it again to use it.`,
+            true
+        );
+        
+        if (!confirmDelete) return;
+        
+        try {
+            await invoke('delete_model', { modelName });
+            await this.loadWhisperModels();
+            this.updateModelStatus();
+        } catch (error) {
+            console.error('Failed to delete model:', error);
+            await popupConfirm('Deletion Failed', `Could not delete model: ${error.message}`, true);
         }
     }
 
@@ -118,69 +176,69 @@ class VoiceSettings {
     }
 
     async downloadModel(modelName) {
-    const model = this.models.find(m => m.model.name === modelName);
-    if (!model || model.downloaded) return;
+        const model = this.models.find(m => m.model.name === modelName);
+        if (!model || model.downloaded) return;
 
-    const modelStatus = document.getElementById('model-status');
-    const progressContainer = document.querySelector('.download-progress-container');
-    const progressFill = document.querySelector('.progress-bar-fill');
-    const progressText = document.querySelector('.progress-text');
+        const modelStatus = document.getElementById('model-status');
+        const progressContainer = document.querySelector('.download-progress-container');
+        const progressFill = document.querySelector('.progress-bar-fill');
+        const progressText = document.querySelector('.progress-text');
 
-    // Initialize UI
-    modelStatus.textContent = `Downloading AI model...`;
-    progressContainer.style.display = 'block';
-    progressFill.style.width = '0%';
-    progressText.textContent = '0%';
+        // Initialize UI
+        modelStatus.textContent = `Downloading AI model...`;
+        progressContainer.style.display = 'block';
+        progressFill.style.width = '0%';
+        progressText.textContent = '0%';
 
-    try {
-        model.downloading = true;
-        this.updateModelStatus();
+        try {
+            model.downloading = true;
+            this.updateModelStatus();
 
-        // Set up progress listener
-        const unlisten = await window.__TAURI__.event.listen(
-            'whisper_download_progress', 
-            (event) => {
-                const progress = event.payload.progress;
-                progressFill.style.width = `${progress}%`;
-                progressText.textContent = `${progress}%`;
-            }
-        );
+            // Set up progress listener
+            const unlisten = await window.__TAURI__.event.listen(
+                'whisper_download_progress', 
+                (event) => {
+                    const progress = event.payload.progress;
+                    progressFill.style.width = `${progress}%`;
+                    progressText.textContent = `${progress}%`;
+                }
+            );
 
-        await invoke('download_whisper_model', { modelName });
+            await invoke('download_whisper_model', { modelName });
 
-        // Clean up listener
-        unlisten();
+            // Clean up listener
+            unlisten();
 
-        model.downloaded = true;
-        model.downloading = false;
-        modelStatus.textContent = `Successfully downloaded AI model!`;
-        
-        // Add completion animation
-        progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
-        progressContainer.style.animation = 'none';
-        void progressContainer.offsetWidth; // Trigger reflow
-        progressContainer.style.animation = 'fadeIn 0.3s ease-out';
-        
-        await this.loadWhisperModels();
-    } catch (error) {
-        model.downloading = false;
-        modelStatus.textContent = `Error downloading model: ${error}`;
-        console.error('Download failed:', error);
-        
-        // Error state styling
-        progressFill.style.background = 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
-        progressText.textContent = 'Failed';
-    } finally {
-        // Hide progress bar after delay
-        setTimeout(() => {
-            progressContainer.style.display = 'none';
-            // Reset progress bar for next use
-            progressFill.style.width = '0%';
-            progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
-            progressText.textContent = '0%';
-        }, 3000);
+            model.downloaded = true;
+            model.downloading = false;
+            modelStatus.textContent = `Successfully downloaded AI model!`;
+            
+            // Add completion animation
+            progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
+            progressContainer.style.animation = 'none';
+            void progressContainer.offsetWidth; // Trigger reflow
+            progressContainer.style.animation = 'fadeIn 0.3s ease-out';
+            
+            await this.loadWhisperModels();
+        } catch (error) {
+            model.downloading = false;
+            modelStatus.textContent = `Error downloading model: ${error}`;
+            console.error('Download failed:', error);
+            
+            // Error state styling
+            progressFill.style.background = 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
+            progressText.textContent = 'Failed';
+        } finally {
+            // Hide progress bar after delay
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+                // Reset progress bar for next use
+                progressFill.style.width = '0%';
+                progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
+                progressText.textContent = '0%';
+            }, 3000);
+        }
     }
-}
 }
 
 // Initialize voice settings when DOM is ready
