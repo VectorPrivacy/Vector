@@ -74,26 +74,21 @@ class VoiceSettings {
             this.models = await invoke('list_models');
             modelSelect.innerHTML = ''; // Clear loading message
             
-            if (this.models.length === 0) {
-                modelSelect.innerHTML = '<option value="" disabled>No models available</option>';
-                return;
-            }
-            
-            this.models.forEach(model => {
+            this.models.forEach(modelState => {
                 const option = document.createElement('option');
-                option.value = model.name;
-                option.textContent = `${model.name} (${model.size}MB)${model.downloaded ? ' ✔' : ''}`;
-                                if (model.downloaded) {
+                option.value = modelState.model.name;
+                option.textContent = `${modelState.model.display_name}`;
+                                if (modelState.downloaded) {
                     option.selected = true;
                     // Set the transcriber's selected model
                     if (cTranscriber) {
-                        cTranscriber.selectedModel = model.name;
+                        cTranscriber.selectedModel = modelState.name;
                     }
                 }
                 modelSelect.appendChild(option);
             });
             
-            modelStatus.textContent = `${this.models.filter(m => m.downloaded).length}/${this.models.length} models downloaded`;
+            modelStatus.textContent = ``;
         } catch (error) {
             modelSelect.innerHTML = '<option value="" disabled>Error loading models</option>';
             modelStatus.textContent = `Error: ${error.message}`;
@@ -105,25 +100,25 @@ class VoiceSettings {
         const statusElement = document.getElementById('model-status');
         if (!statusElement) return;
         
-        const model = this.models.find(m => m.name === cTranscriber?.selectedModel);
+        const model = this.models.find(m => m.model.name === cTranscriber?.selectedModel);
         if (!model) return;
         
         if (model.downloading) {
-            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.name} model... <span id="voice-model-download-progression">(0%)</span></div>`;
+            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.model.name} model... <span id="voice-model-download-progression">(0%)</span></div>`;
             return;
         }
         
         if (model.downloaded) {
-            statusElement.innerHTML = `<div class="alert alert-success">${model.name} model is downloaded and ready</div>`;
+            statusElement.innerHTML = `<div class="alert alert-success">Vector AI is ready</div>`;
             document.getElementById('download-model').style.display = 'none';
         } else {
-            statusElement.innerHTML = `<div class="alert alert-warning">${model.name} model is not downloaded</div>`;
+            statusElement.innerHTML = `<div class="alert alert-warning">AI model is not downloaded</div>`;
             document.getElementById('download-model').style.display = '';
         }
     }
 
     async downloadModel(modelName) {
-    const model = this.models.find(m => m.name === modelName);
+    const model = this.models.find(m => m.model.name === modelName);
     if (!model || model.downloaded) return;
 
     const modelStatus = document.getElementById('model-status');
@@ -132,7 +127,7 @@ class VoiceSettings {
     const progressText = document.querySelector('.progress-text');
 
     // Initialize UI
-    modelStatus.textContent = `Downloading ${modelName} model...`;
+    modelStatus.textContent = `Downloading AI model...`;
     progressContainer.style.display = 'block';
     progressFill.style.width = '0%';
     progressText.textContent = '0%';
@@ -158,7 +153,7 @@ class VoiceSettings {
 
         model.downloaded = true;
         model.downloading = false;
-        modelStatus.textContent = `Successfully downloaded ${modelName} model!`;
+        modelStatus.textContent = `Successfully downloaded AI model!`;
         
         // Add completion animation
         progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';

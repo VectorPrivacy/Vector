@@ -1969,8 +1969,14 @@ function openChatlist() {
     navbarSelect('chat-btn');
     domSettings.style.display = 'none';
 
-    // Open the Chat UI
-    domChats.style.display = '';
+    if (domChats.style.display !== '') {
+        // Run a subtle fade-in animation
+        domChats.classList.add('fadein-subtle-anim');
+        domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
+
+        // Open the Chat UI
+        domChats.style.display = '';
+    }
 }
 
 /**

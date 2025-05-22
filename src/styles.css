@@ -262,10 +262,14 @@ body {
 }
 
 .fadein-anim {
-  animation: Fadein 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
+  animation: fadeInWithoutTransform 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
 }
 
-@keyframes Fadein {
+.fadein-subtle-anim {
+  animation: fadeInWithoutTransform 0.4s ease-out;
+}
+
+@keyframes fadeInWithoutTransform {
   0% { opacity: 0; }
 }
 
@@ -999,19 +1003,29 @@ audio {
   margin-right: 5px;
 }
 
+#settings {
+  overflow-y: auto;
+  height: -webkit-fill-available;
+  padding-bottom: 100px;
+  overscroll-behavior: none;
+  animation: fadeInWithoutTransform 0.4s ease-out
+}
+
 /* Voice Settings Section Styles */
 .settings-section-voice {
   padding: 20px;
-  background: rgba(22, 22, 22, 0.8);
+  padding-top: 0;
   border-radius: 12px;
   margin-top: 15px;
-  animation: fadeIn 0.5s ease-out;
 }
 
-/* Model Dropdown Styles */
-#whisper-model {
-  width: 100%;
+/* Dropdown Styles */
+select {
+  width: 75%;
   padding: 12px 15px;
+  margin-left: auto;
+  margin-right: auto;
+  margin-bottom: 15px;
   border-radius: 8px;
   border: 1px solid #59fcb3;
   background: rgba(0, 0, 0, 0.5);
@@ -1023,7 +1037,6 @@ audio {
   background-position: right 10px center;
   background-size: 20px;
   transition: all 0.3s ease;
-  margin-bottom: 15px;
 }
 
 #whisper-model:focus {
@@ -1111,7 +1124,8 @@ audio {
   height: 100%;
   width: 20px;
   background: linear-gradient(90deg, 
-    rgba(255, 255, 255, 0.8) 0%, 
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.75) 50%, 
     rgba(255, 255, 255, 0) 100%);
   animation: glowSlide 2s infinite linear;
   opacity: 0.7;

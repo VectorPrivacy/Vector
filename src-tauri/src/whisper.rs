@@ -8,20 +8,23 @@ use tauri::{AppHandle, Runtime, Manager, Emitter};
 use serde::Serialize;
 
 /// Whisper model information
+#[derive(Serialize, Clone)]
 pub struct WhisperModel {
     /// Model name (used in filenames and API requests)
     pub name: &'static str,
+    /// Display name (used in the UI as a simplified name)
+    pub display_name: &'static str,
     /// Approximate size in MB
     pub size: usize,
 }
 
 /// List of supported Whisper models with their details
 pub const MODELS: [WhisperModel; 5] = [
-    WhisperModel { name: "tiny", size: 75 },
-    WhisperModel { name: "base", size: 142 },
-    WhisperModel { name: "small", size: 466 },
-    WhisperModel { name: "medium", size: 1500 },
-    WhisperModel { name: "large-v3", size: 2900 },
+    WhisperModel { name: "tiny", display_name: "Lowest Quality - Fastest", size: 75 },
+    WhisperModel { name: "base", display_name: "Low Quality - Faster", size: 142 },
+    WhisperModel { name: "small", display_name: "Base Quality - Fast", size: 466 },
+    WhisperModel { name: "medium", display_name: "High Quality - Slow", size: 1500 },
+    WhisperModel { name: "large-v3", display_name: "Highest Quality - Slowest", size: 2900 },
 ];
 
 pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, audio: Vec<f32>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -190,10 +193,10 @@ pub fn is_model_downloaded<R: Runtime>(handle: &AppHandle<R>, model_name: &str) 
 }
 
 /// Information about a Whisper model and its download status
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct WhisperModelStatus {
     /// The name of the model
-    pub name: String,
+    pub model: WhisperModel,
     /// Whether the model is already downloaded
     pub downloaded: bool,
 }
@@ -210,7 +213,7 @@ pub async fn list_models(app_handle: tauri::AppHandle) -> Vec<WhisperModelStatus
         .map(|model| {
             let is_downloaded = is_model_downloaded(&app_handle, model.name);
             WhisperModelStatus {
-                name: model.name.to_string(),
+                model: model.clone(),
                 downloaded: is_downloaded,
             }
         })
