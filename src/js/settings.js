@@ -3,7 +3,7 @@ const { open } = window.__TAURI__.dialog;
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
 
 /**
- * @type {VoiceSettings}
+ * @type {VoiceTranscriptionUI}
  */
 let cTranscriber = null;
 
@@ -12,15 +12,6 @@ class VoiceSettings {
         this.models = [];
         this.autoTranslate = false;
         this.autoTranscript = false;
-        this.initVoiceSettings();
-        
-        // Add delete button event listener
-        document.addEventListener('DOMContentLoaded', () => {
-            const deleteBtn = document.getElementById('delete-model');
-            if (deleteBtn) {
-                deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
-            }
-        });
     }
 
     async initVoiceSettings() {
@@ -28,9 +19,6 @@ class VoiceSettings {
         if (voiceSection) {
             // Show the section immediately (remove display:none)
             voiceSection.style.display = 'block';
-            
-            // Load models right away since we're showing the section
-            await this.loadWhisperModels();
 
             // Load saved toggle states from localStorage
             this.autoTranslate = localStorage.getItem('autoTranslate') === 'true';
@@ -39,6 +27,9 @@ class VoiceSettings {
             // Set initial toggle states
             document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
             document.getElementById('auto-transcript-toggle').checked = this.autoTranscript;
+
+            // Initialise the model status
+            this.updateModelStatus();
 
             // Add event listeners
             document.getElementById('whisper-model').addEventListener('change', (e) => {
@@ -70,6 +61,12 @@ class VoiceSettings {
                 });
 
             });
+
+            const deleteBtn = document.getElementById('delete-model');
+            console.log(deleteBtn)
+            if (deleteBtn) {
+                deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
+            }
         }
     }
 
@@ -91,7 +88,7 @@ class VoiceSettings {
                     option.selected = true;
                     // Set the transcriber's selected model
                     if (cTranscriber) {
-                        cTranscriber.selectedModel = modelState.name;
+                        cTranscriber.selectedModel = modelState.model.name;
                     }
                 }
                 modelSelect.appendChild(option);
@@ -139,13 +136,13 @@ class VoiceSettings {
         const confirmDelete = await popupConfirm(
             'Delete Model?', 
             `Are you sure you want to delete the "${modelName}" model? This will free up disk space but you'll need to download it again to use it.`,
-            true
+            false
         );
         
         if (!confirmDelete) return;
         
         try {
-            await invoke('delete_model', { modelName });
+            await invoke('delete_whisper_model', { modelName });
             await this.loadWhisperModels();
             this.updateModelStatus();
         } catch (error) {
@@ -240,11 +237,6 @@ class VoiceSettings {
         }
     }
 }
-
-// Initialize voice settings when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-    window.voiceSettings = new VoiceSettings();
-});
 
 /**
  * A GUI wrapper to ask the user for a username, and apply it both

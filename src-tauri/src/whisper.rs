@@ -201,6 +201,43 @@ pub struct WhisperModelStatus {
     pub downloaded: bool,
 }
 
+/// Deletes a Whisper model from local storage
+/// 
+/// # Arguments
+/// * `handle` - The Tauri app handle for accessing app paths
+/// * `model_name` - The name of the model to delete (e.g., "tiny", "base", "small", etc.)
+/// 
+/// # Returns
+/// * `bool` - true if the model was successfully deleted, false if it doesn't exist
+#[tauri::command]
+pub async fn delete_whisper_model<R: Runtime>(handle: AppHandle<R>, model_name: String) -> bool {
+    // Get models directory in app data directory
+    let models_dir = handle.path().app_local_data_dir().unwrap().join("whisper");
+    
+    // Construct model path
+    let model_filename = format!("ggml-{}.bin", model_name);
+    let model_path = models_dir.join(&model_filename);
+    
+    // Check if model exists
+    if model_path.exists() {
+        // Delete the model file
+        match std::fs::remove_file(&model_path) {
+            Ok(_) => {
+                println!("Successfully deleted model: {}", model_path.display());
+                true
+            },
+            Err(e) => {
+                eprintln!("Failed to delete model {}: {}", model_path.display(), e);
+                false
+            }
+        }
+    } else {
+        // Model doesn't exist
+        println!("Model not found: {}", model_path.display());
+        false
+    }
+}
+
 /// Lists all available Whisper models and their download status
 /// 
 /// # Returns

@@ -36,7 +36,7 @@ class VoiceRecorder {
 
 class VoiceTranscriptionUI {
     constructor() {
-        this.selectedModel = 'base'; // Default model
+        this.selectedModel = 'small'; // Default model
         this.isSettingUp = false;
         this.autoTranslate = false;
         this.autoTranscript = false;
@@ -49,7 +49,7 @@ class VoiceTranscriptionUI {
         this.autoTranslate = localStorage.getItem('autoTranslate') === 'true';
         this.autoTranscript = localStorage.getItem('autoTranscript') === 'true';
         
-        const model = window.voiceSettings?.models?.find(m => m.name === this.selectedModel);
+        const model = window.voiceSettings?.models?.find(m => m.model.name === this.selectedModel);
         if (model?.downloaded) return true;
         
         this.isSettingUp = true;
@@ -125,9 +125,14 @@ class VoiceTranscriptionUI {
 }
 
 // Initialize when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     // Initialize voice transcription with default model
     cTranscriber = new VoiceTranscriptionUI();
+    window.voiceSettings = new VoiceSettings();
+
+    // Load our modules chronologically
+    await window.voiceSettings.loadWhisperModels();
+    window.voiceSettings.initVoiceSettings();
 });
 
 function handleAudioAttachment(cAttachment, assetUrl, pMessage) {

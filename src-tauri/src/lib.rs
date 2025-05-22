@@ -2537,6 +2537,7 @@ pub fn run() {
             create_account,
             transcribe,
             download_whisper_model,
+            whisper::delete_whisper_model,
             whisper::list_models
         ])
         .run(tauri::generate_context!())
