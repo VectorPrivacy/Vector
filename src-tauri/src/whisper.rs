@@ -27,7 +27,7 @@ pub const MODELS: [WhisperModel; 5] = [
     WhisperModel { name: "large-v3", display_name: "Highest Quality - Slowest", size: 2900 },
 ];
 
-pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, audio: Vec<f32>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, translate: bool, audio: Vec<f32>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Download or get cached whisper model
     println!("Initializing Whisper...");
     let model_path = download_whisper_model(handle, model_name).await?;
@@ -41,7 +41,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, aud
     params.set_print_progress(false);
     params.set_print_timestamps(true);
     params.set_language(Some("auto"));
-    params.set_translate(true);
+    params.set_translate(translate);
     params.set_suppress_non_speech_tokens(true);
 
     // Create state and run inference

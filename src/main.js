@@ -1714,7 +1714,7 @@ function renderMessage(msg, sender, editID = '') {
                 pMessage.appendChild(imgPreview);
                 } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
                 // Audio - use the enhanced handler with transcription
-                handleAudioAttachment(cAttachment, assetUrl, pMessage);
+                handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
                 } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
                 // Videos
                 const vidPreview = document.createElement('video');

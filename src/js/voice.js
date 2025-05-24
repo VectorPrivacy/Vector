@@ -36,20 +36,14 @@ class VoiceRecorder {
 
 class VoiceTranscriptionUI {
     constructor() {
-        this.selectedModel = 'small'; // Default model
         this.isSettingUp = false;
-        this.autoTranslate = false;
-        this.autoTranscript = false;
     }
 
         async ensureModelReady() {
         if (this.isSettingUp) return false;
-
-        // Get current settings from localStorage
-        this.autoTranslate = localStorage.getItem('autoTranslate') === 'true';
-        this.autoTranscript = localStorage.getItem('autoTranscript') === 'true';
         
-        const model = window.voiceSettings?.models?.find(m => m.model.name === this.selectedModel);
+        const selectedModel = window.voiceSettings?.selectedModel || 'small';
+        const model = window.voiceSettings?.models?.find(m => m.model.name === selectedModel);
         if (model?.downloaded) return true;
         
         this.isSettingUp = true;
@@ -71,7 +65,7 @@ class VoiceTranscriptionUI {
                 }
             );
 
-            await window.voiceSettings.downloadModel(this.selectedModel);
+            await window.voiceSettings.downloadModel(selectedModel);
             unlisten();
             
             progressText.textContent = 'Voice model ready!';
@@ -95,31 +89,16 @@ class VoiceTranscriptionUI {
         }
     }
 
-    async transcribeRecording(wavData) {
-        if (!await this.ensureModelReady()) {
-            throw new Error("Voice model setup failed");
-        }
-
-        if (!wavData) {
-            throw new Error("No audio data to transcribe");
-        }
-        
-        return await invoke('transcribe_audio', {
-            audioData: Array.from(wavData),
-            modelId: this.selectedModel,
-            autoTranslate: this.autoTranslate
-        });
-    }
-
     async transcribeAudioFile(filePath) {
         if (!await this.ensureModelReady()) {
             throw new Error("Voice model setup failed");
         }
 
+        const selectedModel = window.voiceSettings?.selectedModel || 'small';
         return await invoke('transcribe', {
             filePath: filePath,
-            modelName: this.selectedModel,
-            autoTranslate: this.autoTranslate
+            modelName: selectedModel,
+            translate: window.voiceSettings?.autoTranslate || false
         });
     }
 }
@@ -135,7 +114,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.voiceSettings.initVoiceSettings();
 });
 
-function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
+function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     if (['wav', 'mp3'].includes(cAttachment.extension)) {
         const audioContainer = document.createElement('div');
         audioContainer.classList.add('audio-message-container');
@@ -196,7 +175,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
                 // Remove the loading state (or, currently, the entire button)
                 transcribeBtn.remove();
                 
-// Clear any existing content
+                // Clear any existing content
                 while (transcriptionResult.firstChild) {
                     transcriptionResult.removeChild(transcriptionResult.firstChild);
                 }
@@ -235,5 +214,17 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage) {
         audioContainer.appendChild(transcribeContainer);
         audioContainer.appendChild(transcriptionResult);
         pMessage.appendChild(audioContainer);
+
+        // If we have auto-transcribe enabled, and this message was received in the last minute, then transcribe it!
+        if (window.voiceSettings?.autoTranscript) {
+            if (!msg.mine && msg.at > (Date.now() / 1000 - 60)) {
+                // Check if the current model is downloaded before attempting transcription
+                const selectedModel = window.voiceSettings?.selectedModel || 'small';
+                const currentModel = window.voiceSettings.models?.find(m => m.model.name === selectedModel);
+                if (currentModel?.downloaded) {
+                    transcribeBtn.click();
+                }
+            }
+        }
     }
 }

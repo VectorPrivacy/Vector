@@ -12,6 +12,7 @@ class VoiceSettings {
         this.models = [];
         this.autoTranslate = false;
         this.autoTranscript = false;
+        this.selectedModel = 'small'; // Default model
     }
 
     async initVoiceSettings() {
@@ -23,6 +24,7 @@ class VoiceSettings {
         // Set initial toggle states (will be loaded from backend DB in future)
         document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
         document.getElementById('auto-transcript-toggle').checked = this.autoTranscript;
+        document.getElementById('whisper-model').value = this.selectedModel;
 
         this.updateModelStatus();
         this.setupEventListeners();
@@ -31,9 +33,10 @@ class VoiceSettings {
     setupEventListeners() {
         // Model selection change
         document.getElementById('whisper-model').addEventListener('change', (e) => {
-            cTranscriber.selectedModel = e.target.value;
+            this.selectedModel = e.target.value;
             this.updateModelStatus();
             this.updateDeleteButton();
+            // TODO: Save to backend DB when implemented
         });
         
         // Model download
@@ -75,9 +78,15 @@ class VoiceSettings {
             this.models = await invoke('list_models');
             modelSelect.innerHTML = ''; // Clear loading message
             
+            // Create model hierarchy dynamically from model sizes (lowest to highest quality)
+            const modelHierarchy = this.models
+                .slice() // Create a copy to avoid mutating original
+                .sort((a, b) => a.model.size - b.model.size) // Sort by size (smaller = lower quality)
+                .map(m => m.model.name);
+            
             // Track if we need to select a fallback model
             let foundCurrentSelection = false;
-            let fallbackModel = null; // First downloaded model to use as fallback
+            let selectedModel = null;
             
             // Populate dropdown with all available models
             this.models.forEach(modelState => {
@@ -89,27 +98,24 @@ class VoiceSettings {
                 if (currentSelection === modelState.model.name && modelState.downloaded) {
                     foundCurrentSelection = true;
                     option.selected = true;
-                }
-                
-                // Track the first downloaded model as a fallback option
-                if (modelState.downloaded && !fallbackModel) {
-                    fallbackModel = modelState;
+                    selectedModel = modelState.model.name;
                 }
                 
                 modelSelect.appendChild(option);
             });
             
-            // If the previously selected model is no longer available, select the first downloaded model
-            if (!foundCurrentSelection && fallbackModel) {
-                const fallbackOption = Array.from(modelSelect.options).find(opt => opt.value === fallbackModel.model.name);
+            // If the previously selected model is no longer available, find the best fallback
+            if (!foundCurrentSelection) {
+                selectedModel = this.findBestFallbackModel(currentSelection, modelHierarchy);
+                
+                const fallbackOption = Array.from(modelSelect.options).find(opt => opt.value === selectedModel);
                 if (fallbackOption) {
                     fallbackOption.selected = true;
-                    // Update the transcriber to use the fallback model
-                    if (cTranscriber) {
-                        cTranscriber.selectedModel = fallbackModel.model.name;
-                    }
                 }
             }
+            
+            // Update this.selectedModel to match the UI selection
+            this.selectedModel = selectedModel || this.selectedModel;
             
             // Update UI elements based on the selected model
             this.updateDeleteButton();
@@ -178,7 +184,7 @@ class VoiceSettings {
         const statusElement = document.getElementById('model-status');
         if (!statusElement) return;
         
-        const model = this.models.find(m => m.model.name === cTranscriber?.selectedModel);
+        const model = this.models.find(m => m.model.name === this.selectedModel);
         if (!model) return;
         
         if (model.downloading) {
@@ -241,11 +247,6 @@ class VoiceSettings {
             model.downloaded = true;
             model.downloading = false;
             
-            // Set this as the active model for the transcriber
-            if (cTranscriber) {
-                cTranscriber.selectedModel = modelName;
-            }
-            
             modelStatus.textContent = `Successfully downloaded AI model!`;
             
             // Show success animation with green gradient
@@ -281,6 +282,104 @@ class VoiceSettings {
                 progressText.textContent = '0%';
             }, 3000);
         }
+    }
+
+    setAutoTranslate(enabled) {
+        this.autoTranslate = enabled;
+        
+        // Update UI toggle
+        const toggle = document.getElementById('auto-translate-toggle');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
+        
+        // Send backend invoke (pseudocode)
+        // invoke('update_auto_translate_setting', { enabled: enabled });
+        
+        console.log(`Auto-translate ${enabled ? 'enabled' : 'disabled'}`);
+    }
+
+    setAutoTranscript(enabled) {
+        this.autoTranscript = enabled;
+        
+        // Update UI toggle
+        const toggle = document.getElementById('auto-transcript-toggle');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
+        
+        // Send backend invoke (pseudocode)
+        // invoke('set_auto_transcribe', { enabled: enabled });
+        
+        console.log(`Auto-transcript ${enabled ? 'enabled' : 'disabled'}`);
+    }
+
+    setSelectedModel(modelName) {
+        this.selectedModel = modelName;
+        
+        // Update UI dropdown
+        const modelSelect = document.getElementById('whisper-model');
+        if (modelSelect) {
+            modelSelect.value = modelName;
+        }
+        
+        // Send backend invoke (pseudocode)
+        // invoke('set_transcribe_model', { modelName: modelName });
+        
+        console.log(`Selected model set to: ${modelName}`);
+    }
+
+    /**
+     * Find the best fallback model when the current selection is no longer available
+     * @param {string} deletedModel - The model that was deleted or is no longer available
+     * @param {string[]} modelHierarchy - Array of model names ordered from lowest to highest quality
+     * @returns {string} The best fallback model name
+     */
+    findBestFallbackModel(deletedModel, modelHierarchy) {
+        // Get all downloaded models
+        const downloadedModels = this.models.filter(m => m.downloaded);
+        
+        if (downloadedModels.length === 0) {
+            // No downloaded models, fallback to default 'small'
+            return 'small';
+        }
+        
+        // If we have a deleted model, find the next highest downloaded model
+        if (deletedModel && modelHierarchy.includes(deletedModel)) {
+            const deletedIndex = modelHierarchy.indexOf(deletedModel);
+            
+            // Look for next higher models first
+            for (let i = deletedIndex + 1; i < modelHierarchy.length; i++) {
+                const candidate = modelHierarchy[i];
+                if (downloadedModels.some(m => m.model.name === candidate)) {
+                    return candidate;
+                }
+            }
+            
+            // If no higher model found, look for lower models
+            for (let i = deletedIndex - 1; i >= 0; i--) {
+                const candidate = modelHierarchy[i];
+                if (downloadedModels.some(m => m.model.name === candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        
+        // If 'small' is downloaded, prefer it as default
+        if (downloadedModels.some(m => m.model.name === 'small')) {
+            return 'small';
+        }
+        
+        // Otherwise, return the highest quality downloaded model
+        for (let i = modelHierarchy.length - 1; i >= 0; i--) {
+            const candidate = modelHierarchy[i];
+            if (downloadedModels.some(m => m.model.name === candidate)) {
+                return candidate;
+            }
+        }
+        
+        // Final fallback to 'small' if nothing else works
+        return 'small';
     }
 }
 
