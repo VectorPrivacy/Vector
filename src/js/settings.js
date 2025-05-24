@@ -197,7 +197,13 @@ class VoiceSettings {
             document.getElementById('download-model').style.display = 'none';
         } else {
             statusElement.innerHTML = `<div class="alert alert-warning">AI model is not downloaded</div>`;
-            document.getElementById('download-model').style.display = '';
+            const downloadBtn = document.getElementById('download-model');
+            downloadBtn.style.display = '';
+            
+            // Update button text to include model size
+            const sizeInBytes = model.model.size * 1024 * 1024;
+            const formattedSize = formatBytes(sizeInBytes);
+            downloadBtn.textContent = `Download Selected Model (${formattedSize})`;
         }
     }
 

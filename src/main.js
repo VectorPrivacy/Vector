@@ -56,6 +56,9 @@ const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
+const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
+const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-auto-translate-info');
+const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 
 const domApp = document.getElementById('popup-container');
@@ -2300,6 +2303,22 @@ window.addEventListener("DOMContentLoaded", async () => {
             await recorder.start();
         }
     });
+
+    // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
+    // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events
+    domSettingsWhisperModelInfo.onclick = (e) => {
+        popupConfirm('Vector Voice AI Model', 'The Vector Voice AI model <b>determines the Quality of your transcriptions.</b><br><br>A larger model will provide more accurate transcriptions & translations, but require more Disk Space, Memory and CPU power to run.', true);
+    };
+    domSettingsWhisperAutoTranslateInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Vector Voice Translations', 'Vector Voice AI can <b>automatically detect non-English languages and translate them in to English text for you.</b><br><br>You can decide whether Vector Voice transcribes in to their native spoken language, or instead translates in to English on your behalf.', true);
+    };
+    domSettingsWhisperAutoTranscribeInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
+    };
 });
 
 // Listen for app-wide click interations

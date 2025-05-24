@@ -55,6 +55,10 @@
   mask-image: url("./icons/file-search.svg");
 }
 
+.icon-info {
+  mask-image: url("./icons/info.svg");
+}
+
 .icon-loading {
   mask-image: url("./icons/loading.svg");
 }

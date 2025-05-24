@@ -122,7 +122,7 @@
 
          <div class="form-group">
           <label class="toggle-container">
-            <span>Auto Translate</span>
+            <span><span id="whisper-auto-translate-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto Translate</span>
             <input type="checkbox" id="auto-translate-toggle">
             <span class="neon-toggle"></span>
           </label>
@@ -130,7 +130,8 @@
         
          <div class="form-group">
           <label class="toggle-container">
-            <span>Auto Transcript</span>
+            <span>
+            <span id="whisper-auto-transcribe-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto Transcribe</span>
             <input type="checkbox" id="auto-transcript-toggle">
             <span class="neon-toggle"></span>
           </label>
@@ -138,6 +139,7 @@
 
         <div class="form-group" style="margin-top: 30px;">
           <label for="whisper-model">Whisper Model</label>
+          <span id="whisper-model-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
           <div class="model-select-container">
           <select id="whisper-model" class="form-control" style="margin-top: 10px;"></select>
           <button id="delete-model" class="btn-delete-model" title="Delete selected model">
