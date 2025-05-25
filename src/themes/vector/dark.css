@@ -14,12 +14,6 @@
   background-clip: text;
 }
 
-.startup-subtext-gradient {
-  background: linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%);
-  background-size: 200% 200%;
-  background-clip: text;
-}
-
 .back-btn {
   color: rgb(191, 191, 191);
 }
@@ -106,5 +100,104 @@ button:hover {
 }
 
 .divider {
+  background-color: #59fcb3;
+}
+
+.new-chat-btn .icon {
+  background-color: rgba(128, 255, 212, 0.75);
+}
+
+.msg-preview-container {
+  border-color: rgba(90, 252, 180, 0.43) !important;
+  background-color: rgba(90, 252, 180, 0.12) !important;
+}
+
+.progress-bar {
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+}
+
+select {
+  border: 1px solid #59fcb3;
+}
+
+#whisper-model:focus {
+  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.3);
+}
+
+#download-model {
+  background: linear-gradient(135deg, #59fcb3 0%, #00d4ff 100%);
+}
+
+#download-model:hover {
+  box-shadow: 0 5px 15px rgba(89, 252, 179, 0.3);
+}
+
+.model-status {
+  color: #59fcb3;
+}
+
+.progress-bar-track {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(89, 252, 179, 0.1);
+}
+
+.progress-bar-fill {
+  background: linear-gradient(90deg, 
+    #59fcb3 0%, 
+    #00d4ff 100%);
+}
+
+.progress-text {
+  text-shadow: 0 0 5px rgba(89, 252, 179, 0.7);
+}
+
+.voice-progress-container {
+  border: 1px solid #59fcb3;
+  box-shadow: 0 0 15px rgba(89, 252, 179, 0.3);
+}
+
+.voice-progress-fill {
+  background: linear-gradient(90deg, #59fcb3, #00d4ff);
+}
+
+.voice-progress-text {
+  color: #59fcb3;
+}
+
+input[type="checkbox"]:checked + .neon-toggle {
+  background: linear-gradient(135deg, #00ff9d, #00d4ff);
+  box-shadow: 
+    0 0 5px rgba(0, 255, 157, 0.5),
+    0 0 10px rgba(0, 212, 255, 0.3),
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.neon-toggle:hover {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.3),
+    0 0 8px rgba(0, 255, 157, 0.4);
+}
+
+input[type="checkbox"]:checked + .neon-toggle:hover {
+  box-shadow: 
+    0 0 8px rgba(0, 255, 157, 0.8),
+    0 0 12px rgba(0, 212, 255, 0.5),
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+#theme-select:focus {
+  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.3);
+}
+
+.icon-trash {
+  background-color: #59fcb3;
+}
+
+select:disabled {
+  border-color: rgba(89, 252, 179, 0.3);
+}
+
+.nav-icon {
   background-color: #59fcb3;
 }

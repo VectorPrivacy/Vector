@@ -1144,10 +1144,10 @@ function openEncryptionFlow(pkey, fUnlock = false) {
     function updateStatusMessage(message, isProcessing = false) {
         domLoginEncryptTitle.textContent = message;
         if (isProcessing) {
-            domLoginEncryptTitle.classList.add('text-gradient');
+            domLoginEncryptTitle.classList.add('startup-subtext-gradient');
             domLoginEncryptPinRow.style.display = 'none'; // Hide PIN inputs during processing
         } else {
-            domLoginEncryptTitle.classList.remove('text-gradient');
+            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
             domLoginEncryptPinRow.style.display = ''; // Ensure PIN inputs are visible
         }
     }
