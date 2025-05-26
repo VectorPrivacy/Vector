@@ -282,6 +282,23 @@ pub fn get_theme<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Str
     }
 }
 
+//                                                              \/ "pkey" should be "model", then use invoke("")
+#[command]
+pub fn set_whisper_model_name<R: Runtime>(handle: AppHandle<R>, pkey: String) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("whisper_model_name".to_string(), serde_json::json!(pkey));
+    Ok(())
+}
+
+#[command]
+pub fn get_whisper_model_name<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
+    let store = get_store(&handle);
+    match store.get("whisper_model_name") {
+        Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
+        _ => Ok(None),
+    }
+}
+
 #[command]
 pub fn set_pkey<R: Runtime>(handle: AppHandle<R>, pkey: String) -> Result<(), String> {
     let store = get_store(&handle);

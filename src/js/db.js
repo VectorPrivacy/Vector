@@ -19,6 +19,17 @@ async function loadAndDecryptPrivateKey(password) {
     return pkey;
 }
 
+async function saveChosenWhisperModel(pkey) {
+    if (!pkey || typeof pkey !== 'string') {
+        throw new Error('Invalid model name')
+    }
+    await invoke('set_whisper_model_name', {pkey})
+}
+
+async function loadChosenWhisperModel() {
+    return await invoke('get_whisper_model_name')
+}
+
 /**
  * `true` if a local encrypted key exists, `false` otherwise.
  * @returns {Promise<boolean>}

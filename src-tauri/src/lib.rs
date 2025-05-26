@@ -2505,6 +2505,8 @@ pub fn run() {
             db::set_db_version,
             db::get_theme,
             db::set_theme,
+            db::get_whisper_model_name,
+            db::set_whisper_model_name,
             db::get_pkey,
             db::set_pkey,
             db::get_seed,
