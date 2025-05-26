@@ -7,6 +7,18 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use tauri::{AppHandle, Runtime, Manager, Emitter};
 use serde::Serialize;
 
+#[derive(Serialize, Clone)]
+pub struct TranscriptionSection {
+    pub text: String,
+    pub at: i64, // millisecond timestamp
+}
+
+#[derive(Serialize, Clone)]
+pub struct TranscriptionResult {
+    pub sections: Vec<TranscriptionSection>,
+    pub lang: String,
+}
+
 /// Whisper model information
 #[derive(Serialize, Clone)]
 pub struct WhisperModel {
@@ -27,7 +39,7 @@ pub const MODELS: [WhisperModel; 5] = [
     WhisperModel { name: "large-v3", display_name: "Highest Quality - Slowest", size: 2900 },
 ];
 
-pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, translate: bool, audio: Vec<f32>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, translate: bool, audio: Vec<f32>) -> Result<TranscriptionResult, Box<dyn std::error::Error + Send + Sync>> {
     // Download or get cached whisper model
     println!("Initializing Whisper...");
     let model_path = download_whisper_model(handle, model_name).await?;
@@ -41,6 +53,9 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     params.set_print_progress(false);
     params.set_print_timestamps(true);
     params.set_language(Some("auto"));
+    params.set_token_timestamps(true);
+    params.set_max_len(30);
+    params.set_split_on_word(true);
     params.set_translate(translate);
     params.set_suppress_non_speech_tokens(true);
 
@@ -49,38 +64,147 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     let mut state = ctx.create_state()?;
     state.full(params, &audio)?;
 
-    // Get the number of segments
+    // Get the number of segments and detected language (returned as Unicode-compatible ISO codes)
     let num_segments = state.full_n_segments()?;
+    let detected_lang = state.full_lang_id_from_state().unwrap_or(0);
+    let lang_str = match detected_lang {
+        0 => "GB",  // English -> United Kingdom
+        1 => "CN",  // Chinese -> China
+        2 => "DE",  // German -> Germany
+        3 => "ES",  // Spanish -> Spain
+        4 => "RU",  // Russian -> Russia
+        5 => "KR",  // Korean -> South Korea
+        6 => "FR",  // French -> France
+        7 => "JP",  // Japanese -> Japan
+        8 => "PT",  // Portuguese -> Portugal
+        9 => "TR",  // Turkish -> Turkey
+        10 => "PL", // Polish -> Poland
+        11 => "ES", // Catalan -> Spain
+        12 => "NL", // Dutch -> Netherlands
+        13 => "SA", // Arabic -> Saudi Arabia
+        14 => "SE", // Swedish -> Sweden
+        15 => "IT", // Italian -> Italy
+        16 => "ID", // Indonesian -> Indonesia
+        17 => "IN", // Hindi -> India
+        18 => "FI", // Finnish -> Finland
+        19 => "VN", // Vietnamese -> Vietnam
+        20 => "IL", // Hebrew -> Israel
+        21 => "UA", // Ukrainian -> Ukraine
+        22 => "GR", // Greek -> Greece
+        23 => "MY", // Malay -> Malaysia
+        24 => "CZ", // Czech -> Czech Republic
+        25 => "RO", // Romanian -> Romania
+        26 => "DK", // Danish -> Denmark
+        27 => "HU", // Hungarian -> Hungary
+        28 => "IN", // Tamil -> India
+        29 => "NO", // Norwegian -> Norway
+        30 => "TH", // Thai -> Thailand
+        31 => "PK", // Urdu -> Pakistan
+        32 => "HR", // Croatian -> Croatia
+        33 => "BG", // Bulgarian -> Bulgaria
+        34 => "LT", // Lithuanian -> Lithuania
+        35 => "VA", // Latin -> Vatican
+        36 => "NZ", // Maori -> New Zealand
+        37 => "IN", // Malayalam -> India
+        38 => "GB", // Welsh -> United Kingdom
+        39 => "SK", // Slovak -> Slovakia
+        40 => "IN", // Telugu -> India
+        41 => "IR", // Persian -> Iran
+        42 => "LV", // Latvian -> Latvia
+        43 => "BD", // Bengali -> Bangladesh
+        44 => "RS", // Serbian -> Serbia
+        45 => "AZ", // Azerbaijani -> Azerbaijan
+        46 => "SI", // Slovenian -> Slovenia
+        47 => "IN", // Kannada -> India
+        48 => "EE", // Estonian -> Estonia
+        49 => "MK", // Macedonian -> North Macedonia
+        50 => "FR", // Breton -> France
+        51 => "ES", // Basque -> Spain
+        52 => "IS", // Icelandic -> Iceland
+        53 => "AM", // Armenian -> Armenia
+        54 => "NP", // Nepali -> Nepal
+        55 => "MN", // Mongolian -> Mongolia
+        56 => "BA", // Bosnian -> Bosnia and Herzegovina
+        57 => "KZ", // Kazakh -> Kazakhstan
+        58 => "AL", // Albanian -> Albania
+        59 => "TZ", // Swahili -> Tanzania
+        60 => "ES", // Galician -> Spain
+        61 => "IN", // Marathi -> India
+        62 => "IN", // Punjabi -> India
+        63 => "LK", // Sinhala -> Sri Lanka
+        64 => "KH", // Khmer -> Cambodia
+        65 => "ZW", // Shona -> Zimbabwe
+        66 => "NG", // Yoruba -> Nigeria
+        67 => "SO", // Somali -> Somalia
+        68 => "ZA", // Afrikaans -> South Africa
+        69 => "FR", // Occitan -> France
+        70 => "GE", // Georgian -> Georgia
+        71 => "BY", // Belarusian -> Belarus
+        72 => "TJ", // Tajik -> Tajikistan
+        73 => "PK", // Sindhi -> Pakistan
+        74 => "IN", // Gujarati -> India
+        75 => "ET", // Amharic -> Ethiopia
+        76 => "IL", // Yiddish -> Israel
+        77 => "LA", // Lao -> Laos
+        78 => "UZ", // Uzbek -> Uzbekistan
+        79 => "FO", // Faroese -> Faroe Islands
+        80 => "HT", // Haitian Creole -> Haiti
+        81 => "AF", // Pashto -> Afghanistan
+        82 => "TM", // Turkmen -> Turkmenistan
+        83 => "NO", // Nynorsk -> Norway
+        84 => "MT", // Maltese -> Malta
+        85 => "IN", // Sanskrit -> India
+        86 => "LU", // Luxembourgish -> Luxembourg
+        87 => "MM", // Myanmar -> Myanmar
+        88 => "CN", // Tibetan -> China
+        89 => "PH", // Tagalog -> Philippines
+        90 => "MG", // Malagasy -> Madagascar
+        91 => "IN", // Assamese -> India
+        92 => "RU", // Tatar -> Russia
+        93 => "US", // Hawaiian -> United States
+        94 => "CD", // Lingala -> Democratic Republic of Congo
+        95 => "NG", // Hausa -> Nigeria
+        96 => "RU", // Bashkir -> Russia
+        97 => "ID", // Javanese -> Indonesia
+        98 => "ID", // Sundanese -> Indonesia
+        99 => "HK", // Cantonese -> Hong Kong
+        _ => "auto", // Unknown/auto
+    };
 
-    // Collect and print the transcription
+    // Collect sections with timestamps
     println!("\n----- Transcription -----");
-    let mut full_text = String::new();
+    let mut sections = Vec::new();
     for i in 0..num_segments {
         let segment = state.full_get_segment_text(i)?;
         let start_time = state.full_get_segment_t0(i)?;
-        let end_time = state.full_get_segment_t1(i)?;
+        let _end_time = state.full_get_segment_t1(i)?;
 
         let start_mins = start_time / 60;
         let start_secs = start_time % 60;
-        let end_mins = end_time / 60;
-        let end_secs = end_time % 60;
+        let _end_mins = _end_time / 60;
+        let _end_secs = _end_time % 60;
 
-    println!("[{:02}:{:05.2}-{:02}:{:05.2}] {}", 
-        start_mins, start_secs, end_mins, end_secs, segment);
+        println!("[{:02}:{:05.2}-{:02}:{:05.2}] {}", 
+            start_mins, start_secs, _end_mins, _end_secs, segment);
 
-    // Skip empty segments, single punctuation, or [BLANK_AUDIO] markers
-    let trimmed = segment.trim();
-    if !trimmed.is_empty() && 
-       !trimmed.eq(",") && 
-       !trimmed.eq(".") && 
-       !trimmed.eq("[BLANK_AUDIO]") {
-        full_text.push_str(&segment);
-        full_text.push_str("\n");
-    }
+        // Skip empty segments, single punctuation, or [BLANK_AUDIO] markers
+        let trimmed = segment.trim();
+        if !trimmed.is_empty() && 
+           !trimmed.eq(",") && 
+           !trimmed.eq(".") && 
+           !trimmed.eq("[BLANK_AUDIO]") {
+            sections.push(TranscriptionSection {
+                text: segment,
+                at: (start_time as i64) * 10, // Convert to milliseconds (whisper uses centiseconds)
+            });
+        }
     }
     println!("------------------------");
     
-    Ok(full_text)
+    Ok(TranscriptionResult {
+        sections,
+        lang: lang_str.to_string(),
+    })
 }
 
 pub fn resample_audio(path: &Path, target_rate: u32) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {

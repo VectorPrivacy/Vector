@@ -1632,3 +1632,40 @@ select:disabled:hover {
   bottom: 0;
   width: 100%;
 }
+
+/* Transcription highlighting styles */
+.transcription-section {
+  transition: all 0.3s ease;
+  border-radius: 4px;
+  margin: 0 1px;
+}
+
+.transcription-section:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Enhanced highlighting for the current section */
+.transcription-section.current {
+  background-color: rgba(89, 252, 179, 0.3);
+  color: #59fcb3;
+  font-weight: 500;
+  box-shadow: 0 0 8px rgba(89, 252, 179, 0.2);
+}
+
+.transcription-text {
+  line-height: 1.5;
+  user-select: text;
+  cursor: text;
+}
+
+.transcription-result {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.transcription-result.hidden {
+  display: none;
+}

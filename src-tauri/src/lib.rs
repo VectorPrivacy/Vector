@@ -2427,7 +2427,7 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
 }
 
 #[tauri::command]
-async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_name: String, translate: bool) -> Result<String, String> {
+async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_name: String, translate: bool) -> Result<whisper::TranscriptionResult, String> {
     // Convert the file path to a Path
     let path = std::path::Path::new(&file_path);
     
@@ -2441,7 +2441,7 @@ async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_n
         Ok(audio_data) => {
             // Pass the resampled audio to the whisper transcribe function
             match whisper::transcribe(&handle, &model_name, translate, audio_data).await {
-                Ok(text) => Ok(text),
+                Ok(result) => Ok(result),
                 Err(e) => Err(format!("Transcription error: {}", e.to_string()))
             }
         },

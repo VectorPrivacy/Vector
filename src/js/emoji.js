@@ -1376,6 +1376,21 @@ function isEmojiOnly(str) {
 }
 
 /**
+ * Converts an ISO 3166-1 alpha-2 country code to its corresponding flag emoji.
+ * @param {string} isoCode - The two-letter ISO country code
+ * @returns {string} The flag emoji or a globe emoji if invalid
+ */
+function isoToFlagEmoji(isoCode) {
+    if (!isoCode || isoCode.length !== 2) return '🌍';
+    
+    const upperIso = isoCode.toUpperCase();
+    const codePointA = upperIso.charCodeAt(0) - 65 + 0x1F1E6;
+    const codePointB = upperIso.charCodeAt(1) - 65 + 0x1F1E6;
+    
+    return String.fromCodePoint(codePointA, codePointB);
+}
+
+/**
  * Convert all Unicode emojis in the given DOM element to Twemoji SVGs
  * @param {HTMLElement} domElement 
  */

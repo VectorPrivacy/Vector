@@ -201,3 +201,9 @@ select:disabled {
 .nav-icon {
   background-color: #59fcb3;
 }
+
+/* Voice text highlight colors */
+:root {
+  --voice-highlight-bg: rgba(89, 252, 179, 0.3);
+  --voice-highlight-text: #59fcb3;
+}
