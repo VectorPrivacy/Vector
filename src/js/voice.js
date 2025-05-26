@@ -282,8 +282,6 @@ document.addEventListener('DOMContentLoaded', async () => {
  * @param {Object} msg - Message data
  */
 function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
-    if (!['wav', 'mp3'].includes(cAttachment.extension)) return;
-    
     const audioContainer = document.createElement('div');
     audioContainer.classList.add('audio-message-container');
 
@@ -294,102 +292,107 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     audPreview.src = assetUrl;
     audPreview.addEventListener('loadedmetadata', () => softChatScroll(), { once: true });
 
-    // Add transcribe button container
-    const transcribeContainer = document.createElement('div');
-    transcribeContainer.classList.add('transcribe-container');
-    
-    // Add view transcription button
-    const transcribeBtn = document.createElement('button');
-    transcribeBtn.classList.add('btn', 'btn-transcribe');
-    transcribeBtn.style.display = 'flex';
+    audioContainer.appendChild(audPreview);
 
-    const transcribeIcon = document.createElement('span');
-    transcribeIcon.classList.add('icon', 'icon-mic-on');
-    Object.assign(transcribeIcon.style, {
-        position: 'relative',
-        backgroundColor: 'rgba(255, 255, 255, 0.45)',
-        width: '19px',
-        height: '19px'
-    });
-    
-    const transcribeText = document.createElement('span');
-    transcribeText.textContent = 'Transcribe';
-    Object.assign(transcribeText.style, {
-        color: 'rgba(255, 255, 255, 0.45)',
-        marginLeft: '5px'
-    });
-    
-    transcribeBtn.appendChild(transcribeIcon);
-    transcribeBtn.appendChild(transcribeText);
-    
-    // Create container for transcription result
-    const transcriptionResult = document.createElement('div');
-    transcriptionResult.classList.add('transcription-result', 'hidden');
+    // Only add transcription UI for supported formats
+    if (['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
+        // Add transcribe button container
+        const transcribeContainer = document.createElement('div');
+        transcribeContainer.classList.add('transcribe-container');
+        
+        // Add view transcription button
+        const transcribeBtn = document.createElement('button');
+        transcribeBtn.classList.add('btn', 'btn-transcribe');
+        transcribeBtn.style.display = 'flex';
 
-    transcribeBtn.addEventListener('click', async () => {
-        if (transcribeBtn.classList.contains('loading')) return;
+        const transcribeIcon = document.createElement('span');
+        transcribeIcon.classList.add('icon', 'icon-mic-on');
+        Object.assign(transcribeIcon.style, {
+            position: 'relative',
+            backgroundColor: 'rgba(255, 255, 255, 0.45)',
+            width: '19px',
+            height: '19px'
+        });
+        
+        const transcribeText = document.createElement('span');
+        transcribeText.textContent = 'Transcribe';
+        Object.assign(transcribeText.style, {
+            color: 'rgba(255, 255, 255, 0.45)',
+            marginLeft: '5px'
+        });
+        
+        transcribeBtn.appendChild(transcribeIcon);
+        transcribeBtn.appendChild(transcribeText);
+        
+        // Create container for transcription result
+        const transcriptionResult = document.createElement('div');
+        transcriptionResult.classList.add('transcription-result', 'hidden');
 
-        // If already transcribed, just toggle visibility
-        if (transcriptionResult.textContent.trim()) {
-            return transcriptionResult.classList.toggle('hidden');
-        }
+        transcribeBtn.addEventListener('click', async () => {
+            if (transcribeBtn.classList.contains('loading')) return;
 
-        // Show loading state
-        transcribeBtn.classList.add('loading');
-        transcribeText.textContent = 'Transcribing';
-        transcribeBtn.style.cursor = 'default';
-        transcribeIcon.classList.replace('icon-mic-on', 'icon-loading');
-        transcribeIcon.classList.add('spin');
+            // If already transcribed, just toggle visibility
+            if (transcriptionResult.textContent.trim()) {
+                return transcriptionResult.classList.toggle('hidden');
+            }
 
-        try {
-            const transcriptionData = await window.cTranscriber.transcribeAudioFile(cAttachment.path);
-          
-            // Remove the loading state (or, currently, the entire button)
-            transcribeBtn.remove();
+            // Show loading state
+            transcribeBtn.classList.add('loading');
+            transcribeText.textContent = 'Transcribing';
+            transcribeBtn.style.cursor = 'default';
+            transcribeIcon.classList.replace('icon-mic-on', 'icon-loading');
+            transcribeIcon.classList.add('spin');
+
+            try {
+                const transcriptionData = await window.cTranscriber.transcribeAudioFile(cAttachment.path);
+              
+                // Remove the loading state (or, currently, the entire button)
+                transcribeBtn.remove();
+                
+                // Clear any existing content
+                transcriptionResult.innerHTML = '';
+                
+                const transcriptionUI = createTranscriptionUI(transcriptionData, audPreview);
+                transcriptionResult.appendChild(transcriptionUI);
+                transcriptionResult.classList.remove('hidden');
+            } catch (err) {
+                console.error('Transcription error:', err);
+                
+                transcriptionResult.innerHTML = '';
+                const errorDiv = document.createElement('div');
+                errorDiv.classList.add('transcription-error');
+                errorDiv.textContent = `Error: ${err.message || 'Transcription failed'}`;
+                transcriptionResult.appendChild(errorDiv);
+                transcriptionResult.classList.remove('hidden');
+            } finally {
+                // Only clean up if button still exists (not removed on success)
+                if (transcribeBtn.parentNode) {
+                    transcribeBtn.classList.remove('loading');
+                    transcribeBtn.style.cursor = '';
+                    transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
+                    transcribeIcon.classList.remove('spin');
+                    transcribeText.textContent = 'Transcribe';
+                    transcribeBtn.disabled = false;
+                }
+            }
+        });
+
+        transcribeContainer.appendChild(transcribeBtn);
+        audioContainer.appendChild(transcribeContainer);
+        audioContainer.appendChild(transcriptionResult);
+
+        // Auto-transcribe if enabled and this is a recent received message
+        if (window.voiceSettings?.autoTranscript && 
+            !msg.mine && 
+            msg.at > (Date.now() / 1000 - 60)) {
             
-            // Clear any existing content
-            transcriptionResult.innerHTML = '';
-            
-            const transcriptionUI = createTranscriptionUI(transcriptionData, audPreview);
-            transcriptionResult.appendChild(transcriptionUI);
-            transcriptionResult.classList.remove('hidden');
-        } catch (err) {
-            console.error('Transcription error:', err);
-            
-            transcriptionResult.innerHTML = '';
-            const errorDiv = document.createElement('div');
-            errorDiv.classList.add('transcription-error');
-            errorDiv.textContent = `Error: ${err.message || 'Transcription failed'}`;
-            transcriptionResult.appendChild(errorDiv);
-            transcriptionResult.classList.remove('hidden');
-        } finally {
-            // Only clean up if button still exists (not removed on success)
-            if (transcribeBtn.parentNode) {
-                transcribeBtn.classList.remove('loading');
-                transcribeBtn.style.cursor = '';
-                transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
-                transcribeIcon.classList.remove('spin');
-                transcribeText.textContent = 'Transcribe';
-                transcribeBtn.disabled = false;
+            const selectedModel = window.voiceSettings?.selectedModel || 'small';
+            const currentModel = window.voiceSettings.models?.find(m => m.model.name === selectedModel);
+            if (currentModel?.downloaded) {
+                transcribeBtn.click();
             }
         }
-    });
-
-    transcribeContainer.appendChild(transcribeBtn);
-    audioContainer.appendChild(audPreview);
-    audioContainer.appendChild(transcribeContainer);
-    audioContainer.appendChild(transcriptionResult);
-    pMessage.appendChild(audioContainer);
-
-    // Auto-transcribe if enabled and this is a recent received message
-    if (window.voiceSettings?.autoTranscript && 
-        !msg.mine && 
-        msg.at > (Date.now() / 1000 - 60)) {
-        
-        const selectedModel = window.voiceSettings?.selectedModel || 'small';
-        const currentModel = window.voiceSettings.models?.find(m => m.model.name === selectedModel);
-        if (currentModel?.downloaded) {
-            transcribeBtn.click();
-        }
     }
+
+    pMessage.appendChild(audioContainer);
 }

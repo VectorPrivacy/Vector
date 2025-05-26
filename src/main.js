@@ -1715,7 +1715,7 @@ function renderMessage(msg, sender, editID = '') {
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
                 pMessage.appendChild(imgPreview);
-                } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
+                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
                 // Audio - use the enhanced handler with transcription
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
                 } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
