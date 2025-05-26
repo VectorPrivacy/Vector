@@ -122,6 +122,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Audio
             "wav" => "audio/wav",
             "mp3" => "audio/mp3",
+            "flac" => "audio/flac",
+            "ogg" => "audio/ogg",
+            "m4a" => "audio/mp4",
+            "aac" => "audio/aac",
             // Videos
             "mp4" => "video/mp4",
             "webm" => "video/webm",

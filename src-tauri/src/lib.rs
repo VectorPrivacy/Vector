@@ -1326,27 +1326,27 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Figure out the file extension from the mime-type
                 let mime_type = rumor.tags.find(TagKind::Custom(Cow::Borrowed("file-type"))).unwrap().content().unwrap();
-                let extension = match mime_type.split('/').nth(1) {
+                let extension = match mime_type {
                     // Images
-                    Some("png") => "png",
-                    Some("jpeg") => "jpg",
-                    Some("jpg") => "jpg",
-                    Some("gif") => "gif",
-                    Some("webp") => "webp",
+                    "image/png" => "png",
+                    "image/jpeg" | "image/jpg" => "jpg",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
                     // Audio
-                    Some("wav") => "wav",
-                    Some("x-wav") => "wav",
-                    Some("wave") => "wav",
-                    Some("mp3") => "mp3",
+                    "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+                    "audio/mp3" | "audio/mpeg" => "mp3",
+                    "audio/flac" => "flac",
+                    "audio/ogg" => "ogg",
+                    "audio/mp4" => "m4a",
+                    "audio/aac" | "audio/x-aac" => "aac",
                     // Videos
-                    Some("mp4") => "mp4",
-                    Some("webm") => "webm",
-                    Some("quicktime") => "mov",
-                    Some("x-msvideo") => "avi",
-                    Some("x-matroska") => "mkv",
-                    // Fallback options
-                    Some(ext) => ext,
-                    None => "bin",
+                    "video/mp4" => "mp4",
+                    "video/webm" => "webm",
+                    "video/quicktime" => "mov",
+                    "video/x-msvideo" => "avi",
+                    "video/x-matroska" => "mkv",
+                    // Fallback - extract extension from mime subtype
+                    _ => mime_type.split('/').nth(1).unwrap_or("bin"),
                 };
 
                 // Check if the file exists on our system already
