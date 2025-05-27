@@ -6,13 +6,130 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
 use crate::db;
-use crate::Attachment;
-use crate::AttachmentFile;
-use crate::Message;
 use crate::STATE;
 use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::PRIVATE_NIP96_CONFIG;
+
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+pub struct Message {
+    pub id: String,
+    pub content: String,
+    pub replied_to: String,
+    pub preview_metadata: Option<SiteMetadata>,
+    pub attachments: Vec<Attachment>,
+    pub reactions: Vec<Reaction>,
+    pub at: u64,
+    pub pending: bool,
+    pub failed: bool,
+    pub mine: bool,
+}
+
+impl Message {
+    /// Get an attachment by ID
+    /*
+    fn get_attachment(&self, id: &str) -> Option<&Attachment> {
+        self.attachments.iter().find(|p| p.id == id)
+    }
+    */
+
+    /// Get an attachment by ID
+    pub fn get_attachment_mut(&mut self, id: &str) -> Option<&mut Attachment> {
+        self.attachments.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Add a Reaction - if it was not already added
+    pub fn add_reaction(&mut self, reaction: Reaction, chat_id: Option<&str>) -> bool {
+        // Make sure we don't add the same reaction twice
+        if !self.reactions.iter().any(|r| r.id == reaction.id) {
+            self.reactions.push(reaction);
+
+            // Update the frontend if a Chat ID was provided
+            if let Some(chat) = chat_id {
+                let handle = TAURI_APP.get().unwrap();
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &self.id,
+                    "message": &self,
+                    "chat_id": chat
+                })).unwrap();
+            }
+            true
+        } else {
+            // Reaction was already added previously
+            false
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Attachment {
+    /// The encryption Nonce as a stringified unique file ID (TODO: change to SHA256 hash)
+    pub id: String,
+    // The encryption key
+    pub key: String,
+    // The encryption nonce
+    pub nonce: String,
+    /// The file extension
+    pub extension: String,
+    /// The host URL, typically a NIP-96 server
+    pub url: String,
+    /// The storage directory path (typically the ~/Downloads folder)
+    pub path: String,
+    /// The download size of the encrypted file
+    pub size: u64,
+    /// Whether the file is currently being downloaded or not
+    pub downloading: bool,
+    /// Whether the file has been downloaded or not
+    pub downloaded: bool,
+}
+
+impl Default for Attachment {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            key: String::new(),
+            nonce: String::new(),
+            extension: String::new(),
+            url: String::new(),
+            path: String::new(),
+            size: 0,
+            downloading: false,
+            downloaded: true,
+        }
+    }
+}
+
+/// A simple pre-upload format to associate a byte stream with a file extension
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct AttachmentFile {
+    bytes: Vec<u8>,
+    extension: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Reaction {
+    pub id: String,
+    /// The HEX Event ID of the message being reacted to
+    pub reference_id: String,
+    /// The HEX ID of the author
+    pub author_id: String,
+    /// The emoji of the reaction
+    pub emoji: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
+pub struct SiteMetadata {
+    pub domain: String,
+    pub og_title: Option<String>,
+    pub og_description: Option<String>,
+    pub og_image: Option<String>,
+    pub og_url: Option<String>,
+    pub og_type: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub favicon: Option<String>,
+}
 
 #[tauri::command]
 pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<bool, String> {
@@ -342,4 +459,63 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
 
     // Message the file to the intended user
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
+}
+
+#[tauri::command]
+pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool, ()> {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+
+    // Prepare the EventID and Pubkeys for rumor building
+    let reference_event = EventId::from_hex(reference_id.as_str()).unwrap();
+    let receiver_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
+
+    // Grab our pubkey
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
+    // Build our NIP-25 Reaction rumor
+    let rumor = EventBuilder::reaction_extended(
+        reference_event,
+        receiver_pubkey,
+        Some(Kind::PrivateDirectMessage),
+        &emoji,
+    )
+    .build(my_public_key);
+    let rumor_id = rumor.id.unwrap();
+
+    // Send reaction to the real receiver
+    client
+        .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+        .await
+        .unwrap();
+
+    // Send reaction to our own public key, to allow for recovering
+    match client.gift_wrap(&my_public_key, rumor, []).await {
+        Ok(_) => {
+            // And add our reaction locally
+            let reaction = Reaction {
+                id: rumor_id.to_hex(),
+                reference_id: reference_id.clone(),
+                author_id: my_public_key.to_hex(),
+                emoji,
+            };
+
+            // Commit it to our local state
+            let mut state = STATE.lock().await;
+            let profile = state.get_profile_mut(&npub).unwrap();
+            let chat_id = profile.id.clone();
+            let msg = profile.get_message_mut(&reference_id).unwrap();
+            let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
+            if was_reaction_added_to_state {
+                // Save the message's reaction to our DB
+                let handle = TAURI_APP.get().unwrap();
+                db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
+            }
+            return Ok(was_reaction_added_to_state);
+        }
+        Err(e) => {
+            eprintln!("Error: {:?}", e);
+            return Ok(false);
+        }
+    }
 }

@@ -1,17 +1,10 @@
 use std::borrow::Cow;
-use argon2::{Argon2, Params, Version};
 use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
-use rand::Rng;
 use tokio::sync::Mutex;
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce
-};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_fs::FsExt;
 use scraper::{Html, Selector};
 
 mod crypto;
@@ -25,12 +18,15 @@ use voice::AudioRecorder;
 mod net;
 
 mod upload;
-use upload::{upload_data_with_progress, ProgressCallback};
 
 mod util;
 use util::{extract_https_urls, get_file_type_description};
 
 mod message;
+pub use message::{Message, Attachment, Reaction, SiteMetadata};
+
+mod profile;
+pub use profile::{Profile, Status};
 
 /// The Maximum byte size that Vector will auto-download.
 /// 
@@ -62,327 +58,8 @@ static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
-pub struct Message {
-    id: String,
-    content: String,
-    replied_to: String,
-    preview_metadata: Option<SiteMetadata>,
-    attachments: Vec<Attachment>,
-    reactions: Vec<Reaction>,
-    at: u64,
-    pending: bool,
-    failed: bool,
-    mine: bool,
-}
 
-impl Message {
-    /// Get an attachment by ID
-    /*
-    fn get_attachment(&self, id: &str) -> Option<&Attachment> {
-        self.attachments.iter().find(|p| p.id == id)
-    }
-    */
 
-    /// Get an attachment by ID
-    fn get_attachment_mut(&mut self, id: &str) -> Option<&mut Attachment> {
-        self.attachments.iter_mut().find(|p| p.id == id)
-    }
-
-    /// Add a Reaction - if it was not already added
-    fn add_reaction(&mut self, reaction: Reaction, chat_id: Option<&str>) -> bool {
-        // Make sure we don't add the same reaction twice
-        if !self.reactions.iter().any(|r| r.id == reaction.id) {
-            self.reactions.push(reaction);
-
-            // Update the frontend if a Chat ID was provided
-            if let Some(chat) = chat_id {
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": &self.id,
-                    "message": &self,
-                    "chat_id": chat
-                })).unwrap();
-            }
-            true
-        } else {
-            // Reaction was already added previously
-            false
-        }
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-#[serde(default)]
-pub struct Attachment {
-    /// The encryption Nonce as a stringified unique file ID (TODO: change to SHA256 hash)
-    id: String,
-    // The encryption key
-    key: String,
-    // The encryption nonce
-    nonce: String,
-    /// The file extension
-    extension: String,
-    /// The host URL, typically a NIP-96 server
-    url: String,
-    /// The storage directory path (typically the ~/Downloads folder)
-    path: String,
-    /// The download size of the encrypted file
-    size: u64,
-    /// Whether the file is currently being downloaded or not
-    downloading: bool,
-    /// Whether the file has been downloaded or not
-    downloaded: bool,
-}
-
-impl Default for Attachment {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            key: String::new(),
-            nonce: String::new(),
-            extension: String::new(),
-            url: String::new(),
-            path: String::new(),
-            size: 0,
-            downloading: false,
-            downloaded: true,
-        }
-    }
-}
-
-/// A simple pre-upload format to associate a byte stream with a file extension
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-struct AttachmentFile {
-    bytes: Vec<u8>,
-    extension: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub struct Reaction {
-    id: String,
-    /// The HEX Event ID of the message being reacted to
-    reference_id: String,
-    /// The HEX ID of the author
-    author_id: String,
-    /// The emoji of the reaction
-    emoji: String,
-}
-
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
-#[serde(default)]
-pub struct Profile {
-    id: String,
-    name: String,
-    display_name: String,
-    lud06: String,
-    lud16: String,
-    banner: String,
-    avatar: String,
-    about: String,
-    website: String,
-    nip05: String,
-    messages: Vec<Message>,
-    last_read: String,
-    status: Status,
-    last_updated: u64,
-    typing_until: u64,
-    mine: bool,
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Profile {
-    fn new() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            display_name: String::new(),
-            lud06: String::new(),
-            lud16: String::new(),
-            banner: String::new(),
-            avatar: String::new(),
-            about: String::new(),
-            website: String::new(),
-            nip05: String::new(),
-            messages: Vec::new(),
-            last_read: String::new(),
-            status: Status::new(),
-            last_updated: 0,
-            typing_until: 0,
-            mine: false,
-        }
-    }
-
-    /// Get the last message timestamp
-    fn last_message_time(&self) -> Option<u64> {
-        self.messages.last().map(|msg| msg.at)
-    }
-
-    /// Get a message by ID
-    /*
-    fn get_message(&self, id: &str) -> Option<&Message> {
-        self.messages.iter().find(|msg| msg.id == id)
-    }
-    */
-
-    /// Get a mutable message by ID
-    fn get_message_mut(&mut self, id: &str) -> Option<&mut Message> {
-        self.messages.iter_mut().find(|msg| msg.id == id)
-    }
-
-    /// Set the Last Received message as the "Last Read" message
-    fn set_as_read(&mut self) -> bool {
-        // Ensure we have at least one message received from them
-        for msg in self.messages.iter().rev() {
-            if !msg.mine {
-                // Found the most recent message from them
-                self.last_read = msg.id.clone();
-                return true;
-            }
-        }
-        
-        // No messages from them, can't mark anything as read
-        false
-    }
-
-    /// Merge Nostr Metadata with this Vector Profile
-    /// 
-    /// Returns `true` if any fields were updated, `false`` otherwise
-    fn from_metadata(&mut self, meta: Metadata) -> bool {
-        let mut changed = false;
-        
-        // Name
-        if let Some(name) = meta.name {
-            if self.name != name {
-                self.name = name;
-                changed = true;
-            }
-        }
-
-        // Display Name
-        if let Some(name) = meta.display_name {
-            if self.display_name != name {
-                self.display_name = name;
-                changed = true;
-            }
-        }
-
-        // lud06 (LNURL)
-        if let Some(lud06) = meta.lud06 {
-            if self.lud06 != lud06 {
-                self.lud06 = lud06;
-                changed = true;
-            }
-        }
-
-        // lud16 (Lightning Address)
-        if let Some(lud16) = meta.lud16 {
-            if self.lud16 != lud16 {
-                self.lud16 = lud16;
-                changed = true;
-            }
-        }
-
-        // Banner
-        if let Some(banner) = meta.banner {
-            if self.banner != banner {
-                self.banner = banner;
-                changed = true;
-            }
-        }
-        
-        // Picture (Vector Avatar)
-        if let Some(picture) = meta.picture {
-            if self.avatar != picture {
-                self.avatar = picture;
-                changed = true;
-            }
-        }
-
-        // About (Vector Bio)
-        if let Some(about) = meta.about {
-            if self.about != about {
-                self.about = about;
-                changed = true;
-            }
-        }
-
-        // Website
-        if let Some(website) = meta.website {
-            if self.website != website {
-                self.website = website;
-                changed = true;
-            }
-        }
-
-        // NIP-05
-        if let Some(nip05) = meta.nip05 {
-            if self.nip05 != nip05 {
-                self.nip05 = nip05;
-                changed = true;
-            }
-        }
-        
-        changed
-    }
-
-    /// Add a Message to this Vector Profile
-    /// 
-    /// This method internally checks for and avoids duplicate messages.
-    fn internal_add_message(&mut self, message: Message) -> bool {
-        // Make sure we don't add the same message twice
-        if self.messages.iter().any(|m| m.id == message.id) {
-            // Message is already known by the state
-            return false;
-        }
-
-        // If it's their message; disable their typing indicator until further indicators are sent
-        if !message.mine {
-            self.typing_until = 0;
-        }
-
-        // Fast path for common cases: newest or oldest messages
-        if self.messages.is_empty() {
-            // First message
-            self.messages.push(message);
-        } else if message.at >= self.messages.last().unwrap().at {
-            // Common case 1: Latest message (append to end)
-            self.messages.push(message);
-        } else if message.at <= self.messages.first().unwrap().at {
-            // Common case 2: Oldest message (insert at beginning)
-            self.messages.insert(0, message);
-        } else {
-            // Less common case: Message belongs somewhere in the middle
-            self.messages.insert(
-                self.messages.binary_search_by(|m| m.at.cmp(&message.at)).unwrap_or_else(|idx| idx),
-                message
-            );
-        }
-        true
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub struct Status {
-    title: String,
-    purpose: String,
-    url: String,
-}
-
-impl Status {
-    fn new() -> Self {
-        Self {
-            title: String::new(),
-            purpose: String::new(),
-            url: String::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum SyncMode {
@@ -794,327 +471,7 @@ async fn warmup_nip96_servers() -> bool {
     true
 }
 
-#[tauri::command]
-async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool, ()> {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
-    // Prepare the EventID and Pubkeys for rumor building
-    let reference_event = EventId::from_hex(reference_id.as_str()).unwrap();
-    let receiver_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
-
-    // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
-
-    // Build our NIP-25 Reaction rumor
-    let rumor = EventBuilder::reaction_extended(
-        reference_event,
-        receiver_pubkey,
-        Some(Kind::PrivateDirectMessage),
-        &emoji,
-    )
-    .build(my_public_key);
-    let rumor_id = rumor.id.unwrap();
-
-    // Send reaction to the real receiver
-    client
-        .gift_wrap(&receiver_pubkey, rumor.clone(), [])
-        .await
-        .unwrap();
-
-    // Send reaction to our own public key, to allow for recovering
-    match client.gift_wrap(&my_public_key, rumor, []).await {
-        Ok(_) => {
-            // And add our reaction locally
-            let reaction = Reaction {
-                id: rumor_id.to_hex(),
-                reference_id: reference_id.clone(),
-                author_id: my_public_key.to_hex(),
-                emoji,
-            };
-
-            // Commit it to our local state
-            let mut state = STATE.lock().await;
-            let profile = state.get_profile_mut(&npub).unwrap();
-            let chat_id = profile.id.clone();
-            let msg = profile.get_message_mut(&reference_id).unwrap();
-            let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
-            if was_reaction_added_to_state {
-                // Save the message's reaction to our DB
-                let handle = TAURI_APP.get().unwrap();
-                db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
-            }
-            return Ok(was_reaction_added_to_state);
-        }
-        Err(e) => {
-            eprintln!("Error: {:?}", e);
-            return Ok(false);
-        }
-    }
-}
-
-#[tauri::command]
-async fn load_profile(npub: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Convert the Bech32 String in to a PublicKey
-    let profile_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
-
-    // Grab our pubkey to check for profiles belonging to us
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
-
-    // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
-    // Mutex Scope: we want to hold this lock as short as possible, given this function is "spammed" for very fast profile cache hit checks
-    let old_status: Status;
-    {
-        let mut state = STATE.lock().await;
-        old_status = match state.get_profile(&npub) {
-            Some(p) => {
-                // If the profile has been refreshed in the last 30s, return it's cached version
-                if p.last_updated + 30 > std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    {
-                        return true;
-                    }
-                p.status.clone()
-            },
-            None => {
-                // Create a new profile
-                let mut new_profile = Profile::new();
-                new_profile.id = npub.clone();
-                state.profiles.push(new_profile);
-                Status::new()
-            }
-        }
-        .clone();
-    }
-
-    // Attempt to fetch their status, if one exists
-    let status_filter = Filter::new()
-        .author(profile_pubkey)
-        .kind(Kind::from_u16(30315))
-        .limit(1);
-
-    let status = match client
-        .fetch_events(status_filter, std::time::Duration::from_secs(15))
-        .await
-    {
-        Ok(res) => {
-            // Make sure they have a status available
-            if !res.is_empty() {
-                let status_event = res.first().unwrap();
-                // Simple status recognition: last, general-only, no URLs, Metadata or Expiry considered
-                // TODO: comply with expiries, accept more "d" types, allow URLs
-                Status {
-                    title: status_event.content.clone(),
-                    purpose: status_event
-                        .tags
-                        .first()
-                        .unwrap()
-                        .content()
-                        .unwrap()
-                        .to_string(),
-                    url: String::from(""),
-                }
-            } else {
-                // Relays didn't find anything? We'll ignore this and use our previous status
-                old_status
-            }
-        }
-        Err(_) => old_status,
-    };
-
-    // Attempt to fetch their Metadata profile
-    match client
-        .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(15))
-        .await
-    {
-        Ok(meta) => {
-            if meta.is_some() {
-                // If it's ours, mark it as such
-                let mut state = STATE.lock().await;
-                let profile_mutable = state.get_profile_mut(&npub).unwrap();
-                profile_mutable.mine = my_public_key == profile_pubkey;
-
-                // Update the Status, and track changes
-                let status_changed = profile_mutable.status != status;
-                profile_mutable.status = status;
-
-                // Update the Metadata, and track changes
-                let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
-
-                // Apply the current update time
-                profile_mutable.last_updated = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                // If there's any change between our Old and New profile, emit an update
-                if status_changed || metadata_changed {
-                    let handle = TAURI_APP.get().unwrap();
-                    handle.emit("profile_update", &profile_mutable).unwrap();
-
-                    // Cache this profile in our DB, too
-                    db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
-                }
-                return true;
-            } else {
-                return false;
-            }
-        }
-        Err(_) => {
-            return false;
-        }
-    }
-}
-
-#[tauri::command]
-async fn update_profile(name: String, avatar: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
-
-    // Get our profile
-    let mut meta: Metadata;
-    let mut state = STATE.lock().await;
-    let profile = state
-        .get_profile(&my_public_key.to_bech32().unwrap())
-        .unwrap();
-
-    // We'll apply the changes to the previous profile and carry-on the rest
-    meta = Metadata::new().name(if name.is_empty() {
-        &profile.name
-    } else {
-        &name
-    });
-
-    // Optional avatar
-    if !avatar.is_empty() || !profile.avatar.is_empty() {
-        meta = meta.picture(
-            Url::parse(if avatar.is_empty() {
-                profile.avatar.as_str()
-            } else {
-                avatar.as_str()
-            })
-            .unwrap(),
-        );
-    }
-
-    // Add display_name
-    if !profile.display_name.is_empty() {
-        meta = meta.display_name(&profile.display_name);
-    }
-
-    // Add about
-    if !profile.about.is_empty() {
-        meta = meta.about(&profile.about);
-    }
-
-    // Add website
-    if !profile.website.is_empty() {
-        meta = meta.website(Url::parse(&profile.website).unwrap());
-    }
-
-    // Add banner
-    if !profile.banner.is_empty() {
-        meta = meta.banner(Url::parse(&profile.banner).unwrap());
-    }
-
-    // Add nip05
-    if !profile.nip05.is_empty() {
-        meta = meta.nip05(&profile.nip05);
-    }
-
-    // Add lud06
-    if !profile.lud06.is_empty() {
-        meta = meta.lud06(&profile.lud06);
-    }
-
-    // Add lud16
-    if !profile.lud16.is_empty() {
-        meta = meta.lud16(&profile.lud16);
-    }
-
-    // Broadcast the profile update
-    match client.set_metadata(&meta).await {
-        Ok(_) => {
-            // Apply our Metadata to our Profile
-            let profile_mutable = state
-                .get_profile_mut(&my_public_key.to_bech32().unwrap())
-                .unwrap();
-            profile_mutable.from_metadata(meta);
-
-            // Update the frontend
-            let handle = TAURI_APP.get().unwrap();
-            handle.emit("profile_update", &profile_mutable).unwrap();
-            true
-        }
-        Err(_) => false
-    }
-}
-
-#[tauri::command]
-async fn update_status(status: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
-
-    // Build and broadcast the status
-    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
-        .tag(Tag::custom(TagKind::d(), vec!["general"]));
-    match client.send_event_builder(status_builder).await {
-        Ok(_) => {
-            // Add the status to our profile
-            let mut state = STATE.lock().await;
-            let profile = state
-                .get_profile_mut(&my_public_key.to_bech32().unwrap())
-                .unwrap();
-            profile.status.purpose = String::from("general");
-            profile.status.title = status;
-
-            // Update the frontend
-            let handle = TAURI_APP.get().unwrap();
-            handle.emit("profile_update", &profile).unwrap();
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-#[tauri::command]
-async fn upload_avatar(filepath: String) -> Result<String, String> {
-    // Grab the file
-    let handle = TAURI_APP.get().unwrap();
-    return match handle.fs().read(std::path::Path::new(&filepath)) {
-        Ok(file) => {
-            // Format a Mime Type from the file extension
-            let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                _ => "application/octet-stream",
-            };
-
-            // Upload the file to the server
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
-            let conf = PUBLIC_NIP96_CONFIG.wait();
-            return match upload_data(&signer, &conf, file, Some(mime_type), None).await {
-                Ok(url) => Ok(url.to_string()),
-                Err(e) => Err(e.to_string())
-            }
-        },
-        Err(_) => Err(String::from("Image couldn't be loaded from disk"))
-    }
-}
 
 #[tauri::command]
 async fn start_typing(receiver: String) -> bool {
@@ -1863,174 +1220,12 @@ async fn connect() -> bool {
     true
 }
 
-// Convert a byte slice to a hex string
-fn bytes_to_hex_string(bytes: &[u8]) -> String {
-    // Pre-allocate the exact size needed (2 hex chars per byte)
-    let mut result = String::with_capacity(bytes.len() * 2);
-    
-    // Use a lookup table for hex conversion
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    
-    for &b in bytes {
-        // Extract high and low nibbles
-        let high = b >> 4;
-        let low = b & 0xF;
-        result.push(HEX_CHARS[high as usize] as char);
-        result.push(HEX_CHARS[low as usize] as char);
-    }
-    
-    result
-}
 
-// Convert hex string back to bytes for decryption
-fn hex_string_to_bytes(s: &str) -> Vec<u8> {
-    // Pre-allocate the result vector to avoid resize operations
-    let mut result = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    
-    // Process bytes directly to avoid UTF-8 decoding overhead
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        // Convert two hex characters to a single byte
-        let high = match bytes[i] {
-            b'0'..=b'9' => bytes[i] - b'0',
-            b'a'..=b'f' => bytes[i] - b'a' + 10,
-            b'A'..=b'F' => bytes[i] - b'A' + 10,
-            _ => 0,
-        };
-        
-        let low = match bytes[i + 1] {
-            b'0'..=b'9' => bytes[i + 1] - b'0',
-            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
-            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
-            _ => 0,
-        };
-        
-        result.push((high << 4) | low);
-        i += 2;
-    }
-    
-    result
-}
 
-async fn hash_pass(password: String) -> [u8; 32] {
-    // 150000 KiB memory size
-    let memory = 150000;
-    // 10 iterations
-    let iterations = 10;
-    let params = Params::new(memory, iterations, 1, Some(32)).unwrap();
-
-    // TODO: create a random on-disk salt at first init
-    // However, with the nature of this being local software, it won't help a user whom has their system compromised in the first place
-    let salt = "vectorvectovectvecvev".as_bytes();
-
-    // Prepare derivation
-    let argon = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
-    let mut key: [u8; 32] = [0; 32];
-    argon
-        .hash_password_into(password.as_bytes(), salt, &mut key)
-        .unwrap();
-
-    key
-}
-
-// Internal function for encryption logic
-pub async fn internal_encrypt(input: String, password: Option<String>) -> String {
-    // Hash our password with Argon2 and use it as the key
-    let key = if password.is_none() { 
-        ENCRYPTION_KEY.get().unwrap() 
-    } else { 
-        &hash_pass(password.unwrap()).await 
-    };
-
-    // Generate a random 12-byte nonce
-    let mut rng = rand::thread_rng();
-    let nonce_bytes: [u8; 12] = rng.gen();
-    
-    // Create the cipher instance
-    let cipher = ChaCha20Poly1305::new_from_slice(key)
-        .expect("Key should be valid");
-    
-    // Create the nonce
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    
-    // Encrypt the input
-    let ciphertext = cipher
-        .encrypt(nonce, input.as_bytes())
-        .expect("Encryption should not fail");
-    
-    // Prepend the nonce to our ciphertext
-    let mut buffer = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
-    buffer.extend_from_slice(&nonce_bytes);
-    buffer.extend_from_slice(&ciphertext);
-
-    // Save the Encryption Key locally so that we can continually encrypt data post-login
-    if ENCRYPTION_KEY.get().is_none() {
-        ENCRYPTION_KEY.set(*key).unwrap();
-    }
-
-    // Convert the encrypted bytes to a hex string for safe storage/transmission
-    bytes_to_hex_string(&buffer)
-}
-
-// Internal function for decryption logic
-pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    // Check if we're using a password before we potentially move it
-    let has_password = password.is_some();
-
-    // Fast path: If we already have an encryption key and no password is provided, avoid unnecessary work
-    let key = if let Some(pass) = password {
-        // Only hash the password if we actually have one
-        &hash_pass(pass).await
-    } else if let Some(cached_key) = ENCRYPTION_KEY.get() {
-        // Use cached key
-        cached_key
-    } else {
-        // No key available
-        return Err(());
-    };
-
-    // Convert hex to bytes - use reference to avoid copying the string
-    let encrypted_data = match hex_string_to_bytes(ciphertext.as_str()) {
-        bytes if bytes.len() >= 12 => bytes,
-        _ => return Err(())
-    };
-    
-    // Extract nonce and encrypted data - use slices to avoid copying data
-    let (nonce_bytes, actual_ciphertext) = encrypted_data.split_at(12);
-    
-    // Create the cipher instance
-    let cipher = match ChaCha20Poly1305::new_from_slice(key) {
-        Ok(c) => c,
-        Err(_) => return Err(())
-    };
-    
-    // Create the nonce and decrypt
-    let plaintext = match cipher.decrypt(Nonce::from_slice(nonce_bytes), actual_ciphertext) {
-        Ok(pt) => pt,
-        Err(_) => return Err(())
-    };
-
-    // Cache the key if needed - only set if we came from password path
-    if has_password && ENCRYPTION_KEY.get().is_none() {
-        // This only happens once after login with password
-        let _ = ENCRYPTION_KEY.set(*key); // Ignore result as this is non-critical
-    }
-
-    // Convert decrypted bytes to string using unsafe version, because SPEED!
-    // SAFETY: The plaintext bytes are guaranteed to be valid UTF-8, making this safe, because:
-    // 1. They were originally created from a valid UTF-8 string (typically JSON or plaintext)
-    // 2. ChaCha20-Poly1305 authenticated decryption ensures the data is intact
-    // 3. The decryption process preserves the exact byte patterns
-    unsafe {
-        Ok(String::from_utf8_unchecked(plaintext))
-    }
-}
-
-// Tauri command that uses the internal function
+// Tauri command that uses the crypto module
 #[tauri::command]
 async fn encrypt(input: String, password: Option<String>) -> String {
-    let res = internal_encrypt(input, password).await;
+    let res = crypto::internal_encrypt(input, password).await;
 
     // If we have one; save the in-memory seedphrase in an encrypted at-rest format
     match MNEMONIC_SEED.get() {
@@ -2045,10 +1240,10 @@ async fn encrypt(input: String, password: Option<String>) -> String {
     res
 }
 
-// Tauri command that uses the internal function
+// Tauri command that uses the crypto module
 #[tauri::command]
 async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    internal_decrypt(ciphertext, password).await
+    crypto::internal_decrypt(ciphertext, password).await
 }
 
 #[tauri::command]
@@ -2061,18 +1256,6 @@ async fn stop_recording() -> Result<Vec<u8>, String> {
     AudioRecorder::global().stop()
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
-pub struct SiteMetadata {
-    domain: String,
-    og_title: Option<String>,
-    og_description: Option<String>,
-    og_image: Option<String>,
-    og_url: Option<String>,
-    og_type: Option<String>,
-    title: Option<String>,
-    description: Option<String>,
-    favicon: Option<String>,  // New field
-}
 
 pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
     // Extract and normalize domain
@@ -2477,20 +1660,20 @@ pub fn run() {
             db::get_seed,
             db::set_seed,
             db::remove_setting,
-            fetch_messages,
+            profile::load_profile,
+            profile::update_profile,
+            profile::update_status,
+            profile::upload_avatar,
             message::message,
             message::paste_message,
             message::voice_message,
             message::file_message,
+            message::react,
+            fetch_messages,
             warmup_nip96_servers,
-            react,
             download_attachment,
             login,
             notifs,
-            load_profile,
-            update_profile,
-            update_status,
-            upload_avatar,
             start_typing,
             connect,
             encrypt,

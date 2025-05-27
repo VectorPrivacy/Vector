@@ -6,7 +6,8 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::collections::HashMap;
 
-use crate::{Profile, Status, Attachment, Message, Reaction, SiteMetadata, internal_encrypt, internal_decrypt};
+use crate::{Profile, Status, Attachment, Message, Reaction, SiteMetadata};
+use crate::crypto::{internal_encrypt, internal_decrypt};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VectorDB {
@@ -302,7 +303,7 @@ pub fn get_pkey<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Stri
 pub async fn set_seed<R: Runtime>(handle: AppHandle<R>, seed: String) -> Result<(), String> {
     let store = get_store(&handle);
     // Encrypt the seed phrase before storing it
-    let encrypted_seed = crate::internal_encrypt(seed, None).await;
+    let encrypted_seed = internal_encrypt(seed, None).await;
     store.set("seed".to_string(), serde_json::json!(encrypted_seed));
     Ok(())
 }
@@ -314,7 +315,7 @@ pub async fn get_seed<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>
         Some(value) if value.is_string() => {
             let encrypted_seed = value.as_str().unwrap().to_string();
             // Decrypt the seed phrase
-            match crate::internal_decrypt(encrypted_seed, None).await {
+            match internal_decrypt(encrypted_seed, None).await {
                 Ok(decrypted) => Ok(Some(decrypted)),
                 Err(_) => Err("Failed to decrypt seed phrase".to_string()),
             }
