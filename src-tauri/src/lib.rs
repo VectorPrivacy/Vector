@@ -19,7 +19,7 @@ mod net;
 mod upload;
 
 mod util;
-use util::{extract_https_urls, get_file_type_description};
+use util::get_file_type_description;
 
 mod message;
 pub use message::{Message, Attachment, Reaction};
@@ -1301,45 +1301,6 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     })
 }
 
-/// Marks a specific message as read
-#[tauri::command]
-async fn mark_as_read(npub: String) -> bool {
-    // Only mark as read if the Window is focused (user may have the chat open but the app in the background)
-    let handle = TAURI_APP.get().unwrap();
-    if !handle
-        .webview_windows()
-        .iter()
-        .next()
-        .unwrap()
-        .1
-        .is_focused()
-        .unwrap() {
-            // Update the counter to allow for background badge handling of in-chat messages
-            update_unread_counter(handle.clone()).await;
-            return false;
-        }
-
-    // Get a mutable reference to the profile
-    let result = {
-        let mut state = STATE.lock().await;
-        match state.get_profile_mut(&npub) {
-            Some(profile) => profile.set_as_read(),
-            None => false
-        }
-    };
-    
-    // Update the unread counter if the marking was successful
-    if result {
-        // Update the badge count
-        update_unread_counter(handle.clone()).await;
-
-        // Save the "Last Read" marker to the DB
-        db::set_profile(handle.clone(), STATE.lock().await.get_profile(&npub).unwrap().clone()).await.unwrap();
-    }
-    
-    result
-}
-
 /// Updates the OS taskbar badge with the count of unread messages
 #[tauri::command]
 async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
@@ -1440,6 +1401,7 @@ pub fn run() {
             profile::update_profile,
             profile::update_status,
             profile::upload_avatar,
+            profile::mark_as_read,
             message::message,
             message::paste_message,
             message::voice_message,
@@ -1457,7 +1419,6 @@ pub fn run() {
             decrypt,
             start_recording,
             stop_recording,
-            mark_as_read,
             update_unread_counter,
             logout,
             create_account
