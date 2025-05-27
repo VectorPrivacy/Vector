@@ -45,8 +45,13 @@ image = { version = "0.25.6", default-features = false, features = ["png"] }
 cpal = "0.15.3"
 hound = "3.5.1"
 rubato = "0.16.2"
-whisper-rs = "0.13.2"
 symphonia = { version = "0.5.4", features = ["mp3", "wav", "flac", "pcm"] }
+
+# Whisper (with cross-platform acceleration features)
+whisper-rs = "0.13.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.13.2", features = ["metal"] }
 
 # Workaround for a Tauri-4.2.1 dependency issue; screw you, deranged maintainers!
 deranged = "=0.4.0"
