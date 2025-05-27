@@ -6,7 +6,9 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
 use crate::db;
+use crate::net;
 use crate::STATE;
+use crate::util;
 use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::PRIVATE_NIP96_CONFIG;
@@ -16,7 +18,7 @@ pub struct Message {
     pub id: String,
     pub content: String,
     pub replied_to: String,
-    pub preview_metadata: Option<SiteMetadata>,
+    pub preview_metadata: Option<net::SiteMetadata>,
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
     pub at: u64,
@@ -116,19 +118,6 @@ pub struct Reaction {
     pub author_id: String,
     /// The emoji of the reaction
     pub emoji: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
-pub struct SiteMetadata {
-    pub domain: String,
-    pub og_title: Option<String>,
-    pub og_description: Option<String>,
-    pub og_image: Option<String>,
-    pub og_url: Option<String>,
-    pub og_type: Option<String>,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub favicon: Option<String>,
 }
 
 #[tauri::command]
@@ -518,4 +507,58 @@ pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<
             return Ok(false);
         }
     }
+}
+
+#[tauri::command]
+pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
+    // Find the message we're extracting metadata from
+    let text = {
+        let mut state = STATE.lock().await;
+        let chat = state.get_profile_mut(&npub).unwrap();
+        let message = chat.get_message_mut(&msg_id).unwrap();
+        message.content.clone()
+    };
+
+    // Extract URLs from the message
+    const MAX_URLS_TO_TRY: usize = 3;
+    let urls = util::extract_https_urls(text.as_str());
+    if urls.is_empty() {
+        return false;
+    }
+
+    // Only try the first few URLs
+    for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
+        match net::fetch_site_metadata(&url).await {
+            Ok(metadata) => {
+                let has_content = metadata.og_title.is_some() 
+                    || metadata.og_description.is_some()
+                    || metadata.og_image.is_some()
+                    || metadata.title.is_some()
+                    || metadata.description.is_some();
+
+                // Extracted metadata!
+                if has_content {
+                    // Re-fetch the message and add our metadata
+                    let mut state = STATE.lock().await;
+                    let chat = state.get_profile_mut(&npub).unwrap();
+                    let msg = chat.get_message_mut(&msg_id).unwrap();
+                    msg.preview_metadata = Some(metadata);
+
+                    // Update the renderer
+                    let handle = TAURI_APP.get().unwrap();
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": &msg_id,
+                        "message": &msg,
+                        "chat_id": &npub
+                    })).unwrap();
+
+                    // Save the new Metadata to the DB
+                    db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
+                    return true;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    false
 }
