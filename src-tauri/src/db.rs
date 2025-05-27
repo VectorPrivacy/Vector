@@ -282,11 +282,42 @@ pub fn get_theme<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Str
     }
 }
 
-//                                                              \/ "pkey" should be "model", then use invoke("")
 #[command]
-pub fn set_whisper_model_name<R: Runtime>(handle: AppHandle<R>, pkey: String) -> Result<(), String> {
+pub fn set_whisper_auto_translate<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
     let store = get_store(&handle);
-    store.set("whisper_model_name".to_string(), serde_json::json!(pkey));
+    store.set("whisper_auto_translate".to_string(), serde_json::json!(to));
+    Ok(())
+}
+
+#[command]
+pub fn get_whisper_auto_translate<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
+    let store = get_store(&handle);
+    match store.get("whisper_auto_translate") {
+        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub fn set_whisper_auto_transcribe<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("whisper_auto_transcribe".to_string(), serde_json::json!(to));
+    Ok(())
+}
+
+#[command]
+pub fn get_whisper_auto_transcribe<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
+    let store = get_store(&handle);
+    match store.get("whisper_auto_transcribe") {
+        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub fn set_whisper_model_name<R: Runtime>(handle: AppHandle<R>, name: String) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("whisper_model_name".to_string(), serde_json::json!(name));
     Ok(())
 }
 
