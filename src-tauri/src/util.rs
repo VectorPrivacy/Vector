@@ -81,3 +81,53 @@ pub fn get_file_type_description(extension: &str) -> String {
         .unwrap_or("File")
         .to_string()
 }
+
+/// Convert a byte slice to a hex string
+pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
+    // Pre-allocate the exact size needed (2 hex chars per byte)
+    let mut result = String::with_capacity(bytes.len() * 2);
+    
+    // Use a lookup table for hex conversion
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+    
+    for &b in bytes {
+        // Extract high and low nibbles
+        let high = b >> 4;
+        let low = b & 0xF;
+        result.push(HEX_CHARS[high as usize] as char);
+        result.push(HEX_CHARS[low as usize] as char);
+    }
+    
+    result
+}
+
+/// Convert hex string back to bytes for decryption
+pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
+    // Pre-allocate the result vector to avoid resize operations
+    let mut result = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    
+    // Process bytes directly to avoid UTF-8 decoding overhead
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        // Convert two hex characters to a single byte
+        let high = match bytes[i] {
+            b'0'..=b'9' => bytes[i] - b'0',
+            b'a'..=b'f' => bytes[i] - b'a' + 10,
+            b'A'..=b'F' => bytes[i] - b'A' + 10,
+            _ => 0,
+        };
+        
+        let low = match bytes[i + 1] {
+            b'0'..=b'9' => bytes[i + 1] - b'0',
+            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+            _ => 0,
+        };
+        
+        result.push((high << 4) | low);
+        i += 2;
+    }
+    
+    result
+}
