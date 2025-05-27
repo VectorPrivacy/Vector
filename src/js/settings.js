@@ -11,7 +11,7 @@ class VoiceSettings {
     constructor() {
         this.models = [];
         this.autoTranslate = false;
-        this.autoTranscript = false;
+        this.autoTranscribe = false;
         this.selectedModel = 'small'; // Default model
     }
 
@@ -20,11 +20,18 @@ class VoiceSettings {
         if (!voiceSection) return;
 
         voiceSection.style.display = 'block';
-        
+
+        // Load our Settings from disk (or use a default value)
+        const strModelID = await loadChosenWhisperModel() || this.selectedModel;
+        this.autoTranslate = await loadWhisperAutoTranslate();
+
         // Set initial toggle states (will be loaded from backend DB in future)
         document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
-        document.getElementById('auto-transcript-toggle').checked = this.autoTranscript;
-        document.getElementById('whisper-model').value = this.selectedModel;
+        document.getElementById('auto-transcribe-toggle').checked = this.autoTranscribe;
+        
+        // Update selectedModel to match the loaded model ID
+        this.selectedModel = strModelID;
+        document.getElementById('whisper-model').value = strModelID;
 
         this.updateModelStatus();
         this.setupEventListeners();
@@ -32,11 +39,11 @@ class VoiceSettings {
 
     setupEventListeners() {
         // Model selection change
-        document.getElementById('whisper-model').addEventListener('change', (e) => {
+        document.getElementById('whisper-model').addEventListener('change', async (e) => {
             this.selectedModel = e.target.value;
             this.updateModelStatus();
             this.updateDeleteButton();
-            // TODO: Save to backend DB when implemented
+            await this.setSelectedModel(e.target.value);
         });
         
         // Model download
@@ -46,14 +53,14 @@ class VoiceSettings {
         });
 
         // Toggle event listeners
-        document.getElementById('auto-translate-toggle').addEventListener('change', (e) => {
+        document.getElementById('auto-translate-toggle').addEventListener('change', async (e) => {
             this.autoTranslate = e.target.checked;
-            // TODO: Save to backend DB when implemented
+            await this.setAutoTranslate(e.target.checked);
         });
 
-        document.getElementById('auto-transcript-toggle').addEventListener('change', (e) => {
-            this.autoTranscript = e.target.checked;
-            // TODO: Save to backend DB when implemented
+        document.getElementById('auto-transcribe-toggle').addEventListener('change', async (e) => {
+            this.autoTranscribe = e.target.checked;
+            await this.setAutoTranscribe(e.target.checked);
         });
 
         // Model deletion
@@ -290,7 +297,7 @@ class VoiceSettings {
         }
     }
 
-    setAutoTranslate(enabled) {
+    async setAutoTranslate(enabled) {
         this.autoTranslate = enabled;
         
         // Update UI toggle
@@ -299,28 +306,28 @@ class VoiceSettings {
             toggle.checked = enabled;
         }
         
-        // Send backend invoke (pseudocode)
-        // invoke('update_auto_translate_setting', { enabled: enabled });
+        // Save to DB
+        await saveWhisperAutoTranslate(enabled);
         
         console.log(`Auto-translate ${enabled ? 'enabled' : 'disabled'}`);
     }
 
-    setAutoTranscript(enabled) {
-        this.autoTranscript = enabled;
+    async setAutoTranscribe(enabled) {
+        this.autoTranscribe = enabled;
         
         // Update UI toggle
-        const toggle = document.getElementById('auto-transcript-toggle');
+        const toggle = document.getElementById('auto-transcribe-toggle');
         if (toggle) {
             toggle.checked = enabled;
         }
         
-        // Send backend invoke (pseudocode)
-        // invoke('set_auto_transcribe', { enabled: enabled });
+        // Save to DB
+        await saveWhisperAutoTranscribe(enabled);
         
-        console.log(`Auto-transcript ${enabled ? 'enabled' : 'disabled'}`);
+        console.log(`Auto-transcribe ${enabled ? 'enabled' : 'disabled'}`);
     }
 
-    setSelectedModel(modelName) {
+    async setSelectedModel(modelName) {
         this.selectedModel = modelName;
         
         // Update UI dropdown
@@ -329,9 +336,8 @@ class VoiceSettings {
             modelSelect.value = modelName;
         }
         
-        // Send backend invoke (pseudocode)
-        // invoke('set_transcribe_model', { modelName: modelName });
-        
+        // Save to DB
+        await saveChosenWhisperModel(modelName);
         console.log(`Selected model set to: ${modelName}`);
     }
 

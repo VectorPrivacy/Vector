@@ -382,7 +382,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
         audioContainer.appendChild(transcriptionResult);
 
         // Auto-transcribe if enabled and this is a recent received message
-        if (window.voiceSettings?.autoTranscript && 
+        if (window.voiceSettings?.autoTranscribe && 
             !msg.mine && 
             msg.at > (Date.now() / 1000 - 60)) {
             
