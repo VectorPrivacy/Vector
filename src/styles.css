@@ -1354,6 +1354,14 @@ select:focus::-ms-value {
   -webkit-appearance: none;
 }
 
+/* Fix to not get white border in model selection dropdown*/
+#whisper-model:focus,
+#whisper-model:active,
+#whisper-model:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 /* Disabled select styles for visual feedback */
 select:disabled {
   opacity: 0.5;
