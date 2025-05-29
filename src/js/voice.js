@@ -60,9 +60,10 @@ class VoiceTranscriptionUI {
     /**
      * Ensures the selected voice model is ready for transcription.
      * Downloads the model if not already available.
+     * @param {HTMLElement} transcribeBtn - The transcribe button element
      * @returns {Promise<boolean>} True if model is ready, false otherwise
      */
-    async ensureModelReady() {
+    async ensureModelReady(transcribeBtn) {
         if (this.isSettingUp) return false;
         
         const selectedModel = window.voiceSettings?.selectedModel || 'small';
@@ -70,41 +71,62 @@ class VoiceTranscriptionUI {
         if (model?.downloaded) return true;
         
         this.isSettingUp = true;
-        const progressContainer = document.getElementById('voice-progress-container');
-        const progressFill = document.querySelector('.voice-progress-fill');
-        const progressText = document.querySelector('.voice-progress-text');
+
+        // Store original button contents
+        const originalHTML = transcribeBtn.innerHTML;
+        const originalClasses = transcribeBtn.className;
         
-        progressContainer.style.display = 'block';
-        progressText.textContent = 'Downloading voice model...';
+        // Create progress elements inside the transcribe button
+        const progressContainer = document.createElement('div');
+        progressContainer.classList.add('transcribe-progress-container');
+        
+        const progressBar = document.createElement('div');
+        progressBar.classList.add('transcribe-progress-bar');
+        
+        const progressFill = document.createElement('div');
+        progressFill.classList.add('transcribe-progress-fill');
+        
+        const progressText = document.createElement('div');
+        progressText.classList.add('transcribe-progress-text');
+        progressText.textContent = 'Downloading model...';
+        
+        progressBar.appendChild(progressFill);
+        progressContainer.appendChild(progressText);
+        progressContainer.appendChild(progressBar);
+        
+        // Replace button contents with progress indicator
+        transcribeBtn.innerHTML = '';
+        transcribeBtn.appendChild(progressContainer);
+        transcribeBtn.classList.add('downloading');
         
         try {
-            // Set up progress listener
             const unlisten = await window.__TAURI__.event.listen(
                 'whisper_download_progress', 
                 (event) => {
                     const progress = event.payload.progress;
                     progressFill.style.width = `${progress}%`;
-                    progressText.textContent = `Downloading voice model... ${progress}%`;
+                    progressText.textContent = `Downloading... ${progress}%`;
                 }
             );
 
             await window.voiceSettings.downloadModel(selectedModel);
             unlisten();
             
-            progressText.textContent = 'Voice model ready!';
+            progressText.textContent = 'Ready!';
             setTimeout(() => {
-                progressContainer.style.display = 'none';
-                progressFill.style.width = '0%';
+                transcribeBtn.classList.remove('downloading');
             }, 1000);
+
+        // Restore original button state
+        transcribeBtn.innerHTML = originalHTML;
+        transcribeBtn.className = originalClasses;
             
             return true;
         } catch (error) {
-            progressText.textContent = `Download failed: ${error}`;
+            progressText.textContent = `Download failed`;
             progressFill.style.background = '#ff5e5e';
             setTimeout(() => {
-                progressContainer.style.display = 'none';
-                progressFill.style.width = '0%';
-                progressFill.style.background = 'linear-gradient(90deg, #59fcb3, #00d4ff)';
+                transcribeBtn.classList.remove('downloading');
             }, 3000);
             return false;
         } finally {
@@ -118,6 +140,7 @@ class VoiceTranscriptionUI {
      * @returns {Promise<Object>} Transcription data with sections and metadata
      */
     async transcribeAudioFile(filePath) {
+        // We don't pass the button here since this might be called directly
         if (!await this.ensureModelReady()) {
             throw new Error("Voice model setup failed");
         }
@@ -329,12 +352,17 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
         transcriptionResult.classList.add('transcription-result', 'hidden');
 
         transcribeBtn.addEventListener('click', async () => {
-            if (transcribeBtn.classList.contains('loading')) return;
+            if (transcribeBtn.classList.contains('loading') || 
+                transcribeBtn.classList.contains('downloading')) return;
 
             // If already transcribed, just toggle visibility
             if (transcriptionResult.textContent.trim()) {
                 return transcriptionResult.classList.toggle('hidden');
             }
+
+            // Store original button state
+            const originalHTML = transcribeBtn.innerHTML;
+            const originalClasses = transcribeBtn.className;
 
             // Show loading state
             transcribeBtn.classList.add('loading');
@@ -344,10 +372,21 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
             transcribeIcon.classList.add('spin');
 
             try {
+                // Pass the transcribe button to ensureModelReady
+                if (!await window.cTranscriber.ensureModelReady(transcribeBtn)) {
+                    throw new Error("Voice model setup failed");
+                }
+
                 const transcriptionData = await window.cTranscriber.transcribeAudioFile(cAttachment.path);
-              
-                // Remove the loading state (or, currently, the entire button)
-                transcribeBtn.remove();
+                
+                // Restore button state
+                transcribeBtn.classList.remove('loading');
+                transcribeBtn.innerHTML = '';
+                transcribeBtn.appendChild(transcribeIcon);
+                transcribeBtn.appendChild(transcribeText);
+                transcribeText.textContent = 'Transcribe';
+                transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
+                transcribeIcon.classList.remove('spin');
                 
                 // Clear any existing content
                 transcriptionResult.innerHTML = '';
@@ -358,22 +397,21 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
             } catch (err) {
                 console.error('Transcription error:', err);
                 
+                // Restore button state
+                transcribeBtn.classList.remove('loading');
+                transcribeBtn.innerHTML = '';
+                transcribeBtn.appendChild(transcribeIcon);
+                transcribeBtn.appendChild(transcribeText);
+                transcribeText.textContent = 'Transcribe';
+                transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
+                transcribeIcon.classList.remove('spin');
+                
                 transcriptionResult.innerHTML = '';
                 const errorDiv = document.createElement('div');
                 errorDiv.classList.add('transcription-error');
                 errorDiv.textContent = `Error: ${err.message || 'Transcription failed'}`;
                 transcriptionResult.appendChild(errorDiv);
                 transcriptionResult.classList.remove('hidden');
-            } finally {
-                // Only clean up if button still exists (not removed on success)
-                if (transcribeBtn.parentNode) {
-                    transcribeBtn.classList.remove('loading');
-                    transcribeBtn.style.cursor = '';
-                    transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
-                    transcribeIcon.classList.remove('spin');
-                    transcribeText.textContent = 'Transcribe';
-                    transcribeBtn.disabled = false;
-                }
             }
         });
 
