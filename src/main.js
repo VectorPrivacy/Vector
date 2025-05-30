@@ -56,6 +56,9 @@ const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
+const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
+const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-auto-translate-info');
+const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 
 const domApp = document.getElementById('popup-container');
@@ -962,6 +965,13 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
+    // Listen for Vector Voice AI (Whisper) model download progression updates
+    await listen('whisper_download_progress', async (evt) => {
+        // Update the progression UI
+        const spanProgression = document.getElementById('voice-model-download-progression');
+        if (spanProgression) spanProgression.textContent = `(${evt.payload.progress}%)`;
+    });
+
     // Listen for Windows-specific Overlay Icon update requests
     // Note: this API seems unavailable in Tauri's Rust backend, so we're using the JS API as a workaround
     await listen('update_overlay_icon', async (evt) => {
@@ -1174,10 +1184,10 @@ function openEncryptionFlow(pkey, fUnlock = false) {
     function updateStatusMessage(message, isProcessing = false) {
         domLoginEncryptTitle.textContent = message;
         if (isProcessing) {
-            domLoginEncryptTitle.classList.add('text-gradient');
+            domLoginEncryptTitle.classList.add('startup-subtext-gradient');
             domLoginEncryptPinRow.style.display = 'none'; // Hide PIN inputs during processing
         } else {
-            domLoginEncryptTitle.classList.remove('text-gradient');
+            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
             domLoginEncryptPinRow.style.display = ''; // Ensure PIN inputs are visible
         }
     }
@@ -1745,20 +1755,10 @@ function renderMessage(msg, sender, editID = '') {
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
                 pMessage.appendChild(imgPreview);
-            } else if (['wav', 'mp3'].includes(cAttachment.extension)) {
-                // Audio
-                const audPreview = document.createElement('audio');
-                audPreview.setAttribute('controlsList', 'nodownload');
-                audPreview.controls = true;
-                audPreview.preload = 'metadata';
-                audPreview.src = assetUrl;
-                // When the metadata loads, we run some maintenance tasks
-                audPreview.addEventListener('loadedmetadata', () => {
-                    // Auto-scroll to correct against the longer container
-                    softChatScroll();
-                }, { once: true });
-                pMessage.appendChild(audPreview);
-            } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
+                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
+                // Audio - use the enhanced handler with transcription
+                handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
+                } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
                 // Videos
                 const vidPreview = document.createElement('video');
                 vidPreview.setAttribute('controlsList', 'nodownload');
@@ -2086,8 +2086,14 @@ function openChatlist() {
     navbarSelect('chat-btn');
     domSettings.style.display = 'none';
 
-    // Open the Chat UI
-    domChats.style.display = '';
+    if (domChats.style.display !== '') {
+        // Run a subtle fade-in animation
+        domChats.classList.add('fadein-subtle-anim');
+        domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
+
+        // Open the Chat UI
+        domChats.style.display = '';
+    }
 }
 
 /**
@@ -2337,6 +2343,22 @@ window.addEventListener("DOMContentLoaded", async () => {
             await recorder.start();
         }
     });
+
+    // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
+    // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events
+    domSettingsWhisperModelInfo.onclick = (e) => {
+        popupConfirm('Vector Voice AI Model', 'The Vector Voice AI model <b>determines the Quality of your transcriptions.</b><br><br>A larger model will provide more accurate transcriptions & translations, but require more Disk Space, Memory and CPU power to run.', true);
+    };
+    domSettingsWhisperAutoTranslateInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Vector Voice Translations', 'Vector Voice AI can <b>automatically detect non-English languages and translate them in to English text for you.</b><br><br>You can decide whether Vector Voice transcribes in to their native spoken language, or instead translates in to English on your behalf.', true);
+    };
+    domSettingsWhisperAutoTranscribeInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
+    };
 });
 
 // Listen for app-wide click interations

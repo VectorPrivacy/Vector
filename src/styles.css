@@ -55,6 +55,14 @@
   mask-image: url("./icons/file-search.svg");
 }
 
+.icon-info {
+  mask-image: url("./icons/info.svg");
+}
+
+.icon-loading {
+  mask-image: url("./icons/loading.svg");
+}
+
 .icon-mic-on {
   mask-image: url("./icons/mic-on.svg");
 }
@@ -196,12 +204,38 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
+
+  /* Always uses Vector theme (brand colour) */
+  background: linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%);
+  background-size: 200% 200%;
+  background-clip: text;
 }
 
 @keyframes BreathingGradient {
   0% {background-position: 0% 50%;}
   50% {background-position: 100% 50%;}
   100% {background-position: 0% 50%;}
+}
+
+/* Spin the element smoothly around its own center */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  /* keep the element in the normal document flow */
+  display: inline-block;
+
+  /* pivot in the middle rather than a corner */
+  transform-origin: center center;
+
+  /* drive the animation */
+  animation: spin 2s linear infinite;
 }
 
 #version {
@@ -237,10 +271,14 @@ body {
 }
 
 .fadein-anim {
-  animation: Fadein 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
+  animation: fadeInWithoutTransform 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
 }
 
-@keyframes Fadein {
+.fadein-subtle-anim {
+  animation: fadeInWithoutTransform 0.4s ease-out;
+}
+
+@keyframes fadeInWithoutTransform {
   0% { opacity: 0; }
 }
 
@@ -325,7 +363,6 @@ body {
   /* Negate the space use of the icon - thereby keeping the button text centered - by adding a negative margin */
   margin: -30px;
   margin-right: revert;
-  background-color: rgba(128, 255, 212, 0.75);
 }
 
 #chat-list {
@@ -677,11 +714,9 @@ body {
 }
 
 .msg-preview-container {
-  border-color: rgba(90, 252, 180, 0.43) !important;
   border-top: solid;
   border-width: 1px;
   margin-top: 10px;
-  background-color: rgba(90, 252, 180, 0.12) !important;
   border-radius: 14px;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
@@ -960,7 +995,6 @@ audio {
 
 .progress-bar {
   height: 10px;
-  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
   border-radius: 16px;
   margin-top: 3px;
   transition-duration: 0.2s;
@@ -976,6 +1010,707 @@ audio {
   border: none;
 }
 
+#login-encrypt-pins {
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  -webkit-box-shadow: 
+    0 10px 20px 5px #59fcb33c,
+    0 8px 12px 20px rgba(90, 252, 180, 0.36);
+}
+
 #login-input {
   margin-right: 5px;
+}
+
+#settings {
+  overflow-y: auto;
+  height: -webkit-fill-available;
+  padding-bottom: 100px;
+  overscroll-behavior: none;
+  animation: fadeInWithoutTransform 0.4s ease-out
+}
+
+/* Voice Settings Section Styles */
+.settings-section-voice {
+  padding: 20px;
+  padding-top: 0;
+  border-radius: 12px;
+  margin-top: 15px;
+}
+
+/* Dropdown Styles */
+select {
+  width: 75%;
+  padding: 12px 15px;
+  margin-left: auto;
+  margin-right: auto;
+  margin-bottom: 15px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.5);
+  color: white;
+  font-size: 14px;
+  appearance: none;
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 20px;
+  transition: all 0.3s ease;
+}
+
+#whisper-model option {
+  background: #161616;
+  padding: 10px;
+}
+
+/* Download Button Styles */
+#download-model {
+  color: #000;
+  border: none;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  width: 100%;
+}
+
+#download-model:active {
+  transform: translateY(0);
+}
+
+/* Model Status Styles */
+.model-status {
+  margin-top: 15px;
+  font-size: 14px;
+  min-height: 20px;
+}
+
+/* Progress Bar Container */
+.download-progress-container {
+  margin-top: 20px;
+  position: relative;
+  height: 40px;
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Progress Track */
+.progress-bar-track {
+  position: relative;
+  height: 12px;
+  width: 100%;
+  background: rgba(30, 30, 30, 0.8);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Progress Fill */
+.progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 6px;
+  position: relative;
+  transition: width 0.3s cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+/* Animated Glow Effect */
+.progress-bar-glow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 20px;
+  background: linear-gradient(90deg, 
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.75) 50%, 
+    rgba(255, 255, 255, 0) 100%);
+  animation: glowSlide 2s infinite linear;
+  opacity: 0.7;
+  transform: translateX(-100%);
+}
+
+/* Pulse Animation */
+.progress-pulse {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  filter: blur(1px);
+  animation: pulse 1.5s infinite ease-out;
+}
+
+/* Percentage Text */
+.progress-text {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: white;
+  font-size: 11px;
+  font-weight: bold;
+  font-family: 'Courier New', monospace;
+}
+
+/* Animations */
+@keyframes glowSlide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(calc(100vw + 20px)); }
+}
+
+@keyframes pulse {
+  0% { 
+    opacity: 0.6;
+    transform: translateY(-50%) scale(0.95);
+  }
+  50% {
+    opacity: 0.3;
+    transform: translateY(-50%) scale(1.05);
+  }
+  100% {
+    opacity: 0.6;
+    transform: translateY(-50%) scale(0.95);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.voice-progress-container {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 80%;
+  max-width: 400px;
+  background: rgba(22, 22, 22, 0.9);
+  border-radius: 8px;
+  padding: 12px;
+  z-index: 1000;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.voice-progress-bar {
+  height: 8px;
+  width: 100%;
+  background: rgba(30, 30, 30, 0.8);
+  border-radius: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.voice-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.voice-progress-text {
+  font-size: 13px;
+  text-align: center;
+  margin-bottom: 5px;
+}
+
+/* Neon Green Gradient 3D Toggle */
+.toggle-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 15px;
+  cursor: pointer;
+}
+
+.toggle-container span:first-child {
+  margin-right: 10px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.neon-toggle {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 24px;
+  border-radius: 12px;
+  background: #1a1a1a;
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.3),
+    0 2px 5px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s ease;
+}
+
+.neon-toggle:before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #333;
+  box-shadow: 
+    0 1px 3px rgba(0, 0, 0, 0.4),
+    inset 0 -1px 2px rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+}
+
+input[type="checkbox"] {
+  display: none;
+}
+
+input[type="checkbox"]:checked + .neon-toggle:before {
+  transform: translateX(26px);
+  background: #fff;
+  box-shadow: 
+    0 1px 3px rgba(0, 0, 0, 0.4),
+    inset 0 -1px 2px rgba(255, 255, 255, 0.8);
+}
+
+/* Add a subtle glow effect when hovering */
+.neon-toggle:hover {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Remove default focus outline and apply custom styling */
+#theme-select:focus {
+  outline: none;
+}
+
+/* Style options to match whisper model */
+#theme-select option {
+  background: #161616;
+  padding: 10px;
+}
+
+/* For Windows specifically, override the forced focus color */
+select:focus::-ms-value {
+  background-color: transparent;
+  color: white;
+}
+
+/* Model select container styles */
+.model-select-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Delete model button with trash bin icon */
+.btn-delete-model {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: all 0.2s ease;
+  display: none; /* Hidden by default */
+}
+
+.btn-delete-model:hover {
+  opacity: 1;
+}
+
+.icon-trash {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  background-color: transparent;
+  mask: url('./icons/trash.svg') no-repeat center;
+  mask-size: contain;
+}
+
+/* For downloaded models - make it more prominent */
+.btn-delete-model.downloaded {
+  opacity: 0.8;
+  display: block;
+}
+
+.btn-delete-model.downloaded:hover {
+  opacity: 1;
+  transform: translateY(-50%) scale(1.1);
+}
+
+/* Adjust select to accommodate delete button */
+#whisper-model {
+  padding-right: 30px;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+/* Fix to not get white border in model selection dropdown*/
+#whisper-model:focus,
+#whisper-model:active,
+#whisper-model:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Disabled select styles for visual feedback */
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.5);
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23666666'%3e%3cpath d='M7 10l5 5 5-5z'/%3e%3c/svg%3e");
+  pointer-events: none;
+  transition: all 0.3s ease;
+}
+
+select:disabled:hover {
+  box-shadow: none;
+  transform: none;
+}
+
+.popup-cancel-btn {
+  opacity: 0.8;
+  margin-left: 10px;
+}
+
+.nav-icon {
+  width: 30px;
+  height: 30px;
+  position: relative;
+}
+
+.nav-back-btn {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  top: 15px;
+  margin-left: 10px;
+}
+
+.chat-new-back-btn {
+  display: flex;
+  align-items: center;
+}
+
+.chat-new-back-text {
+  font-size: 18px;
+  line-height: normal;
+  margin-left: 2px;
+}
+
+.chat-new-header {
+  background-color: #161616;
+  height: 65px;
+  display: flex;
+}
+
+.chat-new-content {
+  margin-left: 25px;
+  margin-right: 25px;
+}
+
+.chat-new-title {
+  margin-top: 25px;
+  margin-bottom: 5px;
+  text-align: left;
+  font-weight: 500;
+  letter-spacing: 1px;
+}
+
+.chat-new-divider {
+  margin-top: 8px;
+  margin-bottom: 10px;
+}
+
+.chat-new-npub {
+  opacity: 0.75;
+  font-size: 14px;
+  display: block;
+  line-break: anywhere;
+}
+
+.chat-new-center-content {
+  position: absolute;
+  bottom: 90px;
+  width: 100%;
+}
+
+.chat-new-icon {
+  width: 140px;
+  margin: 0;
+  height: 140px;
+  position: relative;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+  opacity: 0.35;
+}
+
+.chat-new-subtitle {
+  margin-bottom: 10px;
+  letter-spacing: 1px;
+}
+
+.chat-new-subtitle-divider {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  width: 325px;
+}
+
+.chat-new-description {
+  opacity: 0.75;
+  font-size: 14px;
+  line-height: 18px !important;
+}
+
+.chat-new-input-box {
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+}
+
+.chat-new-input {
+  margin-top: 8px;
+  height: auto;
+  margin-bottom: 8px;
+}
+
+.chat-new-add-btn {
+  width: 50px;
+  margin: 0;
+  height: 50px;
+  position: relative;
+  display: block;
+  margin-left: auto;
+  margin-right: 8px;
+  margin-bottom: auto;
+  margin-top: auto;
+}
+
+.settings-title {
+  margin-top: 40px;
+}
+
+.settings-divider {
+  margin-top: 25px;
+  margin-bottom: 25px;
+}
+
+.danger-title {
+  color: #ff2ea9;
+}
+
+.logout-btn {
+  backdrop-filter: none;
+}
+
+.navbar {
+  position: fixed;
+  bottom: 0px;
+  height: 65px;
+  width: 100%;
+  background-color: #161616;
+  justify-content: space-evenly;
+}
+
+.navbar-btn {
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
+.navbar-btn-inactive {
+  opacity: 0.5;
+}
+
+.navbar-icon {
+  width: 30px;
+  margin: 0;
+  height: 30px;
+  position: relative;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.navbar-text {
+  font-size: 14px;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.login-logo {
+  width: 260px;
+  margin-top: 50px;
+}
+
+.login-subtext {
+  margin-top: 5px;
+}
+
+.login-create-btn {
+  background-color: #59fcb3;
+  color: black;
+  width: 225px;
+}
+
+.login-login-btn {
+  background-color: transparent;
+  border-color: #59fcb3;
+  margin-top: 10px;
+  width: 225px;
+}
+
+.login-credits {
+  width: 275px;
+}
+
+.login-import-container {
+  position: absolute;
+  bottom: 0px;
+  width: 100%;
+}
+
+.login-input-container {
+  height: 52px;
+}
+
+.login-input {
+  width: 100%;
+  margin-left: 10px;
+  margin-top: 5px;
+  margin-bottom: 5px;
+  background-color: black;
+}
+
+.login-btn {
+  width: 50px;
+  margin-right: 15px;
+}
+
+.login-encrypt-container {
+  position: absolute;
+  width: 100%;
+  bottom: 0px;
+}
+
+.login-encrypt-header {
+  display: inline-flex;
+}
+
+.login-lock-icon {
+  width: 35px;
+  height: 35px;
+}
+
+.login-encrypt-title {
+  margin-bottom: 25px;
+  margin-top: 10px;
+  margin-left: 8px;
+}
+
+.scroll-return-btn {
+  border-radius: 100%;
+  height: 45px;
+  width: 45px;
+}
+
+.sync-status-container {
+  margin-bottom: 15px;
+}
+
+.chat-bookmarks-btn {
+  align-items: center;
+  position: absolute;
+  top: 15px;
+  right: 15px;
+}
+
+.corner-float-bottom {
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+}
+
+/* Transcription highlighting styles */
+.transcription-section {
+  transition: all 0.3s ease;
+  border-radius: 4px;
+  margin: 0 1px;
+}
+
+.transcription-section:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Enhanced highlighting for the current section */
+.transcription-section.current {
+  background-color: rgba(89, 252, 179, 0.3);
+  color: #59fcb3;
+  font-weight: 500;
+  box-shadow: 0 0 8px rgba(89, 252, 179, 0.2);
+}
+
+.transcription-text {
+  line-height: 1.5;
+  user-select: text;
+  cursor: text;
+}
+
+.transcription-result {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.transcription-result.hidden {
+  display: none;
+}
+
+.btn-transcribe.downloading {
+    padding: 8px 12px;
+    cursor: default;
+    background: rgba(30, 30, 30, 0.8);
+}
+
+.transcribe-progress-container {
+    width: 100%;
+    min-width: 120px;
+}
+
+.transcribe-progress-bar {
+    height: 4px;
+    width: 100%;
+    background: rgba(60, 60, 60, 0.8);
+    border-radius: 2px;
+    margin-top: 4px;
+    overflow: hidden;
+}
+
+.transcribe-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #59fcb3, #00d4ff);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.transcribe-progress-text {
+    color: #59fcb3;
+    font-size: 12px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }

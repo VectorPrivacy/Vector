@@ -3,11 +3,404 @@ const { open } = window.__TAURI__.dialog;
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
 
 /**
+ * @type {VoiceTranscriptionUI}
+ */
+let cTranscriber = null;
+
+class VoiceSettings {
+    constructor() {
+        this.models = [];
+        this.autoTranslate = false;
+        this.autoTranscribe = false;
+        this.selectedModel = 'small'; // Default model
+    }
+
+    async initVoiceSettings() {
+        const voiceSection = document.getElementById('settings-voice');
+        if (!voiceSection) return;
+
+        voiceSection.style.display = 'block';
+
+        // Load our Settings from disk (or use a default value)
+        const strModelID = await loadChosenWhisperModel() || this.selectedModel;
+        this.autoTranslate = await loadWhisperAutoTranslate();
+
+        // Set initial toggle states (will be loaded from backend DB in future)
+        document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
+        document.getElementById('auto-transcribe-toggle').checked = this.autoTranscribe;
+        
+        // Update selectedModel to match the loaded model ID
+        this.selectedModel = strModelID;
+        document.getElementById('whisper-model').value = strModelID;
+
+        this.updateModelStatus();
+        this.setupEventListeners();
+    }
+
+    setupEventListeners() {
+        // Model selection change
+        document.getElementById('whisper-model').addEventListener('change', async (e) => {
+            this.selectedModel = e.target.value;
+            this.updateModelStatus();
+            this.updateDeleteButton();
+            await this.setSelectedModel(e.target.value);
+        });
+        
+        // Model download
+        document.getElementById('download-model').addEventListener('click', async () => {
+            const modelName = document.getElementById('whisper-model').value;
+            await this.downloadModel(modelName);
+        });
+
+        // Toggle event listeners
+        document.getElementById('auto-translate-toggle').addEventListener('change', async (e) => {
+            this.autoTranslate = e.target.checked;
+            await this.setAutoTranslate(e.target.checked);
+        });
+
+        document.getElementById('auto-transcribe-toggle').addEventListener('change', async (e) => {
+            this.autoTranscribe = e.target.checked;
+            await this.setAutoTranscribe(e.target.checked);
+        });
+
+        // Model deletion
+        const deleteBtn = document.getElementById('delete-model');
+        if (deleteBtn) {
+            deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
+        }
+    }
+
+    async loadWhisperModels() {
+        const modelSelect = document.getElementById('whisper-model');
+        const modelStatus = document.getElementById('model-status');
+        
+        try {
+            // Store the currently selected model before rebuilding the dropdown
+            const currentSelection = modelSelect.value;
+            
+            // Show loading state while fetching models from backend
+            modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
+            
+            // Fetch available models from Tauri backend
+            this.models = await invoke('list_models');
+            modelSelect.innerHTML = ''; // Clear loading message
+            
+            // Create model hierarchy dynamically from model sizes (lowest to highest quality)
+            const modelHierarchy = this.models
+                .slice() // Create a copy to avoid mutating original
+                .sort((a, b) => a.model.size - b.model.size) // Sort by size (smaller = lower quality)
+                .map(m => m.model.name);
+            
+            // Track if we need to select a fallback model
+            let foundCurrentSelection = false;
+            let selectedModel = null;
+            
+            // Populate dropdown with all available models
+            this.models.forEach(modelState => {
+                const option = document.createElement('option');
+                option.value = modelState.model.name;
+                option.textContent = modelState.model.display_name;
+                
+                // If this was the previously selected model and it's still downloaded, keep it selected
+                if (currentSelection === modelState.model.name && modelState.downloaded) {
+                    foundCurrentSelection = true;
+                    option.selected = true;
+                    selectedModel = modelState.model.name;
+                }
+                
+                modelSelect.appendChild(option);
+            });
+            
+            // If the previously selected model is no longer available, find the best fallback
+            if (!foundCurrentSelection) {
+                selectedModel = this.findBestFallbackModel(currentSelection, modelHierarchy);
+                
+                const fallbackOption = Array.from(modelSelect.options).find(opt => opt.value === selectedModel);
+                if (fallbackOption) {
+                    fallbackOption.selected = true;
+                }
+            }
+            
+            // Update this.selectedModel to match the UI selection
+            this.selectedModel = selectedModel || this.selectedModel;
+            
+            // Update UI elements based on the selected model
+            this.updateDeleteButton();
+            modelStatus.textContent = '';
+        } catch (error) {
+            // Handle errors by showing error state in UI
+            modelSelect.innerHTML = '<option value="" disabled>Error loading models</option>';
+            modelStatus.textContent = `Error: ${error.message}`;
+            console.error('Failed to load models:', error);
+        }
+    }
+
+    updateDeleteButton() {
+        const modelSelect = document.getElementById('whisper-model');
+        const deleteBtn = document.getElementById('delete-model');
+        const selectedModel = modelSelect.value;
+        
+        // Hide delete button if no model is selected
+        if (!selectedModel) {
+            deleteBtn.style.display = 'none';
+            return;
+        }
+        
+        // Find the model data for the selected model
+        const model = this.models.find(m => m.model.name === selectedModel);
+        
+        // Only show delete button for downloaded models (can't delete what isn't there)
+        if (model?.downloaded) {
+            deleteBtn.style.display = 'block';
+            deleteBtn.classList.add('downloaded');
+            deleteBtn.title = `Delete ${model.model.display_name}`;
+        } else {
+            deleteBtn.style.display = 'none';
+            deleteBtn.classList.remove('downloaded');
+        }
+    }
+
+    async deleteSelectedModel() {
+        const modelSelect = document.getElementById('whisper-model');
+        const modelName = modelSelect.value;
+        
+        if (!modelName) {
+            return;
+        }
+        
+        // Confirm deletion
+        const confirmDelete = await popupConfirm(
+            'Delete Model?', 
+            `Are you sure you want to delete the "${modelName}" model? This will free up disk space but you'll need to download it again to use it.`,
+            false
+        );
+        
+        if (!confirmDelete) return;
+        
+        try {
+            await invoke('delete_whisper_model', { modelName });
+            await this.loadWhisperModels();
+            this.updateModelStatus();
+        } catch (error) {
+            console.error('Failed to delete model:', error);
+            await popupConfirm('Deletion Failed', `Could not delete model: ${error.message}`, true);
+        }
+    }
+
+    updateModelStatus() {
+        const statusElement = document.getElementById('model-status');
+        if (!statusElement) return;
+        
+        const model = this.models.find(m => m.model.name === this.selectedModel);
+        if (!model) return;
+        
+        if (model.downloading) {
+            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.model.name} model... <span id="voice-model-download-progression">(0%)</span></div>`;
+            return;
+        }
+        
+        if (model.downloaded) {
+            statusElement.innerHTML = `<div class="alert alert-success">Vector AI is ready</div>`;
+            document.getElementById('download-model').style.display = 'none';
+        } else {
+            statusElement.innerHTML = `<div class="alert alert-warning">AI model is not downloaded</div>`;
+            const downloadBtn = document.getElementById('download-model');
+            downloadBtn.style.display = '';
+            
+            // Update button text to include model size
+            const sizeInBytes = model.model.size * 1024 * 1024;
+            const formattedSize = formatBytes(sizeInBytes);
+            downloadBtn.textContent = `Download Selected Model (${formattedSize})`;
+        }
+    }
+
+    async downloadModel(modelName) {
+        // Find the model in our cached list and validate it's not already downloaded
+        const model = this.models.find(m => m.model.name === modelName);
+        if (!model || model.downloaded) return;
+
+        // Get UI elements for progress display
+        const modelStatus = document.getElementById('model-status');
+        const progressContainer = document.querySelector('.download-progress-container');
+        const progressFill = document.querySelector('.progress-bar-fill');
+        const progressText = document.querySelector('.progress-text');
+
+        // Initialize download UI state
+        modelStatus.textContent = `Downloading AI model...`;
+        progressContainer.style.display = 'block';
+        progressFill.style.width = '0%';
+        progressText.textContent = '0%';
+        
+        // Disable UI during download to prevent user interference
+        document.getElementById('download-model').style.display = 'none';
+        document.getElementById('whisper-model').disabled = true;
+
+        try {
+            // Mark model as downloading and update status display
+            model.downloading = true;
+            this.updateModelStatus();
+
+            // Set up Tauri event listener for download progress updates
+            const unlisten = await window.__TAURI__.event.listen(
+                'whisper_download_progress', 
+                (event) => {
+                    const progress = event.payload.progress;
+                    progressFill.style.width = `${progress}%`;
+                    progressText.textContent = `${progress}%`;
+                }
+            );
+
+            // Start the actual download via Tauri backend
+            await invoke('download_whisper_model', { modelName });
+
+            // Clean up event listener to prevent memory leaks
+            unlisten();
+
+            // Update model state to reflect successful download
+            model.downloaded = true;
+            model.downloading = false;
+            
+            modelStatus.textContent = `Successfully downloaded AI model!`;
+            
+            // Show success animation with green gradient
+            progressFill.style.width = `100%`;
+            progressText.textContent = `100%`;
+            progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
+            progressContainer.style.animation = 'none';
+            void progressContainer.offsetWidth; // Force reflow to reset animation
+            progressContainer.style.animation = 'fadeIn 0.3s ease-out';
+            
+            // Refresh the models dropdown and update UI state
+            await this.loadWhisperModels();
+            this.updateModelStatus();
+        } catch (error) {
+            // Handle download failures
+            model.downloading = false;
+            modelStatus.textContent = `Error downloading model: ${error}`;
+            console.error('Download failed:', error);
+            
+            // Show error state with red gradient
+            progressFill.style.background = 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
+            progressText.textContent = 'Failed';
+        } finally {
+            // Re-enable model selector after download completes
+            document.getElementById('whisper-model').disabled = false;
+            
+            // Clean up progress bar after a delay, regardless of success/failure
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+                // Reset progress bar styling for next download
+                progressFill.style.width = '0%';
+                progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
+                progressText.textContent = '0%';
+            }, 3000);
+        }
+    }
+
+    async setAutoTranslate(enabled) {
+        this.autoTranslate = enabled;
+        
+        // Update UI toggle
+        const toggle = document.getElementById('auto-translate-toggle');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
+        
+        // Save to DB
+        await saveWhisperAutoTranslate(enabled);
+        
+        console.log(`Auto-translate ${enabled ? 'enabled' : 'disabled'}`);
+    }
+
+    async setAutoTranscribe(enabled) {
+        this.autoTranscribe = enabled;
+        
+        // Update UI toggle
+        const toggle = document.getElementById('auto-transcribe-toggle');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
+        
+        // Save to DB
+        await saveWhisperAutoTranscribe(enabled);
+        
+        console.log(`Auto-transcribe ${enabled ? 'enabled' : 'disabled'}`);
+    }
+
+    async setSelectedModel(modelName) {
+        this.selectedModel = modelName;
+        
+        // Update UI dropdown
+        const modelSelect = document.getElementById('whisper-model');
+        if (modelSelect) {
+            modelSelect.value = modelName;
+        }
+        
+        // Save to DB
+        await saveChosenWhisperModel(modelName);
+        console.log(`Selected model set to: ${modelName}`);
+    }
+
+    /**
+     * Find the best fallback model when the current selection is no longer available
+     * @param {string} deletedModel - The model that was deleted or is no longer available
+     * @param {string[]} modelHierarchy - Array of model names ordered from lowest to highest quality
+     * @returns {string} The best fallback model name
+     */
+    findBestFallbackModel(deletedModel, modelHierarchy) {
+        // Get all downloaded models
+        const downloadedModels = this.models.filter(m => m.downloaded);
+        
+        if (downloadedModels.length === 0) {
+            // No downloaded models, fallback to default 'small'
+            return 'small';
+        }
+        
+        // If we have a deleted model, find the next highest downloaded model
+        if (deletedModel && modelHierarchy.includes(deletedModel)) {
+            const deletedIndex = modelHierarchy.indexOf(deletedModel);
+            
+            // Look for next higher models first
+            for (let i = deletedIndex + 1; i < modelHierarchy.length; i++) {
+                const candidate = modelHierarchy[i];
+                if (downloadedModels.some(m => m.model.name === candidate)) {
+                    return candidate;
+                }
+            }
+            
+            // If no higher model found, look for lower models
+            for (let i = deletedIndex - 1; i >= 0; i--) {
+                const candidate = modelHierarchy[i];
+                if (downloadedModels.some(m => m.model.name === candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        
+        // If 'small' is downloaded, prefer it as default
+        if (downloadedModels.some(m => m.model.name === 'small')) {
+            return 'small';
+        }
+        
+        // Otherwise, return the highest quality downloaded model
+        for (let i = modelHierarchy.length - 1; i >= 0; i--) {
+            const candidate = modelHierarchy[i];
+            if (downloadedModels.some(m => m.model.name === candidate)) {
+                return candidate;
+            }
+        }
+        
+        // Final fallback to 'small' if nothing else works
+        return 'small';
+    }
+}
+
+/**
  * A GUI wrapper to ask the user for a username, and apply it both
  * in-app and on the Nostr network.
  */
 async function askForUsername() {
-    const strUsername = await popupConfirm('Choose a Username', `This lets Vector users identify you easier!`, false, 'New Username');
+    const strUsername = await popupConfirm('Choose a Username', 'This lets Vector users identify you easier!', false, 'New Username');
     if (!strUsername) return;
 
     // Display the change immediately
@@ -66,7 +459,7 @@ async function askForAvatar() {
  * in-app and on the Nostr network.
  */
 async function askForStatus() {
-    const strStatus = await popupConfirm('Status', `Set a public status for everyone to see`, false, 'Custom Status');
+    const strStatus = await popupConfirm('Status', 'Set a public status for everyone to see', false, 'Custom Status');
     if (!strStatus) return;
 
     // Display the change immediately
@@ -76,7 +469,7 @@ async function askForStatus() {
 
     // Send out the metadata update
     try {
-        await invoke("update_status", { status: strStatus, });
+        await invoke("update_status", { status: strStatus });
     } catch (e) {
         await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true);
     }
@@ -95,8 +488,8 @@ async function selectFile() {
 
 /**
  * Set the theme of the app by hot-swapping theme CSS files
- * @param {string} theme - The theme name, i.e: `vector`, `chatstr`
- * @param {string} mode - The theme mode, i.e: `light`, `dark`
+ * @param {string} theme - The theme name, i.e: vector, chatstr
+ * @param {string} mode - The theme mode, i.e: light, dark
  */
 async function setTheme(theme = 'vector', mode = 'dark') {
     domTheme.href = `/themes/${theme}/${mode}.css`;
@@ -121,4 +514,4 @@ domSettingsLogout.onclick = async (evt) => {
 
     // Begin the logout sequence
     await invoke('logout');
-}
+};

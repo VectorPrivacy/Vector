@@ -21,6 +21,7 @@ mod upload;
 mod util;
 use util::{get_file_type_description, calculate_file_hash, is_nonce_filename, migrate_nonce_file_to_hash};
 
+mod whisper;
 mod message;
 pub use message::{Message, Attachment, Reaction};
 
@@ -985,27 +986,27 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Figure out the file extension from the mime-type
                 let mime_type = rumor.tags.find(TagKind::Custom(Cow::Borrowed("file-type"))).unwrap().content().unwrap();
-                let extension = match mime_type.split('/').nth(1) {
+                let extension = match mime_type {
                     // Images
-                    Some("png") => "png",
-                    Some("jpeg") => "jpg",
-                    Some("jpg") => "jpg",
-                    Some("gif") => "gif",
-                    Some("webp") => "webp",
+                    "image/png" => "png",
+                    "image/jpeg" | "image/jpg" => "jpg",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
                     // Audio
-                    Some("wav") => "wav",
-                    Some("x-wav") => "wav",
-                    Some("wave") => "wav",
-                    Some("mp3") => "mp3",
+                    "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+                    "audio/mp3" | "audio/mpeg" => "mp3",
+                    "audio/flac" => "flac",
+                    "audio/ogg" => "ogg",
+                    "audio/mp4" => "m4a",
+                    "audio/aac" | "audio/x-aac" => "aac",
                     // Videos
-                    Some("mp4") => "mp4",
-                    Some("webm") => "webm",
-                    Some("quicktime") => "mov",
-                    Some("x-msvideo") => "avi",
-                    Some("x-matroska") => "mkv",
-                    // Fallback options
-                    Some(ext) => ext,
-                    None => "bin",
+                    "video/mp4" => "mp4",
+                    "video/webm" => "webm",
+                    "video/quicktime" => "mov",
+                    "video/x-msvideo" => "avi",
+                    "video/x-matroska" => "mkv",
+                    // Fallback - extract extension from mime subtype
+                    _ => mime_type.split('/').nth(1).unwrap_or("bin"),
                 };
 
                 let handle = TAURI_APP.get().unwrap();
@@ -1707,6 +1708,38 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
     unread_count
 }
 
+#[tauri::command]
+async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_name: String, translate: bool) -> Result<whisper::TranscriptionResult, String> {
+    // Convert the file path to a Path
+    let path = std::path::Path::new(&file_path);
+    
+    // Check if the file exists
+    if !path.exists() {
+        return Err(format!("File does not exist: {}", file_path));
+    }
+    
+    // Read the wav file and resample
+    match whisper::resample_audio(path, 16000) {
+        Ok(audio_data) => {
+            // Pass the resampled audio to the whisper transcribe function
+            match whisper::transcribe(&handle, &model_name, translate, audio_data).await {
+                Ok(result) => Ok(result),
+                Err(e) => Err(format!("Transcription error: {}", e.to_string()))
+            }
+        },
+        Err(e) => Err(format!("Audio processing error: {}", e.to_string()))
+    }
+}
+
+#[tauri::command]
+async fn download_whisper_model<R: Runtime>(handle: AppHandle<R>, model_name: String) -> Result<String, String> {
+    // Download (or simply return the cached path of) a Whisper Model
+    match whisper::download_whisper_model(&handle, &model_name).await {
+        Ok(path) => Ok(path),
+        Err(e) => Err(format!("Model Download error: {}", e.to_string()))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -1840,6 +1873,12 @@ pub fn run() {
             db::set_db_version,
             db::get_theme,
             db::set_theme,
+            db::get_whisper_auto_translate,
+            db::set_whisper_auto_translate,
+            db::get_whisper_auto_transcribe,
+            db::set_whisper_auto_transcribe,
+            db::get_whisper_model_name,
+            db::set_whisper_model_name,
             db::get_pkey,
             db::set_pkey,
             db::get_seed,
@@ -1869,7 +1908,11 @@ pub fn run() {
             stop_recording,
             update_unread_counter,
             logout,
-            create_account
+            create_account,
+            transcribe,
+            download_whisper_model,
+            whisper::delete_whisper_model,
+            whisper::list_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

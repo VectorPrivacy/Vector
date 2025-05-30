@@ -319,6 +319,10 @@ function getFileTypeInfo(extension) {
       // Audio
       "wav": { description: "Voice Message", icon: "mic-on" },
       "mp3": { description: "Audio Clip", icon: "mic-on" },
+      "m4a": { description: "Audio Clip", icon: "mic-on" },
+      "aac": { description: "Audio Clip", icon: "mic-on" },
+      "flac": { description: "Audio Clip", icon: "mic-on" },
+      "ogg": { description: "Audio Clip", icon: "mic-on" },
 
       // Videos
       "mp4": { description: "Video", icon: "video" },

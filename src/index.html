@@ -27,7 +27,7 @@
         <input id="popupInput">
         <hr class="divider">
 
-        <button id="popupConfirm">Confirm</button><button id="popupCancel" style="opacity: 0.8;margin-left: 10px;">Cancel</button>
+        <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
       </center>
     </div>
 
@@ -39,11 +39,11 @@
       </div>
 
       <div id="chats" class="chats">
-        <div id="chat-bookmarks-btn" class="btn" style="display: none; align-items: center; position: absolute; top: 15px; right: 15px;">
-          <span class="icon icon-bookmark" style="width: 30px; height: 30px; position: relative; background-color: #59fcb3;"></span>
+        <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">
+          <span class="icon icon-bookmark nav-icon"></span>
         </div>
         <div id="account" class="account" style="display: none;"></div>
-        <div id="sync-status-container" style="margin-bottom: 15px; display: none;">
+        <div id="sync-status-container" class="sync-status-container" style="display: none;">
           <p id="sync-status" class="text-gradient"></p>
         </div>
         <div id="chat-list">
@@ -52,8 +52,8 @@
       </div>
 
       <div id="chat" class="chat" style="display: none;">
-        <div id="chat-back-btn" class="btn" style="display: flex; align-items: center; position: absolute; top: 15px;">
-          <span class="icon icon-chevron-double-left" style="width: 30px; height: 30px; position: relative; margin-left: 10px; background-color: #59fcb3;"></span>
+        <div id="chat-back-btn" class="btn nav-back-btn">
+          <span class="icon icon-chevron-double-left nav-icon"></span>
         </div>
         <h3 id="chat-contact"></h3>
         <span class="cutoff" id="chat-contact-status"></span>
@@ -61,7 +61,7 @@
         <div id="chat-messages" class="chat-messages">
 
         </div>
-        <button id="chat-scroll-return" class="corner-float" style="border-radius: 100%; height: 45px; width: 45px;"><span class="icon icon-chevron-down"></span></button>
+        <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span></button>
 
         <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
@@ -72,79 +72,135 @@
             <button id="chat-input-voice"><span class="icon icon-mic-on"></span></button>
           </div>
         </div>
+        <div id="voice-progress-container" class="voice-progress-container" style="display: none;">
+          <div class="voice-progress-bar">
+            <div class="voice-progress-fill"></div>
+            <div class="voice-progress-text">Setting up voice transcription...</div>
+          </div>
+        </div>
+      </div>
       </div>
 
       <div id="chat-new" style="display: none;">
-        <div style="background-color: #161616; height: 65px; display: flex;">
-          <div id="chat-new-back-btn" class="btn" style="display: flex; align-items: center;">
-            <span class="icon icon-chevron-double-left" style="width: 30px; height: 30px; position: relative; margin-left: 10px; background-color: #59fcb3;"></span>
-            <p style="font-size: 18px; line-height: normal; margin-left: 2px;">Back</p>
+        <div class="chat-new-header">
+          <div id="chat-new-back-btn" class="btn chat-new-back-btn">
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+            <p class="chat-new-back-text">Back</p>
           </div>
         </div>
-        <center style="margin-left: 25px; margin-right: 25px;">
-          <h2 style="margin-top: 25px; margin-bottom: 5px; text-align: left; font-weight: 500; letter-spacing: 1px;">My nPub Key</h2>
-          <hr class="divider" style="margin-top: 8px; margin-bottom: 10px;">
-          <span style="opacity: 0.75; font-size: 14px; display: block; line-break: anywhere;" id="share-npub"></span>
+        <center class="chat-new-content">
+          <h2 class="chat-new-title">My nPub Key</h2>
+          <hr class="divider chat-new-divider">
+          <span class="chat-new-npub" id="share-npub"></span>
         </center>
-        <center style="position: absolute; bottom: 90px; width: 100%;">
-          <span class="icon icon-add-user" style="width: 140px; margin: 0; height: 140px; position: relative; display: block; margin-left: auto; margin-right: auto; opacity: 0.35;"></span>
-          <h2 style="margin-bottom: 10px; letter-spacing: 1px;">Start a New Chat</h2>
-          <hr class="divider" style="margin-top: 8px; margin-bottom: 10px; width: 325px;">
-          <div style="margin-left: 25px; margin-right: 25px;">
-            <span style="opacity: 0.75; font-size: 14px; line-height: 18px !important;">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
+        <center class="chat-new-center-content">
+          <span class="icon icon-add-user chat-new-icon"></span>
+          <h2 class="chat-new-subtitle">Start a New Chat</h2>
+          <hr class="divider chat-new-subtitle-divider">
+          <div class="chat-new-content">
+            <span class="chat-new-description">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
           </div>
         </center>
-        <div class="row input-box" style="position: absolute; bottom: 0; width: 100%;">
-          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container" style="margin-top: 8px; height: auto; margin-bottom: 8px;">
-          <span id="chat-new-btn" class="icon icon-add-user btn" style="width: 50px; margin: 0; height: 50px; position: relative; display: block; margin-left: auto; margin-right: 8px; margin-bottom: auto; margin-top: auto;"></span>
+        <div class="row input-box chat-new-input-box">
+          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container chat-new-input">
+          <span id="chat-new-btn" class="icon icon-add-user btn chat-new-add-btn"></span>
         </div>
       </div>
 
       <div id="settings" style="display: none;">
-        <h2 style="margin-top: 60px;">Choose your Theme</h2>
+        <h2 class="settings-title">Choose your Theme</h2>
         <select id="theme-select">
           <option value="vector">Vector</option>
           <option value="chatstr">Chatstr</option>
         </select>
-        <hr class="divider" style="margin-top: 25px; margin-bottom: 25px;">
-        <h2 style="color: #ff2ea9;">Dangerzone</h2>
-        <button id="logout-btn" style="backdrop-filter: none;">Logout</button>
+
+        <hr class="divider settings-divider">
+
+        <!-- Voice Settings Section -->
+        <div id="settings-voice" class="settings-section settings-section-voice" style="display: none;">
+        <h2 class="settings-title">Voice Settings</h2>
+
+         <div class="form-group">
+          <label class="toggle-container">
+            <span><span id="whisper-auto-translate-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto Translate</span>
+            <input type="checkbox" id="auto-translate-toggle">
+            <span class="neon-toggle"></span>
+          </label>
+        </div>
+        
+         <div class="form-group">
+          <label class="toggle-container">
+            <span>
+            <span id="whisper-auto-transcribe-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto Transcribe</span>
+            <input type="checkbox" id="auto-transcribe-toggle">
+            <span class="neon-toggle"></span>
+          </label>
+        </div>
+
+        <div class="form-group" style="margin-top: 30px;">
+          <label for="whisper-model">Whisper Model</label>
+          <span id="whisper-model-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+          <div class="model-select-container">
+          <select id="whisper-model" class="form-control" style="margin-top: 10px;"></select>
+          <button id="delete-model" class="btn-delete-model" title="Delete selected model">
+          <span class="icon-trash"></span>
+          </button>
+          </div>
+          <div id="model-status" class="model-status"></div>
+        </div>
+        <div class="form-group">
+          <button id="download-model" class="btn btn-primary">Download Selected Model</button>
+          <div class="download-progress-container" style="display: none;">
+          <div class="progress-bar-track">
+          <div class="progress-bar-fill"></div>
+          <div class="progress-bar-glow"></div>
+          <div class="progress-text">0%</div>
+          </div>
+          <div class="progress-pulse"></div>
+          </div>
+        </div>
       </div>
 
-      <div id="navbar" class="row" style="position: absolute; bottom: 0px; height: 65px; width: 100%; background-color: #161616; justify-content: space-evenly; display: none;">
-        <div id="chat-btn" class="btn" style="margin-top: auto; margin-bottom: auto;">
-          <span class="icon icon-chats" style="width: 30px; margin: 0; height: 30px; position: relative; display: block; margin-left: auto; margin-right: auto;"></span>
-          <p style="font-size: 14px; margin-top: 0; margin-bottom: 0;">Chat</p>
+        <hr class="divider settings-divider">
+
+        <h2 class="danger-title">Dangerzone</h2>
+        <button id="logout-btn" class="logout-btn">Logout</button>
+      </div>
+
+      <div id="navbar" class="row navbar" style="display: none;">
+        <div id="chat-btn" class="btn navbar-btn">
+          <span class="icon icon-chats navbar-icon"></span>
+          <p class="navbar-text">Chat</p>
         </div>
-        <div id="settings-btn" class="btn" style="margin-top: auto; margin-bottom: auto; opacity: 0.5;">
-          <span class="icon icon-settings" style="width: 30px; margin: 0; height: 30px; position: relative; display: block; margin-left: auto; margin-right: auto;"></span>
-          <p style="font-size: 14px; margin-top: 0; margin-bottom: 0;">Settings</p>
+        <div id="settings-btn" class="btn navbar-btn navbar-btn-inactive">
+          <span class="icon icon-settings navbar-icon"></span>
+          <p class="navbar-text">Settings</p>
         </div>
       </div>
 
       <div id="login-form" class="fadein-anim">
-        <img src="./icons/vector-logo.svg" style="width: 260px; margin-top: 50px;">
-        <h4 class="startup-subtext-gradient" style="margin-top: 5px;">Private & Encrypted Messenger</h4>
+        <img src="./icons/vector-logo.svg" class="login-logo">
+        <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
         <div id="login-start">
-          <button id="start-account-creation-btn" style="background-color: #59fcb3; color: black; width: 225px;">Create Account</button>
+          <button id="start-account-creation-btn" class="login-create-btn">Create Account</button>
           <br>
-          <button id="start-login-btn" style="background-color: transparent; border-color: #59fcb3; margin-top: 10px; width: 225px;">Login</button>
+          <button id="start-login-btn" class="login-login-btn">Login</button>
           <br>
-          <img src="./icons/by-formlesslabs.svg" style="width: 275px;">
+          <img src="./icons/by-formlesslabs.svg" class="login-credits">
         </div>
-        <div id="login-import" style="position: absolute; bottom: 0px; width: 100%; display: none;">
-          <img src="./icons/by-formlesslabs.svg" style="width: 275px;">
-          <div class="row input-box" style="height: 52px;">
-            <input type="password" style="width: 100%; margin-left: 10px; margin-top: 5px; margin-bottom: 5px; background-color: black;" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
-            <svg id="login-btn" class="btn" style="width: 50px; margin-right: 15px;" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <div id="login-import" class="login-import-container" style="display: none;">
+          <img src="./icons/by-formlesslabs.svg" class="login-credits">
+          <div class="row input-box login-input-container">
+            <input type="password" class="login-input" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
+            <svg id="login-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
         </div>
-        <div id="login-encrypt" style="position: absolute; width: 100%; bottom: 0px; display: none;">
-          <div style="display: inline-flex;">
-            <img src="./icons/lock.svg" style="width: 35px; height: 35px;">
-            <h3 id="login-encrypt-title" style="margin-bottom: 25px; margin-top: 10px; margin-left: 8px;">Choose an Encryption Pin</h3>
+        <div id="login-encrypt" class="login-encrypt-container" style="display: none;">
+          <div class="login-encrypt-header">
+            <img src="./icons/lock.svg" class="login-lock-icon">
+            <h3 id="login-encrypt-title" class="login-encrypt-title">Choose an Encryption Pin</h3>
           </div>
           <div id="login-encrypt-pins" class="row pin-row input-box">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-0">

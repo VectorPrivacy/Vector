@@ -14,12 +14,6 @@
   background-clip: text;
 }
 
-.startup-subtext-gradient {
-  background: linear-gradient(to right, #f8f8f8 13.87%, #b188e2 60%);
-  background-size: 200% 200%;
-  background-clip: text;
-}
-
 .back-btn {
   color: rgba(167, 137, 204, 1);
 }
@@ -98,4 +92,109 @@ button {
 
 .divider {
   background-color: rgba(128, 0, 128, 0.5);
+}
+
+.new-chat-btn .icon {
+  background-color: rgba(177, 136, 226, 0.75);
+}
+
+.msg-preview-container {
+  border-color: rgba(161, 40, 253, 0.43) !important;
+  background-color: rgba(161, 40, 253, 0.12) !important;
+}
+
+.progress-bar {
+  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
+}
+
+select {
+  border: 1px solid #b188e2;
+}
+
+#whisper-model:focus {
+  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.3);
+}
+
+#download-model {
+  background: linear-gradient(135deg, #b188e2 0%, #9b59b6 100%);
+}
+
+#download-model:hover {
+  box-shadow: 0 5px 15px rgba(177, 136, 226, 0.3);
+}
+
+.model-status {
+  color: #b188e2;
+}
+
+.progress-bar-track {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(177, 136, 226, 0.1);
+}
+
+.progress-bar-fill {
+  background: linear-gradient(90deg, 
+    #b188e2 0%, 
+    #9b59b6 100%);
+}
+
+.progress-text {
+  text-shadow: 0 0 5px rgba(177, 136, 226, 0.7);
+}
+
+.voice-progress-container {
+  border: 1px solid #b188e2;
+  box-shadow: 0 0 15px rgba(177, 136, 226, 0.3);
+}
+
+.voice-progress-fill {
+  background: linear-gradient(90deg, #b188e2, #9b59b6);
+}
+
+.voice-progress-text {
+  color: #b188e2;
+}
+
+input[type="checkbox"]:checked + .neon-toggle {
+  background: linear-gradient(135deg, #b188e2, #9b59b6);
+  box-shadow: 
+    0 0 5px rgba(177, 136, 226, 0.5),
+    0 0 10px rgba(155, 89, 182, 0.3),
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.neon-toggle:hover {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.3),
+    0 0 8px rgba(177, 136, 226, 0.4);
+}
+
+input[type="checkbox"]:checked + .neon-toggle:hover {
+  box-shadow: 
+    0 0 8px rgba(177, 136, 226, 0.8),
+    0 0 12px rgba(155, 89, 182, 0.5),
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+#theme-select:focus {
+  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.3);
+}
+
+.icon-trash {
+  background-color: #b188e2;
+}
+
+select:disabled {
+  border-color: rgba(177, 136, 226, 0.3);
+}
+
+.nav-icon {
+  background-color: #b188e2;
+}
+
+/* Voice text highlight colors */
+:root {
+  --voice-highlight-bg: rgba(177, 136, 226, 0.3);
+  --voice-highlight-text: #b188e2;
 }
