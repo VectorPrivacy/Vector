@@ -1678,7 +1678,6 @@ select:disabled:hover {
   display: none;
 }
 
-/* Add these styles to your CSS */
 .btn-transcribe.downloading {
     padding: 8px 12px;
     cursor: default;
