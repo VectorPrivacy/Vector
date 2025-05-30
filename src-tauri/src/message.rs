@@ -8,7 +8,7 @@ use crate::crypto;
 use crate::db;
 use crate::net;
 use crate::STATE;
-use crate::util;
+use crate::util::{self, calculate_file_hash};
 use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::PRIVATE_NIP96_CONFIG;
@@ -66,7 +66,7 @@ impl Message {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Attachment {
-    /// The encryption Nonce as a stringified unique file ID (TODO: change to SHA256 hash)
+    /// The SHA256 hash of the file as a unique file ID
     pub id: String,
     // The encryption key
     pub key: String,
@@ -164,9 +164,46 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     } else {
         let attached_file = file.unwrap();
 
-        // Encrypt the attachment
-        let params = crypto::generate_encryption_params();
-        let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
+        // Calculate the file hash first (before encryption)
+        let file_hash = calculate_file_hash(&attached_file.bytes);
+
+        // Check for existing attachment with same hash across all profiles BEFORE encrypting
+        let existing_attachment = {
+            let state = STATE.lock().await;
+            let mut found_attachment: Option<(String, Attachment)> = None;
+            
+            // Search through all profiles for an attachment with matching hash
+            for profile in &state.profiles {
+                for message in &profile.messages {
+                    for attachment in &message.attachments {
+                        if attachment.id == file_hash && !attachment.url.is_empty() {
+                            // Found a matching attachment with a valid URL
+                            found_attachment = Some((profile.id.clone(), attachment.clone()));
+                            break;
+                        }
+                    }
+                    if found_attachment.is_some() {
+                        break;
+                    }
+                }
+                if found_attachment.is_some() {
+                    break;
+                }
+            }
+            
+            found_attachment
+        };
+
+        // Only encrypt if we don't have an existing attachment (optimization)
+        let (params, enc_file) = if existing_attachment.is_some() {
+            // Skip encryption for duplicate files - we'll reuse existing encryption params
+            (crypto::EncryptionParams { key: String::new(), nonce: String::new() }, Vec::new())
+        } else {
+            // Encrypt the attachment only if it's a new file
+            let params = crypto::generate_encryption_params();
+            let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
+            (params, enc_file)
+        };
 
         // Update the attachment in-state
         {
@@ -188,25 +225,34 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Resolve the directory path using the determined base directory
             let dir = handle.path().resolve("vector", base_directory).unwrap();
 
-            // Store the nonce-based file name on-disk for future reference
-            let nonce_file_path = dir.join(format!("{}.{}", &params.nonce, &attached_file.extension));
+            // Store the hash-based file name on-disk for future reference
+            let hash_file_path = dir.join(format!("{}.{}", &file_hash, &attached_file.extension));
 
             // Create the vector directory if it doesn't exist
             std::fs::create_dir_all(&dir).unwrap();
 
-            // Save the nonce-named file
-            std::fs::write(&nonce_file_path, &attached_file.bytes).unwrap();
+            // Save the hash-named file
+            std::fs::write(&hash_file_path, &attached_file.bytes).unwrap();
+
+            // Determine encryption params and file size based on whether we found an existing attachment
+            let (attachment_key, attachment_nonce, file_size) = if let Some((_, ref existing)) = existing_attachment {
+                // Reuse existing encryption params
+                (existing.key.clone(), existing.nonce.clone(), existing.size)
+            } else {
+                // Use new encryption params and encrypted file size
+                (params.key.clone(), params.nonce.clone(), enc_file.len() as u64)
+            };
 
             // Add the Attachment in-state (with our local path, to prevent re-downloading it accidentally from server)
             message.attachments.push(Attachment {
-                // Temp: id will soon become a SHA256 hash of the file
-                id: params.nonce.clone(),
-                key: params.key.clone(),
-                nonce: params.nonce.clone(),
+                // Use SHA256 hash as the ID
+                id: file_hash.clone(),
+                key: attachment_key,
+                nonce: attachment_nonce,
                 extension: attached_file.extension.clone(),
                 url: String::new(),
-                path: nonce_file_path.to_string_lossy().to_string(),
-                size: enc_file.len() as u64,
+                path: hash_file_path.to_string_lossy().to_string(),
+                size: file_size,
                 downloading: false,
                 downloaded: true
             });
@@ -238,58 +284,123 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             _ => "application/octet-stream",
         };
 
-        // Upload the file to the server
-        let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-        let signer = client.signer().await.unwrap();
-        let conf = PRIVATE_NIP96_CONFIG.wait();
-        let file_size = enc_file.len();
-        // Clone the Arc outside the closure for use inside a seperate-threaded progress callback
-        let pending_id_for_callback = Arc::clone(&pending_id);
-        // Create a progress callback for file uploads
-        let progress_callback: crate::upload::ProgressCallback = Box::new(move |percentage, _| {
-                // This is a simple callback that logs progress but could be enhanced to emit events
-                if let Some(pct) = percentage {
-                    handle.emit("attachment_upload_progress", serde_json::json!({
-                        "id": pending_id_for_callback.as_ref(),
-                        "progress": pct
-                    })).unwrap();
+        // Check if we found an existing attachment with the same hash
+        let mut should_upload = true;
+        let attachment_rumor = if let Some((_found_profile_id, existing_attachment)) = existing_attachment {
+            // Verify the URL is still live before reusing
+            let url_is_live = match net::check_url_live(&existing_attachment.url).await {
+                Ok(is_live) => is_live,
+                Err(_) => false // Treat errors as dead URL
+            };
+            
+            if url_is_live {
+                should_upload = false;
+                
+                // Update our pending message with the existing URL
+                {
+                    let pending_id_for_update = Arc::clone(&pending_id);
+                    let mut state = STATE.lock().await;
+                    let chat = state.get_profile_mut(&receiver).unwrap();
+                    let message = chat.get_message_mut(pending_id_for_update.as_ref()).unwrap();
+                    if let Some(attachment) = message.attachments.last_mut() {
+                        attachment.url = existing_attachment.url.clone();
+                    }
                 }
-            Ok(())
-        });
-
-        match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback).await {
-            Ok(url) => {
-                // Create the attachment rumor
-                let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
-
-                // Append decryption keys and file metadata
+                
+                // Create the attachment rumor with the existing URL
+                let attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing_attachment.url);
+                
+                // Append decryption keys and file metadata (using existing attachment's params)
                 attachment_rumor
                     .tag(Tag::public_key(receiver_pubkey))
                     .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
-                    .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
+                    .tag(Tag::custom(TagKind::custom("size"), [existing_attachment.size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-                    .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
-            },
-            Err(_) => {
-                // The file upload failed: so we mark the message as failed and notify of an error
-                let pending_id_for_failure = Arc::clone(&pending_id);
-                let mut state = STATE.lock().await;
-                let chat = state.get_profile_mut(&receiver).unwrap();
-                let failed_msg = chat.get_message_mut(pending_id_for_failure.as_ref()).unwrap();
-                failed_msg.failed = true;
-
-                // Update the frontend
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": pending_id_for_failure.as_ref(),
-                    "message": &failed_msg,
-                    "chat_id": &receiver
-                })).unwrap();
-
-                // Return the error
-                return Err(String::from("Failed to upload file"));
+                    .tag(Tag::custom(TagKind::custom("decryption-key"), [existing_attachment.key.as_str()]))
+                    .tag(Tag::custom(TagKind::custom("decryption-nonce"), [existing_attachment.nonce.as_str()]))
+                    .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]))
+            } else {
+                // URL is dead, need to upload
+                should_upload = true;
+                EventBuilder::new(Kind::from_u16(15), String::new()) // Placeholder
             }
-        }
+        } else {
+            // No existing attachment found
+            EventBuilder::new(Kind::from_u16(15), String::new()) // Placeholder
+        };
+        
+        // Final attachment rumor - either reused or newly uploaded
+        let final_attachment_rumor = if should_upload {
+            // Upload the file to the server
+            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+            let signer = client.signer().await.unwrap();
+            let conf = PRIVATE_NIP96_CONFIG.wait();
+            let file_size = enc_file.len();
+            // Clone the Arc outside the closure for use inside a seperate-threaded progress callback
+            let pending_id_for_callback = Arc::clone(&pending_id);
+            // Create a progress callback for file uploads
+            let progress_callback: crate::upload::ProgressCallback = Box::new(move |percentage, _| {
+                    if let Some(pct) = percentage {
+                        handle.emit("attachment_upload_progress", serde_json::json!({
+                            "id": pending_id_for_callback.as_ref(),
+                            "progress": pct
+                        })).unwrap();
+                    }
+                Ok(())
+            });
+
+            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback).await {
+                Ok(url) => {
+                    // Update our pending message with the uploaded URL
+                    {
+                        let pending_id_for_url_update = Arc::clone(&pending_id);
+                        let mut state = STATE.lock().await;
+                        let chat = state.get_profile_mut(&receiver).unwrap();
+                        let message = chat.get_message_mut(pending_id_for_url_update.as_ref()).unwrap();
+                        if let Some(attachment) = message.attachments.last_mut() {
+                            attachment.url = url.to_string();
+                        }
+                    }
+                    
+                    // Create the attachment rumor
+                    let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
+
+                    // Append decryption keys and file metadata
+                    attachment_rumor
+                        .tag(Tag::public_key(receiver_pubkey))
+                        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                        .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
+                        .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
+                        .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
+                        .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
+                        .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]))
+                },
+                Err(_) => {
+                    // The file upload failed: so we mark the message as failed and notify of an error
+                    let pending_id_for_failure = Arc::clone(&pending_id);
+                    let mut state = STATE.lock().await;
+                    let chat = state.get_profile_mut(&receiver).unwrap();
+                    let failed_msg = chat.get_message_mut(pending_id_for_failure.as_ref()).unwrap();
+                    failed_msg.failed = true;
+
+                    // Update the frontend
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": pending_id_for_failure.as_ref(),
+                        "message": &failed_msg,
+                        "chat_id": &receiver
+                    })).unwrap();
+
+                    // Return the error
+                    return Err(String::from("Failed to upload file"));
+                }
+            }
+        } else {
+            // We already have a valid attachment_rumor from the reuse logic
+            attachment_rumor
+        };
+        
+        // Return the final attachment rumor as the main rumor
+        final_attachment_rumor
     };
 
     // If a reply reference is included, add the tag

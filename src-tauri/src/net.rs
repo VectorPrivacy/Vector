@@ -487,3 +487,38 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
     
     Ok(metadata)
 }
+
+/// Check if a URL is live and accessible
+/// Returns true if the URL responds with a success status (2xx)
+pub async fn check_url_live(url: &str) -> Result<bool, &'static str> {
+    // Create a client with a reasonable timeout for checking
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| "Failed to create HTTP client")?;
+    
+    // Try a HEAD request first (more efficient)
+    match client.head(url).send().await {
+        Ok(response) => {
+            // Check if status is 2xx (success)
+            Ok(response.status().is_success())
+        }
+        Err(_) => {
+            // If HEAD fails, try a GET request with minimal range
+            // Some servers don't support HEAD requests
+            match client
+                .get(url)
+                .header("Range", "bytes=0-1")
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    // Accept both 200 (full content) and 206 (partial content)
+                    let status = response.status();
+                    Ok(status.is_success() || status.as_u16() == 206)
+                }
+                Err(_) => Ok(false), // URL is not accessible
+            }
+        }
+    }
+}

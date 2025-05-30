@@ -3,7 +3,7 @@ use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WebviewUrl};
 use tauri_plugin_notification::NotificationExt;
 
 mod crypto;
@@ -19,18 +19,13 @@ mod net;
 mod upload;
 
 mod util;
-use util::get_file_type_description;
+use util::{get_file_type_description, calculate_file_hash, is_nonce_filename, migrate_nonce_file_to_hash};
 
 mod message;
 pub use message::{Message, Attachment, Reaction};
 
 mod profile;
 pub use profile::{Profile, Status};
-
-/// The Maximum byte size that Vector will auto-download.
-/// 
-/// Files larger than this require explicit user permission to be downloaded.
-static MAX_AUTO_DOWNLOAD_BYTES: u64 = 10_485_760;
 
 /// # Trusted Relay
 ///
@@ -56,6 +51,8 @@ static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
 static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
 static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
+// TODO: REMOVE AFTER SEVERAL UPDATES - This static is only needed for the one-time migration from nonce-based to hash-based storage
+static PENDING_MIGRATION: OnceCell<std::collections::HashMap<String, (String, String)>> = OnceCell::new();
 
 
 
@@ -240,8 +237,61 @@ async fn fetch_messages<R: Runtime>(
                 }
             }
 
-            // Send the state to our frontend to signal finalised init with a full state
-            handle.emit("init_finished", &state.profiles).unwrap();
+            // Check if we have pending migrations to apply to the database
+            let has_pending_migrations = PENDING_MIGRATION.get().map(|m| !m.is_empty()).unwrap_or(false);
+            
+            if has_pending_migrations {
+                // Drop state before migration
+                drop(state);
+                
+                let migration_map = PENDING_MIGRATION.get().unwrap();
+                println!("Applying pending database migrations for {} files", migration_map.len());
+                
+                // Emit migration start event to frontend
+                handle.emit("progress_operation", serde_json::json!({
+                    "type": "start",
+                    "message": "Migrating DB"
+                })).unwrap();
+                
+                // Apply the database migrations synchronously
+                match update_database_attachment_paths(&handle, migration_map).await {
+                    Ok(_) => (/* Yay! */),
+                    Err(e) => {
+                        eprintln!("Failed to update database attachment paths: {}", e);
+                        // Emit error event
+                        handle.emit("progress_operation", serde_json::json!({
+                            "type": "error",
+                            "message": format!("Migration error: {}", e.to_string())
+                        })).unwrap();
+                    }
+                }
+                
+                // Re-acquire state and reload messages to ensure correct paths
+                state = STATE.lock().await;
+                
+                // Reload messages from database with updated paths
+                let messages = db::get_all_messages(&handle).await.unwrap();
+                
+                // Clear existing messages and reload with updated paths
+                for profile in &mut state.profiles {
+                    profile.messages.clear();
+                }
+                
+                // Add each message to the state with updated paths
+                for (msg, npub) in messages {
+                    state.add_message(&npub, msg);
+                }
+                
+                // Send the state to our frontend to signal finalised init with a full state
+                handle.emit("init_finished", &state.profiles).unwrap();
+            } else {
+                // Check that our filesystem hasn't changed since the app was last opened
+                // i.e: if an attachment file was deleted, we should mark it's attachment with "downloaded = false"
+                check_attachment_filesystem_integrity(&handle, &mut state).await;
+
+                // Send the state to our frontend to signal finalised init with a full state
+                handle.emit("init_finished", &state.profiles).unwrap();
+            }
 
             // ALWAYS begin with an initial sync of at least the last 2 days
             let now = Timestamp::now();
@@ -443,6 +493,257 @@ async fn get_oldest_message_timestamp() -> Option<u64> {
     }
     
     oldest_timestamp
+}
+
+/// Checks if downloaded attachments still exist on the filesystem
+/// Sets downloaded=false for any missing files and updates the database
+async fn check_attachment_filesystem_integrity<R: Runtime>(
+    handle: &AppHandle<R>,
+    state: &mut ChatState,
+) {
+    let mut total_checked = 0;
+    let mut updates_needed = Vec::new();
+    
+    // Capture the starting timestamp
+    let start_time = std::time::Instant::now();
+    
+    // First pass: count total attachments to check
+    let mut total_attachments = 0;
+    for profile in &state.profiles {
+        for message in &profile.messages {
+            for attachment in &message.attachments {
+                if attachment.downloaded {
+                    total_attachments += 1;
+                }
+            }
+        }
+    }
+    
+    // Iterate through all profiles and their messages
+    for (profile_idx, profile) in state.profiles.iter_mut().enumerate() {
+        for (message_idx, message) in profile.messages.iter_mut().enumerate() {
+            let mut message_updated = false;
+            
+            for attachment in message.attachments.iter_mut() {
+                // Only check attachments that are marked as downloaded
+                if attachment.downloaded {
+                    total_checked += 1;
+                    
+                    // Emit progress every 2 attachments or on the last one, but only if process has taken >1 second
+                    if (total_checked % 2 == 0 || total_checked == total_attachments) && start_time.elapsed().as_secs() >= 1 {
+                        handle.emit("progress_operation", serde_json::json!({
+                            "type": "progress",
+                            "current": total_checked,
+                            "total": total_attachments,
+                            "message": "Checking file integrity"
+                        })).unwrap();
+                    }
+                    
+                    // Check if the file exists on the filesystem
+                    let file_path = std::path::Path::new(&attachment.path);
+                    if !file_path.exists() {
+                        // File is missing, mark as not downloaded
+                        attachment.downloaded = false;
+                        message_updated = true;
+                    }
+                }
+            }
+            
+            // Mark this message for database update if any attachment was updated
+            if message_updated {
+                updates_needed.push((profile_idx, message_idx));
+            }
+        }
+    }
+    
+    // Update database for any messages with missing attachments
+    if !updates_needed.is_empty() {
+        // Only emit progress if process has taken >1 second
+        if start_time.elapsed().as_secs() >= 1 {
+            handle.emit("progress_operation", serde_json::json!({
+                "type": "progress",
+                "total": updates_needed.len(),
+                "current": 0,
+                "message": "Updating database..."
+            })).unwrap();
+        }
+        
+        for (i, (profile_idx, message_idx)) in updates_needed.iter().enumerate() {
+            let message = state.profiles[*profile_idx].messages[*message_idx].clone();
+            let contact_id = state.profiles[*profile_idx].id.clone();
+            
+            if let Err(e) = db::save_message(handle.clone(), message, contact_id).await {
+                eprintln!("Failed to update message after filesystem check: {}", e);
+            }
+            
+            // Emit progress for database updates, but only if process has taken >1 second
+            if ((i + 1) % 5 == 0 || i + 1 == updates_needed.len()) && start_time.elapsed().as_secs() >= 1 {
+                handle.emit("progress_operation", serde_json::json!({
+                    "type": "progress",
+                    "current": i + 1,
+                    "total": updates_needed.len(),
+                    "message": "Updating database"
+                })).unwrap();
+            }
+        }
+    }
+}
+
+/// Updates database attachment paths after login when encryption key is available
+/// Returns the number of attachments that were updated
+async fn update_database_attachment_paths<R: Runtime>(
+    handle: &AppHandle<R>, 
+    migration_map: &std::collections::HashMap<String, (String, String)>
+) -> Result<u32, Box<dyn std::error::Error>> {
+    // Get all messages from database
+    let messages = db::get_all_messages(handle).await?;
+    let mut updated_count = 0;
+    let total_messages = messages.len();
+    let mut processed_messages = 0;
+    
+    // Update attachment paths in messages
+    for (mut message, contact_id) in messages {
+        let mut updated = false;
+        
+        // Check each attachment
+        for attachment in &mut message.attachments {
+            // Check if this attachment needs migration based on nonce
+            if let Some((old_path, new_path)) = migration_map.get(&attachment.nonce) {
+                // Update the path if it matches the old path or contains the nonce
+                if attachment.path == *old_path || attachment.path.contains(&attachment.nonce) {
+                    attachment.path = new_path.clone();
+                    attachment.downloaded = true;
+                    updated = true;
+                    updated_count += 1;
+                }
+            }
+        }
+        
+        // Save the message back if it was updated
+        if updated {
+            db::save_message(handle.clone(), message, contact_id).await?;
+        }
+        
+        // Emit progress
+        processed_messages += 1;
+        if processed_messages % 10 == 0 || processed_messages == total_messages {
+            handle.emit("progress_operation", serde_json::json!({
+                "type": "progress",
+                "current": processed_messages,
+                "total": total_messages,
+                "message": "Migrating DB"
+            })).unwrap();
+        }
+    }
+    
+    if updated_count > 0 {
+        println!("Successfully updated {} attachment references in database", updated_count);
+    }
+    
+    Ok(updated_count)
+}
+
+// TODO: REMOVE AFTER SEVERAL UPDATES - This migration code is only needed for users upgrading from nonce-based to hash-based storage
+/// Migrates nonce-based attachment files to hash-based files at startup
+/// Returns a map of nonce->new_path for database updates after login
+async fn migrate_nonce_files_to_hash<R: Runtime>(handle: &AppHandle<R>) -> Result<std::collections::HashMap<String, (String, String)>, Box<dyn std::error::Error>> {
+    // Choose the appropriate base directory based on platform
+    let base_directory = if cfg!(target_os = "ios") {
+        tauri::path::BaseDirectory::Document
+    } else {
+        tauri::path::BaseDirectory::Download
+    };
+
+    // Resolve the directory path using the determined base directory
+    let dir = handle.path().resolve("vector", base_directory)?;
+    
+    // Check if the directory exists
+    // TODO: note that, if we allow Vector to utilise non-default paths per-attachment (i.e: do not copy files to the Vector dir during upload, but use the original path), then this assumption must be changed.
+    if !dir.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Track migrated files for database updates
+    let mut migration_map: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    
+    // Read all files in the directory
+    let mut total_files = 0;
+    let mut migrated_files = 0;
+    
+    // First pass: count nonce-based files
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if let Some(filename) = entry.path().file_name() {
+            if is_nonce_filename(&filename.to_string_lossy()) {
+                total_files += 1;
+            }
+        }
+    }
+
+    // If there are files to migrate, show progress
+    if total_files > 0 {
+        // Emit initial migration status
+        handle.emit("migration_start", serde_json::json!({
+            "total": total_files,
+            "current": 0,
+            "status": "Starting file migration..."
+        })).unwrap();
+    }
+    
+    // Second pass: migrate files
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        // Skip if it's not a file
+        if !path.is_file() {
+            continue;
+        }
+        
+        // Get the filename
+        if let Some(filename) = path.file_name() {
+            let filename_str = filename.to_string_lossy();
+            
+            // Check if this is a nonce-based filename
+            if is_nonce_filename(&filename_str) {
+                // Extract nonce from filename (format: {nonce}.{extension})
+                if let Some(nonce) = filename_str.split('.').next() {
+                    // Migrate the file
+                    match migrate_nonce_file_to_hash(&path) {
+                        Ok(new_filename) => {
+                            migrated_files += 1;
+                            
+                            // Update progress
+                            handle.emit("migration_progress", serde_json::json!({
+                                "total": total_files,
+                                "current": migrated_files,
+                                "status": format!("Migrated file {} of {}", migrated_files, total_files)
+                            })).unwrap();
+                            
+                            // Store the old and new paths for database update
+                            let old_path = path.to_string_lossy().to_string();
+                            let new_path = dir.join(&new_filename).to_string_lossy().to_string();
+                            migration_map.insert(nonce.to_string(), (old_path, new_path));
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to migrate {}: {}", filename_str, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Emit completion for file migration
+    if total_files > 0 {
+        handle.emit("migration_complete", serde_json::json!({
+            "total": total_files,
+            "migrated": migrated_files,
+            "status": "File migration complete!"
+        })).unwrap();
+    }
+    
+    Ok(migration_map)
 }
 
 
@@ -676,6 +977,9 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 let decryption_key = rumor.tags.find(TagKind::Custom(Cow::Borrowed("decryption-key"))).unwrap().content().unwrap();
                 let decryption_nonce = rumor.tags.find(TagKind::Custom(Cow::Borrowed("decryption-nonce"))).unwrap().content().unwrap();
 
+                // Extract the original file hash (ox tag) if present
+                let original_file_hash = rumor.tags.find(TagKind::Custom(Cow::Borrowed("ox"))).map(|tag| tag.content().unwrap_or(""));
+
                 // Extract the content storage URL
                 let content_url = rumor.content;
 
@@ -704,7 +1008,6 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     None => "bin",
                 };
 
-                // Check if the file exists on our system already
                 let handle = TAURI_APP.get().unwrap();
                 // Choose the appropriate base directory based on platform
                 let base_directory = if cfg!(target_os = "ios") {
@@ -715,68 +1018,104 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Resolve the directory path using the determined base directory
                 let dir = handle.path().resolve("vector", base_directory).unwrap();
-                let file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
-                let size: u64;
-                let downloaded: bool;
-
+                
                 // Grab the reported file size - it's noteworthy that this COULD be missing or wrong, so must be treated as an assumption or guide
                 let reported_size = rumor.tags
                     .find(TagKind::Custom(Cow::Borrowed("size")))
                     .map_or(0, |tag| tag.content().unwrap_or("0").parse().unwrap_or(0));
 
-                // Is the file already downloaded?
-                if file_path.exists() {
-                    size = reported_size;
-                    downloaded = true;
+                // Check for existing local files based on ox tag first
+                let mut file_hash = String::new();
+                let mut file_path = std::path::PathBuf::new();
+                let mut size: u64 = reported_size;
+                let mut downloaded: bool = false;
+                let mut found_existing_file = false;
+                
+                // If we have an ox tag (original file hash), check if a local file exists with that hash
+                if let Some(ox_hash) = original_file_hash {
+                    if !ox_hash.is_empty() {
+                        // Check if a local file exists with this hash across all messages
+                        let state = STATE.lock().await;
+                        for profile in &state.profiles {
+                            for message in &profile.messages {
+                                for attachment in &message.attachments {
+                                    if attachment.id == ox_hash && attachment.downloaded {
+                                        // Found existing attachment with same original hash
+                                        file_path = std::path::PathBuf::from(&attachment.path);
+                                        file_hash = ox_hash.to_string();
+                                        size = attachment.size;
+                                        downloaded = true;
+                                        found_existing_file = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                // Is the filesize known?
-                else if reported_size == 0 {
-                    size = 0;
-                    downloaded = false;
-                }
-                // Does it meet our autodownload policy?
-                else if reported_size > MAX_AUTO_DOWNLOAD_BYTES {
-                    // File size is either unknown, or too large
-                    downloaded = false;
-                    size = reported_size;
-                }
-                // Is it small enough to auto-download during sync? (to avoid blocking the sync thread too long)
-                else if is_new && reported_size <= 262144 { // 256 KB or less
-                    // Small file, download immediately
-                    let small_attachment = Attachment {
-                        id: decryption_nonce.to_string(),
-                        key: decryption_key.to_string(),
-                        nonce: decryption_nonce.to_string(),
-                        extension: extension.to_string(),
-                        url: content_url.clone(),
-                        path: file_path.to_string_lossy().to_string(),
-                        size: reported_size,
-                        downloading: false,
-                        downloaded: false
-                    };
-                    
-                    // Download silently (no progress reporting) with a 5-second timeout
-                    if let Ok(encrypted_data) = net::download_silent(&content_url, Some(std::time::Duration::from_secs(5))).await {
-                        // Decrypt and save the file
-                        if let Ok(_) = decrypt_and_save_attachment(handle, &encrypted_data, &small_attachment).await {
-                            // Successfully downloaded and decrypted
-                            downloaded = true;
+                
+                if !found_existing_file {
+                    // Check if a hash-based file might already exist
+                    // We need to download to check the hash, but only for small files during sync
+                    if is_new && reported_size > 0 && reported_size <= 262144 {
+                        // Try to download and check if hash file exists
+                        let temp_attachment = Attachment {
+                            id: decryption_nonce.to_string(),
+                            key: decryption_key.to_string(),
+                            nonce: decryption_nonce.to_string(),
+                            extension: extension.to_string(),
+                            url: content_url.clone(),
+                            path: String::new(), // Temporary, will be set below
+                            size: reported_size,
+                            downloading: false,
+                            downloaded: false
+                        };
+                        
+                        // Download to check hash
+                        if let Ok(encrypted_data) = net::download_silent(&content_url, Some(std::time::Duration::from_secs(5))).await {
+                            // Calculate hash without saving
+                            if let Ok(decrypted_data) = crypto::decrypt_data(&encrypted_data, &temp_attachment.key, &temp_attachment.nonce) {
+                                file_hash = calculate_file_hash(&decrypted_data);
+                                let hash_file_path = dir.join(format!("{}.{}", file_hash, extension));
+                                
+                                if hash_file_path.exists() {
+                                    // Hash file already exists!
+                                    file_path = hash_file_path;
+                                    downloaded = true;
+                                    size = reported_size;
+                                } else {
+                                    // Save the new file with hash name
+                                    if let Err(_e) = std::fs::write(&hash_file_path, decrypted_data) {
+                                        downloaded = false;
+                                        size = reported_size;
+                                        // Still set path to where it WILL be downloaded
+                                        file_path = hash_file_path;
+                                    } else {
+                                        file_path = hash_file_path;
+                                        downloaded = true;
+                                        size = reported_size;
+                                    }
+                                }
+                            } else {
+                                // Failed to decrypt for hash check, fall back to nonce placeholder
+                                file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
+                                downloaded = false;
+                                size = reported_size;
+                            }
                         } else {
-                            // Failed to decrypt
+                            // Failed to download for hash check, fall back to nonce placeholder
+                            file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
                             downloaded = false;
+                            size = reported_size;
                         }
                     } else {
-                        // Failed to download
+                        // File too large, size unknown, or during historical sync
+                        // Use nonce as placeholder - this will be updated to hash-based
+                        // when the file is actually downloaded via download_attachment
+                        file_path = dir.join(format!("{}.{}", decryption_nonce, extension));
                         downloaded = false;
+                        size = reported_size;
                     }
-                    
-                    size = reported_size;
-                }
-                // File size is good but larger than our auto-sync threshold
-                else {
-                    // We'll adjust our metadata to let the frontend know this file is ready for download
-                    downloaded = false;
-                    size = reported_size;
                 }
 
                 // Check if the message replies to anything
@@ -811,14 +1150,15 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 }
 
                 // Create an attachment
+                // Note: The path will be updated to hash-based when the file is downloaded
                 let mut attachments = Vec::new();
                 let attachment = Attachment {
-                    id: decryption_nonce.to_string(),
+                    id: if downloaded { file_hash } else { decryption_nonce.to_string() },
                     key: decryption_key.to_string(),
                     nonce: decryption_nonce.to_string(),
                     extension: extension.to_string(),
                     url: content_url,
-                    path: file_path.to_string_lossy().to_string(),
+                    path: file_path.to_string_lossy().to_string(), // Will be updated to hash-based path on download
                     size,
                     downloading: false,
                     downloaded
@@ -988,6 +1328,9 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
     let decrypted_data = crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
         .map_err(|e| e.to_string())?;
     
+    // Calculate the hash of the decrypted file
+    let file_hash = calculate_file_hash(&decrypted_data);
+    
     // Choose the appropriate base directory based on platform
     let base_directory = if cfg!(target_os = "ios") {
         tauri::path::BaseDirectory::Document
@@ -997,7 +1340,9 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
 
     // Resolve the directory path using the determined base directory
     let dir = handle.path().resolve("vector", base_directory).unwrap();
-    let file_path = dir.join(format!("{}.{}", attachment.id, attachment.extension));
+    
+    // Use hash-based filename
+    let file_path = dir.join(format!("{}.{}", file_hash, attachment.extension));
 
     // Create the vector directory if it doesn't exist
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -1072,7 +1417,8 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
     let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment).await;
     
     // Process the result
-    if let Err(error) = result {
+    match result {
+        Err(error) => {
         // Handle decryption/saving error
         let mut state = STATE.lock().await;
         let mut_profile = state.get_profile_mut(&npub).unwrap();
@@ -1098,36 +1444,52 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
         })).unwrap();
         return false;
     }
+        Ok(hash_file_path) => {
+            // Successfully decrypted and saved
+            // Extract the hash from the filename (format: {hash}.{extension})
+            let file_hash = hash_file_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&attachment_id)
+                .to_string();
+            
+            // Update state with successful download
+            {
+                let mut state = STATE.lock().await;
+                let mut_profile = state.get_profile_mut(&npub).unwrap();
 
-    // Update state with successful download
-    {
-        let mut state = STATE.lock().await;
-        let mut_profile = state.get_profile_mut(&npub).unwrap();
+                // Store all necessary IDs first
+                let profile_id = mut_profile.id.clone();
+                let msg_id_clone = msg_id.clone();
+                let old_attachment_id = attachment_id.clone();
 
-        // Store all necessary IDs first
-        let profile_id = mut_profile.id.clone();
-        let msg_id_clone = msg_id.clone();
-        let attachment_id_clone = attachment_id.clone();
+                // Update the attachment status, ID (from nonce to hash), and path
+                let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
+                
+                // Find the attachment by the old ID (nonce) and update it
+                if let Some(attachment_index) = mut_msg.attachments.iter().position(|a| a.id == old_attachment_id) {
+                    let mut_attachment = &mut mut_msg.attachments[attachment_index];
+                    mut_attachment.id = file_hash.clone(); // Update ID from nonce to hash
+                    mut_attachment.downloading = false;
+                    mut_attachment.downloaded = true;
+                    mut_attachment.path = hash_file_path.to_string_lossy().to_string(); // Update to hash-based path
+                }
 
-        // Update the attachment status
-        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
-        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
-        mut_attachment.downloading = false;
-        mut_attachment.downloaded = true;
+                // Emit the finished download with both old and new IDs
+                handle.emit("attachment_download_result", serde_json::json!({
+                    "profile_id": profile_id,
+                    "msg_id": msg_id_clone,
+                    "old_id": old_attachment_id,
+                    "id": file_hash,
+                    "success": true,
+                })).unwrap();
 
-        // Emit the finished download
-        handle.emit("attachment_download_result", serde_json::json!({
-            "profile_id": profile_id,
-            "msg_id": msg_id_clone,
-            "id": attachment_id_clone,
-            "success": true,
-        })).unwrap();
-
-        // Save to the DB
-        db::save_message(handle.clone(), mut_msg.clone(), npub).await.unwrap();
+                // Save to the DB with updated ID and path
+                db::save_message(handle.clone(), mut_msg.clone(), npub).await.unwrap();
+            }
+            
+            true
+        }
     }
-
-    true
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1363,6 +1725,92 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             let handle = app.app_handle().clone();
+
+            // Check if we need to migrate files
+            let needs_migration = tauri::async_runtime::block_on(async {
+                // Choose the appropriate base directory based on platform
+                let base_directory = if cfg!(target_os = "ios") {
+                    tauri::path::BaseDirectory::Document
+                } else {
+                    tauri::path::BaseDirectory::Download
+                };
+
+                // Resolve the directory path using the determined base directory
+                if let Ok(dir) = handle.path().resolve("vector", base_directory) {
+                    if dir.exists() {
+                        // Count nonce-based files
+                        if let Ok(entries) = std::fs::read_dir(&dir) {
+                            for entry in entries {
+                                if let Ok(entry) = entry {
+                                    if let Some(filename) = entry.path().file_name() {
+                                        if is_nonce_filename(&filename.to_string_lossy()) {
+                                            return true; // Found at least one file to migrate
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            });
+
+            // If we need to migrate, create migration window first
+            if needs_migration {
+                // Hide the main window initially
+                if let Some(main_window) = app.get_webview_window("main") {
+                    let _ = main_window.hide();
+                }
+
+                // Create migration window
+                let _ = WebviewWindowBuilder::new(
+                    app,
+                    "migration",
+                    WebviewUrl::App("migration.html".into())
+                )
+                .title("Vector - File Migration")
+                .inner_size(500.0, 300.0)
+                .resizable(false)
+                .center()
+                .build()
+                .expect("Failed to create migration window");
+
+                // Clone handle for the migration task
+                let handle_clone = handle.clone();
+                let main_window = app.get_webview_window("main").unwrap();
+                
+                // Run migration in a separate task
+                tauri::async_runtime::spawn(async move {
+                    match migrate_nonce_files_to_hash(&handle_clone).await {
+                        Ok(migration_map) => {
+                            // Store the migration map for database update after login
+                            if !migration_map.is_empty() {
+                                let _ = PENDING_MIGRATION.set(migration_map);
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to migrate attachment files: {}", e),
+                    }
+                    
+                    // After migration, show main window and close migration window
+                    let _ = main_window.show();
+                    if let Some(mig_win) = handle_clone.get_webview_window("migration") {
+                        let _ = mig_win.close();
+                    }
+                });
+            } else {
+                // No migration needed, run it silently just in case
+                tauri::async_runtime::block_on(async {
+                    match migrate_nonce_files_to_hash(&handle).await {
+                        Ok(migration_map) => {
+                            // Store the migration map for database update after login
+                            if !migration_map.is_empty() {
+                                let _ = PENDING_MIGRATION.set(migration_map);
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to migrate attachment files: {}", e),
+                    }
+                });
+            }
 
             // Setup a graceful shutdown for our Nostr subscriptions
             let window = app.get_webview_window("main").unwrap();

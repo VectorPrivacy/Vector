@@ -772,11 +772,18 @@ async function setupRustListeners() {
         // Update the in-memory attachment
         let cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
         let cMsg = cProfile.messages.find(m => m.id === evt.payload.msg_id);
-        let cAttachment = cMsg.attachments.find(a => a.id === evt.payload.id);
+    
+        // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
+        let cAttachment = cMsg.attachments.find(a => a.id === evt.payload?.old_id || evt.payload.id);
 
         cAttachment.downloading = false;
         if (evt.payload.success) {
             cAttachment.downloaded = true;
+            // Update our ID and Path
+            if (evt.payload.old_id) {
+                cAttachment.id = evt.payload.id;
+                cAttachment.path = cAttachment.path.replace(evt.payload.old_id, evt.payload.id);
+            }
 
             // If this user has an open chat, then update the rendered message
             if (strOpenChat === evt.payload.profile_id) {
@@ -981,6 +988,39 @@ async function login() {
 
         // Setup our Rust Event listeners for efficient back<-->front sync
         await setupRustListeners();
+
+        // Setup unified progress operation event listener
+        await listen('progress_operation', (evt) => {
+            const { type, current, total, message } = evt.payload;
+            
+            switch (type) {
+                case 'start':
+                    domLoginEncryptTitle.textContent = message;
+                    domLoginEncryptTitle.classList.add('text-gradient');
+                    domLoginEncryptTitle.style.color = '';
+                    break;
+                    
+                case 'progress':
+                    if (current && total) {
+                        const progress = Math.round((current / total) * 100);
+                        domLoginEncryptTitle.textContent = `${message} (${progress}%)`;
+                    } else {
+                        domLoginEncryptTitle.textContent = message;
+                    }
+                    break;
+                    
+                case 'complete':
+                    domLoginEncryptTitle.textContent = message;
+                    domLoginEncryptTitle.classList.remove('text-gradient');
+                    break;
+                    
+                case 'error':
+                    domLoginEncryptTitle.textContent = message;
+                    domLoginEncryptTitle.classList.remove('text-gradient');
+                    domLoginEncryptTitle.style.color = 'red';
+                    break;
+            }
+        });
 
         // Setup a Rust Listener for the backend's init finish
         await listen('init_finished', (evt) => {
