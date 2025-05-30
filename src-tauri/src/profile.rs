@@ -1,5 +1,5 @@
 use nostr_sdk::prelude::*;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tauri_plugin_fs::FsExt;
 
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP, PUBLIC_NIP96_CONFIG};
@@ -475,4 +475,43 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
         },
         Err(_) => Err(String::from("Image couldn't be loaded from disk"))
     }
+}
+
+/// Marks a specific message as read
+#[tauri::command]
+pub async fn mark_as_read(npub: String) -> bool {
+    // Only mark as read if the Window is focused (user may have the chat open but the app in the background)
+    let handle = TAURI_APP.get().unwrap();
+    if !handle
+        .webview_windows()
+        .iter()
+        .next()
+        .unwrap()
+        .1
+        .is_focused()
+        .unwrap() {
+            // Update the counter to allow for background badge handling of in-chat messages
+            crate::update_unread_counter(handle.clone()).await;
+            return false;
+        }
+
+    // Get a mutable reference to the profile
+    let result = {
+        let mut state = STATE.lock().await;
+        match state.get_profile_mut(&npub) {
+            Some(profile) => profile.set_as_read(),
+            None => false
+        }
+    };
+    
+    // Update the unread counter if the marking was successful
+    if result {
+        // Update the badge count
+        crate::update_unread_counter(handle.clone()).await;
+
+        // Save the "Last Read" marker to the DB
+        db::set_profile(handle.clone(), STATE.lock().await.get_profile(&npub).unwrap().clone()).await.unwrap();
+    }
+    
+    result
 }

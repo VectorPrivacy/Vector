@@ -6,7 +6,8 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::collections::HashMap;
 
-use crate::{Profile, Status, Attachment, Message, Reaction, SiteMetadata};
+use crate::{Profile, Status, Attachment, Message, Reaction};
+use crate::net::SiteMetadata;
 use crate::crypto::{internal_encrypt, internal_decrypt};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

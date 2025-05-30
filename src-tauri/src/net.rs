@@ -1,8 +1,10 @@
+use std::cmp::min;
+
 use futures_util::StreamExt;
 use reqwest::{self, Client};
 use serde_json::json;
-use std::cmp::min;
 use tauri::{AppHandle, Emitter};
+use scraper::{Html, Selector};
 
 /// Trait for reporting download progress
 pub trait ProgressReporter {
@@ -303,4 +305,220 @@ async fn download_with_streaming(
     reporter.report_complete()?;
 
     Ok(result)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
+pub struct SiteMetadata {
+    pub domain: String,
+    pub og_title: Option<String>,
+    pub og_description: Option<String>,
+    pub og_image: Option<String>,
+    pub og_url: Option<String>,
+    pub og_type: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub favicon: Option<String>,
+}
+
+pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
+    // Extract and normalize domain
+    let domain = {
+        let parts: Vec<&str> = url.split('/').collect();
+        if parts.len() >= 3 {
+            let mut domain = format!("{}://{}", parts[0].trim_end_matches(':'), parts[2]);
+            if !domain.ends_with('/') {
+                domain.push('/');
+            }
+            domain
+        } else {
+            let mut domain = url.to_string();
+            if !domain.ends_with('/') {
+                domain.push('/');
+            }
+            domain
+        }
+    };
+    
+    let mut html_chunk = Vec::new();
+    
+    let client = reqwest::Client::new();
+    let mut response = client
+        .get(url)
+        .header("Range", "bytes=0-32768")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Read the response in chunks
+    loop {
+        let chunk = response.chunk().await.map_err(|e| e.to_string())?;
+        match chunk {
+            Some(data) => {
+                html_chunk.extend_from_slice(&data);
+                
+                if let Ok(current_html) = String::from_utf8(html_chunk.clone()) {
+                    if let Some(head_end) = current_html.find("</head>") {
+                        html_chunk.truncate(head_end + 7);
+                        break;
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+    
+    let html_string = String::from_utf8(html_chunk).map_err(|e| e.to_string())?;
+    let document = Html::parse_document(&html_string);
+    let meta_selector = Selector::parse("meta").unwrap();
+    let link_selector = Selector::parse("link").unwrap();
+    
+    let mut metadata = SiteMetadata {
+        domain: domain.clone(),
+        og_title: None,
+        og_description: None,
+        og_image: None,
+        og_url: Some(String::from(url)),
+        og_type: None,
+        title: None,
+        description: None,
+        favicon: None,
+    };
+    
+    // Process favicon links
+    let mut favicon_candidates = Vec::new();
+    for link in document.select(&link_selector) {
+        if let Some(rel) = link.value().attr("rel") {
+            if let Some(href) = link.value().attr("href") {
+                match rel.to_lowercase().as_str() {
+                    "icon" | "shortcut icon" | "apple-touch-icon" => {
+                        // Normalize the favicon URL
+                        let favicon_url = if href.starts_with("https://") {
+                            href.to_string()
+                        } else if href.starts_with("//") {
+                            format!("https:{}", href)
+                        } else if href.starts_with('/') {
+                            format!("{}{}", domain.trim_end_matches('/'), href)
+                        } else {
+                            format!("{}/{}", domain.trim_end_matches('/'), href)
+                        };
+                        
+                        favicon_candidates.push((favicon_url, rel.to_lowercase()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Set favicon with priority order
+    if favicon_candidates.is_empty() {
+        // If no favicon found in links, try the default /favicon.ico location
+        metadata.favicon = Some(format!("{}/favicon.ico", domain.trim_end_matches('/')));
+    } else {
+        // Priority order:
+        // 1. apple-touch-icon (highest quality)
+        // 2. icon with .png extension
+        // 3. shortcut icon with .png extension
+        // 4. any other icon
+        // 5. fallback to /favicon.ico
+        
+        let favicon = favicon_candidates.iter()
+            .find(|(_url, rel)| 
+                rel == "apple-touch-icon")
+            .or_else(|| 
+                favicon_candidates.iter()
+                    .find(|(url, _)| 
+                        url.ends_with(".png")))
+            .or_else(|| 
+                favicon_candidates.iter()
+                    .find(|(_, rel)| 
+                        rel == "icon" || rel == "shortcut icon"))
+            .map(|(url, _)| url.clone())
+            .or_else(|| 
+                // Fallback to /favicon.ico
+                Some(format!("{}/favicon.ico", domain.trim_end_matches('/')))
+            );
+        
+        metadata.favicon = favicon;
+    }
+    
+    // Process meta tags (existing code)
+    for meta in document.select(&meta_selector) {
+        let element = meta.value();
+        
+        if let Some(property) = element.attr("property") {
+            if let Some(content) = element.attr("content") {
+                match property {
+                    "og:title" => metadata.og_title = Some(content.to_string()),
+                    "og:description" => metadata.og_description = Some(content.to_string()),
+                    "og:image" => {
+                        let image_url = if content.starts_with("https://") {
+                            content.to_string()
+                        } else if content.starts_with("//") {
+                            format!("https:{}", content)
+                        } else if content.starts_with('/') {
+                            format!("{}{}", domain.trim_end_matches('/'), content)
+                        } else {
+                            format!("{}{}", domain.trim_end_matches('/'), content)
+                        };
+                        metadata.og_image = Some(image_url);
+                    },
+                    "og:url" => metadata.og_url = Some(content.to_string()),
+                    "og:type" => metadata.og_type = Some(content.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        
+        if let Some(name) = element.attr("name") {
+            if let Some(content) = element.attr("content") {
+                match name {
+                    "description" => metadata.description = Some(content.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    // Extract title from title tag
+    if let Some(title_element) = document.select(&Selector::parse("title").unwrap()).next() {
+        metadata.title = Some(title_element.text().collect::<String>());
+    }
+    
+    Ok(metadata)
+}
+
+/// Check if a URL is live and accessible
+/// Returns true if the URL responds with a success status (2xx)
+pub async fn check_url_live(url: &str) -> Result<bool, &'static str> {
+    // Create a client with a reasonable timeout for checking
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| "Failed to create HTTP client")?;
+    
+    // Try a HEAD request first (more efficient)
+    match client.head(url).send().await {
+        Ok(response) => {
+            // Check if status is 2xx (success)
+            Ok(response.status().is_success())
+        }
+        Err(_) => {
+            // If HEAD fails, try a GET request with minimal range
+            // Some servers don't support HEAD requests
+            match client
+                .get(url)
+                .header("Range", "bytes=0-1")
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    // Accept both 200 (full content) and 206 (partial content)
+                    let status = response.status();
+                    Ok(status.is_success() || status.as_u16() == 206)
+                }
+                Err(_) => Ok(false), // URL is not accessible
+            }
+        }
+    }
 }

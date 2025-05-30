@@ -29,14 +29,12 @@ fn make_client(proxy: Option<SocketAddr>) -> Result<Client, Error> {
 
 /// Custom upload stream that allows tracking progress
 struct ProgressTrackingStream {
-    total_size: u64,
     bytes_sent: Arc<Mutex<u64>>,
     inner: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
 }
 
 impl ProgressTrackingStream {
     fn new(data: Vec<u8>, bytes_sent: Arc<Mutex<u64>>) -> Self {
-        let total_size = data.len() as u64;
         let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
         
         // Spawn a background task to feed the stream
@@ -59,7 +57,6 @@ impl ProgressTrackingStream {
         });
         
         Self {
-            total_size,
             bytes_sent,
             inner: rx,
         }
