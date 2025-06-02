@@ -52,7 +52,7 @@ jobs:
 
       - name: Install CUDA Toolkit (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: Jimver/cuda-toolkit@v0.2.25
+        uses: Jimver/cuda-toolkit@v0.2.24
         with:
           method: 'network'
 
