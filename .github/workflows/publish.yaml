@@ -50,13 +50,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Setup Vulkan SDK (Windows)
+      - name: Install CUDA Toolkit (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        uses: Jimver/cuda-toolkit@v0.2.11
         with:
-          vulkan-query-version: latest
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools
-          vulkan-use-cache: true
+          cuda: '12.2'
+          method: 'network'
 
       - name: install frontend dependencies
         run: npm install
