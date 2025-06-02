@@ -44,6 +44,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
+          # Install Vulkan SDK for whisper-rs
+          sudo apt-get install -y vulkan-tools libvulkan-dev vulkan-validationlayers-dev spirv-tools
 
       - name: install frontend dependencies
         run: npm install
