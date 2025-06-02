@@ -50,6 +50,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          choco install vulkan-sdk -y
+          echo "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+
       - name: install frontend dependencies
         run: npm install
 
