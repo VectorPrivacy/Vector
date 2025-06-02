@@ -50,19 +50,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Install Vulkan SDK (Windows)
+      - name: Setup Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
-        run: |
-          Write-Host "Installing Vulkan SDK via winget..."
-          winget install --id=KhronosGroup.VulkanSDK --exact --silent --accept-package-agreements --accept-source-agreements
-          Write-Host "Setting environment variables..."
-          # winget installs to a versioned directory, let's find it
-          $vulkanPath = Get-ChildItem "C:\VulkanSDK\" | Sort-Object Name -Descending | Select-Object -First 1
-          $vulkanSdkPath = $vulkanPath.FullName
-          Write-Host "Found Vulkan SDK at: $vulkanSdkPath"
-          echo "VULKAN_SDK=$vulkanSdkPath" >> $env:GITHUB_ENV
-          echo "$vulkanSdkPath\Bin" >> $env:GITHUB_PATH
-          Write-Host "Vulkan SDK setup complete!"
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools
+          vulkan-use-cache: true
 
       - name: install frontend dependencies
         run: npm install
