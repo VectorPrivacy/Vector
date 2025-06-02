@@ -1,5 +1,8 @@
 :root {
   background-color: #060606;
+  --voice-highlight-bg: rgba(89, 252, 179, 0.3);
+  --voice-highlight-text: #59fcb3;
+  --voice-frequency-glow: rgba(89, 252, 179, 0.8);
 }
 
 .popup {
@@ -136,6 +139,10 @@ select {
   color: #59fcb3;
 }
 
+.audio-transcribe-btn .icon {
+  background-color: #59fcb3;
+}
+
 .progress-bar-track {
   box-shadow: 
     inset 0 1px 3px rgba(0, 0, 0, 0.4),
@@ -202,8 +209,48 @@ select:disabled {
   background-color: #59fcb3;
 }
 
-/* Voice text highlight colors */
-:root {
-  --voice-highlight-bg: rgba(89, 252, 179, 0.3);
-  --voice-highlight-text: #59fcb3;
+/* Custom Audio Player Theme Overrides */
+.custom-audio-player {
+  background: rgba(11, 41, 28, 0.4);
+  border-color: rgba(89, 252, 179, 0.25);
+}
+
+.custom-audio-player:hover {
+  background: rgba(11, 41, 28, 0.6);
+  border-color: rgba(89, 252, 179, 0.5);
+  box-shadow: 0 0 15px rgba(89, 252, 179, 0.2);
+}
+
+.audio-play-btn {
+  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
+  box-shadow: 0 2px 10px rgba(89, 252, 179, 0.3);
+}
+
+.audio-play-btn:hover {
+  box-shadow: 0 0 25px rgba(89, 252, 179, 0.6),
+              0 0 40px rgba(89, 252, 179, 0.3);
+}
+
+.audio-progress-fill {
+  background: linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%);
+  box-shadow: 0 0 15px rgba(89, 252, 179, 0.5);
+}
+
+.audio-progress-handle {
+  background: #59fcb3;
+  box-shadow: 0 0 15px rgba(89, 252, 179, 0.8),
+              0 0 25px rgba(89, 252, 179, 0.4);
+}
+
+.waveform-bar {
+  background: linear-gradient(to top, #2b976c, #59fcb3);
+}
+
+.custom-audio-player.playing .waveform-bar {
+  box-shadow: 0 0 5px rgba(89, 252, 179, 0.5);
+}
+
+.audio-time-display .current-time {
+  color: #59fcb3;
+  text-shadow: 0 0 5px rgba(89, 252, 179, 0.5);
 }

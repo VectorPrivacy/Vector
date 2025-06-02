@@ -76,6 +76,16 @@ class VoiceTranscriptionUI {
         const originalHTML = transcribeBtn.innerHTML;
         const originalClasses = transcribeBtn.className;
         
+        // Hide audio player UI elements but keep transcribe button visible
+        const audioContainer = transcribeBtn.closest('.audio-message-container');
+        const playBtn = audioContainer?.querySelector('.audio-play-btn');
+        const waveform = audioContainer?.querySelector('.audio-waveform');
+        const timeDisplay = audioContainer?.querySelector('.audio-time-display');
+        
+        if (playBtn) playBtn.style.display = 'none';
+        if (waveform) waveform.style.display = 'none';
+        if (timeDisplay) timeDisplay.style.display = 'none';
+        
         // Create progress elements inside the transcribe button
         const progressContainer = document.createElement('div');
         progressContainer.classList.add('transcribe-progress-container');
@@ -95,6 +105,8 @@ class VoiceTranscriptionUI {
         progressContainer.appendChild(progressBar);
         
         // Replace button contents with progress indicator
+        transcribeBtn.style.marginLeft = 'auto';
+        transcribeBtn.style.marginRight = 'auto';
         transcribeBtn.innerHTML = '';
         transcribeBtn.appendChild(progressContainer);
         transcribeBtn.classList.add('downloading');
@@ -120,6 +132,13 @@ class VoiceTranscriptionUI {
         // Restore original button state
         transcribeBtn.innerHTML = originalHTML;
         transcribeBtn.className = originalClasses;
+        transcribeBtn.style.marginLeft = '';
+        transcribeBtn.style.marginRight = '';
+        
+        // Show audio player UI again
+        if (playBtn) playBtn.style.display = '';
+        if (waveform) waveform.style.display = '';
+        if (timeDisplay) timeDisplay.style.display = '';
             
             return true;
         } catch (error) {
@@ -127,6 +146,15 @@ class VoiceTranscriptionUI {
             progressFill.style.background = '#ff5e5e';
             setTimeout(() => {
                 transcribeBtn.classList.remove('downloading');
+                // Restore original button state
+                transcribeBtn.innerHTML = originalHTML;
+                transcribeBtn.className = originalClasses;
+                transcribeBtn.style.marginLeft = '';
+                transcribeBtn.style.marginRight = '';
+                // Show audio player UI again
+                if (playBtn) playBtn.style.display = '';
+                if (waveform) waveform.style.display = '';
+                if (timeDisplay) timeDisplay.style.display = '';
             }, 3000);
             return false;
         } finally {
@@ -306,46 +334,339 @@ document.addEventListener('DOMContentLoaded', async () => {
  */
 function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     const audioContainer = document.createElement('div');
-    audioContainer.classList.add('audio-message-container');
+    audioContainer.classList.add('audio-message-container', 'custom-audio-player');
 
+    // Create hidden audio element for playback control
     const audPreview = document.createElement('audio');
-    audPreview.setAttribute('controlsList', 'nodownload');
-    audPreview.controls = true;
     audPreview.preload = 'metadata';
     audPreview.src = assetUrl;
-    audPreview.addEventListener('loadedmetadata', () => softChatScroll(), { once: true });
+    audPreview.style.display = 'none';
+    audPreview.addEventListener('loadedmetadata', () => {
+        updateDuration();
+        softChatScroll();
+    });
 
+    // Create custom audio player
+    const customPlayer = document.createElement('div');
+    customPlayer.classList.add('custom-audio-player-inner');
+
+    // Play/Pause button
+    const playBtn = document.createElement('button');
+    playBtn.classList.add('audio-play-btn');
+    playBtn.innerHTML = '<span class="icon icon-play"></span>';
+    
+    // Time display
+    const timeDisplay = document.createElement('div');
+    timeDisplay.classList.add('audio-time-display');
+    timeDisplay.innerHTML = '<span class="current-time">0:00</span> / <span class="duration">0:00</span>';
+
+    // Transcribe Button
+    const transcribeBtn = document.createElement('button');
+    transcribeBtn.classList.add('audio-transcribe-btn');
+    const transcribeIcon = document.createElement('span');
+    transcribeIcon.classList.add('icon', 'icon-file-plus');
+    transcribeBtn.appendChild(transcribeIcon);
+    
+    // Waveform visualization with real frequency data
+    const waveform = document.createElement('div');
+    waveform.classList.add('audio-waveform');
+    const barCount = 32; // Number of frequency bars
+    const bars = [];
+    
+    for (let i = 0; i < barCount; i++) {
+        const bar = document.createElement('div');
+        bar.classList.add('waveform-bar');
+        bar.setAttribute('data-index', i);
+        waveform.appendChild(bar);
+        bars.push(bar);
+    }
+    
+    // Web Audio API setup for frequency analysis
+    let audioContext = null;
+    let analyser = null;
+    let source = null;
+    let animationId = null;
+    
+    function initAudioAnalyser() {
+        if (audioContext) return;
+        
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256; // Increased for better frequency resolution
+        analyser.smoothingTimeConstant = 0.85; // Slightly more smoothing for visual appeal
+        
+        source = audioContext.createMediaElementSource(audPreview);
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+    }
+    
+    function updateVisualizer() {
+        if (!analyser || audPreview.paused) {
+            cancelAnimationFrame(animationId);
+            // Reset bars when paused but maintain playback position opacity
+            const currentProgress = (audPreview.currentTime / audPreview.duration) || 0;
+            bars.forEach((bar, i) => {
+                bar.style.height = '20%';
+                const barProgress = (i + 0.5) / barCount;
+                bar.style.opacity = barProgress <= currentProgress ? '0.3' : '0.15';
+            });
+            return;
+        }
+        
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+        analyser.getByteFrequencyData(dataArray);
+        
+        // Create logarithmic scale for frequency distribution
+        // Human hearing is logarithmic, so we want more bars for lower frequencies
+        const minFreq = 100;  // Start from 100Hz to skip very low frequencies
+        const maxFreq = 8000; // Cap at 8kHz for voice/music clarity
+        const nyquist = audioContext.sampleRate / 2;
+        
+        // Calculate frequency bins for each bar using logarithmic scale
+        const logMin = Math.log10(minFreq);
+        const logMax = Math.log10(maxFreq);
+        
+        for (let i = 0; i < barCount; i++) {
+            // Calculate frequency range for this bar
+            const logFreqStart = logMin + (logMax - logMin) * (i / barCount);
+            const logFreqEnd = logMin + (logMax - logMin) * ((i + 1) / barCount);
+            
+            const freqStart = Math.pow(10, logFreqStart);
+            const freqEnd = Math.pow(10, logFreqEnd);
+            
+            // Convert frequencies to bin indices
+            const binStart = Math.floor((freqStart / nyquist) * bufferLength);
+            const binEnd = Math.ceil((freqEnd / nyquist) * bufferLength);
+            
+            // Average the frequency data for this range
+            let sum = 0;
+            let count = 0;
+            for (let j = binStart; j < binEnd && j < bufferLength; j++) {
+                sum += dataArray[j];
+                count++;
+            }
+            
+            const average = count > 0 ? sum / count : 0;
+            
+            // Apply gentler frequency-based boost
+            // Lower frequencies: minimal boost, higher frequencies: moderate boost
+            const freqBoost = 1 + (i / barCount) * 0.5; // Reduced from 1.5 to 0.5
+            const boostedValue = average * freqBoost;
+            
+            // Apply dynamic range compression to prevent maxing out
+            // This creates more visual variation
+            const compressed = Math.tanh(boostedValue / 128) * 255; // Soft limiting
+            
+            // Convert to percentage with power scaling for better dynamics
+            const normalizedValue = compressed / 255;
+            const scaledHeight = Math.pow(normalizedValue, 1.5) * 70; // Increased power for more dynamic range
+            
+            // Update bar with smooth animation
+            const bar = bars[i];
+            bar.style.height = `${Math.max(5, Math.min(80, scaledHeight + 5))}%`;
+            
+            // Calculate base opacity based on frequency activity
+            const baseOpacity = 0.3 + (scaledHeight / 70) * 0.7;
+            
+            // Apply playback position opacity adjustment
+            const currentProgress = (audPreview.currentTime / audPreview.duration) || 0;
+            const barProgress = (i + 0.5) / barCount; // Center of each bar
+            
+            // Future bars (not yet played) have reduced opacity
+            const playbackOpacity = barProgress <= currentProgress ? 1 : 0.4;
+            bar.style.opacity = baseOpacity * playbackOpacity;
+            
+            // Add glow effect for active frequencies with adjusted threshold
+            if (scaledHeight > 50 && barProgress <= currentProgress) {
+                const glowIntensity = (scaledHeight - 50) / 3;
+                // Use theme's frequency glow color
+                const glowColor = getComputedStyle(document.documentElement).getPropertyValue('--voice-frequency-glow');
+                bar.style.boxShadow = `0 0 ${glowIntensity}px ${glowColor.trim()}`;
+            } else {
+                bar.style.boxShadow = 'none';
+            }
+        }
+        
+        animationId = requestAnimationFrame(updateVisualizer);
+    }
+    
+    // Assemble custom player
+    customPlayer.appendChild(playBtn);
+    customPlayer.appendChild(waveform);
+    customPlayer.appendChild(timeDisplay);
+    customPlayer.appendChild(transcribeBtn);
+    
     audioContainer.appendChild(audPreview);
+    audioContainer.appendChild(customPlayer);
+
+    // Helper functions
+    function formatTime(seconds) {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    function updateDuration() {
+        const duration = audPreview.duration;
+        if (!isNaN(duration)) {
+            timeDisplay.querySelector('.duration').textContent = formatTime(duration);
+        }
+    }
+
+    // Play/Pause functionality with visualizer
+    playBtn.addEventListener('click', async () => {
+        if (audPreview.paused) {
+            // Initialize audio context on first play (browser requirement)
+            if (!audioContext) {
+                initAudioAnalyser();
+            }
+            
+            // Resume audio context if suspended
+            if (audioContext && audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            
+            audPreview.play();
+            playBtn.innerHTML = '<span class="icon icon-pause"></span>';
+            customPlayer.classList.add('playing');
+            
+            // Start visualizer
+            updateVisualizer();
+        } else {
+            audPreview.pause();
+            playBtn.innerHTML = '<span class="icon icon-play"></span>';
+            customPlayer.classList.remove('playing');
+            
+            // Stop visualizer
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+        }
+    });
+
+    // Update time display
+    audPreview.addEventListener('timeupdate', () => {
+        const currentTime = audPreview.currentTime;
+        const duration = audPreview.duration;
+        
+        if (!isNaN(duration)) {
+            timeDisplay.querySelector('.current-time').textContent = formatTime(currentTime);
+            
+            // Update static bar opacity based on playback position when paused
+            if (audPreview.paused) {
+                updateStaticBarsOpacity(currentTime, duration);
+            }
+        }
+    });
+    
+    // Function to update bar opacity when paused
+    function updateStaticBarsOpacity(currentTime, duration) {
+        const currentProgress = currentTime / duration;
+        bars.forEach((bar, i) => {
+            const barProgress = (i + 0.5) / barCount;
+            const opacity = barProgress <= currentProgress ? 0.3 : 0.15;
+            bar.style.opacity = opacity;
+        });
+    }
+
+    // Waveform seek functionality
+    let isWaveformDragging = false;
+    
+    function waveformSeek(e) {
+        const rect = waveform.getBoundingClientRect();
+        const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+        const percentage = x / rect.width;
+        
+        if (!isNaN(audPreview.duration)) {
+            audPreview.currentTime = percentage * audPreview.duration;
+        }
+    }
+    
+    waveform.addEventListener('mousedown', (e) => {
+        isWaveformDragging = true;
+        waveformSeek(e);
+        document.addEventListener('mousemove', handleWaveformDrag);
+        document.addEventListener('mouseup', stopWaveformDrag);
+    });
+    
+    // Touch support for mobile
+    waveform.addEventListener('touchstart', (e) => {
+        isWaveformDragging = true;
+        const touch = e.touches[0];
+        const rect = waveform.getBoundingClientRect();
+        const x = Math.max(0, Math.min(touch.clientX - rect.left, rect.width));
+        const percentage = x / rect.width;
+        
+        if (!isNaN(audPreview.duration)) {
+            audPreview.currentTime = percentage * audPreview.duration;
+        }
+    });
+    
+    waveform.addEventListener('touchmove', (e) => {
+        if (isWaveformDragging) {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const rect = waveform.getBoundingClientRect();
+            const x = Math.max(0, Math.min(touch.clientX - rect.left, rect.width));
+            const percentage = x / rect.width;
+            
+            if (!isNaN(audPreview.duration)) {
+                audPreview.currentTime = percentage * audPreview.duration;
+            }
+        }
+    });
+    
+    waveform.addEventListener('touchend', () => {
+        isWaveformDragging = false;
+    });
+    
+    function handleWaveformDrag(e) {
+        if (isWaveformDragging) {
+            waveformSeek(e);
+        }
+    }
+    
+    function stopWaveformDrag() {
+        isWaveformDragging = false;
+        document.removeEventListener('mousemove', handleWaveformDrag);
+        document.removeEventListener('mouseup', stopWaveformDrag);
+    }
+
+    // Reset on end
+    audPreview.addEventListener('ended', () => {
+        playBtn.innerHTML = '<span class="icon icon-play"></span>';
+        customPlayer.classList.remove('playing');
+        timeDisplay.querySelector('.current-time').textContent = '0:00';
+        
+        // Stop visualizer
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+        }
+        
+        // Reset bars
+        bars.forEach(bar => {
+            bar.style.height = '20%';
+            bar.style.opacity = '0.3';
+            bar.style.boxShadow = 'none';
+        });
+    });
+    
+    // Cleanup audio context when element is removed
+    audioContainer.addEventListener('remove', () => {
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+        }
+        if (audioContext) {
+            audioContext.close();
+        }
+    });
 
     // Only add transcription UI for supported formats
     if (['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
         // Add transcribe button container
         const transcribeContainer = document.createElement('div');
         transcribeContainer.classList.add('transcribe-container');
-        
-        // Add view transcription button
-        const transcribeBtn = document.createElement('button');
-        transcribeBtn.classList.add('btn', 'btn-transcribe');
-        transcribeBtn.style.display = 'flex';
-
-        const transcribeIcon = document.createElement('span');
-        transcribeIcon.classList.add('icon', 'icon-mic-on');
-        Object.assign(transcribeIcon.style, {
-            position: 'relative',
-            backgroundColor: 'rgba(255, 255, 255, 0.45)',
-            width: '19px',
-            height: '19px'
-        });
-        
-        const transcribeText = document.createElement('span');
-        transcribeText.textContent = 'Transcribe';
-        Object.assign(transcribeText.style, {
-            color: 'rgba(255, 255, 255, 0.45)',
-            marginLeft: '5px'
-        });
-        
-        transcribeBtn.appendChild(transcribeIcon);
-        transcribeBtn.appendChild(transcribeText);
         
         // Create container for transcription result
         const transcriptionResult = document.createElement('div');
@@ -360,15 +681,10 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
                 return transcriptionResult.classList.toggle('hidden');
             }
 
-            // Store original button state
-            const originalHTML = transcribeBtn.innerHTML;
-            const originalClasses = transcribeBtn.className;
-
             // Show loading state
             transcribeBtn.classList.add('loading');
-            transcribeText.textContent = 'Transcribing';
             transcribeBtn.style.cursor = 'default';
-            transcribeIcon.classList.replace('icon-mic-on', 'icon-loading');
+            transcribeIcon.classList.replace('icon-file-plus', 'icon-loading');
             transcribeIcon.classList.add('spin');
 
             try {
@@ -382,10 +698,9 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
                 // Restore button state
                 transcribeBtn.classList.remove('loading');
                 transcribeBtn.innerHTML = '';
+                transcribeBtn.style.cursor = '';
                 transcribeBtn.appendChild(transcribeIcon);
-                transcribeBtn.appendChild(transcribeText);
-                transcribeText.textContent = 'Transcribe';
-                transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
+                transcribeIcon.classList.replace('icon-loading', 'icon-file-plus');
                 transcribeIcon.classList.remove('spin');
                 
                 // Clear any existing content
@@ -400,10 +715,9 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
                 // Restore button state
                 transcribeBtn.classList.remove('loading');
                 transcribeBtn.innerHTML = '';
+                transcribeBtn.style.cursor = '';
                 transcribeBtn.appendChild(transcribeIcon);
-                transcribeBtn.appendChild(transcribeText);
-                transcribeText.textContent = 'Transcribe';
-                transcribeIcon.classList.replace('icon-loading', 'icon-mic-on');
+                transcribeIcon.classList.replace('icon-loading', 'icon-file-plus');
                 transcribeIcon.classList.remove('spin');
                 
                 transcriptionResult.innerHTML = '';
@@ -415,7 +729,6 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
             }
         });
 
-        transcribeContainer.appendChild(transcribeBtn);
         audioContainer.appendChild(transcribeContainer);
         audioContainer.appendChild(transcriptionResult);
 

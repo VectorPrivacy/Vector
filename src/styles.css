@@ -99,6 +99,10 @@
   mask-image: url("./icons/chevron-double-left.svg");
 }
 
+.icon-file-plus {
+  mask-image: url("./icons/file-plus.svg");
+}
+
 .icon-cancel {
   mask-image: url("./icons/cancel.svg");
 }
@@ -1713,4 +1717,224 @@ select:disabled:hover {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* Custom Audio Player Styles */
+.custom-audio-player {
+    gap: 12px;
+    padding: 12px;
+    background: rgba(22, 22, 22, 0.6);
+    border: 1px solid rgba(89, 252, 179, 0.2);
+    border-radius: 12px;
+    position: relative;
+    overflow: hidden;
+    min-width: 280px;
+    transition: all 0.3s ease;
+}
+
+.custom-audio-player-inner {
+    display: flex;
+    align-items: center;
+}
+
+.custom-audio-player:hover {
+    border-color: rgba(89, 252, 179, 0.4);
+    background: rgba(22, 22, 22, 0.8);
+}
+
+.audio-play-btn {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.audio-play-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 0 20px rgba(89, 252, 179, 0.5);
+}
+
+.audio-play-btn:active {
+    transform: scale(0.95);
+}
+
+.audio-play-btn .icon {
+    width: 20px;
+    height: 20px;
+    background-color: #000;
+    mask-size: 20px;
+}
+
+.icon-play {
+    mask-image: url("./icons/play.svg");
+    mask-position: 55% center;
+}
+
+.icon-pause {
+    mask-image: url("./icons/pause.svg");
+}
+
+.audio-progress-container {
+    flex: 1;
+    padding: 0 8px;
+    cursor: pointer;
+}
+
+.audio-progress-bar {
+    position: relative;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    overflow: visible;
+}
+
+.audio-progress-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.1s ease;
+    box-shadow: 0 0 10px rgba(89, 252, 179, 0.4);
+}
+
+.audio-progress-handle {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 14px;
+    height: 14px;
+    background: #59fcb3;
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(89, 252, 179, 0.6);
+    left: 0%;
+    transition: left 0.1s ease;
+    opacity: 0;
+}
+
+.custom-audio-player:hover .audio-progress-handle {
+    opacity: 1;
+}
+
+.audio-waveform {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 30px;
+    opacity: 0.8;
+    margin: 0 8px;
+    position: relative;
+    flex: 1;
+    cursor: pointer;
+}
+
+/* Visual feedback on hover */
+.audio-waveform:hover {
+    opacity: 1;
+}
+
+.audio-waveform:hover .waveform-bar {
+    transition: all 0.15s ease;
+}
+
+.waveform-bar {
+    width: 3px;
+    background: #59fcb3;
+    border-radius: 1.5px;
+    height: 20%; /* Initial height */
+    transition: height 0.1s ease, opacity 0.1s ease, box-shadow 0.2s ease;
+    transform-origin: bottom;
+}
+
+/* Remove the old animation since we're using real frequency data */
+.custom-audio-player.playing .waveform-bar {
+    animation: none;
+}
+
+/* Subtle pulse effect for the entire waveform container when playing */
+.custom-audio-player.playing .audio-waveform {
+    opacity: 1;
+}
+
+.audio-time-display {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.7);
+    white-space: nowrap;
+    font-family: monospace;
+    min-width: 80px;
+    text-align: right;
+}
+
+.audio-time-display .current-time {
+    color: #59fcb3;
+    font-weight: bold;
+}
+
+.audio-transcribe-btn {
+    padding: 12px;
+    margin-left: 5px;
+    background-color: transparent;
+    border: none;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.audio-transcribe-btn .icon {
+    background-color: #000;
+    width: 18px;
+    height: 18px;
+}
+
+.audio-transcribe-btn:hover {
+    transform: scale(1.1);
+}
+
+.audio-transcribe-btn.loading {
+    cursor: default;
+}
+
+.audio-transcribe-btn.loading:hover {
+    transform: none;
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+    .custom-audio-player {
+        min-width: 240px;
+        gap: 8px;
+        padding: 10px;
+    }
+    
+    .audio-waveform {
+        flex: 1;
+        gap: 1px; /* Tighter spacing on mobile */
+    }
+    
+    .waveform-bar {
+        width: 2px; /* Slightly thinner bars on mobile */
+    }
+    
+    .audio-time-display {
+        font-size: 10px;
+        min-width: 70px;
+    }
+    
+    .audio-play-btn {
+        width: 25px;
+        height: 25px;
+        min-width: 25px;
+        padding: 0;
+        margin: 0;
+    }
 }
