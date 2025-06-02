@@ -52,13 +52,30 @@ jobs:
 
       - name: Install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
+        timeout-minutes: 15
         run: |
-          # Download and install current Vulkan SDK
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/1.3.261.1/windows/VulkanSDK-1.3.261.1-Installer.exe" -OutFile "VulkanSDK-Installer.exe"
-          Start-Process -FilePath "VulkanSDK-Installer.exe" -ArgumentList "/S" -Wait
-          # Set environment variables
+          Write-Host "Starting Vulkan SDK download..."
+          try {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/1.3.261.1/windows/VulkanSDK-1.3.261.1-Installer.exe" -OutFile "VulkanSDK-Installer.exe" -TimeoutSec 600
+            Write-Host "Download completed. File size: $((Get-Item VulkanSDK-Installer.exe).Length / 1MB) MB"
+          } catch {
+            Write-Host "Download failed: $_"
+            exit 1
+          }
+          
+          Write-Host "Starting silent installation..."
+          try {
+            $process = Start-Process -FilePath "VulkanSDK-Installer.exe" -ArgumentList "/S" -Wait -PassThru
+            Write-Host "Installation completed with exit code: $($process.ExitCode)"
+          } catch {
+            Write-Host "Installation failed: $_"
+            exit 1
+          }
+          
+          Write-Host "Setting environment variables..."
           echo "VULKAN_SDK=C:\VulkanSDK\1.3.261.1" >> $env:GITHUB_ENV
           echo "C:\VulkanSDK\1.3.261.1\Bin" >> $env:GITHUB_PATH
+          Write-Host "Vulkan SDK setup complete!"
 
       - name: install frontend dependencies
         run: npm install
