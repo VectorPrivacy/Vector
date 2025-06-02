@@ -54,5 +54,11 @@ whisper-rs = "0.13.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.13.2", features = ["metal"] }
 
+[target.'cfg(windows)'.dependencies]
+whisper-rs = { version = "0.13.2", features = ["cuda", "vulkan"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+whisper-rs = { version = "0.13.2", features = ["cuda", "vulkan"] }
+
 # Workaround for a Tauri-4.2.1 dependency issue; screw you, deranged maintainers!
 deranged = "=0.4.0"
