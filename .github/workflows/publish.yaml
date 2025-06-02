@@ -52,9 +52,8 @@ jobs:
 
       - name: Install CUDA Toolkit (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: Jimver/cuda-toolkit@v0.2.11
+        uses: Jimver/cuda-toolkit@v0.2.25
         with:
-          cuda: '12.9.0'
           method: 'network'
 
       - name: install frontend dependencies
