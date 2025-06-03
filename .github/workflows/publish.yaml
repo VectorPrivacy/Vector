@@ -58,15 +58,21 @@ jobs:
           # Update MSYS2 first
           C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
           
-          # Install Vulkan packages including glslc
-          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-shaderc mingw-w64-x86_64-glslang mingw-w64-x86_64-spirv-tools"
+          # Install Vulkan packages including development libraries
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-icd-loader mingw-w64-x86_64-shaderc mingw-w64-x86_64-glslang mingw-w64-x86_64-spirv-tools"
           
-          # Set environment variables
+          # Set environment variables for CMake to find Vulkan
           echo "VULKAN_SDK=C:\msys64\mingw64" >> $env:GITHUB_ENV
+          echo "VK_SDK_PATH=C:\msys64\mingw64" >> $env:GITHUB_ENV
+          echo "Vulkan_LIBRARY=C:\msys64\mingw64\lib\libvulkan.dll.a" >> $env:GITHUB_ENV
+          echo "Vulkan_INCLUDE_DIR=C:\msys64\mingw64\include" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=C:\msys64\mingw64" >> $env:GITHUB_ENV
           echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
           
-          # Verify glslc is available
-          Write-Host "Verifying glslc installation..."
+          # Verify installations
+          Write-Host "Checking for Vulkan library..."
+          dir C:\msys64\mingw64\lib\*vulkan*
+          Write-Host "Verifying glslc..."
           C:\msys64\mingw64\bin\glslc.exe --version
 
       - name: install frontend dependencies
