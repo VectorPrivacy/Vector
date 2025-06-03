@@ -53,28 +53,28 @@ jobs:
       - name: Install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
         run: |
-          Write-Host "Installing Vulkan components via vcpkg..."
+          Write-Host "Installing Vulkan components..."
           
-          # Install Vulkan components
+          # Install Vulkan components via vcpkg
           vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
           
+          # Download glslc from your server
+          Write-Host "Downloading glslc.exe..."
+          Invoke-WebRequest -Uri "https://jskitty.cat/glslc.exe" -OutFile "glslc.exe"
+          
+          # Place it in the vcpkg bin directory
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          New-Item -ItemType Directory -Force -Path $vcpkgBin
+          Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
+          
           # Set up environment
-          $vcpkgRoot = "C:\vcpkg\installed\x64-windows"
-          echo "VULKAN_SDK=$vcpkgRoot" >> $env:GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$vcpkgRoot" >> $env:GITHUB_ENV
-          echo "$vcpkgRoot\bin" >> $env:GITHUB_PATH
+          echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "$vcpkgBin" >> $env:GITHUB_PATH
           
-          # Create a dummy glslc.exe to satisfy CMake's check
-          New-Item -ItemType Directory -Force -Path "$vcpkgRoot\bin"
-          $glslcContent = @'
-          @echo off
-          echo glslc shaderc v2023.8
-          exit 0
-          '@
-          $glslcContent | Out-File -FilePath "$vcpkgRoot\bin\glslc.bat" -Encoding ASCII
-          
-          # Also create glslc.exe wrapper
-          Copy-Item "$vcpkgRoot\bin\glslc.bat" "$vcpkgRoot\bin\glslc.exe"
+          # Verify glslc works
+          Write-Host "Verifying glslc..."
+          & "$vcpkgBin\glslc.exe" --version
 
       - name: install frontend dependencies
         run: npm install
