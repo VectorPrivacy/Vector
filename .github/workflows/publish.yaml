@@ -58,19 +58,38 @@ jobs:
           # Install all Vulkan components via vcpkg
           vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows glslang:x64-windows spirv-tools:x64-windows
           
-          # Set up environment for CMake to find everything
+          # Set up environment for CMake
           $vcpkgRoot = "C:\vcpkg\installed\x64-windows"
           
           echo "VULKAN_SDK=$vcpkgRoot" >> $env:GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=$vcpkgRoot" >> $env:GITHUB_ENV
           echo "CMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
           echo "$vcpkgRoot\bin" >> $env:GITHUB_PATH
-          echo "$vcpkgRoot\tools\glslang" >> $env:GITHUB_PATH
           
-          # Verify installations
-          Write-Host "Checking for required files..."
-          dir "$vcpkgRoot\bin\*vulkan*"
-          dir "$vcpkgRoot\tools\glslang\glslc.exe"
+          # Find glslc.exe - it might be in a different location
+          Write-Host "Searching for glslc.exe..."
+          $glslc = Get-ChildItem -Path "C:\vcpkg" -Filter "glslc.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($glslc) {
+              Write-Host "Found glslc at: $($glslc.FullName)"
+              $glslcDir = Split-Path $glslc.FullName -Parent
+              echo "$glslcDir" >> $env:GITHUB_PATH
+              
+              # Also copy to where CMake might expect it
+              New-Item -ItemType Directory -Force -Path "$vcpkgRoot\bin"
+              Copy-Item $glslc.FullName "$vcpkgRoot\bin\" -Force
+          } else {
+              Write-Host "glslc.exe not found - glslang might provide glslangValidator instead"
+              # Look for glslangValidator as alternative
+              $glslangValidator = Get-ChildItem -Path "C:\vcpkg" -Filter "glslangValidator.exe" -Recurse -ErrorAction SilentlyContinue
+              if ($glslangValidator) {
+                  Write-Host "Found glslangValidator at: $($glslangValidator.FullName)"
+              }
+          }
+          
+          # List what we have
+          Write-Host "Checking installations..."
+          dir "$vcpkgRoot\bin"
+          dir "$vcpkgRoot\tools" -ErrorAction SilentlyContinue
 
       - name: install frontend dependencies
         run: npm install
