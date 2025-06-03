@@ -50,30 +50,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Install Vulkan SDK (Windows)
+      - name: Setup Vulkan SDK (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
+          vulkan-use-cache: false
+
+      - name: Download glslc manually (Windows)
         if: matrix.platform == 'windows-latest'
         run: |
-          Write-Host "Installing Vulkan via MSYS2..."
+          # Since the action might not install glslc properly, let's get it from vcpkg
+          vcpkg install glslang:x64-windows
           
-          # Update MSYS2 first
-          C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+          # Find and copy glslc to where CMake expects it
+          $glslcPath = Get-ChildItem -Path "C:\vcpkg\installed\x64-windows\tools" -Filter "glslc.exe" -Recurse | Select-Object -First 1
+          if ($glslcPath) {
+              Write-Host "Found glslc at: $($glslcPath.FullName)"
+              Copy-Item $glslcPath.FullName "$env:VULKAN_SDK\Bin\" -Force
+          }
           
-          # Install Vulkan packages including development libraries
-          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-icd-loader mingw-w64-x86_64-shaderc mingw-w64-x86_64-glslang mingw-w64-x86_64-spirv-tools"
-          
-          # Set environment variables for CMake to find Vulkan
-          echo "VULKAN_SDK=C:\msys64\mingw64" >> $env:GITHUB_ENV
-          echo "VK_SDK_PATH=C:\msys64\mingw64" >> $env:GITHUB_ENV
-          echo "Vulkan_LIBRARY=C:\msys64\mingw64\lib\libvulkan.dll.a" >> $env:GITHUB_ENV
-          echo "Vulkan_INCLUDE_DIR=C:\msys64\mingw64\include" >> $env:GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=C:\msys64\mingw64" >> $env:GITHUB_ENV
-          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
-          
-          # Verify installations
-          Write-Host "Checking for Vulkan library..."
-          dir C:\msys64\mingw64\lib\*vulkan*
-          Write-Host "Verifying glslc..."
-          C:\msys64\mingw64\bin\glslc.exe --version
+          # Add vcpkg tools to PATH as backup
+          echo "C:\vcpkg\installed\x64-windows\tools\glslang" >> $env:GITHUB_PATH
 
       - name: install frontend dependencies
         run: npm install
