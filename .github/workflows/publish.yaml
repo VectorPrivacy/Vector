@@ -50,11 +50,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Install CUDA Toolkit (Windows)
+      - name: Install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: Jimver/cuda-toolkit@v0.2.24
-        with:
-          method: 'network'
+        run: |
+          Write-Host "Downloading Vulkan runtime and tools..."
+          # Create directories
+          New-Item -ItemType Directory -Force -Path "C:\VulkanSDK"
+          
+          # Download pre-built glslc directly from Google's shaderc
+          Invoke-WebRequest -Uri "https://storage.googleapis.com/shaderc/artifacts/prod/graphics_shader_compiler/shaderc/windows/continuous_release_2022/433/20221215-134414/install.zip" -OutFile "shaderc.zip"
+          Expand-Archive -Path "shaderc.zip" -DestinationPath "C:\VulkanSDK\shaderc"
+          
+          # Download Vulkan runtime
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime-components.zip" -OutFile "vulkan-runtime.zip"
+          Expand-Archive -Path "vulkan-runtime.zip" -DestinationPath "C:\VulkanSDK\runtime"
+          
+          # Set environment variables
+          echo "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+          echo "C:\VulkanSDK\shaderc\install\bin" >> $env:GITHUB_PATH
+          echo "C:\VulkanSDK\runtime\Bin" >> $env:GITHUB_PATH
+          
+          # Verify glslc is available
+          Write-Host "Checking for glslc..."
+          & "C:\VulkanSDK\shaderc\install\bin\glslc.exe" --version
 
       - name: install frontend dependencies
         run: npm install
