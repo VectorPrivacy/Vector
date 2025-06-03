@@ -53,24 +53,21 @@ jobs:
       - name: Install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
         run: |
-          Write-Host "Installing Vulkan components..."
+          Write-Host "Installing Vulkan via MSYS2..."
           
-          # Use chocolatey to get glslc/shaderc tools
-          choco install shaderc -y
+          # Update MSYS2 first
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
           
-          # Download Vulkan SDK headers and libraries manually
-          $vulkanVersion = "1.3.261.1"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$vulkanVersion/windows/VulkanSDK-$vulkanVersion-Installer.exe" -OutFile "VulkanSDK.exe"
-          
-          # Extract without installing (to avoid hang)
-          Start-Process -FilePath "VulkanSDK.exe" -ArgumentList "/S", "/D=C:\VulkanSDK" -NoNewWindow -Wait -TimeoutSec 30
+          # Install Vulkan packages including glslc
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-shaderc mingw-w64-x86_64-glslang mingw-w64-x86_64-spirv-tools"
           
           # Set environment variables
-          echo "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
-          echo "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+          echo "VULKAN_SDK=C:\msys64\mingw64" >> $env:GITHUB_ENV
+          echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
           
-          # Verify glslc from chocolatey
-          where glslc
+          # Verify glslc is available
+          Write-Host "Verifying glslc installation..."
+          C:\msys64\mingw64\bin\glslc.exe --version
 
       - name: install frontend dependencies
         run: npm install
