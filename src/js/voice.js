@@ -338,6 +338,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
 
     // Create hidden audio element for playback control
     const audPreview = document.createElement('audio');
+    audPreview.crossOrigin = 'anonymous';
     audPreview.preload = 'metadata';
     audPreview.src = assetUrl;
     audPreview.style.display = 'none';
@@ -390,7 +391,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     function initAudioAnalyser() {
         if (audioContext) return;
         
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioContext = new AudioContext();
         analyser = audioContext.createAnalyser();
         analyser.fftSize = 256; // Increased for better frequency resolution
         analyser.smoothingTimeConstant = 0.85; // Slightly more smoothing for visual appeal
