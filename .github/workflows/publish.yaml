@@ -50,29 +50,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Setup Vulkan SDK (Windows)
-        if: matrix.platform == 'windows-latest'
-        uses: humbletim/setup-vulkan-sdk@v1.2.1
-        with:
-          vulkan-query-version: latest
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
-          vulkan-use-cache: false
-
-      - name: Download glslc manually (Windows)
+      - name: Install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
         run: |
-          # Since the action might not install glslc properly, let's get it from vcpkg
-          vcpkg install glslang:x64-windows
+          Write-Host "Installing Vulkan components via vcpkg..."
           
-          # Find and copy glslc to where CMake expects it
-          $glslcPath = Get-ChildItem -Path "C:\vcpkg\installed\x64-windows\tools" -Filter "glslc.exe" -Recurse | Select-Object -First 1
-          if ($glslcPath) {
-              Write-Host "Found glslc at: $($glslcPath.FullName)"
-              Copy-Item $glslcPath.FullName "$env:VULKAN_SDK\Bin\" -Force
-          }
+          # Install all Vulkan components via vcpkg
+          vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows glslang:x64-windows spirv-tools:x64-windows
           
-          # Add vcpkg tools to PATH as backup
-          echo "C:\vcpkg\installed\x64-windows\tools\glslang" >> $env:GITHUB_PATH
+          # Set up environment for CMake to find everything
+          $vcpkgRoot = "C:\vcpkg\installed\x64-windows"
+          
+          echo "VULKAN_SDK=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+          echo "$vcpkgRoot\bin" >> $env:GITHUB_PATH
+          echo "$vcpkgRoot\tools\glslang" >> $env:GITHUB_PATH
+          
+          # Verify installations
+          Write-Host "Checking for required files..."
+          dir "$vcpkgRoot\bin\*vulkan*"
+          dir "$vcpkgRoot\tools\glslang\glslc.exe"
 
       - name: install frontend dependencies
         run: npm install
