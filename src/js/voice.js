@@ -496,7 +496,6 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     customPlayer.appendChild(playBtn);
     customPlayer.appendChild(waveform);
     customPlayer.appendChild(timeDisplay);
-    customPlayer.appendChild(transcribeBtn);
     
     audioContainer.appendChild(audPreview);
     audioContainer.appendChild(customPlayer);
@@ -665,6 +664,9 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
 
     // Only add transcription UI for supported formats
     if (['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
+        // Display the Transcribe button
+        customPlayer.appendChild(transcribeBtn);
+        
         // Add transcribe button container
         const transcribeContainer = document.createElement('div');
         transcribeContainer.classList.add('transcribe-container');
