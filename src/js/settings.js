@@ -24,6 +24,7 @@ class VoiceSettings {
         // Load our Settings from disk (or use a default value)
         const strModelID = await loadChosenWhisperModel() || this.selectedModel;
         this.autoTranslate = await loadWhisperAutoTranslate();
+        this.autoTranscribe = await loadWhisperAutoTranscribe();
 
         // Set initial toggle states (will be loaded from backend DB in future)
         document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
