@@ -62,6 +62,10 @@ pub fn get_file_type_description(extension: &str) -> String {
         // Audio
         map.insert("wav", "Voice Message");
         map.insert("mp3", "Audio Clip");
+        map.insert("m4a", "Audio Clip");
+        map.insert("aac", "Audio Clip");
+        map.insert("flac", "Audio Clip");
+        map.insert("ogg", "Audio Clip");
 
         // Videos
         map.insert("mp4", "Video");
