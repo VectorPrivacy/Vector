@@ -412,9 +412,22 @@ async function askForUsername() {
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: strUsername, avatar: "", banner: "" });
+        await invoke("update_profile", { name: strUsername, avatar: "", banner: "", about: "" });
     } catch (e) {
         await popupConfirm('Username Update Failed!', 'An error occurred while updating your Username, the change may not have committed to the network, you can re-try any time.', true);
+    }
+}
+
+/**
+ * Set the user's "About Me" field on the Nostr network.
+ * @param {string} about - The new 'About Me' text to be set for the user
+ */
+async function setAboutMe(about) {
+    // Send out the metadata update
+    try {
+        await invoke("update_profile", { name: "", avatar: "", banner: "", about: about });
+    } catch (e) {
+        await popupConfirm('About Me Update Failed!', 'An error occurred while updating your "About Me", the change may not have committed to the network, you can re-try any time.', true);
     }
 }
 
@@ -451,7 +464,7 @@ async function askForAvatar() {
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "" });
+        await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
     } catch (e) {
         return await popupConfirm('Avatar Update Failed!', e, true);
     }
@@ -490,7 +503,7 @@ async function askForBanner() {
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL });
+        await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL, about: "" });
     } catch (e) {
         return await popupConfirm('Banner Update Failed!', e, true);
     }

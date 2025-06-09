@@ -35,6 +35,7 @@ const domProfileNameSecondary = document.getElementById('profile-secondary-name'
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
 const domProfileBadges = document.getElementById('profile-badge-list');
 const domProfileDescription = document.getElementById('profile-description');
+const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
@@ -1256,6 +1257,8 @@ function renderProfileTab(cProfile) {
         domProfileNameSecondary.classList.add('btn');
         domProfileStatusSecondary.onclick = askForStatus;
         domProfileStatusSecondary.classList.add('btn');
+        domProfileDescription.onclick = editProfileDescription;
+        domProfileDescription.classList.add('btn');
     } else {
         // Show the 'Back' button and link it to the profile's chat
         domProfileBackBtn.style.display = '';
@@ -1276,6 +1279,8 @@ function renderProfileTab(cProfile) {
         domProfileNameSecondary.classList.remove('btn');
         domProfileStatusSecondary.onclick = null;
         domProfileStatusSecondary.classList.remove('btn');
+        domProfileDescription.onclick = null;
+        domProfileDescription.classList.remove('btn');
     }
 }
 
@@ -2260,6 +2265,61 @@ function openSettings() {
     // Hide the other tabs
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
+}
+
+/**
+ * Edit the profile description inline
+ */
+function editProfileDescription() {
+    // Get the current profile
+    const cProfile = arrChats.find(a => a.mine);
+    if (!cProfile) return;
+
+    // Set the textarea content to current description
+    domProfileDescriptionEditor.value = cProfile.about || '';
+
+    // Hide the span and show the textarea
+    domProfileDescription.style.display = 'none';
+    domProfileDescriptionEditor.style.display = '';
+
+    // Focus the text
+    domProfileDescriptionEditor.focus();
+
+    // Handle blur event to save and return to view mode
+    domProfileDescriptionEditor.onblur = () => {
+        // Update the profile's about property
+        cProfile.about = domProfileDescriptionEditor.value;
+
+        // Update the span content
+        domProfileDescription.textContent = cProfile.about;
+        twemojify(domProfileDescription);
+
+        // Hide textarea and show span
+        domProfileDescriptionEditor.style.display = 'none';
+        domProfileDescription.style.display = '';
+
+        // Upload new About Me to Nostr
+        setAboutMe(cProfile.about);
+
+        // Remove the blur event listener
+        domProfileDescriptionEditor.onblur = null;
+    };
+
+    // Resize it to match the content size (CSS cannot scale textareas based on content)
+    domProfileDescriptionEditor.style.height = Math.min(domProfileDescriptionEditor.scrollHeight, 100) + 'px';
+
+    // Handle input events to resize the textarea dynamically
+    domProfileDescriptionEditor.oninput = () => {
+        domProfileDescriptionEditor.style.height = Math.min(domProfileDescriptionEditor.scrollHeight, 100) + 'px';
+    };
+
+    // Handle Enter key to submit (excluding Shift+Enter for line breaks)
+    domProfileDescriptionEditor.onkeydown = (evt) => {
+        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
+            evt.preventDefault();
+            domProfileDescriptionEditor.blur(); // Trigger the blur event to save
+        }
+    };
 }
 
 /**
