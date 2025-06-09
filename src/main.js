@@ -24,6 +24,18 @@ const domLoginEncrypt = document.getElementById('login-encrypt');
 const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
 const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
 
+const domProfile = document.getElementById('profile');
+const domProfileBackBtn = document.getElementById('profile-back-btn');
+const domProfileName = document.getElementById('profile-name');
+const domProfileStatus = document.getElementById('profile-status');
+// Note: these are 'let' due to needing to use `.replaceWith` when hot-swapping profile elements
+let domProfileBanner = document.getElementById('profile-banner');
+let domProfileAvatar = document.getElementById('profile-avatar');
+const domProfileNameSecondary = document.getElementById('profile-secondary-name');
+const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
+const domProfileBadges = document.getElementById('profile-badge-list');
+const domProfileDescription = document.getElementById('profile-description');
+
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
 const domAccount = document.getElementById('account');
@@ -31,8 +43,9 @@ const domSyncStatusContainer = document.getElementById('sync-status-container');
 const domSyncStatus = document.getElementById('sync-status');
 const domChatList = document.getElementById('chat-list');
 const domNavbar = document.getElementById('navbar');
-const domSettingsBtn = document.getElementById('settings-btn');
+const domProfileBtn = document.getElementById('profile-btn');
 const domChatlistBtn = document.getElementById('chat-btn');
+const domSettingsBtn = document.getElementById('settings-btn');
 
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
@@ -49,7 +62,7 @@ const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 
 const domChatNew = document.getElementById('chat-new');
-const domChatNewBackBtn = document.getElementById('chat-new-back-btn');
+const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
 const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
@@ -524,7 +537,7 @@ function renderContact(chat) {
         divAvatarContainer.appendChild(imgAvatar);
     } else {
         // Otherwise, generate a Gradient Avatar
-        divAvatarContainer.appendChild(pubkeyToAvatar(chat.id, chat?.name));
+        divAvatarContainer.appendChild(pubkeyToAvatar(chat.id, chat?.name, 50));
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -1105,9 +1118,11 @@ async function login() {
 
 /**
  * Renders the user's own profile UI
- * @param {object} cProfile 
+ * @param {Profile} cProfile 
  */
 function renderCurrentProfile(cProfile) {
+    /* Chatlist Tab */
+
     // Reset any existing UI
     domAccount.innerHTML = ``;
 
@@ -1122,23 +1137,23 @@ function renderCurrentProfile(cProfile) {
         domAvatar.src = cProfile.avatar;
     } else {
         // Display our Gradient Avatar
-        domAvatar = pubkeyToAvatar(strPubkey, cProfile?.name)
+        domAvatar = pubkeyToAvatar(strPubkey, cProfile?.name, 50);
     }
     domAvatar.classList.add('btn');
     domAvatar.onclick = askForAvatar;
     divRow.appendChild(domAvatar);
 
-    // Render our username and npub
-    const h2Username = document.createElement('h2');
-    h2Username.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
-    h2Username.classList.add('btn', 'cutoff');
-    h2Username.style.fontFamily = `Rubik`;
-    h2Username.style.marginTop = `auto`;
-    h2Username.style.marginBottom = `auto`;
-    h2Username.style.maxWidth = `calc(100% - 150px)`;
-    h2Username.onclick = askForUsername;
-    if (cProfile?.name) twemojify(h2Username);
-    divRow.appendChild(h2Username);
+    // Render our Display Name and npub
+    const h2DisplayName = document.createElement('h2');
+    h2DisplayName.textContent = cProfile?.name || strPubkey.substring(0, 10) + '…';
+    h2DisplayName.classList.add('btn', 'cutoff');
+    h2DisplayName.style.fontFamily = `Rubik`;
+    h2DisplayName.style.marginTop = `auto`;
+    h2DisplayName.style.marginBottom = `auto`;
+    h2DisplayName.style.maxWidth = `calc(100% - 150px)`;
+    h2DisplayName.onclick = askForUsername;
+    if (cProfile?.name) twemojify(h2DisplayName);
+    divRow.appendChild(h2DisplayName);
 
     // Add the username row
     domAccount.appendChild(divRow);
@@ -1151,8 +1166,117 @@ function renderCurrentProfile(cProfile) {
     twemojify(pStatus);
     domAccount.appendChild(pStatus);
 
+    /* Start Chat Tab */
+
     // Render our Share npub
     domShareNpub.textContent = strPubkey;
+}
+
+/**
+ * Render the Profile tab based on a given profile
+ * @param {Profile} cProfile 
+ */
+function renderProfileTab(cProfile) {
+    // Display Name
+    domProfileName.innerHTML = cProfile?.name || strPubkey.substring(0, 10) + '…';
+    if (cProfile?.name) twemojify(domProfileName);
+
+    // Status
+    const strStatusPlaceholder = cProfile.mine ? 'Set a Status' : '';
+    domProfileStatus.innerHTML = cProfile?.status?.title || strStatusPlaceholder;
+    if (cProfile?.status?.title) twemojify(domProfileStatus);
+
+    // Banner
+    if (cProfile.banner) {
+        // We have a banner URL; so render the banner as a web image
+        if (domProfileBanner.tagName === 'DIV') {
+            const newBanner = document.createElement('img');
+            domProfileBanner.replaceWith(newBanner);
+            domProfileBanner = newBanner;
+        }
+        domProfileBanner.src = cProfile.banner;
+    } else {
+        // We don't have a banner URL; so render an empty DIV
+        if (domProfileBanner.tagName === 'IMG') {
+            const newBanner = document.createElement('div');
+            newBanner.style.backgroundColor = 'rgb(27, 27, 27)';
+            domProfileBanner.replaceWith(newBanner);
+            domProfileBanner = newBanner;
+        }
+    }
+    domProfileBanner.classList.add('profile-banner', 'btn');
+    domProfileBanner.onclick = askForBanner;
+
+    // Avatar
+    if (cProfile.avatar) {
+        if (domProfileAvatar.tagName === 'DIV') {
+            const newAvatar = document.createElement('img');
+            domProfileAvatar.replaceWith(newAvatar);
+            domProfileAvatar = newAvatar;
+        }
+        domProfileAvatar.src = cProfile.avatar;
+    } else {
+        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.name);
+        domProfileAvatar.replaceWith(newAvatar);
+        domProfileAvatar = newAvatar;
+    }
+    domProfileAvatar.classList.add('profile-avatar', 'btn');
+    domProfileAvatar.onclick = askForAvatar;
+
+    // Secondary Display Name
+    const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : '';
+    domProfileNameSecondary.innerHTML = cProfile?.name || strNamePlaceholder;
+    if (cProfile?.name) twemojify(domProfileNameSecondary);
+
+    // Secondary Status
+    domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
+
+    // Secondary Description
+    domProfileDescription.textContent = cProfile.about;
+    twemojify(domProfileDescription);
+
+    // If this is OUR profile: make the elements clickable
+    if (cProfile.mine) {
+        // Hide the 'Back' button and deregister it's clickable function
+        domProfileBackBtn.style.display = 'none';
+        domProfileBackBtn.onclick = null;
+        // Display the Navbar
+        domNavbar.style.display = '';
+
+        // Configure clickables
+        domProfileName.onclick = askForUsername;
+        domProfileName.classList.add('btn');
+        domProfileStatus.onclick = askForStatus;
+        domProfileStatus.classList.add('btn');
+        domProfileBanner.onclick = askForBanner;
+        domProfileBanner.classList.add('btn');
+        domProfileAvatar.onclick = askForAvatar;
+        domProfileAvatar.classList.add('btn');
+        domProfileNameSecondary.onclick = askForUsername;
+        domProfileNameSecondary.classList.add('btn');
+        domProfileStatusSecondary.onclick = askForStatus;
+        domProfileStatusSecondary.classList.add('btn');
+    } else {
+        // Show the 'Back' button and link it to the profile's chat
+        domProfileBackBtn.style.display = '';
+        domProfileBackBtn.onclick = () => openChat(cProfile.id);
+        // Hide the Navbar
+        domNavbar.style.display = 'none';
+
+        // Configure clickables
+        domProfileName.onclick = null;
+        domProfileName.classList.remove('btn');
+        domProfileStatus.onclick = null;
+        domProfileStatus.classList.remove('btn');
+        domProfileBanner.onclick = null;
+        domProfileBanner.classList.remove('btn');
+        domProfileAvatar.onclick = null;
+        domProfileAvatar.classList.remove('btn');
+        domProfileNameSecondary.onclick = null;
+        domProfileNameSecondary.classList.remove('btn');
+        domProfileStatusSecondary.onclick = null;
+        domProfileStatusSecondary.classList.remove('btn');
+    }
 }
 
 /**
@@ -1352,9 +1476,16 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         // Prefer displaying their name, otherwise, npub
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+            domChatContact.classList.remove('btn');
         } else {
             domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
             if (profile?.name) twemojify(domChatContact);
+            // When the name or status is clicked, expand their Profile
+            domChatContact.onclick = () => {
+                closeChat();
+                openProfile(profile);
+            };
+            domChatContact.classList.add('btn');
         }
 
         // Display either their Status or Typing Indicator
@@ -1538,6 +1669,9 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         } else {
             domChatContact.textContent = profile?.name || strOpenChat.substring(0, 10) + '…';
         }
+        // There's no profile to render; so don't allow clicking them to expand it
+        domChatContact.onclick = null;
+        domChatContact.classList.remove('btn');
 
         // Force wipe the 'Status' and it's styling
         domChatContactStatus.textContent = fNotes ? domChatContactStatus.textContent = 'Encrypted Notes to Self' : '';
@@ -1603,7 +1737,11 @@ function renderMessage(msg, sender, editID = '') {
         // Add an avatar if this is not OUR message
         if (!msg.mine && sender?.avatar) {
             const imgAvatar = document.createElement('img');
-            imgAvatar.classList.add('avatar');
+            imgAvatar.classList.add('avatar', 'btn');
+            imgAvatar.onclick = () => {
+                closeChat();
+                openProfile(sender);
+            };
             imgAvatar.src = sender.avatar;
             divMessage.appendChild(imgAvatar);
         }
@@ -1995,6 +2133,8 @@ function cancelReply() {
  */
 function openChat(contact) {
     // Display the Chat UI
+    navbarSelect('chat-btn');
+    domProfile.style.display = 'none';
     domChatNew.style.display = 'none';
     domChats.style.display = 'none';
     domChat.style.display = '';
@@ -2052,6 +2192,7 @@ function closeChat() {
     }
 
     // Reset the chat UI
+    domProfile.style.display = 'none';
     domChats.style.display = '';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
@@ -2074,16 +2215,32 @@ function closeChat() {
     adjustSize();
 }
 
-function openSettings() {
-    navbarSelect('settings-btn');
-    domSettings.style.display = '';
-
-    // Close the Chat UI
+/**
+ * Open the Expanded Profile view, optionally with a non-default profile
+ * @param {Profile} cProfile - An optional profile to render
+ */
+function openProfile(cProfile) {
+    navbarSelect('profile-btn');
     domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+
+    // Render our own profile by default, but otherwise; the given one
+    if (!cProfile) cProfile = arrChats.find(a => a.mine);
+    renderProfileTab(cProfile);
+
+    if (domProfile.style.display !== '') {
+        // Run a subtle fade-in animation
+        domProfile.classList.add('fadein-subtle-anim');
+        domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
+
+        // Open the tab
+        domProfile.style.display = '';
+    }
 }
 
 function openChatlist() {
     navbarSelect('chat-btn');
+    domProfile.style.display = 'none';
     domSettings.style.display = 'none';
 
     if (domChats.style.display !== '') {
@@ -2091,9 +2248,18 @@ function openChatlist() {
         domChats.classList.add('fadein-subtle-anim');
         domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
 
-        // Open the Chat UI
+        // Open the tab
         domChats.style.display = '';
     }
+}
+
+function openSettings() {
+    navbarSelect('settings-btn');
+    domSettings.style.display = '';
+
+    // Hide the other tabs
+    domProfile.style.display = 'none';
+    domChats.style.display = 'none';
 }
 
 /**
@@ -2101,7 +2267,8 @@ function openChatlist() {
  */
 function navbarSelect(strSelectionID = '') {
     for (const navItem of domNavbar.querySelectorAll('div')) {
-        navItem.style.opacity = strSelectionID === navItem.id ? 1 : 0.5;
+        if (strSelectionID === navItem.id) navItem.classList.remove('navbar-btn-inactive');
+        else navItem.classList.add('navbar-btn-inactive');
     }
 }
 
@@ -2147,8 +2314,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     await invoke('set_db_version', { version: 1 });
 
     // Hook up our static buttons
-    domSettingsBtn.onclick = openSettings;
+    domProfileBtn.onclick = () => openProfile();
     domChatlistBtn.onclick = openChatlist;
+    domSettingsBtn.onclick = openSettings;
     domLoginAccountCreationBtn.onclick = async () => {
         try {
             const { public, private } = await invoke("create_account");

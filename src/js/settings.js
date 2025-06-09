@@ -411,7 +411,7 @@ async function askForUsername() {
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: strUsername, avatar: "" });
+        await invoke("update_profile", { name: strUsername, avatar: "", banner: "" });
     } catch (e) {
         await popupConfirm('Username Update Failed!', 'An error occurred while updating your Username, the change may not have committed to the network, you can re-try any time.', true);
     }
@@ -449,9 +449,47 @@ async function askForAvatar() {
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: strUploadURL });
+        await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "" });
     } catch (e) {
         return await popupConfirm('Avatar Update Failed!', e, true);
+    }
+}
+
+/**
+ * A GUI wrapper to ask the user for a banner URL, and apply it both
+ * in-app and on the Nostr network.
+ */
+async function askForBanner() {
+    // Prompt the user to select an image file
+    const file = await open({
+        title: 'Choose a Banner',
+        multiple: false,
+        directory: false,
+        filters: [{
+            name: 'Image',
+            extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp']
+        }]
+    });
+    if (!file) return;
+
+    // Upload the banner to a NIP-96 server
+    let strUploadURL = '';
+    try {
+        strUploadURL = await invoke("upload_avatar", { filepath: file });
+    } catch (e) {
+        return await popupConfirm('Banner Upload Failed!', e, true);
+    }
+
+    // Display the change immediately
+    const cProfile = arrChats.find(a => a.mine);
+    cProfile.banner = strUploadURL;
+    renderCurrentProfile(cProfile);
+
+    // Send out the metadata update
+    try {
+        await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL });
+    } catch (e) {
+        return await popupConfirm('Banner Update Failed!', e, true);
     }
 }
 

@@ -38,6 +38,28 @@
         <div id="emoji-results"></div>
       </div>
 
+      <div id="profile" class="chats" style="display: none;">
+        <div style="height: 60px; background-color: #161616;">
+          <div id="profile-back-btn" class="btn nav-back-btn">
+          <span class="icon icon-chevron-double-left nav-icon"></span>
+        </div>
+          <div>
+            <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
+            <span id="profile-status" class="cutoff chat-contact-status btn" style="font-style: normal;"></span>
+          </div>
+        </div>
+        <div>
+          <img id="profile-banner" class="profile-banner">
+          <img id="profile-avatar" class="profile-avatar btn">
+        </div>
+        <div>
+          <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
+          <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="font-style: normal; width: 90%;"></span>
+          <div id="profile-badge-list" style="height: 50px;"></div>
+          <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; height: 225px;"></span>
+        </div>
+      </div>
+
       <div id="chats" class="chats">
         <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">
           <span class="icon icon-bookmark nav-icon"></span>
@@ -56,7 +78,7 @@
           <span class="icon icon-chevron-double-left nav-icon"></span>
         </div>
         <h3 id="chat-contact"></h3>
-        <span class="cutoff" id="chat-contact-status"></span>
+        <span class="cutoff chat-contact-status" id="chat-contact-status"></span>
         <div id="msg-top-fade" class="fadeout-top-msgs"></div>
         <div id="chat-messages" class="chat-messages">
 
@@ -83,7 +105,7 @@
 
       <div id="chat-new" style="display: none;">
         <div class="chat-new-header">
-          <div id="chat-new-back-btn" class="btn chat-new-back-btn">
+          <div id="chat-new-back-text-btn" class="btn chat-new-back-text-btn">
             <span class="icon icon-chevron-double-left nav-icon"></span>
             <p class="chat-new-back-text">Back</p>
           </div>
@@ -168,6 +190,10 @@
       </div>
 
       <div id="navbar" class="row navbar" style="display: none;">
+        <div id="profile-btn" class="btn navbar-btn navbar-btn-inactive">
+          <span class="icon icon-user-circle navbar-icon"></span>
+          <p class="navbar-text">Profile</p>
+        </div>
         <div id="chat-btn" class="btn navbar-btn">
           <span class="icon icon-chats navbar-icon"></span>
           <p class="navbar-text">Chat</p>

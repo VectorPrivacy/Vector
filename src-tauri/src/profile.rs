@@ -333,7 +333,7 @@ pub async fn load_profile(npub: String) -> bool {
 }
 
 #[tauri::command]
-pub async fn update_profile(name: String, avatar: String) -> bool {
+pub async fn update_profile(name: String, avatar: String, banner: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
@@ -361,6 +361,18 @@ pub async fn update_profile(name: String, avatar: String) -> bool {
                 profile.avatar.as_str()
             } else {
                 avatar.as_str()
+            })
+            .unwrap(),
+        );
+    }
+
+    // Optional banner
+    if !banner.is_empty() || !profile.banner.is_empty() {
+        meta = meta.banner(
+            Url::parse(if banner.is_empty() {
+                profile.banner.as_str()
+            } else {
+                banner.as_str()
             })
             .unwrap(),
         );

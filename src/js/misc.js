@@ -2,11 +2,18 @@
  * Generate a consistent Gradient Avatar from an npub
  * @param {string} npub - The npub to generate an avatar for
  * @param {string} username - A username to display initials from
+ * @param {number} limitSizeTo - An optional pixel width/height to lock the avatar to
  */
-function pubkeyToAvatar(npub, username) {
+function pubkeyToAvatar(npub, username, limitSizeTo = 0) {
     // Otherwise, display their Gradient Avatar
     const divAvatar = document.createElement('div');
     divAvatar.classList.add('placeholder-avatar');
+    if (limitSizeTo > 0) {
+        divAvatar.style.minHeight = limitSizeTo + 'px';
+        divAvatar.style.minWidth = limitSizeTo + 'px';
+        divAvatar.style.maxHeight = limitSizeTo + 'px';
+        divAvatar.style.maxWidth = limitSizeTo + 'px';
+    }
 
     // Convert the last three chars of their npub in to RGB HEX as a placeholder avatar
     const strLastChars = npub.slice(-3).padEnd(3, 'a');
