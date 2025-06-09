@@ -1233,7 +1233,8 @@ function renderProfileTab(cProfile) {
     domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
 
     // Secondary Description
-    domProfileDescription.textContent = cProfile.about;
+    const strDescriptionPlaceholder = cProfile.mine ? (cProfile?.about || 'Set an About Me') : '';
+    domProfileDescription.textContent = strDescriptionPlaceholder;
     twemojify(domProfileDescription);
 
     // If this is OUR profile: make the elements clickable
@@ -2287,6 +2288,18 @@ function editProfileDescription() {
 
     // Handle blur event to save and return to view mode
     domProfileDescriptionEditor.onblur = () => {
+        // Hide textarea and show span
+        domProfileDescriptionEditor.style.display = 'none';
+        domProfileDescription.style.display = '';
+
+        // Remove the blur event listener
+        domProfileDescriptionEditor.onblur = null;
+
+        // If nothing was edited, don't change anything
+        if (!domProfileDescriptionEditor.value ||
+            domProfileDescriptionEditor.value === cProfile.about
+        ) return;
+
         // Update the profile's about property
         cProfile.about = domProfileDescriptionEditor.value;
 
@@ -2294,15 +2307,8 @@ function editProfileDescription() {
         domProfileDescription.textContent = cProfile.about;
         twemojify(domProfileDescription);
 
-        // Hide textarea and show span
-        domProfileDescriptionEditor.style.display = 'none';
-        domProfileDescription.style.display = '';
-
         // Upload new About Me to Nostr
         setAboutMe(cProfile.about);
-
-        // Remove the blur event listener
-        domProfileDescriptionEditor.onblur = null;
     };
 
     // Resize it to match the content size (CSS cannot scale textareas based on content)
