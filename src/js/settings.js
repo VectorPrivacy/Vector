@@ -408,6 +408,7 @@ async function askForUsername() {
     const cProfile = arrChats.find(a => a.mine);
     cProfile.name = strUsername;
     renderCurrentProfile(cProfile);
+    if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
@@ -446,6 +447,7 @@ async function askForAvatar() {
     const cProfile = arrChats.find(a => a.mine);
     cProfile.avatar = strUploadURL;
     renderCurrentProfile(cProfile);
+    if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
@@ -484,6 +486,7 @@ async function askForBanner() {
     const cProfile = arrChats.find(a => a.mine);
     cProfile.banner = strUploadURL;
     renderCurrentProfile(cProfile);
+    if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
@@ -505,6 +508,7 @@ async function askForStatus() {
     const cProfile = arrChats.find(a => a.mine);
     cProfile.status.title = strStatus;
     renderCurrentProfile(cProfile);
+    if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
