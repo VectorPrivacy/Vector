@@ -316,6 +316,9 @@ body {
   margin-right: auto;
   height: 175px;
   border-radius: 100%;
+  border-color: #060606;
+  border-style: solid;
+  border-width: 8px;
   object-fit: cover;
   object-position: center;
 }
