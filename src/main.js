@@ -36,6 +36,7 @@ const domProfileStatusSecondary = document.getElementById('profile-secondary-sta
 const domProfileBadges = document.getElementById('profile-badge-list');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
+const domProfileId = document.getElementById('profile-id');
 
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
@@ -847,6 +848,11 @@ async function setupRustListeners() {
         if (strOpenChat === evt.payload.id) {
             updateChat(arrChats[nProfileIdx], []);
         }
+        // If this user is being viewed in the Expanded Profile View, update it
+        // Note: no need to update our own, it makes editing very weird
+        if (!arrChats[nProfileIdx].mine && domProfileId.textContent === evt.payload.id) {
+            renderProfileTab(arrChats[nProfileIdx]);
+        }
         // Render the Chat List
         renderChatlist();
     });
@@ -1236,6 +1242,9 @@ function renderProfileTab(cProfile) {
     const strDescriptionPlaceholder = cProfile.mine ? (cProfile?.about || 'Set an About Me') : '';
     domProfileDescription.textContent = cProfile?.about || strDescriptionPlaceholder;
     twemojify(domProfileDescription);
+
+    // npub
+    domProfileId.textContent = cProfile.id;
 
     // If this is OUR profile: make the elements clickable
     if (cProfile.mine) {
