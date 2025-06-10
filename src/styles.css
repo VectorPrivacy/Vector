@@ -319,6 +319,7 @@ body {
   border-color: #060606;
   border-style: solid;
   border-width: 8px;
+  background-color: #060606;
   object-fit: cover;
   object-position: center;
 }
