@@ -1205,7 +1205,7 @@ function renderProfileTab(cProfile) {
             domProfileBanner = newBanner;
         }
     }
-    domProfileBanner.classList.add('profile-banner', 'btn');
+    domProfileBanner.classList.add('profile-banner');
     domProfileBanner.onclick = askForBanner;
 
     // Avatar
@@ -1221,7 +1221,7 @@ function renderProfileTab(cProfile) {
         domProfileAvatar.replaceWith(newAvatar);
         domProfileAvatar = newAvatar;
     }
-    domProfileAvatar.classList.add('profile-avatar', 'btn');
+    domProfileAvatar.classList.add('profile-avatar');
     domProfileAvatar.onclick = askForAvatar;
 
     // Secondary Display Name
@@ -1232,9 +1232,9 @@ function renderProfileTab(cProfile) {
     // Secondary Status
     domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
 
-    // Secondary Description
+    // Description
     const strDescriptionPlaceholder = cProfile.mine ? (cProfile?.about || 'Set an About Me') : '';
-    domProfileDescription.textContent = strDescriptionPlaceholder;
+    domProfileDescription.textContent = cProfile?.about || strDescriptionPlaceholder;
     twemojify(domProfileDescription);
 
     // If this is OUR profile: make the elements clickable
