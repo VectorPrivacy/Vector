@@ -1760,89 +1760,81 @@ pub fn run() {
             let handle = app.app_handle().clone();
 
             // Check if we need to migrate files
-            let needs_migration = tauri::async_runtime::block_on(async {
-                // Choose the appropriate base directory based on platform
-                let base_directory = if cfg!(target_os = "ios") {
-                    tauri::path::BaseDirectory::Document
-                } else {
-                    tauri::path::BaseDirectory::Download
-                };
+            // Note: this is restricted to Desktop only, since Vector Mobile didn't even exist before the Migration was done
+            // Note: this entire block can be removed once sufficient versions have passed.
+            #[cfg(not(any(target_os = "ios", target_os = "android")))]
+            {
+                let needs_migration = tauri::async_runtime::block_on(async {
+                    // Choose the appropriate base directory based on platform
+                    let base_directory = if cfg!(target_os = "ios") {
+                        tauri::path::BaseDirectory::Document
+                    } else {
+                        tauri::path::BaseDirectory::Download
+                    };
 
-                // Resolve the directory path using the determined base directory
-                if let Ok(dir) = handle.path().resolve("vector", base_directory) {
-                    if dir.exists() {
-                        // Count nonce-based files
-                        if let Ok(entries) = std::fs::read_dir(&dir) {
-                            for entry in entries {
-                                if let Ok(entry) = entry {
-                                    if let Some(filename) = entry.path().file_name() {
-                                        if is_nonce_filename(&filename.to_string_lossy()) {
-                                            return true; // Found at least one file to migrate
+                    // Resolve the directory path using the determined base directory
+                    if let Ok(dir) = handle.path().resolve("vector", base_directory) {
+                        if dir.exists() {
+                            // Count nonce-based files
+                            if let Ok(entries) = std::fs::read_dir(&dir) {
+                                for entry in entries {
+                                    if let Ok(entry) = entry {
+                                        if let Some(filename) = entry.path().file_name() {
+                                            if is_nonce_filename(&filename.to_string_lossy()) {
+                                                return true; // Found at least one file to migrate
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                false
-            });
+                    false
+                });
 
-            // If we need to migrate, create migration window first
-            if needs_migration {
-                // Hide the main window initially
-                if let Some(main_window) = app.get_webview_window("main") {
-                    let _ = main_window.hide();
-                }
-
-                // Create migration window
-                let _ = WebviewWindowBuilder::new(
-                    app,
-                    "migration",
-                    WebviewUrl::App("migration.html".into())
-                )
-                .title("Vector - File Migration")
-                .inner_size(500.0, 300.0)
-                .resizable(false)
-                .center()
-                .build()
-                .expect("Failed to create migration window");
-
-                // Clone handle for the migration task
-                let handle_clone = handle.clone();
-                let main_window = app.get_webview_window("main").unwrap();
-                
-                // Run migration in a separate task
-                tauri::async_runtime::spawn(async move {
-                    match migrate_nonce_files_to_hash(&handle_clone).await {
-                        Ok(migration_map) => {
-                            // Store the migration map for database update after login
-                            if !migration_map.is_empty() {
-                                let _ = PENDING_MIGRATION.set(migration_map);
-                            }
-                        }
-                        Err(e) => eprintln!("Failed to migrate attachment files: {}", e),
+                // If we need to migrate, create migration window first
+                if needs_migration {
+                    // Hide the main window initially
+                    if let Some(main_window) = app.get_webview_window("main") {
+                        let _ = main_window.hide();
                     }
+
+                    // Create migration window
+                    let _ = WebviewWindowBuilder::new(
+                        app,
+                        "migration",
+                        WebviewUrl::App("migration.html".into())
+                    )
+                    .title("Vector - File Migration")
+                    .inner_size(500.0, 300.0)
+                    .resizable(false)
+                    .center()
+                    .build()
+                    .expect("Failed to create migration window");
+
+                    // Clone handle for the migration task
+                    let handle_clone = handle.clone();
+                    let main_window = app.get_webview_window("main").unwrap();
                     
-                    // After migration, show main window and close migration window
-                    let _ = main_window.show();
-                    if let Some(mig_win) = handle_clone.get_webview_window("migration") {
-                        let _ = mig_win.close();
-                    }
-                });
-            } else {
-                // No migration needed, run it silently just in case
-                tauri::async_runtime::block_on(async {
-                    match migrate_nonce_files_to_hash(&handle).await {
-                        Ok(migration_map) => {
-                            // Store the migration map for database update after login
-                            if !migration_map.is_empty() {
-                                let _ = PENDING_MIGRATION.set(migration_map);
+                    // Run migration in a separate task
+                    tauri::async_runtime::spawn(async move {
+                        match migrate_nonce_files_to_hash(&handle_clone).await {
+                            Ok(migration_map) => {
+                                // Store the migration map for database update after login
+                                if !migration_map.is_empty() {
+                                    let _ = PENDING_MIGRATION.set(migration_map);
+                                }
                             }
+                            Err(e) => eprintln!("Failed to migrate attachment files: {}", e),
                         }
-                        Err(e) => eprintln!("Failed to migrate attachment files: {}", e),
-                    }
-                });
+                        
+                        // After migration, show main window and close migration window
+                        let _ = main_window.show();
+                        if let Some(mig_win) = handle_clone.get_webview_window("migration") {
+                            let _ = mig_win.close();
+                        }
+                    });
+                }
             }
 
             // Setup a graceful shutdown for our Nostr subscriptions
