@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use ::image::ImageEncoder;
+use blurhash;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -64,6 +65,16 @@ impl Message {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct ImageMetadata {
+    /// The Blurhash preview
+    pub blurhash: String,
+    /// Image pixel width
+    pub width: u32,
+    /// Image pixel height
+    pub height: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Attachment {
     /// The SHA256 hash of the file as a unique file ID
@@ -80,6 +91,8 @@ pub struct Attachment {
     pub path: String,
     /// The download size of the encrypted file
     pub size: u64,
+    /// Image metadata (Visual Media only, i.e: Images, Video Thumbnail, etc)
+    pub img_meta: Option<ImageMetadata>,
     /// Whether the file is currently being downloaded or not
     pub downloading: bool,
     /// Whether the file has been downloaded or not
@@ -96,6 +109,7 @@ impl Default for Attachment {
             url: String::new(),
             path: String::new(),
             size: 0,
+            img_meta: None,
             downloading: false,
             downloaded: true,
         }
@@ -106,6 +120,8 @@ impl Default for Attachment {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct AttachmentFile {
     bytes: Vec<u8>,
+    /// Image metadata (for images only)
+    img_meta: Option<ImageMetadata>,
     extension: String,
 }
 
@@ -253,6 +269,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 url: String::new(),
                 path: hash_file_path.to_string_lossy().to_string(),
                 size: file_size,
+                img_meta: attached_file.img_meta.clone(),
                 downloading: false,
                 downloaded: true
             });
@@ -312,17 +329,25 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 }
                 
                 // Create the attachment rumor with the existing URL
-                let attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing_attachment.url);
+                let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing_attachment.url)
                 
                 // Append decryption keys and file metadata (using existing attachment's params)
-                attachment_rumor
                     .tag(Tag::public_key(receiver_pubkey))
                     .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
                     .tag(Tag::custom(TagKind::custom("size"), [existing_attachment.size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                     .tag(Tag::custom(TagKind::custom("decryption-key"), [existing_attachment.key.as_str()]))
                     .tag(Tag::custom(TagKind::custom("decryption-nonce"), [existing_attachment.nonce.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]))
+                    .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
+                
+                // Append image metadata if available
+                if let Some(ref img_meta) = attached_file.img_meta {
+                    attachment_rumor = attachment_rumor
+                        .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
+                        .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
+                }
+
+                attachment_rumor
             } else {
                 // URL is dead, need to upload
                 should_upload = true;
@@ -367,17 +392,25 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     }
                     
                     // Create the attachment rumor
-                    let attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
+                    let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string())
 
                     // Append decryption keys and file metadata
-                    attachment_rumor
                         .tag(Tag::public_key(receiver_pubkey))
                         .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
                         .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
                         .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                         .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
                         .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
-                        .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]))
+                        .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
+
+                    // Append image metadata if available
+                    if let Some(ref img_meta) = attached_file.img_meta {
+                        attachment_rumor = attachment_rumor
+                            .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
+                            .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
+                    }
+
+                    attachment_rumor
                 },
                 Err(_) => {
                     // The file upload failed: so we mark the message as failed and notify of an error
@@ -525,9 +558,20 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
         ::image::ExtendedColorType::Rgba8                  // color type
     ).map_err(|e| e.to_string()).unwrap();
 
+    // Generate image metadata with Blurhash and dimensions
+    let img_meta: Option<ImageMetadata> = match blurhash::encode(4, 3, img.width(), img.height(), &pixels) {
+        Ok(hash) => Some(ImageMetadata {
+            blurhash: hash,
+            width: img.width(),
+            height: img.height(),
+        }),
+        Err(_) => None
+    };
+
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
         bytes: png_data,
+        img_meta,
         extension: String::from("png")
     };
 
@@ -540,6 +584,7 @@ pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>)
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
         bytes,
+        img_meta: None,
         extension: String::from("wav")
     };
 
@@ -555,9 +600,39 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     // Load the file
     let bytes = std::fs::read(file_path.as_str()).unwrap();
 
+    // Generate image metadata if the file is an image
+    let img_meta: Option<ImageMetadata> = match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" => {
+            // Try to load and decode the image
+            match ::image::load_from_memory(&bytes) {
+                Ok(img) => {
+                    // Convert to RGBA8 format for blurhash
+                    let rgba_img = img.to_rgba8();
+                    let (width, height) = rgba_img.dimensions();
+                    let pixels = rgba_img.as_raw();
+                    
+                    // Generate Blurhash
+                    match blurhash::encode(4, 3, width, height, pixels) {
+                        Ok(hash) => {
+                            Some(ImageMetadata {
+                                blurhash: hash,
+                                width,
+                                height,
+                            })
+                        },
+                        Err(_) => None
+                    }
+                },
+                Err(_) => None
+            }
+        },
+        _ => None // Not an image file
+    };
+
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
         bytes,
+        img_meta,
         extension: ext.to_string()
     };
 

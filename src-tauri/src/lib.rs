@@ -984,6 +984,39 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 // Extract the content storage URL
                 let content_url = rumor.content;
 
+                // Extract image metadata if provided
+                let img_meta: Option<message::ImageMetadata> = {
+                    let blurhash_opt = rumor.tags.find(TagKind::Custom(Cow::Borrowed("blurhash")))
+                        .and_then(|tag| tag.content())
+                        .map(|s| s.to_string());
+                    
+                    let dimensions_opt = rumor.tags.find(TagKind::Custom(Cow::Borrowed("dim")))
+                        .and_then(|tag| tag.content())
+                        .and_then(|s| {
+                            // Parse "width-x-height" format
+                            let parts: Vec<&str> = s.split('x').collect();
+                            if parts.len() == 2 {
+                                let width = parts[0].parse::<u32>().ok()?;
+                                let height = parts[1].parse::<u32>().ok()?;
+                                Some((width, height))
+                            } else {
+                                None
+                            }
+                        });
+                    
+                    // Only create ImageMetadata if we have all required fields
+                    match (blurhash_opt, dimensions_opt) {
+                        (Some(blurhash), Some((width, height))) => {
+                            Some(message::ImageMetadata {
+                                blurhash,
+                                width,
+                                height,
+                            })
+                        },
+                        _ => None
+                    }
+                };
+
                 // Figure out the file extension from the mime-type
                 let mime_type = rumor.tags.find(TagKind::Custom(Cow::Borrowed("file-type"))).unwrap().content().unwrap();
                 let extension = match mime_type {
@@ -1068,6 +1101,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             url: content_url.clone(),
                             path: String::new(), // Temporary, will be set below
                             size: reported_size,
+                            img_meta: img_meta.clone(),
                             downloading: false,
                             downloaded: false
                         };
@@ -1161,6 +1195,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     url: content_url,
                     path: file_path.to_string_lossy().to_string(), // Will be updated to hash-based path on download
                     size,
+                    img_meta,
                     downloading: false,
                     downloaded
                 };
@@ -1352,6 +1387,37 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
     std::fs::write(&file_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
     
     Ok(file_path)
+}
+
+#[tauri::command]
+async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<String, String> {
+    // Get the first attachment from the message
+    let img_meta = {
+        let state = STATE.lock().await;
+        let profile = state.get_profile(&npub)
+            .ok_or_else(|| "Profile not found".to_string())?;
+        let message = profile.messages.iter()
+            .find(|m| m.id == msg_id)
+            .ok_or_else(|| "Message not found".to_string())?;
+        
+        // Get the first attachment
+        let attachment = message.attachments.first()
+            .ok_or_else(|| "No attachments found".to_string())?;
+        
+        // Get image metadata
+        attachment.img_meta.clone()
+            .ok_or_else(|| "No image metadata available".to_string())?
+    };
+    
+    // Generate the Base64 image using the decode_blurhash_to_base64 function
+    let base64_image = util::decode_blurhash_to_base64(
+        &img_meta.blurhash,
+        img_meta.width,
+        img_meta.height,
+        1.0 // Default punch value
+    );
+    
+    Ok(base64_image)
 }
 
 #[tauri::command]
@@ -1889,6 +1955,7 @@ pub fn run() {
             message::fetch_msg_metadata,
             fetch_messages,
             warmup_nip96_servers,
+            generate_blurhash_preview,
             download_attachment,
             login,
             notifs,

@@ -752,12 +752,15 @@ async function setupRustListeners() {
         if (strOpenChat) {
             let divDownload = document.getElementById(evt.payload.id);
             if (divDownload) {
+                // Check if we need a text label (for non-image files)
+                let iLabel = divDownload.querySelector('.download-label');
+                if (iLabel) {
+                    // Update the text with progress
+                    iLabel.textContent = `Downloading... (${evt.payload.progress}%)`;
+                }
+                
                 let divBar = divDownload.querySelector('.progress-bar');
                 if (divBar) {
-                    // Update the Title
-                    const iDownloading = divDownload.querySelector('i');
-                    iDownloading.textContent = `Downloading (${evt.payload.progress}%)`;
-
                     // Update the Download Progress bar
                     divBar.style.width = `${evt.payload.progress}%`;
                 } else {
@@ -766,16 +769,27 @@ async function setupRustListeners() {
                     newDivDownload.id = evt.payload.id;
                     newDivDownload.style.minWidth = `200px`;
                     newDivDownload.style.textAlign = `center`;
-
-                    // Create the Download Progress title
-                    const iDownloading = document.createElement('i');
-                    iDownloading.textContent = `Downloading (0%)`;
-                    newDivDownload.appendChild(iDownloading);
+                    
+                    // For non-image files, add a text label
+                    // Check if the element being updated is a non-image file by looking for existing download button attributes
+                    const attachmentElement = document.getElementById(evt.payload.id);
+                    const isNonImageAttachment = attachmentElement && (attachmentElement.hasAttribute('download') || attachmentElement.classList.contains('btn'));
+                    
+                    if (isNonImageAttachment) {
+                        const iLabel = document.createElement('i');
+                        iLabel.classList.add('download-label');
+                        iLabel.textContent = `Downloading... (${evt.payload.progress}%)`;
+                        iLabel.style.display = `block`;
+                        iLabel.style.marginBottom = `5px`;
+                        newDivDownload.appendChild(iLabel);
+                    }
 
                     // Create the Download Progress bar
                     divBar = document.createElement('div');
                     divBar.classList.add('progress-bar');
                     divBar.style.width = `0%`;
+                    divBar.style.height = `5px`;
+                    divBar.style.marginTop = `0`;
                     newDivDownload.appendChild(divBar);
 
                     // Replace the previous UI
@@ -1907,6 +1921,8 @@ function renderMessage(msg, sender, editID = '') {
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
+                // Add soft scroll on image load to prevent scrolling issues
+                imgPreview.addEventListener('load', softChatScroll, { once: true });
                 pMessage.appendChild(imgPreview);
                 } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
                 // Audio - use the enhanced handler with transcription
@@ -1956,31 +1972,175 @@ function renderMessage(msg, sender, editID = '') {
                 pMessage.appendChild(divBar);
             }
         } else if (cAttachment.downloading) {
-            // Display download progression UI
-            const iDownloading = document.createElement('i');
-            iDownloading.id = cAttachment.id;
-            iDownloading.textContent = `Downloading`;
-            pMessage.appendChild(iDownloading);
-        } else {
-            // Determine and display file size
-            let strSize = 'Unknown Size';
-            if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
-
-            // Display download prompt UI
-            const iDownload = document.createElement('i');
-            iDownload.id = cAttachment.id;
-            iDownload.toggleAttribute('download', true);
-            iDownload.setAttribute('npub', sender.id);
-            iDownload.setAttribute('msg', msg.id);
-            iDownload.classList.add('btn');
-            iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
-            pMessage.appendChild(iDownload);
-
-            // If the size is known and within auto-download range; immediately begin downloading
-            if (cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES) {
-                invoke('download_attachment', { npub: sender.id, msgId: msg.id, attachmentId: cAttachment.id });
+            // For images, show blurhash preview while downloading
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                // Generate blurhash preview for downloading image
+                invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
+                    .then(base64Image => {
+                        const imgPreview = document.createElement('img');
+                        imgPreview.style.width = `100%`;
+                        imgPreview.style.height = `auto`;
+                        imgPreview.style.borderRadius = `8px`;
+                        imgPreview.style.opacity = `0.7`;
+                        imgPreview.src = base64Image;
+                        // Add soft scroll on blurhash load to prevent scrolling issues
+                        imgPreview.addEventListener('load', softChatScroll, { once: true });
+                        
+                        // Create container for relative positioning
+                        const container = document.createElement('div');
+                        container.style.position = `relative`;
+                        container.appendChild(imgPreview);
+                        
+                        // Add downloading indicator (for progress bar targeting)
+                        const iDownloading = document.createElement('i');
+                        iDownloading.id = cAttachment.id;
+                        iDownloading.textContent = `Downloading`;
+                        iDownloading.style.position = `absolute`;
+                        iDownloading.style.top = `50%`;
+                        iDownloading.style.left = `50%`;
+                        iDownloading.style.transform = `translate(-50%, -50%)`;
+                        iDownloading.style.backgroundColor = `rgba(0, 0, 0, 0.7)`;
+                        iDownloading.style.padding = `5px 10px`;
+                        iDownloading.style.borderRadius = `4px`;
+                        iDownloading.style.color = `white`;
+                        container.appendChild(iDownloading);
+                        
+                        pMessage.appendChild(container);
+                    })
+                    .catch(() => {
+                        // Fallback to simple downloading indicator if blurhash fails
+                        const iDownloading = document.createElement('i');
+                        iDownloading.id = cAttachment.id;
+                        iDownloading.textContent = `Downloading`;
+                        pMessage.appendChild(iDownloading);
+                    });
+            } else {
+                // Display download progression UI for non-images
+                const iDownloading = document.createElement('i');
+                iDownloading.id = cAttachment.id;
+                iDownloading.textContent = `Downloading`;
+                pMessage.appendChild(iDownloading);
             }
-        }
+            } else {
+                // Check if this attachment will auto-download
+                const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES;
+
+                // For images, show blurhash preview with download button (unless auto-downloading)
+                if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                    // Generate blurhash preview for undownloaded image
+                    invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
+                        .then(base64Image => {
+                            const imgPreview = document.createElement('img');
+                            imgPreview.style.width = `100%`;
+                            imgPreview.style.height = `auto`;
+                            imgPreview.style.borderRadius = `8px`;
+                            imgPreview.style.opacity = willAutoDownload ? `0.8` : `0.6`;
+                            imgPreview.src = base64Image;
+                            // Add soft scroll on blurhash load to prevent scrolling issues
+                            imgPreview.addEventListener('load', softChatScroll, { once: true });
+                            
+                            // Create container for relative positioning
+                            const container = document.createElement('div');
+                            container.style.position = `relative`;
+                            container.appendChild(imgPreview);
+
+                            // Only show download button if NOT auto-downloading
+                            if (!willAutoDownload) {
+                                // Determine and display file size
+                                let strSize = 'Unknown Size';
+                                if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
+
+                                // Create download button overlay
+                                const iDownload = document.createElement('i');
+                                iDownload.id = cAttachment.id;
+                                iDownload.toggleAttribute('download', true);
+                                iDownload.setAttribute('npub', sender.id);
+                                iDownload.setAttribute('msg', msg.id);
+                                iDownload.classList.add('btn');
+                                iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
+                                iDownload.style.position = `absolute`;
+                                iDownload.style.top = `50%`;
+                                iDownload.style.left = `50%`;
+                                iDownload.style.transform = `translate(-50%, -50%)`;
+                                iDownload.style.backgroundColor = `rgba(0, 0, 0, 0.8)`;
+                                iDownload.style.padding = `8px 15px`;
+                                iDownload.style.borderRadius = `6px`;
+                                iDownload.style.color = `white`;
+                                iDownload.style.cursor = `pointer`;
+                                iDownload.style.fontSize = `12px`;
+                                iDownload.style.whiteSpace = `nowrap`;
+                                iDownload.style.textAlign = `center`;
+                                iDownload.style.maxWidth = `90%`;
+                                iDownload.style.overflow = `hidden`;
+                                iDownload.style.textOverflow = `ellipsis`;
+                                container.appendChild(iDownload);
+                            } else {
+                                // For auto-downloading images, create a hidden element for progress bar targeting
+                                const iHidden = document.createElement('i');
+                                iHidden.id = cAttachment.id;
+                                iHidden.style.display = `none`;
+                                container.appendChild(iHidden);
+                            }
+                            
+                            pMessage.appendChild(container);
+                        })
+                        .catch(() => {
+                            // Fallback when blurhash fails
+                            if (!willAutoDownload) {
+                                // Manual download: show download button
+                                let strSize = 'Unknown Size';
+                                if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
+
+                                const iDownload = document.createElement('i');
+                                iDownload.id = cAttachment.id;
+                                iDownload.toggleAttribute('download', true);
+                                iDownload.setAttribute('npub', sender.id);
+                                iDownload.setAttribute('msg', msg.id);
+                                iDownload.classList.add('btn');
+                                iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
+                                pMessage.appendChild(iDownload);
+                            } else {
+                                // Auto-download: show downloading indicator for progress bar targeting
+                                const iDownloading = document.createElement('i');
+                                iDownloading.id = cAttachment.id;
+                                iDownloading.textContent = `Downloading image...`;
+                                iDownloading.style.textAlign = `center`;
+                                iDownloading.style.display = `block`;
+                                pMessage.appendChild(iDownloading);
+                            }
+                        });
+                } else if (!willAutoDownload) {
+                    // Only show download prompt for non-images if NOT auto-downloading
+                    // Determine and display file size
+                    let strSize = 'Unknown Size';
+                    if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
+
+                    // Display download prompt UI for non-images
+                    const iDownload = document.createElement('i');
+                    iDownload.id = cAttachment.id;
+                    iDownload.toggleAttribute('download', true);
+                    iDownload.setAttribute('npub', sender.id);
+                    iDownload.setAttribute('msg', msg.id);
+                    iDownload.classList.add('btn');
+                    iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
+                    pMessage.appendChild(iDownload);
+                }
+
+                // If the size is known and within auto-download range; immediately begin downloading
+                if (willAutoDownload) {
+                    // For non-images (which don't have blurhash previews), create a placeholder for progress bar targeting
+                    if (!['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                        const iDownloading = document.createElement('i');
+                        iDownloading.id = cAttachment.id;
+                        iDownloading.textContent = `Starting download...`;
+                        iDownloading.style.textAlign = `center`;
+                        iDownloading.style.display = `block`;
+                        pMessage.appendChild(iDownloading);
+                    }
+                    
+                    invoke('download_attachment', { npub: sender.id, msgId: msg.id, attachmentId: cAttachment.id });
+                }
+            }
     }
 
     // Append Payment Shortcuts (i.e: Bitcoin Payment URIs, etc)
