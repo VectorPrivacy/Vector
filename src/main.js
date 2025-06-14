@@ -2653,12 +2653,15 @@ window.addEventListener("DOMContentLoaded", async () => {
                     nLastTypingIndicator = 0;
                 } catch(_) {}
             }
-        } else {
-            // Send a Typing Indicator
-            if (nLastTypingIndicator + 30000 < Date.now()) {
-                nLastTypingIndicator = Date.now();
-                await invoke("start_typing", { receiver: strOpenChat });
-            }
+        }
+    };
+
+    // Hook up an 'input' listener on the Message Box for typing indicators
+    domChatMessageInput.oninput = async () => {
+        // Send a Typing Indicator only when content actually changes
+        if (nLastTypingIndicator + 30000 < Date.now()) {
+            nLastTypingIndicator = Date.now();
+            await invoke("start_typing", { receiver: strOpenChat });
         }
     };
 
