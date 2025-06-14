@@ -1781,10 +1781,35 @@ function renderMessage(msg, sender, editID = '') {
 
         // If there is a message before them, and it isn't theirs, apply additional edits
         if (domPrevMsg && fIsMsg) {
-            // Curve their bottom-left border to encapsulate their message
-            const pMsg = domPrevMsg.querySelector('p');
-            if (pMsg) {
-                pMsg.style.borderBottomLeftRadius = `15px`;
+            // Check if the previous message was from the contact (!mine) 
+            const prevSenderID = domPrevMsg.getAttribute('sender');
+            const wasPrevMsgFromContact = prevSenderID !== strPubkey.substring(0, 8);
+            
+            // Only curve the previous message's bottom-left border if it was from the user (mine)
+            // If it was from the contact, we need to check if it should have a rounded corner (last in streak)
+            if (!wasPrevMsgFromContact) {
+                const pMsg = domPrevMsg.querySelector('p');
+                if (pMsg) {
+                    pMsg.style.borderBottomLeftRadius = `15px`;
+                }
+            } else {
+                // The previous message was from the contact - check if it needs rounding as last in streak
+                // Look back to see if it had previous messages from same sender
+                const prevPrevMsg = domPrevMsg.previousElementSibling;
+                const hadPreviousFromSameSender = prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
+                
+                // Look forward to see if there are more messages from same sender after this one
+                // (which would make this a middle message, not the last)
+                const prevNextMsg = domPrevMsg.nextElementSibling;
+                const hasNextFromSameSender = prevNextMsg && prevNextMsg.getAttribute('sender') === prevSenderID;
+                
+                // Only round if it had previous messages AND no next messages from same sender (making it the last)
+                if (hadPreviousFromSameSender && !hasNextFromSameSender) {
+                    const pMsg = domPrevMsg.querySelector('p');
+                    if (pMsg && !pMsg.classList.contains('no-background')) {
+                        pMsg.style.borderBottomLeftRadius = `15px`;
+                    }
+                }
             }
 
             // Add some additional margin to separate the senders visually
@@ -1924,7 +1949,7 @@ function renderMessage(msg, sender, editID = '') {
             if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                 // Images
                 const imgPreview = document.createElement('img');
-                imgPreview.style.width = `100%`;
+                imgPreview.style.maxWidth = `100%`;
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
@@ -2262,7 +2287,7 @@ function renderMessage(msg, sender, editID = '') {
     if (msg.mine) divMessage.append(divExtras, pMessage);
     else divMessage.append(pMessage, divExtras);
 
-    // After rendering, check if this is a singular received message to apply a sharp corner to the message bubble
+    // After rendering, check message corner styling for received messages
     // This needs to be done post-render when the message is in the DOM
     setTimeout(() => {
         if (!msg.mine && domChatMessages.contains(divMessage)) {
@@ -2275,13 +2300,35 @@ function renderMessage(msg, sender, editID = '') {
             // Check if next message exists and is from the same sender
             const hasNextFromSameSender = nextMsg && nextMsg.getAttribute('sender') === strShortSenderID;
             
-            // If this is the first (or only) message from this sender and there's no next message from them
+            // If we're continuing a message streak (not first from sender), we need to update the previous message
+            if (!isFirstFromSender && prevMsg) {
+                // The previous message is no longer the last in the streak, so remove its rounded corner
+                const prevPMsg = prevMsg.querySelector('p');
+                if (prevPMsg && !prevPMsg.classList.contains('no-background')) {
+                    // Check if the previous message was styled as last (had rounded corner)
+                    if (prevPMsg.style.borderBottomLeftRadius === '15px') {
+                        // Remove the rounded corner since it's no longer the last
+                        prevPMsg.style.borderBottomLeftRadius = '';
+                    }
+                }
+            }
+            
+            // Now style the current message appropriately
             if (isFirstFromSender && !hasNextFromSameSender) {
                 // This is a singular message - apply sharp bottom-left corner
                 const pMsg = divMessage.querySelector('p');
                 if (pMsg && !pMsg.classList.contains('no-background')) {
                     // Make the bottom-left corner sharp (0px radius)
                     pMsg.style.borderBottomLeftRadius = '0px';
+                }
+            }
+            // If this is the last message in a multi-message streak (has previous from same sender, but no next from same sender)
+            else if (!isFirstFromSender && !hasNextFromSameSender) {
+                // This is the last message in a streak - apply rounded bottom-left corner
+                const pMsg = divMessage.querySelector('p');
+                if (pMsg && !pMsg.classList.contains('no-background')) {
+                    // Make the bottom-left corner rounded (15px radius) to close the bubble group
+                    pMsg.style.borderBottomLeftRadius = '15px';
                 }
             }
         }
