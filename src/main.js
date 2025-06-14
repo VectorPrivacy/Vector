@@ -1207,6 +1207,10 @@ function renderProfileTab(cProfile) {
     domProfileStatus.innerHTML = cProfile?.status?.title || strStatusPlaceholder;
     if (cProfile?.status?.title) twemojify(domProfileStatus);
 
+    // Adjust our Profile Name class to manage space according to Status visibility
+    domProfileName.classList.toggle('chat-contact', !domProfileStatus.textContent);
+    domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
+
     // Banner
     if (cProfile.banner) {
         // We have a banner URL; so render the banner as a web image
