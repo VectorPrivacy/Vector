@@ -518,18 +518,22 @@ body {
 
 .chat-contact-with-status {
   display: block;
-  max-width: 100%;
+  max-width: 60%;
   font-weight: bold;
   margin-top: 8px;
   margin-bottom: 0;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .chat-contact {
   display: block;
-  max-width: 100%;
+  max-width: 60%;
   font-weight: bold;
   margin-top: 20px;
   margin-bottom: 12px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .chat h3 img {
@@ -1434,8 +1438,9 @@ select:disabled:hover {
   display: flex;
   align-items: center;
   position: absolute;
-  top: 15px;
-  margin-left: 10px;
+  top: 10px;
+  margin-left: 5px;
+  padding: 5px;
 }
 
 /* Text-accompanied "Back" Navigation button */
