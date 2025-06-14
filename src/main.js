@@ -1790,6 +1790,9 @@ function renderMessage(msg, sender, editID = '') {
             // Add some additional margin to separate the senders visually
             divMessage.style.marginTop = `15px`;
         }
+        
+        // Check if this is a singular message (no next message from same sender)
+        // This check happens after the message is rendered (at the end of the function)
     } else {
         // Add additional margin to simulate avatar space
         if (!msg.mine && sender?.avatar) {
@@ -2258,6 +2261,31 @@ function renderMessage(msg, sender, editID = '') {
     // Depending on who it is: render the extras appropriately
     if (msg.mine) divMessage.append(divExtras, pMessage);
     else divMessage.append(pMessage, divExtras);
+
+    // After rendering, check if this is a singular received message to apply a sharp corner to the message bubble
+    // This needs to be done post-render when the message is in the DOM
+    setTimeout(() => {
+        if (!msg.mine && domChatMessages.contains(divMessage)) {
+            const nextMsg = divMessage.nextElementSibling;
+            const prevMsg = divMessage.previousElementSibling;
+            
+            // Check if previous message exists and is from a different sender
+            const isFirstFromSender = !prevMsg || prevMsg.getAttribute('sender') !== strShortSenderID;
+            
+            // Check if next message exists and is from the same sender
+            const hasNextFromSameSender = nextMsg && nextMsg.getAttribute('sender') === strShortSenderID;
+            
+            // If this is the first (or only) message from this sender and there's no next message from them
+            if (isFirstFromSender && !hasNextFromSameSender) {
+                // This is a singular message - apply sharp bottom-left corner
+                const pMsg = divMessage.querySelector('p');
+                if (pMsg && !pMsg.classList.contains('no-background')) {
+                    // Make the bottom-left corner sharp (0px radius)
+                    pMsg.style.borderBottomLeftRadius = '0px';
+                }
+            }
+        }
+    }, 0);
 
     return divMessage;
 }
