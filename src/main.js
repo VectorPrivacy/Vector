@@ -429,6 +429,16 @@ let arrChats = [];
 let strOpenChat = "";
 
 /**
+ * Tracks if we're in the initial chat open period for auto-scrolling
+ */
+let chatOpenAutoScrollTimer = null;
+
+/**
+ * Tracks the timestamp when a chat was opened for media load auto-scrolling
+ */
+let chatOpenTimestamp = 0;
+
+/**
  * Synchronise all messages from the backend
  */
 async function init() {
@@ -1953,8 +1963,15 @@ function renderMessage(msg, sender, editID = '') {
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
-                // Add soft scroll on image load to prevent scrolling issues
-                imgPreview.addEventListener('load', softChatScroll, { once: true });
+                // Add event listener for auto-scrolling within the first 100ms of chat opening
+                imgPreview.addEventListener('load', () => {
+                    // Auto-scroll if within 100ms of chat opening
+                    if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+                        scrollToBottom(domChatMessages, false);
+                    }
+                    // Also do soft scroll for normal layout adjustments
+                    softChatScroll();
+                }, { once: true });
                 pMessage.appendChild(imgPreview);
                 } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
                 // Audio - use the enhanced handler with transcription
@@ -1975,7 +1992,11 @@ function renderMessage(msg, sender, editID = '') {
                 vidPreview.addEventListener('loadedmetadata', () => {
                     // Seek a tiny amount to force the frame 'poster' to load, without loading the entire video
                     vidPreview.currentTime = 0.1;
-                    // Auto-scroll to correct against the longer container
+                    // Auto-scroll if within 100ms of chat opening
+                    if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+                        scrollToBottom(domChatMessages, false);
+                    }
+                    // Also do soft scroll for normal layout adjustments
                     softChatScroll();
                 }, { once: true });
                 pMessage.appendChild(vidPreview);
@@ -2401,6 +2422,21 @@ function openChat(contact) {
     const cProfile = arrChats.find(p => p.id === contact);
     strOpenChat = contact;
 
+    // Clear any existing auto-scroll timer
+    if (chatOpenAutoScrollTimer) {
+        clearTimeout(chatOpenAutoScrollTimer);
+        chatOpenAutoScrollTimer = null;
+    }
+
+    // Record when the chat was opened
+    chatOpenTimestamp = Date.now();
+
+    // After 100ms, stop auto-scrolling on media loads
+    chatOpenAutoScrollTimer = setTimeout(() => {
+        chatOpenTimestamp = 0; // Reset timestamp to disable auto-scrolling
+        chatOpenAutoScrollTimer = null;
+    }, 100);
+
     // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
     updateChat(cProfile, (cProfile?.messages || []).slice(-50), true);
 }
@@ -2422,6 +2458,12 @@ function openNewChat() {
  * Closes the current chat, taking the user back to the chat list
  */
 function closeChat() {
+    // Clear any auto-scroll timer
+    if (chatOpenAutoScrollTimer) {
+        clearTimeout(chatOpenAutoScrollTimer);
+        chatOpenAutoScrollTimer = null;
+    }
+
     // Attempt to completely release memory (force garbage collection...) of in-chat media
     while (domChatMessages.firstElementChild) {
         const domChild = domChatMessages.firstElementChild;
