@@ -13,11 +13,27 @@ class VoiceSettings {
         this.autoTranslate = false;
         this.autoTranscribe = false;
         this.selectedModel = 'small'; // Default model
+        this.transcriptionSupported = false;
     }
 
     async initVoiceSettings() {
         const voiceSection = document.getElementById('settings-voice');
         if (!voiceSection) return;
+
+        // Check platform features first
+        try {
+            const features = await invoke('get_platform_features');
+            this.transcriptionSupported = features.transcription;
+        } catch (e) {
+            console.error('Failed to get platform features:', e);
+            this.transcriptionSupported = false;
+        }
+
+        // Only show voice settings if transcription is supported
+        if (!this.transcriptionSupported) {
+            voiceSection.style.display = 'none';
+            return;
+        }
 
         voiceSection.style.display = 'block';
 

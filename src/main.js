@@ -2755,9 +2755,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
 
     // Hook up an 'Enter' listener on the Message Box for sending messages
-    domChatMessageInput.onkeydown = async (evt) => {
+    domChatMessageInput.addEventListener('keydown', async (evt) => {
+        // Check for Enter key using multiple methods for better compatibility
+        const isEnterKey = evt.key === 'Enter' || 
+                        evt.code === 'Enter' || 
+                        evt.code === 'NumpadEnter';
+        
         // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message
-        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
+        if (isEnterKey && !evt.shiftKey) {
             evt.preventDefault();
             if (domChatMessageInput.value.trim().length) {
                 // Cache the message and previous Input Placeholder
@@ -2775,7 +2780,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 } catch(_) {}
             }
         }
-    };
+    });
 
     // Hook up an 'input' listener on the Message Box for typing indicators
     domChatMessageInput.oninput = async () => {

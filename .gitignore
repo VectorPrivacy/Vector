@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Android Signing Keystore file
+src-tauri/gen/android/keystore.properties
