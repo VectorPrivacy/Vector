@@ -2645,6 +2645,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Once login fade-in animation ends, remove it
     domLogin.addEventListener('animationend', () => domLogin.classList.remove('fadein-anim'), { once: true });
 
+    // Fetch platform features to determine OS-specific behavior
+    await fetchPlatformFeatures();
+
     // Immediately load and apply theme settings
     const strTheme = await invoke('get_theme');
     if (strTheme) {
@@ -2754,33 +2757,45 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
-    // Hook up an 'Enter' listener on the Message Box for sending messages
-    domChatMessageInput.addEventListener('keydown', async (evt) => {
-        // Check for Enter key using multiple methods for better compatibility
-        const isEnterKey = evt.key === 'Enter' || 
-                        evt.code === 'Enter' || 
-                        evt.code === 'NumpadEnter';
-        
-        // Allow 'Shift + Enter' to create linebreaks, while only 'Enter' sends a message
-        if (isEnterKey && !evt.shiftKey) {
-            evt.preventDefault();
-            if (domChatMessageInput.value.trim().length) {
-                // Cache the message and previous Input Placeholder
-                const strMessage = domChatMessageInput.value;
+    // Unified message sending function
+    async function sendMessage(messageText) {
+        if (!messageText || !messageText.trim()) return;
 
-                // Send the message, and display "Sending..." as the placeholder
-                domChatMessageInput.value = '';
-                domChatMessageInput.setAttribute('placeholder', 'Sending...');
-                try {
-                    // Reset reply selection while passing a copy of the reference to the backend
-                    const strReplyRef = strCurrentReplyReference;
-                    cancelReply();
-                    await message(strOpenChat, strMessage, strReplyRef, "");
-                    nLastTypingIndicator = 0;
-                } catch(_) {}
-            }
+        // Clear input and show sending state
+        domChatMessageInput.value = '';
+        domChatMessageInput.setAttribute('placeholder', 'Sending...');
+
+        try {
+            const replyRef = strCurrentReplyReference;
+            cancelReply();
+            await message(strOpenChat, messageText.trim(), replyRef, "");
+            nLastTypingIndicator = 0;
+        } catch(_) {}
+    }
+
+    // Desktop/iOS - traditional keydown approach
+    domChatMessageInput.addEventListener('keydown', async (evt) => {
+        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
+            evt.preventDefault();
+            await sendMessage(domChatMessageInput.value);
         }
     });
+
+    // Android-specific - detect newline in input
+    if (platformFeatures.os === 'android') {
+        domChatMessageInput.addEventListener('input', async (evt) => {
+            const value = domChatMessageInput.value;
+
+            // Check if input contains a newline character
+            if (value.includes('\n')) {
+                // Extract the message BEFORE clearing (remove the newline)
+                const messageText = value.replace(/\n/g, '');
+
+                // Send the message with the extracted text
+                await sendMessage(messageText);
+            }
+        });
+    }
 
     // Hook up an 'input' listener on the Message Box for typing indicators
     domChatMessageInput.oninput = async () => {
@@ -2875,6 +2890,17 @@ window.addEventListener("DOMContentLoaded", async () => {
             await recorder.start();
         }
     });
+
+    // Initialize voice transcription with default model
+    window.cTranscriber = new VoiceTranscriptionUI();
+    window.voiceSettings = new VoiceSettings();
+
+    // Only load whisper models if transcription is supported
+    if (platformFeatures.transcription) {
+        await window.voiceSettings.loadWhisperModels();
+    }
+    
+    window.voiceSettings.initVoiceSettings();
 
     // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
     // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events

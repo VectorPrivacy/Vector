@@ -314,29 +314,6 @@ function createTranscriptionUI(transcriptionData, audioElement) {
     return transcriptionText;
 }
 
-// Initialize when DOM is ready
-document.addEventListener('DOMContentLoaded', async () => {
-    // Initialize voice transcription with default model
-    window.cTranscriber = new VoiceTranscriptionUI();
-    window.voiceSettings = new VoiceSettings();
-
-    // Check platform features first
-    try {
-        const features = await invoke('get_platform_features');
-        window.voiceSettings.transcriptionSupported = features.transcription;
-    } catch (e) {
-        console.error('Failed to get platform features:', e);
-        window.voiceSettings.transcriptionSupported = false;
-    }
-
-    // Only load whisper models if transcription is supported
-    if (window.voiceSettings.transcriptionSupported) {
-        await window.voiceSettings.loadWhisperModels();
-    }
-    
-    window.voiceSettings.initVoiceSettings();
-});
-
 /**
  * Handles audio attachment rendering and transcription functionality.
  * @param {Object} cAttachment - Attachment data
@@ -675,8 +652,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     });
 
     // Only add transcription UI for supported formats and platforms
-    if (['wav', 'mp3', 'flac'].includes(cAttachment.extension) && 
-        window.voiceSettings?.transcriptionSupported) {
+    if (platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
         // Display the Transcribe button
         customPlayer.appendChild(transcribeBtn);
         

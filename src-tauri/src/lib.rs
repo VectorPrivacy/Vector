@@ -1736,17 +1736,30 @@ async fn create_account() -> Result<LoginKeyPair, String> {
 #[derive(serde::Serialize, Clone)]
 struct PlatformFeatures {
     transcription: bool,
+    os: String,
     // Add more features here as needed
 }
 
 /// Returns a list of platform-specific features available
 #[tauri::command]
 async fn get_platform_features() -> PlatformFeatures {
+    let os = if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    };
+
     PlatformFeatures {
-        #[cfg(not(target_os = "android"))]
-        transcription: true,
-        #[cfg(target_os = "android")]
-        transcription: false,
+        transcription: !cfg!(target_os = "android"),
+        os: os.to_string(),
     }
 }
 

@@ -3,6 +3,23 @@ const { open } = window.__TAURI__.dialog;
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
 
 /**
+ * Platform features retrieved from the backend
+ * @typedef {Object} PlatformFeatures
+ * @property {boolean} transcription - Whether transcriptions are enabled
+ * @property {"android" | "ios" | "macos" | "windows" | "linux" | "unknown"} os - The operating system
+ */
+
+/** @type {PlatformFeatures} */
+let platformFeatures = null;
+
+/**
+ * Fetch platform features from the backend
+ */
+async function fetchPlatformFeatures() {
+    platformFeatures = await invoke("get_platform_features");
+}
+
+/**
  * @type {VoiceTranscriptionUI}
  */
 let cTranscriber = null;
@@ -13,24 +30,14 @@ class VoiceSettings {
         this.autoTranslate = false;
         this.autoTranscribe = false;
         this.selectedModel = 'small'; // Default model
-        this.transcriptionSupported = false;
     }
 
     async initVoiceSettings() {
         const voiceSection = document.getElementById('settings-voice');
         if (!voiceSection) return;
 
-        // Check platform features first
-        try {
-            const features = await invoke('get_platform_features');
-            this.transcriptionSupported = features.transcription;
-        } catch (e) {
-            console.error('Failed to get platform features:', e);
-            this.transcriptionSupported = false;
-        }
-
         // Only show voice settings if transcription is supported
-        if (!this.transcriptionSupported) {
+        if (!platformFeatures.transcription) {
             voiceSection.style.display = 'none';
             return;
         }
