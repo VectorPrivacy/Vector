@@ -5,6 +5,10 @@ use tauri_plugin_fs::FsExt;
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP, PUBLIC_NIP96_CONFIG};
 use crate::db;
 use crate::Message;
+use crate::message::AttachmentFile;
+
+#[cfg(target_os = "android")]
+use crate::android::filesystem;
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -465,29 +469,58 @@ pub async fn update_status(status: String) -> bool {
 
 #[tauri::command]
 pub async fn upload_avatar(filepath: String) -> Result<String, String> {
-    // Grab the file
     let handle = TAURI_APP.get().unwrap();
-    return match handle.fs().read(std::path::Path::new(&filepath)) {
-        Ok(file) => {
-            // Format a Mime Type from the file extension
-            let mime_type = match filepath.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                _ => "application/octet-stream",
-            };
 
-            // Upload the file to the server
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
-            let conf = PUBLIC_NIP96_CONFIG.wait();
-            return match nostr_sdk::nips::nip96::upload_data(&signer, &conf, file, Some(mime_type), None).await {
-                Ok(url) => Ok(url.to_string()),
-                Err(e) => Err(e.to_string())
+    // Grab the file as AttachmentFile
+    let attachment_file = {
+        #[cfg(not(target_os = "android"))]
+        {
+            // Read file bytes
+            let bytes = handle.fs().read(std::path::Path::new(&filepath))
+                .map_err(|_| "Image couldn't be loaded from disk")?;
+
+            // Extract extension from filepath
+            let extension = filepath
+                .rsplit('.')
+                .next()
+                .unwrap_or("bin")
+                .to_lowercase();
+
+            AttachmentFile {
+                bytes,
+                img_meta: None,
+                extension,
             }
-        },
-        Err(_) => Err(String::from("Image couldn't be loaded from disk"))
+        }
+        #[cfg(target_os = "android")]
+        {
+            filesystem::read_android_uri(filepath)?
+        }
+    };
+
+    // Format a Mime Type from the file extension
+    let mime_type = match attachment_file.extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    };
+
+    // Upload the file to the server
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let signer = client.signer().await.unwrap();
+    let conf = PUBLIC_NIP96_CONFIG.wait();
+
+    match nostr_sdk::nips::nip96::upload_data(
+        &signer,
+        &conf,
+        attachment_file.bytes,
+        Some(mime_type),
+        None
+    ).await {
+        Ok(url) => Ok(url.to_string()),
+        Err(e) => Err(e.to_string())
     }
 }
 

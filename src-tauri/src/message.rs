@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use ::image::ImageEncoder;
+use ::image::{ImageBuffer, ImageEncoder, Rgba};
 use blurhash;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -13,6 +13,9 @@ use crate::util::{self, calculate_file_hash};
 use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::PRIVATE_NIP96_CONFIG;
+
+#[cfg(target_os = "android")]
+use crate::android::{clipboard, filesystem};
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 pub struct Message {
@@ -119,10 +122,10 @@ impl Default for Attachment {
 /// A simple pre-upload format to associate a byte stream with a file extension
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct AttachmentFile {
-    bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
     /// Image metadata (for images only)
-    img_meta: Option<ImageMetadata>,
-    extension: String,
+    pub img_meta: Option<ImageMetadata>,
+    pub extension: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -522,24 +525,44 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
 #[tauri::command]
 pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String, transparent: bool) -> Result<bool, String> {
-    // Copy the image from the clipboard
-    let img = handle.clipboard().read_image().unwrap();
+    // Platform-specific clipboard reading
+    #[cfg(target_os = "android")]
+    let img = {
+        use crate::android::clipboard::read_image_from_clipboard;
+        read_image_from_clipboard()?
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let img = {
+        let tauri_img = handle.clipboard().read_image()
+            .map_err(|e| format!("Failed to read clipboard: {:?}", e))?;
+
+        // Get RGBA data - this returns &[u8], not a Result
+        let rgba_data = tauri_img.rgba();
+
+        // Convert to ImageBuffer
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
+            tauri_img.width(),
+            tauri_img.height(),
+            rgba_data.to_vec()
+        ).ok_or_else(|| "Failed to create image buffer".to_string())?
+    };
 
     // Create the encoder directly with a Vec<u8>
     let mut png_data = Vec::new();
     let encoder = ::image::codecs::png::PngEncoder::new(&mut png_data);
 
     // Get original pixels
-    let original_pixels = img.rgba();
+    let original_pixels = img.as_raw();
 
-    // Windows: check that every image has a non-zero-ish Alpha channel, if not, this is probably a non-PNG/GIF which has had it's Alpha channel nuked
+    // Windows: check that every image has a non-zero-ish Alpha channel
     let mut _transparency_bug_search = false;
     #[cfg(target_os = "windows")]
     {
         _transparency_bug_search = original_pixels.iter().skip(3).step_by(4).all(|&a| a <= 2);
     }
 
-    // For non-transparent images: we need to manually account for the zero'ing out of the Alpha channel
+    // For non-transparent images: manually account for the zero'ing out of the Alpha channel
     let pixels = if !transparent || _transparency_bug_search {
         // Only clone if we need to modify
         let mut modified = original_pixels.to_vec();
@@ -552,11 +575,11 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 
     // Encode directly from pixels to PNG bytes
     encoder.write_image(
-        &pixels,               // raw pixels
-        img.width(),           // width
-        img.height(),          // height
-        ::image::ExtendedColorType::Rgba8                  // color type
-    ).map_err(|e| e.to_string()).unwrap();
+        &pixels,
+        img.width(),
+        img.height(),
+        ::image::ExtendedColorType::Rgba8
+    ).map_err(|e| e.to_string())?;
 
     // Generate image metadata with Blurhash and dimensions
     let img_meta: Option<ImageMetadata> = match blurhash::encode(4, 3, img.width(), img.height(), &pixels) {
@@ -594,47 +617,52 @@ pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>)
 
 #[tauri::command]
 pub async fn file_message(receiver: String, replied_to: String, file_path: String) -> Result<bool, String> {
-    // Parse the file extension
-    let ext = file_path.clone().rsplit('.').next().unwrap_or("").to_lowercase();
+    // Load the file as AttachmentFile
+    let mut attachment_file = {
+        #[cfg(not(target_os = "android"))]
+        {
+            // Read file bytes
+            let bytes = std::fs::read(&file_path)
+                .map_err(|e| format!("Failed to read file: {}", e))?;
 
-    // Load the file
-    let bytes = std::fs::read(file_path.as_str()).unwrap();
+            // Extract extension from filepath
+            let extension = file_path
+                .rsplit('.')
+                .next()
+                .unwrap_or("bin")
+                .to_lowercase();
+
+            AttachmentFile {
+                bytes,
+                img_meta: None,
+                extension,
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            filesystem::read_android_uri(file_path)?
+        }
+    };
 
     // Generate image metadata if the file is an image
-    let img_meta: Option<ImageMetadata> = match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" => {
-            // Try to load and decode the image
-            match ::image::load_from_memory(&bytes) {
-                Ok(img) => {
-                    // Convert to RGBA8 format for blurhash
-                    let rgba_img = img.to_rgba8();
-                    let (width, height) = rgba_img.dimensions();
-                    let pixels = rgba_img.as_raw();
-                    
-                    // Generate Blurhash
-                    match blurhash::encode(4, 3, width, height, pixels) {
-                        Ok(hash) => {
-                            Some(ImageMetadata {
-                                blurhash: hash,
-                                width,
-                                height,
-                            })
-                        },
-                        Err(_) => None
-                    }
-                },
-                Err(_) => None
-            }
-        },
-        _ => None // Not an image file
-    };
+    if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        // Try to load and decode the image
+        if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
+            // Convert to RGBA8 format for blurhash
+            let rgba_img = img.to_rgba8();
+            let (width, height) = rgba_img.dimensions();
+            let pixels = rgba_img.as_raw();
 
-    // Generate an Attachment File
-    let attachment_file = AttachmentFile {
-        bytes,
-        img_meta,
-        extension: ext.to_string()
-    };
+            // Generate Blurhash
+            if let Ok(hash) = blurhash::encode(4, 3, width, height, pixels) {
+                attachment_file.img_meta = Some(ImageMetadata {
+                    blurhash: hash,
+                    width,
+                    height,
+                });
+            }
+        }
+    }
 
     // Message the file to the intended user
     message(receiver, String::new(), replied_to, Some(attachment_file)).await

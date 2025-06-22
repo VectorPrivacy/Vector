@@ -1978,28 +1978,44 @@ function renderMessage(msg, sender, editID = '') {
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
                 } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
                 // Videos
-                const vidPreview = document.createElement('video');
-                vidPreview.setAttribute('controlsList', 'nodownload');
-                vidPreview.controls = true;
-                vidPreview.style.width = `100%`;
-                vidPreview.style.height = `auto`;
-                vidPreview.style.borderRadius = `8px`;
-                vidPreview.style.cursor = `pointer`;
-                vidPreview.preload = "metadata";
-                vidPreview.playsInline = true;
-                vidPreview.src = assetUrl;
-                // When the metadata loads, we run some maintenance tasks
-                vidPreview.addEventListener('loadedmetadata', () => {
-                    // Seek a tiny amount to force the frame 'poster' to load, without loading the entire video
-                    vidPreview.currentTime = 0.1;
+                const handleMetadataLoaded = (video) => {
+                    // Seek a tiny amount to force the frame 'poster' to load
+                    video.currentTime = 0.1;
+                    
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
                         scrollToBottom(domChatMessages, false);
                     }
                     // Also do soft scroll for normal layout adjustments
                     softChatScroll();
-                }, { once: true });
-                pMessage.appendChild(vidPreview);
+                };
+                
+                // Platform-specific video creation
+                if (platformFeatures.os === 'android') {
+                    // Android always uses blob method with size limit
+                    createAndroidVideo(assetUrl, cAttachment, handleMetadataLoaded, (element) => {
+                        pMessage.appendChild(element);
+                    });
+                } else {
+                    // Standard video element for other platforms
+                    const vidPreview = document.createElement('video');
+                    vidPreview.setAttribute('controlsList', 'nodownload');
+                    vidPreview.controls = true;
+                    vidPreview.style.width = `100%`;
+                    vidPreview.style.height = `auto`;
+                    vidPreview.style.borderRadius = `8px`;
+                    vidPreview.style.cursor = `pointer`;
+                    vidPreview.preload = "metadata";
+                    vidPreview.playsInline = true;
+                    vidPreview.src = assetUrl;
+                    
+                    // Add metadata loaded handler
+                    vidPreview.addEventListener('loadedmetadata', () => {
+                        handleMetadataLoaded(vidPreview);
+                    }, { once: true });
+                    
+                    pMessage.appendChild(vidPreview);
+                }
             } else {
                 // Unknown attachment
                 const iUnknown = document.createElement('i');
@@ -2474,12 +2490,22 @@ function closeChat() {
             // Streamable media (audio + video) should be paused, then force-unloaded
             if (domMedia instanceof HTMLMediaElement) {
                 domMedia.pause();
-                domMedia.src = ``;
+                
+                // For Android blob URLs, revoke them before clearing
+                if (platformFeatures.os === 'android' && domMedia.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(domMedia.src);
+                }
+                
+                domMedia.removeAttribute('src'); // Better than setting to empty string
                 domMedia.load();
             }
             // Static media (images) should simply be unloaded
             if (domMedia instanceof HTMLImageElement) {
-                domMedia.src = ``;
+                // Also check for blob URLs on images if you use them
+                if (domMedia.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(domMedia.src);
+                }
+                domMedia.removeAttribute('src');
             }
         }
 
@@ -2887,7 +2913,11 @@ window.addEventListener("DOMContentLoaded", async () => {
             domChatMessageInput.setAttribute('placeholder', 'Recording...');
 
             // Start recording
-            await recorder.start();
+            if (await recorder.start() === false) {
+                // An error likely occured: reset the UI
+                cancelReply();
+                await recorder.stop();
+            }
         }
     });
 

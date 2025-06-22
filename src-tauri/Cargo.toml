@@ -52,6 +52,8 @@ symphonia = { version = "0.5.4", features = ["mp3", "wav", "flac", "pcm"] }
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"
+ndk-context = "0.1.1"
 openssl = { version = "0.10", features = ["vendored"] }
 
 # Whisper (with cross-platform acceleration features - excluded on Android)

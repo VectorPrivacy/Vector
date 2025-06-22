@@ -27,8 +27,12 @@ class VoiceRecorder {
             await invoke('start_recording');
             this.isRecording = true;
             this.button.innerHTML = '<span class="icon icon-mic-off"></span>';
+            return true;
         } catch (err) {
             console.error('Recording start failed:', err);
+            await popupConfirm('Recording Error', err, true);
+            this.isRecording = false;
+            return false;
         }
     }
 

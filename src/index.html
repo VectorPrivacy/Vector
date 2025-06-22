@@ -4,16 +4,19 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
     <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vector</title>
     <script src="/main.js" defer></script>
     <script src="/js/settings.js" defer></script>
     <script src="/js/misc.js" defer></script>
     <script src="/js/db.js" defer></script>
-    <script src="/js/markdown.js" defer></script>
-    <script src="/js/emoji.js" defer></script>
     <script src="/js/voice.js" defer></script>
-    <script src="/js/payments.js" defer></script>
+    <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
+    <script src="/js/markdown.js"></script>
+    <script src="/js/emoji.js"></script>
+    <script src="/js/payments.js"></script>
+    <!-- OS-specific code (how should we handle this better? runtime injection?) -->
+    <script src="/js/platforms/android.js"></script>
     <!-- Minified Libraries -->
     <script src="/js/twemoji.min.js"></script>
   </head>

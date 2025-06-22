@@ -21,8 +21,17 @@ mod upload;
 mod util;
 use util::{get_file_type_description, calculate_file_hash, is_nonce_filename, migrate_nonce_file_to_hash};
 
+#[cfg(target_os = "android")]
+mod android {
+    pub mod clipboard;
+    pub mod filesystem;
+    pub mod permissions;
+    pub mod utils;
+}
+
 #[cfg(not(target_os = "android"))]
 mod whisper;
+
 mod message;
 pub use message::{Message, Attachment, Reaction};
 
@@ -1677,6 +1686,19 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
 
 #[tauri::command]
 async fn start_recording() -> Result<(), String> {
+    #[cfg(target_os = "android")] 
+    {
+        // Check if we already have permission
+        if !android::permissions::check_audio_permission().unwrap() {
+            // This will block until the user responds to the permission dialog
+            let granted = android::permissions::request_audio_permission_blocking()?;
+            
+            if !granted {
+                return Err("Audio permission denied by user".to_string());
+            }
+        }
+    }
+
     AudioRecorder::global().start()
 }
 
