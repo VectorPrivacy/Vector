@@ -40,31 +40,46 @@
         <input id="emoji-search-input" placeholder="Search...">
         <div id="emoji-results"></div>
       </div>
-
+      
       <div id="profile" class="chats" style="display: none;">
         <div style="height: 60px; background-color: #161616;">
           <div id="profile-back-btn" class="btn nav-back-btn">
-          <span class="icon icon-chevron-double-left nav-icon"></span>
-        </div>
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+          </div>
           <div>
             <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
             <span id="profile-status" class="cutoff chat-contact-status btn" style="font-style: normal;"></span>
           </div>
         </div>
-        <div>
+        <div style="position: relative;">
           <img id="profile-banner" class="profile-banner">
-          <img id="profile-avatar" class="profile-avatar btn">
+          <div class="profile-banner-edit btn">
+            <span class="icon icon-edit"></span>
+          </div>
+          <div class="profile-avatar-container">
+            <img id="profile-avatar" class="profile-avatar">
+            <div class="profile-avatar-edit btn">
+              <span class="icon icon-edit"></span>
+            </div>
+          </div>
         </div>
+        <div class="profile-content"></div>
         <div style="padding-bottom: 75px;">
           <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
           <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="font-style: normal; width: 90%;"></span>
+          <div id="profile-npub-container" class="profile-npub-container">
+            <span id="profile-npub" class="profile-npub"></span>
+            <button id="profile-npub-copy" class="btn profile-npub-copy">
+              <span class="icon icon-copy"></span>
+            </button>
+          </div>
           <div id="profile-badge-list" style="height: 50px;"></div>
           <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px;"></span>
           <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none;"></textarea>
           <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
-          <span id="profile-id" style="display: none;"></span>
+           <span id="profile-id" style="display: none;"></span>
+          </div>
         </div>
-      </div>
 
       <div id="chats" class="chats">
         <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">

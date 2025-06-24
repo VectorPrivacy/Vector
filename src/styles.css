@@ -301,27 +301,39 @@ body {
   }
 }
 
+/* Profile Banner */
 .profile-banner {
   object-fit: cover;
   object-position: center;
   width: 100%;
   height: 200px;
+  display: block;
 }
 
-.profile-avatar {
-  width: 175px;
+/* Avatar Container */
+.profile-avatar-container {
   position: relative;
-  margin-top: -130px;
-  margin-left: auto;
-  margin-right: auto;
+  width: 175px;
   height: 175px;
-  border-radius: 100%;
-  border-color: #060606;
-  border-style: solid;
-  border-width: 8px;
+  margin: -87px auto 10px;
+  border-radius: 50%;
+  border: 8px solid #060606;
   background-color: #060606;
+}
+
+/* Avatar Image */
+.profile-avatar {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
   object-fit: cover;
   object-position: center;
+}
+
+/* Main Profile Content Area */
+.profile-content {
+  padding: 0 20px 20px;
+  text-align: center;
 }
 
 .profile-description-editor {
@@ -333,6 +345,98 @@ body {
   font-weight: 400;
   padding: 0;
   overscroll-behavior: none;
+}
+
+.profile-avatar-edit {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.profile-banner-edit {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+/* Profile npub Section*/
+.profile-npub-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 15px 0;
+  width: 100%;
+}
+
+.profile-npub {
+  font-size: 12px;
+  opacity: 0.7;
+  word-break: break-all;
+  text-align: center;
+  flex: 1;
+  max-width: calc(100% - 30px);
+  padding: 0 8px;
+}
+
+.profile-npub-copy {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Icons */
+.icon-edit {
+  mask-image: url("./icons/edit.svg");
+  -webkit-mask-image: url("./icons/edit.svg");
+  width: 16px;
+  height: 16px;
+  background-color: #39FF14;
+}
+
+.icon-copy {
+  mask-image: url("./icons/copy.svg");
+  -webkit-mask-image: url("./icons/copy.svg");
+  width: 16px;
+  height: 16px;
+  background-color: #39FF14;
+}
+
+.icon-check {
+  mask-image: url("./icons/check.svg");
+  -webkit-mask-image: url("./icons/check.svg");
+  width: 16px;
+  height: 16px;
+  background-color: #39FF14;
+}
+
+.profile-avatar-edit .icon-edit,
+.profile-banner-edit .icon-edit,
+.profile-npub-copy .icon-copy,
+.profile-npub-copy .icon-check {
+  background-color: #39FF14;
 }
 
 .account {
