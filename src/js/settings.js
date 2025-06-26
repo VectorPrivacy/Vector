@@ -571,13 +571,12 @@ async function selectFile() {
  * @param {string} mode - The theme mode, i.e: light, dark
  */
 async function setTheme(theme = 'vector', mode = 'dark') {
-    domTheme.href = `/themes/${theme}/${mode}.css`;
-
-    // Ensure the value of the Theme Selector matches (i.e: at bootup during theme load)
-    domSettingsThemeSelect.value = theme;
-
-    // Save the selection to DB
-    await invoke('set_theme', { theme: theme });
+  document.body.classList.remove('vector-theme', 'chatstr-theme');
+  document.body.classList.add(`${theme}-theme`);
+  
+  domTheme.href = `/themes/${theme}/${mode}.css`;
+  domSettingsThemeSelect.value = theme;
+  await invoke('set_theme', { theme: theme });
 }
 
 // Apply Theme changes in real-time

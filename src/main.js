@@ -1148,7 +1148,7 @@ async function login() {
 }
 
 /**
- * Renders the user's own profile UI
+ * Renders the user's own profile UI in the chat list
  * @param {Profile} cProfile 
  */
 function renderCurrentProfile(cProfile) {
@@ -1198,7 +1198,6 @@ function renderCurrentProfile(cProfile) {
     domAccount.appendChild(pStatus);
 
     /* Start Chat Tab */
-
     // Render our Share npub
     domShareNpub.textContent = strPubkey;
 }
@@ -1221,9 +1220,8 @@ function renderProfileTab(cProfile) {
     domProfileName.classList.toggle('chat-contact', !domProfileStatus.textContent);
     domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
 
-    // Banner
+    // Banner - keep original structure but add click handler
     if (cProfile.banner) {
-        // We have a banner URL; so render the banner as a web image
         if (domProfileBanner.tagName === 'DIV') {
             const newBanner = document.createElement('img');
             domProfileBanner.replaceWith(newBanner);
@@ -1231,7 +1229,6 @@ function renderProfileTab(cProfile) {
         }
         domProfileBanner.src = cProfile.banner;
     } else {
-        // We don't have a banner URL; so render an empty DIV
         if (domProfileBanner.tagName === 'IMG') {
             const newBanner = document.createElement('div');
             newBanner.style.backgroundColor = 'rgb(27, 27, 27)';
@@ -1240,9 +1237,10 @@ function renderProfileTab(cProfile) {
         }
     }
     domProfileBanner.classList.add('profile-banner');
-    domProfileBanner.onclick = askForBanner;
+    domProfileBanner.onclick = cProfile.mine ? askForBanner : null;
+    if (cProfile.mine) domProfileBanner.classList.add('btn');
 
-    // Avatar
+    // Avatar - keep original structure but add click handler
     if (cProfile.avatar) {
         if (domProfileAvatar.tagName === 'DIV') {
             const newAvatar = document.createElement('img');
@@ -1256,7 +1254,8 @@ function renderProfileTab(cProfile) {
         domProfileAvatar = newAvatar;
     }
     domProfileAvatar.classList.add('profile-avatar');
-    domProfileAvatar.onclick = askForAvatar;
+    domProfileAvatar.onclick = cProfile.mine ? askForAvatar : null;
+    if (cProfile.mine) domProfileAvatar.classList.add('btn');
 
     // Secondary Display Name
     const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : '';
@@ -1266,6 +1265,12 @@ function renderProfileTab(cProfile) {
     // Secondary Status
     domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
 
+    // npub display
+    const profileNpub = document.getElementById('profile-npub');
+    if (profileNpub) {
+        profileNpub.textContent = cProfile.id;
+    }
+
     // Description
     const strDescriptionPlaceholder = cProfile.mine ? (cProfile?.about || 'Set an About Me') : '';
     domProfileDescription.textContent = cProfile?.about || strDescriptionPlaceholder;
@@ -1274,23 +1279,43 @@ function renderProfileTab(cProfile) {
     // npub
     domProfileId.textContent = cProfile.id;
 
+    // Add npub copy functionality
+    document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
+        const npub = document.getElementById('profile-npub')?.textContent;
+        if (npub) {
+            navigator.clipboard.writeText(npub).then(() => {
+                const copyBtn = e.target.closest('.profile-npub-copy');
+                if (copyBtn) {
+                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
+                    }, 2000);
+                }
+            });
+        }
+    });
+
     // If this is OUR profile: make the elements clickable
     if (cProfile.mine) {
-        // Hide the 'Back' button and deregister it's clickable function
+        // Show edit buttons and set their click handlers
+        document.querySelector('.profile-avatar-edit').style.display = 'flex';
+        document.querySelector('.profile-avatar-edit').onclick = askForAvatar;
+        
+        document.querySelector('.profile-banner-edit').style.display = 'flex';
+        document.querySelector('.profile-banner-edit').onclick = askForBanner;
+        
+        // Hide the 'Back' button and deregister its clickable function
         domProfileBackBtn.style.display = 'none';
         domProfileBackBtn.onclick = null;
+        
         // Display the Navbar
         domNavbar.style.display = '';
 
-        // Configure clickables
+        // Configure other clickables
         domProfileName.onclick = askForUsername;
         domProfileName.classList.add('btn');
         domProfileStatus.onclick = askForStatus;
         domProfileStatus.classList.add('btn');
-        domProfileBanner.onclick = askForBanner;
-        domProfileBanner.classList.add('btn');
-        domProfileAvatar.onclick = askForAvatar;
-        domProfileAvatar.classList.add('btn');
         domProfileNameSecondary.onclick = askForUsername;
         domProfileNameSecondary.classList.add('btn');
         domProfileStatusSecondary.onclick = askForStatus;
@@ -1298,21 +1323,28 @@ function renderProfileTab(cProfile) {
         domProfileDescription.onclick = editProfileDescription;
         domProfileDescription.classList.add('btn');
     } else {
+        // Hide edit buttons
+        document.querySelector('.profile-avatar-edit').style.display = 'none';
+        document.querySelector('.profile-banner-edit').style.display = 'none';
+        
+        // Remove click handlers from avatar and banner
+        domProfileAvatar.onclick = null;
+        domProfileAvatar.classList.remove('btn');
+        domProfileBanner.onclick = null;
+        domProfileBanner.classList.remove('btn');
+        
         // Show the 'Back' button and link it to the profile's chat
         domProfileBackBtn.style.display = '';
         domProfileBackBtn.onclick = () => openChat(cProfile.id);
+        
         // Hide the Navbar
         domNavbar.style.display = 'none';
 
-        // Configure clickables
+        // Remove other clickables
         domProfileName.onclick = null;
         domProfileName.classList.remove('btn');
         domProfileStatus.onclick = null;
         domProfileStatus.classList.remove('btn');
-        domProfileBanner.onclick = null;
-        domProfileBanner.classList.remove('btn');
-        domProfileAvatar.onclick = null;
-        domProfileAvatar.classList.remove('btn');
         domProfileNameSecondary.onclick = null;
         domProfileNameSecondary.classList.remove('btn');
         domProfileStatusSecondary.onclick = null;
@@ -2947,6 +2979,22 @@ window.addEventListener("DOMContentLoaded", async () => {
         e.stopPropagation();
         popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
     };
+
+        // Add npub copy functionality for chat-new section
+    document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
+        const npub = document.getElementById('share-npub')?.textContent;
+        if (npub) {
+            navigator.clipboard.writeText(npub).then(() => {
+                const copyBtn = e.target.closest('.profile-npub-copy');
+                if (copyBtn) {
+                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
+                    }, 2000);
+                }
+            });
+        }
+    });
 });
 
 // Listen for app-wide click interations
