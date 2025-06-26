@@ -2979,6 +2979,22 @@ window.addEventListener("DOMContentLoaded", async () => {
         e.stopPropagation();
         popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
     };
+
+        // Add npub copy functionality for chat-new section
+    document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
+        const npub = document.getElementById('share-npub')?.textContent;
+        if (npub) {
+            navigator.clipboard.writeText(npub).then(() => {
+                const copyBtn = e.target.closest('.profile-npub-copy');
+                if (copyBtn) {
+                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
+                    }, 2000);
+                }
+            });
+        }
+    });
 });
 
 // Listen for app-wide click interations
