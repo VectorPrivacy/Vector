@@ -375,28 +375,33 @@ body {
   cursor: pointer;
 }
 
-/* Profile npub Section*/
+/* Profile npub Section */
 .profile-npub-container {
   display: flex;
   align-items: center;
-  justify-content: center;
-  margin: 15px 0;
-  width: 100%;
+  justify-content: space-between;
+  margin: 20px 0;
+  padding: 12px 16px;
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 30px;
+  width: calc(100% - 32px);
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .profile-npub {
-  font-size: 12px;
-  opacity: 0.7;
+  font-size: 14px;
+  opacity: 0.8;
   word-break: break-all;
   text-align: center;
   flex: 1;
-  max-width: calc(100% - 30px);
-  padding: 0 8px;
+  padding: 0 12px;
 }
 
 .profile-npub-copy {
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   background-color: rgba(0, 0, 0, 0.3);
   display: flex;
@@ -404,10 +409,8 @@ body {
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
-  margin-left: auto;
 }
 
-/* Icons */
 /* Icons */
 .icon-edit {
   mask-image: url("./icons/edit.svg");
