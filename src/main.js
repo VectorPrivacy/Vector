@@ -1220,9 +1220,8 @@ function renderProfileTab(cProfile) {
     domProfileName.classList.toggle('chat-contact', !domProfileStatus.textContent);
     domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
 
-    // Banner
+    // Banner - keep original structure but add click handler
     if (cProfile.banner) {
-        // We have a banner URL; so render the banner as a web image
         if (domProfileBanner.tagName === 'DIV') {
             const newBanner = document.createElement('img');
             domProfileBanner.replaceWith(newBanner);
@@ -1230,7 +1229,6 @@ function renderProfileTab(cProfile) {
         }
         domProfileBanner.src = cProfile.banner;
     } else {
-        // We don't have a banner URL; so render an empty DIV
         if (domProfileBanner.tagName === 'IMG') {
             const newBanner = document.createElement('div');
             newBanner.style.backgroundColor = 'rgb(27, 27, 27)';
@@ -1239,25 +1237,10 @@ function renderProfileTab(cProfile) {
         }
     }
     domProfileBanner.classList.add('profile-banner');
+    domProfileBanner.onclick = cProfile.mine ? askForBanner : null;
+    if (cProfile.mine) domProfileBanner.classList.add('btn');
 
-    // Avatar container setup
-    if (domProfileAvatar.parentElement.classList.contains('profile-avatar-container')) {
-        // Already has proper container
-    } else {
-        const avatarContainer = document.createElement('div');
-        avatarContainer.classList.add('profile-avatar-container');
-        avatarContainer.appendChild(domProfileAvatar);
-        // Add edit button
-        const editBtn = document.createElement('div');
-        editBtn.classList.add('profile-avatar-edit', 'btn');
-        editBtn.innerHTML = '<span class="icon icon-edit"></span>';
-        avatarContainer.appendChild(editBtn);
-        // Replace in DOM
-        domProfileAvatar.replaceWith(avatarContainer);
-        domProfileAvatar = avatarContainer.querySelector('img');
-    }
-
-    // Avatar image
+    // Avatar - keep original structure but add click handler
     if (cProfile.avatar) {
         if (domProfileAvatar.tagName === 'DIV') {
             const newAvatar = document.createElement('img');
@@ -1271,6 +1254,8 @@ function renderProfileTab(cProfile) {
         domProfileAvatar = newAvatar;
     }
     domProfileAvatar.classList.add('profile-avatar');
+    domProfileAvatar.onclick = cProfile.mine ? askForAvatar : null;
+    if (cProfile.mine) domProfileAvatar.classList.add('btn');
 
     // Secondary Display Name
     const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : '';
@@ -1312,19 +1297,12 @@ function renderProfileTab(cProfile) {
 
     // If this is OUR profile: make the elements clickable
     if (cProfile.mine) {
-        // Show edit buttons
+        // Show edit buttons and set their click handlers
         document.querySelector('.profile-avatar-edit').style.display = 'flex';
-        document.querySelector('.profile-banner-edit').style.display = 'flex';
-        
-        // Set click handlers for edit buttons
         document.querySelector('.profile-avatar-edit').onclick = askForAvatar;
-        document.querySelector('.profile-banner-edit').onclick = askForBanner;
         
-        // Remove old click handlers from the elements themselves
-        domProfileAvatar.onclick = null;
-        domProfileAvatar.classList.remove('btn');
-        domProfileBanner.onclick = null;
-        domProfileBanner.classList.remove('btn');
+        document.querySelector('.profile-banner-edit').style.display = 'flex';
+        document.querySelector('.profile-banner-edit').onclick = askForBanner;
         
         // Hide the 'Back' button and deregister its clickable function
         domProfileBackBtn.style.display = 'none';
