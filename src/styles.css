@@ -408,12 +408,13 @@ body {
 }
 
 /* Icons */
+/* Icons */
 .icon-edit {
   mask-image: url("./icons/edit.svg");
   -webkit-mask-image: url("./icons/edit.svg");
   width: 16px;
   height: 16px;
-  background-color: #39FF14;
+  background-color: var(--icon-color-primary);
 }
 
 .icon-plus-circle {
@@ -421,7 +422,7 @@ body {
   -webkit-mask-image: url("./icons/plus-circle.svg");
   width: 18px;
   height: 18px;
-  background-color: #39FF14;
+  background-color: var(--icon-color-primary);
 }
 
 .icon-copy {
@@ -429,7 +430,7 @@ body {
   -webkit-mask-image: url("./icons/copy.svg");
   width: 16px;
   height: 16px;
-  background-color: #39FF14;
+  background-color: var(--icon-color-primary);
 }
 
 .icon-check {
@@ -437,15 +438,16 @@ body {
   -webkit-mask-image: url("./icons/check.svg");
   width: 16px;
   height: 16px;
-  background-color: #39FF14;
+  background-color: var(--icon-color-primary);
 }
 
-.profile-avatar-edit .icon-edit,
-.profile-banner-edit .icon-edit,
-.profile-npub-copy .icon-copy,
-.profile-npub-copy .icon-check {
-  background-color: #39FF14;
+.icon-edit,
+.icon-plus-circle,
+.icon-copy,
+.icon-check {
+  background-color: var(--icon-color-primary);
 }
+
 
 .account {
   align-items: center;
