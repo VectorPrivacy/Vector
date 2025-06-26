@@ -1190,13 +1190,14 @@ audio {
   animation: fadeInWithoutTransform 0.4s ease-out
 }
 
-/* Voice Settings Section Styles */
-.settings-section-voice {
-  padding: 20px;
+.settings-section {
+  padding: 20px 20px 0 20px;
   padding-top: 0;
   border-radius: 12px;
   margin-top: 15px;
 }
+
+/* Voice Settings Section Styles */
 
 /* Dropdown Styles */
 select {
@@ -1662,13 +1663,9 @@ select:disabled:hover {
   margin-top: auto;
 }
 
-.settings-title {
-  margin-top: 40px;
-}
-
 .settings-divider {
-  margin-top: 25px;
-  margin-bottom: 25px;
+  margin-top: 40px;
+  margin-bottom: 40px;
 }
 
 .danger-title {
@@ -2067,6 +2064,79 @@ select:disabled:hover {
 
 .audio-transcribe-btn.loading:hover {
     transform: none;
+}
+
+.network-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 15px;
+}
+
+.relay-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 15px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+}
+
+.relay-item:hover {
+  background: rgba(0, 0, 0, 0.5);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.relay-url {
+  flex: 1;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.8);
+  word-break: break-all;
+  margin-right: 15px;
+}
+
+.relay-status {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.relay-status.connected {
+  background: rgba(89, 252, 179, 0.2);
+  color: #59fcb3;
+  border: 1px solid rgba(89, 252, 179, 0.3);
+}
+
+.relay-status.connecting {
+  background: rgba(255, 193, 7, 0.2);
+  color: #ffc107;
+  border: 1px solid rgba(255, 193, 7, 0.3);
+}
+
+.relay-status.disconnected {
+  background: rgba(255, 82, 82, 0.2);
+  color: #ff5252;
+  border: 1px solid rgba(255, 82, 82, 0.3);
+}
+
+.relay-status.pending {
+  background: rgba(156, 39, 176, 0.2);
+  color: #9c27b0;
+  border: 1px solid rgba(156, 39, 176, 0.3);
+}
+
+.relay-status.initialized,
+.relay-status.terminated,
+.relay-status.banned {
+  background: rgba(128, 128, 128, 0.2);
+  color: #808080;
+  border: 1px solid rgba(128, 128, 128, 0.3);
 }
 
 /* Responsive adjustments */

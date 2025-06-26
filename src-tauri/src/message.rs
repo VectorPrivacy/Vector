@@ -139,6 +139,22 @@ pub struct Reaction {
     pub emoji: String,
 }
 
+/// Helper function to mark message as failed and update frontend
+async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
+    let mut state = STATE.lock().await;
+    let chat = state.get_profile_mut(receiver).unwrap();
+    let failed_msg = chat.get_message_mut(pending_id.as_ref()).unwrap();
+    failed_msg.failed = true;
+
+    // Update the frontend
+    let handle = TAURI_APP.get().unwrap();
+    handle.emit("message_update", serde_json::json!({
+        "old_id": pending_id.as_ref(),
+        "message": &failed_msg,
+        "chat_id": receiver
+    })).unwrap();
+}
+
 #[tauri::command]
 pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<bool, String> {
     // Immediately add the message to our state as "Pending" with an ID derived from the current nanosecond, we'll update it as either Sent (non-pending) or Failed in the future
@@ -417,19 +433,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 },
                 Err(_) => {
                     // The file upload failed: so we mark the message as failed and notify of an error
-                    let pending_id_for_failure = Arc::clone(&pending_id);
-                    let mut state = STATE.lock().await;
-                    let chat = state.get_profile_mut(&receiver).unwrap();
-                    let failed_msg = chat.get_message_mut(pending_id_for_failure.as_ref()).unwrap();
-                    failed_msg.failed = true;
-
-                    // Update the frontend
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": pending_id_for_failure.as_ref(),
-                        "message": &failed_msg,
-                        "chat_id": &receiver
-                    })).unwrap();
-
+                    mark_message_failed(Arc::clone(&pending_id), &receiver).await;
                     // Return the error
                     return Err(String::from("Failed to upload file"));
                 }
@@ -455,70 +459,112 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     let built_rumor = rumor.build(my_public_key);
     let rumor_id = built_rumor.id.unwrap();
 
-    // Send message to the real receiver
+    // Send message to the real receiver with retry logic
+    let mut send_attempts = 0;
+    const MAX_ATTEMPTS: u32 = 6;
+    const RETRY_DELAY_MS: u64 = 10000; // 10 seconds
+    
+    let mut final_output = None;
+    
+    while send_attempts < MAX_ATTEMPTS {
+        send_attempts += 1;
+        
+        match client
+            .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
+            .await
+        {
+            Ok(output) => {
+                // Check if at least one relay acknowledged the message
+                if !output.success.is_empty() {
+                    // Success! Message was acknowledged by at least one relay
+                    final_output = Some(output);
+                    break;
+                } else if output.failed.is_empty() {
+                    // No success but also no failures - this might be a temporary network issue
+                    // Continue retrying
+                } else {
+                    // We have failures but no successes
+                    if send_attempts == MAX_ATTEMPTS {
+                        // Final attempt failed
+                        mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+                        return Ok(false);
+                    }
+                }
+                
+                // If we're here and haven't reached max attempts, wait before retrying
+                if send_attempts < MAX_ATTEMPTS {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                }
+            }
+            Err(e) => {
+                // Network or other error - log and retry if we haven't exceeded attempts
+                eprintln!("Failed to send message (attempt {}/{}): {:?}", send_attempts, MAX_ATTEMPTS, e);
+                
+                if send_attempts == MAX_ATTEMPTS {
+                    // Final attempt failed
+                    mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+                    return Ok(false);
+                }
+                
+                // Wait before retrying
+                tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+        }
+    }
+    
+    // If we get here without final_output, all attempts failed
+    if final_output.is_none() {
+        mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+        return Ok(false);
+    }
+
+    // Send message to our own public key, to allow for message recovering
     match client
-        .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
+        .gift_wrap(&my_public_key, built_rumor, [])
         .await
     {
         Ok(_) => {
-            // Send message to our own public key, to allow for message recovering
-            match client
-                .gift_wrap(&my_public_key, built_rumor, [])
-                .await
-            {
-                Ok(_) => {
-                    // Mark the message as a success
-                    let pending_id_for_success = Arc::clone(&pending_id);
-                    let mut state = STATE.lock().await;
-                    let chat = state.get_profile_mut(&receiver).unwrap();
-                    let sent_msg = chat.get_message_mut(pending_id_for_success.as_ref()).unwrap();
-                    sent_msg.id = rumor_id.to_hex();
-                    sent_msg.pending = false;
-
-                    // Update the frontend
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": pending_id_for_success.as_ref(),
-                        "message": &sent_msg,
-                        "chat_id": &receiver
-                    })).unwrap();
-
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), sent_msg.clone(), receiver).await.unwrap();
-                    return Ok(true);
-                }
-                Err(_) => {
-                    // This is an odd case; the message was sent to the receiver, but NOT ourselves
-                    // We'll class it as sent, for now...
-                    let pending_id_for_partial = Arc::clone(&pending_id);
-                    let mut state = STATE.lock().await;
-                    let chat = state.get_profile_mut(&receiver).unwrap();
-                    let sent_ish_msg = chat.get_message_mut(pending_id_for_partial.as_ref()).unwrap();
-                    sent_ish_msg.id = rumor_id.to_hex();
-                    sent_ish_msg.pending = false;
-
-                    // Update the frontend
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": pending_id_for_partial.as_ref(),
-                        "message": &sent_ish_msg,
-                        "chat_id": &receiver
-                    })).unwrap();
-
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), sent_ish_msg.clone(), receiver).await.unwrap();
-                    return Ok(true);
-                }
-            }
-        }
-        Err(_) => {
-            // Mark the message as a failure, bad message, bad!
-            let pending_id_for_final = Arc::clone(&pending_id);
+            // Mark the message as a success
+            let pending_id_for_success = Arc::clone(&pending_id);
             let mut state = STATE.lock().await;
             let chat = state.get_profile_mut(&receiver).unwrap();
-            let failed_msg = chat.get_message_mut(pending_id_for_final.as_ref()).unwrap();
-            failed_msg.failed = true;
-            return Ok(false);
+            let sent_msg = chat.get_message_mut(pending_id_for_success.as_ref()).unwrap();
+            sent_msg.id = rumor_id.to_hex();
+            sent_msg.pending = false;
+
+            // Update the frontend
+            handle.emit("message_update", serde_json::json!({
+                "old_id": pending_id_for_success.as_ref(),
+                "message": &sent_msg,
+                "chat_id": &receiver
+            })).unwrap();
+
+            // Save the message to our DB
+            let handle = TAURI_APP.get().unwrap();
+            db::save_message(handle.clone(), sent_msg.clone(), receiver).await.unwrap();
+            return Ok(true);
+        }
+        Err(_) => {
+            // This is an odd case; the message was sent to the receiver, but NOT ourselves
+            // We'll class it as sent, for now...
+            let pending_id_for_partial = Arc::clone(&pending_id);
+            let mut state = STATE.lock().await;
+            let chat = state.get_profile_mut(&receiver).unwrap();
+            let sent_ish_msg = chat.get_message_mut(pending_id_for_partial.as_ref()).unwrap();
+            sent_ish_msg.id = rumor_id.to_hex();
+            sent_ish_msg.pending = false;
+
+            // Update the frontend
+            handle.emit("message_update", serde_json::json!({
+                "old_id": pending_id_for_partial.as_ref(),
+                "message": &sent_ish_msg,
+                "chat_id": &receiver
+            })).unwrap();
+
+            // Save the message to our DB
+            let handle = TAURI_APP.get().unwrap();
+            db::save_message(handle.clone(), sent_ish_msg.clone(), receiver).await.unwrap();
+            return Ok(true);
         }
     }
 }

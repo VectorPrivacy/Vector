@@ -425,3 +425,13 @@ function levenshteinDistance(str1, str2) {
     
     return dp[len1][len2];
 }
+
+/**
+ * Pauses execution for a specified amount of time.
+ * 
+ * @param {number} ms - The number of milliseconds to sleep
+ * @returns {Promise<void>} A promise that resolves after the specified delay
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}

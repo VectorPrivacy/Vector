@@ -159,17 +159,16 @@
       </div>
 
       <div id="settings" style="display: none;">
-        <h2 class="settings-title">Choose your Theme</h2>
+        <h2 style="margin-top: 40px">Choose your Theme</h2>
         <select id="theme-select">
           <option value="vector">Vector</option>
           <option value="chatstr">Chatstr</option>
         </select>
 
-        <hr class="divider settings-divider">
-
         <!-- Voice Settings Section -->
-        <div id="settings-voice" class="settings-section settings-section-voice" style="display: none;">
-        <h2 class="settings-title">Voice Settings</h2>
+        <div id="settings-voice" class="settings-section" style="display: none;">
+        <hr class="divider settings-divider">
+        <h2>Voice Settings</h2>
 
          <div class="form-group">
           <label class="toggle-container">
@@ -210,8 +209,17 @@
           <div class="progress-pulse"></div>
           </div>
         </div>
-        <hr class="divider settings-divider">
       </div>
+
+        <!-- Network Settings Section -->
+        <div id="settings-network" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Network</h2>
+          <div id="network-list" class="network-list">
+            <!-- Relay list will be dynamically populated here -->
+          </div>
+          <hr class="divider settings-divider">
+        </div>
 
         <h2 class="danger-title">Dangerzone</h2>
         <button id="logout-btn" class="logout-btn">Logout</button>

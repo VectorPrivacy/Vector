@@ -708,6 +708,8 @@ async function warmupUploadServers() {
     // This simple function continually polls Vector's NIP-96 servers until configs are cached, for faster file uploads later
     while (true) {
         if (await invoke('warmup_nip96_servers')) break;
+        // If we reach here, this warmup attempt failed: sleep for a bit and try again soon
+        await sleep(5000);
     }
 }
 
@@ -1022,12 +1024,63 @@ async function setupRustListeners() {
         // Enable or Disable our notification badge Overlay Icon
         await getCurrentWindow().setOverlayIcon(evt.payload.enable ? "./icons/icon_badge_notification.png" : undefined);
     });
+
+    // Listen for relay status changes
+    await listen('relay_status_change', (evt) => {
+        // Update the relay status in the network list
+        const relayItem = document.querySelector(`[data-relay-url="${evt.payload.url}"]`);
+        if (relayItem) {
+            const statusElement = relayItem.querySelector('.relay-status');
+            if (statusElement) {
+                // Remove all status classes
+                statusElement.classList.remove('connected', 'connecting', 'disconnected', 'pending', 'initialized', 'terminated', 'banned');
+                // Add the new status class
+                statusElement.classList.add(evt.payload.status);
+                // Update the text
+                statusElement.textContent = evt.payload.status;
+            }
+        }
+    });
 }
 
 /**
  * A flag that indicates when Vector is still in it's initiation sequence
  */
 let fInit = true;
+
+/**
+ * Renders the relay list in the Settings Network section
+ */
+async function renderRelayList() {
+    try {
+        const relays = await invoke('get_relays');
+        const networkList = document.getElementById('network-list');
+        
+        // Clear existing content
+        networkList.innerHTML = '';
+        
+        // Create relay items
+        relays.forEach(relay => {
+            const relayItem = document.createElement('div');
+            relayItem.className = 'relay-item';
+            relayItem.setAttribute('data-relay-url', relay.url);
+            
+            const relayUrl = document.createElement('span');
+            relayUrl.className = 'relay-url';
+            relayUrl.textContent = relay.url;
+            
+            const relayStatus = document.createElement('span');
+            relayStatus.className = `relay-status ${relay.status}`;
+            relayStatus.textContent = relay.status;
+            
+            relayItem.appendChild(relayUrl);
+            relayItem.appendChild(relayStatus);
+            networkList.appendChild(relayItem);
+        });
+    } catch (error) {
+        console.error('Failed to fetch relays:', error);
+    }
+}
 
 /**
  * Login to the Nostr network
@@ -1136,6 +1189,12 @@ async function login() {
 
                 // Setup our Unread Counters
                 await invoke("update_unread_counter");
+
+                // Monitor relay connections
+                invoke("monitor_relay_connections");
+
+                // Render the initial relay list
+                renderRelayList();
             }, { once: true });
         });
 
