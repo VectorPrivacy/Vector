@@ -416,6 +416,14 @@ body {
   background-color: #39FF14;
 }
 
+.icon-plus-circle {
+  mask-image: url("./icons/plus-circle.svg");
+  -webkit-mask-image: url("./icons/plus-circle.svg");
+  width: 18px;
+  height: 18px;
+  background-color: #39FF14;
+}
+
 .icon-copy {
   mask-image: url("./icons/copy.svg");
   -webkit-mask-image: url("./icons/copy.svg");
