@@ -397,7 +397,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 Ok(())
             });
 
-            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback).await {
+            // Upload the file with both a Progress Emitter and multiple re-try attempts in case of connection instability
+            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -461,11 +462,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
     // Send message to the real receiver with retry logic
     let mut send_attempts = 0;
-    const MAX_ATTEMPTS: u32 = 6;
-    const RETRY_DELAY_MS: u64 = 10000; // 10 seconds
-    
+    const MAX_ATTEMPTS: u32 = 12;
+    const RETRY_DELAY_MS: u64 = 5; // 5 seconds
+
     let mut final_output = None;
-    
+
     while send_attempts < MAX_ATTEMPTS {
         send_attempts += 1;
         

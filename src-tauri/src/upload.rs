@@ -15,7 +15,14 @@ use std::sync::{Arc, Mutex};
 /// Makes a reqwest client
 fn make_client(proxy: Option<SocketAddr>) -> Result<Client, Error> {
     let client: Client = {
-        let mut builder = Client::builder();
+        let mut builder = Client::builder()
+            // Set connection timeout to 5 seconds - this only applies to initial connection
+            .connect_timeout(std::time::Duration::from_secs(5))
+            // No read timeout - we'll rely on stall detection instead
+            // This allows large files to upload without timing out
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(2);
+            
         if let Some(proxy) = proxy {
             let proxy = format!("socks5h://{proxy}");
             use reqwest::Proxy;
@@ -94,6 +101,10 @@ pub type ProgressCallback = Box<dyn Fn(Option<u8>, Option<u64>) -> Result<(), St
 ///
 /// This function extends the standard NIP-96 upload_data function by adding progress reporting
 /// via a callback function that is called periodically during the upload process.
+///
+/// # Retry Parameters
+/// - `retry_count`: Optional number of retry attempts (default: 0)
+/// - `retry_spacing`: Optional delay between retry attempts (default: 1s)
 pub async fn upload_data_with_progress<T>(
     signer: &T,
     desc: &ServerConfig,
@@ -101,6 +112,52 @@ pub async fn upload_data_with_progress<T>(
     mime_type: Option<&str>,
     proxy: Option<SocketAddr>,
     progress_callback: ProgressCallback,
+    retry_count: Option<u32>,
+    retry_spacing: Option<std::time::Duration>,
+) -> Result<Url, Error>
+where
+    T: NostrSigner,
+{
+    let retry_count = retry_count.unwrap_or(0);
+    let retry_spacing = retry_spacing.unwrap_or(std::time::Duration::from_secs(1));
+    
+    let mut last_error = None;
+    
+    for attempt in 0..=retry_count {
+        // Log retry attempt if not the first attempt
+        if attempt > 0 {
+            // Sleep before retry
+            tokio::time::sleep(retry_spacing).await;
+        }
+        
+        match upload_attempt(
+            signer,
+            desc,
+            file_data.clone(),
+            mime_type,
+            proxy,
+            &progress_callback,
+        ).await {
+            Ok(url) => return Ok(url),
+            Err(e) => {
+                last_error = Some(e);
+                // Continue to next retry attempt
+            }
+        }
+    }
+    
+    // All attempts failed, return the last error
+    Err(last_error.unwrap_or_else(|| Error::UploadError("No upload attempts were made".to_string())))
+}
+
+/// Internal function that performs a single upload attempt
+async fn upload_attempt<T>(
+    signer: &T,
+    desc: &ServerConfig,
+    file_data: Vec<u8>,
+    mime_type: Option<&str>,
+    proxy: Option<SocketAddr>,
+    progress_callback: &ProgressCallback,
 ) -> Result<Url, Error>
 where
     T: NostrSigner,
@@ -149,6 +206,11 @@ where
     let mut last_percentage = 0;
     let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
     
+    // Track stalled uploads
+    let mut last_bytes_sent = 0u64;
+    let mut stall_counter = 0;
+    const STALL_THRESHOLD: u32 = 50; // 5 seconds (50 * 100ms) without progress
+    
     // Use tokio::select to concurrently wait for the response and report progress
     let response = loop {
         tokio::select! {
@@ -164,6 +226,18 @@ where
                 } else {
                     0
                 };
+                
+                // Check if upload is stalled
+                if current_bytes == last_bytes_sent && percentage < 100 && percentage > 0 {
+                    stall_counter += 1;
+                    if stall_counter >= STALL_THRESHOLD {
+                        return Err(Error::UploadError("Upload stalled - no progress detected".to_string()));
+                    }
+                } else {
+                    // Progress detected, reset stall counter
+                    stall_counter = 0;
+                    last_bytes_sent = current_bytes;
+                }
                 
                 // Only report when percentage changes to reduce events
                 if percentage > last_percentage {
