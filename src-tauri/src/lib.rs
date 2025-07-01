@@ -1524,13 +1524,33 @@ fn show_notification(title: String, content: String) {
         .is_focused()
         .unwrap()
     {
-        handle
-            .notification()
-            .builder()
-            .title(title)
-            .body(content)
-            .show()
-            .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
+        #[cfg(target_os = "android")]
+        {
+            handle
+                .notification()
+                .builder()
+                .title(title)
+                .body(&content)
+                .large_body(&content)
+                // Android-specific notification extensions
+                .icon("ic_notification")
+                .summary("Private Message")
+                .large_icon("ic_large_icon")
+                .show()
+                .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
+        }
+        
+        #[cfg(not(target_os = "android"))]
+        {
+            handle
+                .notification()
+                .builder()
+                .title(title)
+                .body(&content)
+                .large_body(&content)
+                .show()
+                .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
+        }
     }
 }
 
