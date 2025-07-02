@@ -419,8 +419,15 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
         meta = meta.lud16(&profile.lud16);
     }
 
+    // Serialize the metadata to JSON for the event content
+    let metadata_json = serde_json::to_string(&meta).unwrap();
+
+    // Create the metadata event with the Vector tag
+    let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
+        .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
+
     // Broadcast the profile update
-    match client.set_metadata(&meta).await {
+    match client.send_event_builder(metadata_event).await {
         Ok(_) => {
             // Apply our Metadata to our Profile
             let profile_mutable = state
