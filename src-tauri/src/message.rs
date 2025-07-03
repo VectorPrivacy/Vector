@@ -168,7 +168,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         content,
         replied_to,
         preview_metadata: None,
-        at: current_time.as_secs(),
+        at: current_time.as_millis() as u64,
         attachments: Vec::new(),
         reactions: Vec::new(),
         pending: true,
@@ -455,6 +455,18 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             [msg.replied_to, String::from(""), String::from("reply")],
         ));
     }
+
+    // Get fresh timestamp with milliseconds right before giftwrapping
+    let final_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let milliseconds = final_time.as_millis() % 1000;
+
+    // Add millisecond precision tag for accurate message ordering
+    rumor = rumor.tag(Tag::custom(
+        TagKind::custom("ms"),
+        [milliseconds.to_string()],
+    ));
 
     // Build the rumor with our key (unsigned)
     let built_rumor = rumor.build(my_public_key);

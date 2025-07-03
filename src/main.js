@@ -566,12 +566,12 @@ function renderContact(chat) {
         }
     }
     
-    if (cLastContactMsg && cLastContactMsg.at * 1000 > Date.now() - 60000 * 5) {
+    if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
         // set the divStatusIcon .backgroundColor to green (online)
         divStatusIcon.style.backgroundColor = '#59fcb3';
         divAvatarContainer.appendChild(divStatusIcon);
     }
-    else if (cLastContactMsg && cLastContactMsg.at * 1000 > Date.now() - 60000 * 30) {
+    else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
         // set to orange (away)
         divStatusIcon.style.backgroundColor = '#fce459';
         divAvatarContainer.appendChild(divStatusIcon);
@@ -617,7 +617,7 @@ function renderContact(chat) {
     // Display the "last message" time
     const pTimeAgo = document.createElement('p');
     pTimeAgo.classList.add('chatlist-contact-timestamp');
-    pTimeAgo.textContent = timeAgo(cLastMsg.at * 1000);
+    pTimeAgo.textContent = timeAgo(cLastMsg.at);
     if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
     // Apply 'Unread' final styling
     if (nUnread) pTimeAgo.style.color = '#59fcb3';
@@ -1690,7 +1690,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
                     nLastMsgTime = newestMsg.at;
                 }
 
-                if (msg.at - nLastMsgTime > 600) {
+                if (msg.at - nLastMsgTime > 600 * 1000) {
                     insertTimestamp(msg.at, domChatMessages);
                     nLastMsgTime = msg.at;
                 }
@@ -1759,7 +1759,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 
                 if (currentNode.message.at <= msg.at && msg.at <= nextNode.message.at) {
                     // Add timestamp if needed
-                    if (msg.at - currentNode.message.at > 600) {
+                    if (msg.at - currentNode.message.at > 600 * 1000) {
                         const timestamp = insertTimestamp(msg.at);
                         domChatMessages.insertBefore(timestamp, nextNode.element);
                     }
@@ -1776,7 +1776,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             if (!inserted) {
                 // Check if we need a timestamp
                 const lastMsg = messageNodes[messageNodes.length - 1]?.message;
-                if (lastMsg && msg.at - lastMsg.at > 600) {
+                if (lastMsg && msg.at - lastMsg.at > 600 * 1000) {
                     insertTimestamp(msg.at, domChatMessages);
                 }
 
@@ -1825,7 +1825,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
     pTimestamp.classList.add('msg-inline-timestamp');
-    const messageDate = new Date(timestamp * 1000);
+    const messageDate = new Date(timestamp);
 
     // Render the time contextually
     if (isToday(messageDate)) {

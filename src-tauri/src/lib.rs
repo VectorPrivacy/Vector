@@ -950,13 +950,36 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     show_notification(display_name, rumor.content.clone());
                 }
 
+                // Extract milliseconds from custom tag if present
+                let ms_timestamp = match rumor.tags.find(TagKind::Custom(Cow::Borrowed("ms"))) {
+                    Some(ms_tag) => {
+                        // Get the ms value and append it to the timestamp
+                        if let Some(ms_str) = ms_tag.content() {
+                            if let Ok(ms_value) = ms_str.parse::<u64>() {
+                                // Validate that ms is between 0-999
+                                if ms_value <= 999 {
+                                    rumor.created_at.as_u64() * 1000 + ms_value
+                                } else {
+                                    // Invalid ms value, ignore it
+                                    rumor.created_at.as_u64() * 1000
+                                }
+                            } else {
+                                rumor.created_at.as_u64() * 1000
+                            }
+                        } else {
+                            rumor.created_at.as_u64() * 1000
+                        }
+                    }
+                    None => rumor.created_at.as_u64() * 1000
+                };
+
                 // Create the Message
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
                     content: rumor.content,
                     replied_to,
                     preview_metadata: None,
-                    at: rumor.created_at.as_u64(),
+                    at: ms_timestamp,
                     attachments: Vec::new(),
                     reactions: Vec::new(),
                     mine: is_mine,
@@ -1256,13 +1279,36 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                 };
                 attachments.push(attachment);
 
+                // Extract milliseconds from custom tag if present (same as for text messages)
+                let ms_timestamp = match rumor.tags.find(TagKind::Custom(Cow::Borrowed("ms"))) {
+                    Some(ms_tag) => {
+                        // Get the ms value and append it to the timestamp
+                        if let Some(ms_str) = ms_tag.content() {
+                            if let Ok(ms_value) = ms_str.parse::<u64>() {
+                                // Validate that ms is between 0-999
+                                if ms_value <= 999 {
+                                    rumor.created_at.as_u64() * 1000 + ms_value
+                                } else {
+                                    // Invalid ms value, ignore it
+                                    rumor.created_at.as_u64() * 1000
+                                }
+                            } else {
+                                rumor.created_at.as_u64() * 1000
+                            }
+                        } else {
+                            rumor.created_at.as_u64() * 1000
+                        }
+                    }
+                    None => rumor.created_at.as_u64() * 1000
+                };
+
                 // Create the message
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
                     content: String::new(),
                     replied_to,
                     preview_metadata: None,
-                    at: rumor.created_at.as_u64(),
+                    at: ms_timestamp,
                     attachments,
                     reactions: Vec::new(),
                     mine: is_mine,
