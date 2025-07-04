@@ -275,6 +275,25 @@ async fn fetch_messages<R: Runtime>(
                 }
             }
 
+            // Check if we need to migrate timestamps from seconds to milliseconds
+            // Drop state before migration
+            drop(state);
+            
+            // Run timestamp migration
+            match migrate_unix_to_millisecond_timestamps(&handle).await {
+                Ok(count) => {
+                    if count > 0 {
+                        println!("Migrated {} message timestamps", count);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to migrate timestamps: {}", e);
+                }
+            }
+            
+            // Re-acquire state after timestamp migration
+            state = STATE.lock().await;
+            
             // Check if we have pending migrations to apply to the database
             let has_pending_migrations = PENDING_MIGRATION.get().map(|m| !m.is_empty()).unwrap_or(false);
             
@@ -694,6 +713,67 @@ async fn update_database_attachment_paths<R: Runtime>(
     
     if updated_count > 0 {
         println!("Successfully updated {} attachment references in database", updated_count);
+    }
+    
+    Ok(updated_count)
+}
+
+/// Migrates Unix timestamps (in seconds) to millisecond timestamps
+/// Returns the number of messages that were updated
+async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
+    handle: &AppHandle<R>
+) -> Result<u32, Box<dyn std::error::Error>> {
+    // Get all messages from database
+    let messages = db::get_all_messages(handle).await?;
+    
+    // Define threshold - timestamps below this are likely in seconds
+    // Using year 2000 (946684800000 ms) as a reasonable cutoff
+    const MILLISECOND_THRESHOLD: u64 = 946684800000;
+    
+    // Collect messages that need updating
+    let mut messages_to_update: Vec<(Message, String)> = Vec::new();
+    
+    for (mut message, contact_id) in messages {
+        // Check if timestamp appears to be in seconds (too small to be milliseconds)
+        if message.at < MILLISECOND_THRESHOLD {
+            // Convert seconds to milliseconds
+            let old_timestamp = message.at;
+            message.at = old_timestamp * 1000;
+            
+            println!("Migrating timestamp for message {}: {} -> {}", message.id, old_timestamp, message.at);
+            
+            // Add to batch
+            messages_to_update.push((message, contact_id));
+        }
+    }
+    
+    let updated_count = messages_to_update.len() as u32;
+    
+    if !messages_to_update.is_empty() {
+        // Emit progress for saving
+        handle.emit("progress_operation", serde_json::json!({
+            "type": "progress",
+            "current": 0,
+            "total": updated_count,
+            "message": "Updating timestamps"
+        })).unwrap();
+        
+        // Save all updated messages in batches
+        const BATCH_SIZE: usize = 250;
+        for (i, chunk) in messages_to_update.chunks(BATCH_SIZE).enumerate() {
+            db::save_messages(handle, chunk.to_vec()).await?;
+            
+            // Emit progress for batch save
+            let processed = ((i + 1) * BATCH_SIZE).min(updated_count as usize);
+            handle.emit("progress_operation", serde_json::json!({
+                "type": "progress",
+                "current": processed,
+                "total": updated_count,
+                "message": "Updating timestamps"
+            })).unwrap();
+        }
+        
+        println!("Successfully migrated {} message timestamps from seconds to milliseconds", updated_count);
     }
     
     Ok(updated_count)

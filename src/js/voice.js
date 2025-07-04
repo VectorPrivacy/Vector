@@ -731,7 +731,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
         // Auto-transcribe if enabled and this is a recent received message
         if (window.voiceSettings?.autoTranscribe && 
             !msg.mine && 
-            msg.at > (Date.now() / 1000 - 60)) {
+            msg.at > (Date.now() - 60)) {
             
             const selectedModel = window.voiceSettings?.selectedModel || 'small';
             const currentModel = window.voiceSettings.models?.find(m => m.model.name === selectedModel);

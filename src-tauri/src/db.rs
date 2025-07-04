@@ -423,6 +423,47 @@ pub async fn save_message<R: Runtime>(
     Ok(())
 }
 
+/// Save multiple messages in a single batch operation
+/// This is much more efficient than calling save_message multiple times
+pub async fn save_messages<R: Runtime>(
+    handle: &AppHandle<R>, 
+    messages_batch: Vec<(Message, String)> // Vec of (message, contact_id)
+) -> Result<(), String> {
+    if messages_batch.is_empty() {
+        return Ok(());
+    }
+    
+    let store = get_store(handle);
+    
+    // Get the current messages map (or create empty one)
+    let mut messages_map: HashMap<String, String> = match store.get("messages") {
+        Some(value) => serde_json::from_value(value.clone())
+            .unwrap_or_default(),
+        None => HashMap::new(),
+    };
+    
+    // Process all messages in the batch
+    for (message, contact_id) in messages_batch {
+        // 1. Convert to slim message with contact info
+        let slim_message = SlimMessage::from((&message, contact_id));
+        
+        // 2. Serialize to JSON
+        let json = serde_json::to_string(&slim_message)
+            .map_err(|e| format!("Failed to serialize message: {}", e))?;
+        
+        // 3. Encrypt the JSON
+        let encrypted = internal_encrypt(json, None).await;
+        
+        // Add to the map
+        messages_map.insert(message.id.clone(), encrypted);
+    }
+    
+    // Save the entire map back to store in one operation
+    store.set("messages".to_string(), serde_json::json!(messages_map));
+    
+    Ok(())
+}
+
 pub async fn get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(Message, String)>, String> {
     let store = get_store(handle);
     
