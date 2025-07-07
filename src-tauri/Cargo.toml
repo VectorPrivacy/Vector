@@ -7,6 +7,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["whisper"]
+whisper = ["dep:whisper-rs"]
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -58,14 +62,14 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 # Whisper (with cross-platform acceleration features - excluded on Android)
 [target.'cfg(all(not(target_os = "android"), target_os = "macos"))'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["metal"] }
+whisper-rs = { version = "0.13.2", features = ["metal"], optional = true }
 
 [target.'cfg(all(not(target_os = "android"), windows))'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["vulkan"] }
+whisper-rs = { version = "0.13.2", features = ["vulkan"], optional = true }
 
 [target.'cfg(all(not(target_os = "android"), target_os = "linux"))'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["vulkan"] }
+whisper-rs = { version = "0.13.2", features = ["vulkan"], optional = true }
 
 # For other platforms (not Android, macOS, Windows, or Linux)
 [target.'cfg(all(not(target_os = "android"), not(target_os = "macos"), not(windows), not(target_os = "linux")))'.dependencies]
-whisper-rs = "0.13.2"
+whisper-rs = { version = "0.13.2", optional = true }

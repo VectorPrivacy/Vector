@@ -38,7 +38,7 @@ cd ~/apps/Vector && yarn add -D @tauri-apps/cli && yarn install
 ```
 
 ```
-npm run tauri build
+npm run build
 ```
 
 ### Upgrading Vector
@@ -52,7 +52,7 @@ cd ~/apps/Vector && git pull
 Compiling is only necessary if files were updated when running the previous command:
 
 ```
-npm run tauri build
+npm run build
 ```
 
 ### Vector Executables
@@ -62,3 +62,37 @@ The compiled Vector app can be found in the release folder located here:
 ```
 cd ~/apps/Vector/src-tauri/target/release/
 ```
+
+---
+
+# Bare Builds
+
+Vector supports "bare builds" - a minimal compilation mode that excludes optional features for enhanced security and performance, while not the recommended experience for most users, Vector bare builds are hardened, faster, and lighter; at the expense of more "glamorous" and complex features.
+
+### Why Use Bare Builds?
+
+- **Reduced Attack Surface**: Fewer dependencies & less code means fewer potential vulnerabilities.
+- **Resource Efficiency**: Lower memory and CPU usage, with faster boot time.
+- **True Minimalism**: A powerful app, with only the core necessities.
+
+### Building Vector Bare
+
+```bash
+# Development bare build
+npm run dev:bare
+
+# Production bare build
+npm run build:bare
+```
+
+### What's Excluded?
+
+Currently, bare builds exclude:
+- Vector Voice AI (Whisper and its GPU ML dependencies, like Vulkan).
+
+### Standard vs Bare
+
+- **Standard Build**: Full suite of features, maximum utility and range of function.
+- **Bare Build**: Core functionality only, maximum security and efficiency.
+
+The bare build is perfect for users who prioritize security, privacy, and performance over additional features like Local AI and flashy utility features.

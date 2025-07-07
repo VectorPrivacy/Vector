@@ -4,7 +4,15 @@
   "version": "0.1.7",
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:dev:bare": "tauri dev -- --no-default-features",
+    "tauri:build:bare": "tauri build -- --no-default-features",
+    "dev": "npm run tauri:dev",
+    "build": "npm run tauri:build",
+    "dev:bare": "npm run tauri:dev:bare",
+    "build:bare": "npm run tauri:build:bare"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.4.1"

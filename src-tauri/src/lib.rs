@@ -2099,7 +2099,7 @@ async fn get_platform_features() -> PlatformFeatures {
     };
 
     PlatformFeatures {
-        transcription: !cfg!(target_os = "android"),
+        transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
         os: os.to_string(),
     }
 }
@@ -2147,7 +2147,7 @@ async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
     unread_count
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), feature = "whisper"))]
 #[tauri::command]
 async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_name: String, translate: bool) -> Result<whisper::TranscriptionResult, String> {
     // Convert the file path to a Path
@@ -2171,13 +2171,13 @@ async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_n
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", not(feature = "whisper")))]
 #[tauri::command]
 async fn transcribe<R: Runtime>(_handle: AppHandle<R>, _file_path: String, _model_name: String, _translate: bool) -> Result<String, String> {
-    Err("Whisper transcription is not supported on Android".to_string())
+    Err("Whisper transcription is not supported on this platform".to_string())
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), feature = "whisper"))]
 #[tauri::command]
 async fn download_whisper_model<R: Runtime>(handle: AppHandle<R>, model_name: String) -> Result<String, String> {
     // Download (or simply return the cached path of) a Whisper Model
@@ -2187,10 +2187,10 @@ async fn download_whisper_model<R: Runtime>(handle: AppHandle<R>, model_name: St
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", not(feature = "whisper")))]
 #[tauri::command]
 async fn download_whisper_model<R: Runtime>(_handle: AppHandle<R>, _model_name: String) -> Result<String, String> {
-    Err("Whisper model download is not supported on Android".to_string())
+    Err("Whisper model download is not supported on this platform".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2358,13 +2358,11 @@ pub fn run() {
             logout,
             create_account,
             get_platform_features,
-            #[cfg(not(target_os = "android"))]
             transcribe,
-            #[cfg(not(target_os = "android"))]
             download_whisper_model,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::list_models
         ])
         .run(tauri::generate_context!())
