@@ -29,7 +29,7 @@ mod android {
     pub mod utils;
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), feature = "whisper"))]
 mod whisper;
 
 mod message;
