@@ -54,7 +54,7 @@ static PUBLIC_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 /// # Trusted Private NIP-96 Server
 ///
 /// A temporary hardcoded NIP-96 server, handling file uploads for encrypted files (in-chat)
-static TRUSTED_PRIVATE_NIP96: &str = "https://medea-small.jskitty.cat";
+static TRUSTED_PRIVATE_NIP96: &str = "https://medea-1-swiss.vectorapp.io";
 static PRIVATE_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
 
 
