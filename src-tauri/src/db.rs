@@ -35,6 +35,7 @@ pub struct SlimProfile {
     nip05: String,
     last_read: String,
     status: Status,
+    muted: bool,
     // Omitting: messages, last_updated, typing_until, mine
 }
 
@@ -53,6 +54,7 @@ impl Default for SlimProfile {
             nip05: String::new(),
             last_read: String::new(),
             status: Status::new(),
+            muted: false,
         }
     }
 }
@@ -72,6 +74,7 @@ impl From<&Profile> for SlimProfile {
             nip05: profile.nip05.clone(),
             last_read: profile.last_read.clone(),
             status: profile.status.clone(),
+            muted: profile.muted,
         }
     }
 }
@@ -96,6 +99,7 @@ impl SlimProfile {
             last_updated: 0,      // Default value
             typing_until: 0,      // Default value
             mine: false,          // Default value
+            muted: self.muted,
         }
     }
 }

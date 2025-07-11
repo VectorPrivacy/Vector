@@ -29,6 +29,7 @@ pub struct Profile {
     pub last_updated: u64,
     pub typing_until: u64,
     pub mine: bool,
+    pub muted: bool,
 }
 
 impl Default for Profile {
@@ -56,6 +57,7 @@ impl Profile {
             last_updated: 0,
             typing_until: 0,
             mine: false,
+            muted: false,
         }
     }
 
@@ -568,4 +570,29 @@ pub async fn mark_as_read(npub: String) -> bool {
     }
     
     result
+}
+
+/// Toggles the muted status of a profile
+#[tauri::command]
+pub async fn toggle_muted(npub: String) -> bool {
+    let handle = TAURI_APP.get().unwrap();
+    let mut state = STATE.lock().await;
+
+    match state.get_profile_mut(&npub) {
+        Some(profile) => {
+            profile.muted = !profile.muted;
+
+            // Update the frontend
+            handle.emit("profile_muted", serde_json::json!({
+                "profile_id": &profile.id,
+                "value": &profile.muted
+            })).unwrap();
+
+            // Save to DB
+            db::set_profile(handle.clone(), profile.clone()).await.unwrap();
+
+            profile.muted
+        }
+        None => false
+    }
 }

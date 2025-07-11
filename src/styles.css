@@ -115,6 +115,14 @@
   mask-image: url("./icons/settings.svg");
 }
 
+.icon-volume-mute {
+  mask-image: url("./icons/volume-mute.svg");
+}
+
+.icon-volume-max {
+  mask-image: url("./icons/volume-max.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -373,6 +381,14 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+.profile-options {
+  display: flex;
+  justify-content: center;
+  height: 50px;
+  margin-top: 30px;
+  margin-bottom: 30px;
 }
 
 /* Profile npub Section */

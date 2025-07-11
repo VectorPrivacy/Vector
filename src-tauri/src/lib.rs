@@ -180,8 +180,8 @@ impl ChatState {
         let mut total_unread = 0;
          
         for profile in &self.profiles {
-            // Skip own profile (mine == true)
-            if profile.mine {
+            // Skip our own profile, as well as muted profiles
+            if profile.mine || profile.muted {
                 continue;
             }
             
@@ -1015,19 +1015,27 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Send an OS notification for incoming messages
                 if !is_mine && is_new {
-                    // Find the name of the sender, if we have it
-                    let display_name = match STATE.lock().await.get_profile(&contact) {
+                    // Find the name of the sender and check if muted
+                    let _ = match STATE.lock().await.get_profile(&contact) {
                         Some(profile) => {
-                            // We have a profile, just check for a name
-                            match profile.name.is_empty() {
-                                true => String::from("New Message"),
-                                false => profile.name.clone(),
+                            if profile.muted {
+                                false // Profile is muted, don't send notification
+                            } else {
+                                // Profile is not muted, send notification
+                                let display_name = match profile.name.is_empty() {
+                                    true => String::from("New Message"),
+                                    false => profile.name.clone(),
+                                };
+                                show_notification(display_name, rumor.content.clone());
+                                true
                             }
                         }
-                        // No profile
-                        None => String::from("New Message"),
+                        // No profile, send notification with default name
+                        None => {
+                            show_notification(String::from("New Message"), rumor.content.clone());
+                            true
+                        }
                     };
-                    show_notification(display_name, rumor.content.clone());
                 }
 
                 // Extract milliseconds from custom tag if present
@@ -1325,21 +1333,28 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Send an OS notification for incoming files
                 if !is_mine && is_new {
-                    // Find the name of the sender, if we have it
-                    let display_name = match STATE.lock().await.get_profile(&contact) {
+                    // Find the name of the sender and check if muted
+                    let _ = match STATE.lock().await.get_profile(&contact) {
                         Some(profile) => {
-                            // We have a profile, just check for a name
-                            match profile.name.is_empty() {
-                                true => String::from("New Message"),
-                                false => profile.name.clone(),
+                            if profile.muted {
+                                false // Profile is muted, don't send notification
+                            } else {
+                                // Profile is not muted, send notification
+                                let display_name = match profile.name.is_empty() {
+                                    true => String::from("New Message"),
+                                    false => profile.name.clone(),
+                                };
+                                // Create a "description" of the attachment file
+                                show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(extension));
+                                true
                             }
                         }
-                        // No profile
-                        None => String::from("New Message"),
+                        // No profile, send notification with default name
+                        None => {
+                            show_notification(String::from("New Message"), "Sent a ".to_string() + &get_file_type_description(extension));
+                            true
+                        }
                     };
-
-                    // Create a "description" of the attachment file
-                    show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(extension));
                 }
 
                 // Create an attachment
@@ -2334,6 +2349,7 @@ pub fn run() {
             profile::update_status,
             profile::upload_avatar,
             profile::mark_as_read,
+            profile::toggle_muted,
             message::message,
             message::paste_message,
             message::voice_message,

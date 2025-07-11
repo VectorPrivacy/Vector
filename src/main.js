@@ -33,9 +33,10 @@ let domProfileBanner = document.getElementById('profile-banner');
 let domProfileAvatar = document.getElementById('profile-avatar');
 const domProfileNameSecondary = document.getElementById('profile-secondary-name');
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
-const domProfileBadges = document.getElementById('profile-badge-list');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
+const domProfileOptions = document.getElementById('profile-option-list');
+const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileId = document.getElementById('profile-id');
 
 const domChats = document.getElementById('chats');
@@ -527,7 +528,7 @@ function renderChatlist() {
  */
 function renderContact(chat) {
     // Collect the Unread Message count for 'Unread' emphasis and badging
-    const nUnread = countUnreadMessages(chat);
+    const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
 
     // The Contact container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
@@ -881,6 +882,17 @@ async function setupRustListeners() {
         }
         // Render the Chat List
         renderChatlist();
+    });
+
+    await listen('profile_muted', (evt) => {
+        const cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
+        cProfile.muted = evt.payload.value;
+
+        // If this profile is Expanded, update the Mute UI
+        if (domProfileId.textContent === cProfile.id) {
+            domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
+            domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
+        }
     });
 
     // Listen for incoming messages
@@ -1354,8 +1366,11 @@ function renderProfileTab(cProfile) {
         }
     });
 
-    // If this is OUR profile: make the elements clickable
+    // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
+        // Hide Contact Options
+        domProfileOptions.style.display = 'none';
+
         // Show edit buttons and set their click handlers
         document.querySelector('.profile-avatar-edit').style.display = 'flex';
         document.querySelector('.profile-avatar-edit').onclick = askForAvatar;
@@ -1382,6 +1397,12 @@ function renderProfileTab(cProfile) {
         domProfileDescription.onclick = editProfileDescription;
         domProfileDescription.classList.add('btn');
     } else {
+        // Show Contact Options
+        domProfileOptions.style.display = '';
+
+        // Setup Mute option
+        domProfileOptionMute.onclick = () => invoke('toggle_muted', { npub: cProfile.id });
+
         // Hide edit buttons
         document.querySelector('.profile-avatar-edit').style.display = 'none';
         document.querySelector('.profile-banner-edit').style.display = 'none';
