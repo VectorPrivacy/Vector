@@ -85,7 +85,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
         domPopupCancelBtn.removeEventListener('click', onCancelClick);
         domPopup.style.display = 'none';
-        resolve(strInputPlaceholder ? '' : false);
+        resolve(false);
     };
 
     // Create a promise that resolves when either the confirm or cancel button was clicked

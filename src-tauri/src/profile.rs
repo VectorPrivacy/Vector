@@ -16,6 +16,7 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub display_name: String,
+    pub nickname: String,
     pub lud06: String,
     pub lud16: String,
     pub banner: String,
@@ -44,6 +45,7 @@ impl Profile {
             id: String::new(),
             name: String::new(),
             display_name: String::new(),
+            nickname: String::new(),
             lud06: String::new(),
             lud16: String::new(),
             banner: String::new(),
@@ -592,6 +594,28 @@ pub async fn toggle_muted(npub: String) -> bool {
             db::set_profile(handle.clone(), profile.clone()).await.unwrap();
 
             profile.muted
+        }
+        None => false
+    }
+}
+
+/// Sets a nickname for a profile
+#[tauri::command]
+pub async fn set_nickname(npub: String, nickname: String) -> bool {
+    let handle = TAURI_APP.get().unwrap();
+    let mut state = STATE.lock().await;
+
+    match state.get_profile_mut(&npub) {
+        Some(profile) => {
+            profile.nickname = nickname;
+
+            // Update the frontend
+            handle.emit("profile_update", &profile).unwrap();
+
+            // Save to DB
+            db::set_profile(handle.clone(), profile.clone()).await.unwrap();
+
+            true
         }
         None => false
     }

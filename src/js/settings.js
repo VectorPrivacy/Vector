@@ -538,7 +538,7 @@ async function askForBanner() {
  */
 async function askForStatus() {
     const strStatus = await popupConfirm('Status', 'Set a public status for everyone to see', false, 'Custom Status');
-    if (!strStatus) return;
+    if (strStatus === false) return;
 
     // Display the change immediately
     const cProfile = arrChats.find(a => a.mine);

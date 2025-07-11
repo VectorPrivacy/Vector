@@ -1022,9 +1022,12 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                 false // Profile is muted, don't send notification
                             } else {
                                 // Profile is not muted, send notification
-                                let display_name = match profile.name.is_empty() {
-                                    true => String::from("New Message"),
-                                    false => profile.name.clone(),
+                                let display_name = if !profile.nickname.is_empty() {
+                                    profile.nickname.clone()
+                                } else if !profile.name.is_empty() {
+                                    profile.name.clone()
+                                } else {
+                                    String::from("New Message")
                                 };
                                 show_notification(display_name, rumor.content.clone());
                                 true
@@ -1340,9 +1343,12 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                 false // Profile is muted, don't send notification
                             } else {
                                 // Profile is not muted, send notification
-                                let display_name = match profile.name.is_empty() {
-                                    true => String::from("New Message"),
-                                    false => profile.name.clone(),
+                                let display_name = if !profile.nickname.is_empty() {
+                                    profile.nickname.clone()
+                                } else if !profile.name.is_empty() {
+                                    profile.name.clone()
+                                } else {
+                                    String::from("New Message")
                                 };
                                 // Create a "description" of the attachment file
                                 show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(extension));
@@ -2350,6 +2356,7 @@ pub fn run() {
             profile::upload_avatar,
             profile::mark_as_read,
             profile::toggle_muted,
+            profile::set_nickname,
             message::message,
             message::paste_message,
             message::voice_message,
