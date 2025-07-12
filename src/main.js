@@ -1402,6 +1402,8 @@ function renderProfileTab(cProfile) {
         domProfileOptions.style.display = '';
 
         // Setup Mute option
+        domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
+        domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
         domProfileOptionMute.onclick = () => invoke('toggle_muted', { npub: cProfile.id });
 
         // Setup Nickname option
