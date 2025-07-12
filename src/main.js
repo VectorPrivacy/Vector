@@ -896,6 +896,16 @@ async function setupRustListeners() {
         }
     });
 
+    await listen('profile_nick_changed', (evt) => {
+        const cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
+        cProfile.nickname = evt.payload.value;
+
+        // If this profile is Expanded, update the UI
+        if (domProfileId.textContent === cProfile.id) {
+            renderProfileTab(cProfile);
+        }
+    });
+
     // Listen for incoming messages
     await listen('message_new', (evt) => {
         // Grab our profile index (a profile should be guaranteed before its first message event)

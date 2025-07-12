@@ -610,7 +610,10 @@ pub async fn set_nickname(npub: String, nickname: String) -> bool {
             profile.nickname = nickname;
 
             // Update the frontend
-            handle.emit("profile_update", &profile).unwrap();
+            handle.emit("profile_nick_changed", serde_json::json!({
+                "profile_id": &profile.id,
+                "value": &profile.nickname
+            })).unwrap();
 
             // Save to DB
             db::set_profile(handle.clone(), profile.clone()).await.unwrap();
