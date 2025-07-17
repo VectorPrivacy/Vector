@@ -3049,6 +3049,10 @@ window.addEventListener("DOMContentLoaded", async () => {
         try {
             const { public, private } = await invoke("login", { importKey: domLoginInput.value.trim() });
             strPubkey = public;
+
+            // Connect to Nostr
+            await invoke("connect");
+
             // Check if user has an existing account (has encrypted private key)
             if (await hasKey()) {
                 // Existing user - skip invite flow
