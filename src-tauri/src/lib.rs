@@ -5,6 +5,8 @@ use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WebviewUrl};
 use tauri_plugin_notification::NotificationExt;
+use rand::{thread_rng, Rng};
+use rand::distributions::Alphanumeric;
 
 mod crypto;
 
@@ -64,6 +66,14 @@ static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
 // TODO: REMOVE AFTER SEVERAL UPDATES - This static is only needed for the one-time migration from nonce-based to hash-based storage
 static PENDING_MIGRATION: OnceCell<std::collections::HashMap<String, (String, String)>> = OnceCell::new();
+
+#[derive(Clone)]
+struct PendingInviteAcceptance {
+    invite_code: String,
+    inviter_pubkey: PublicKey,
+}
+
+static PENDING_INVITE: OnceCell<PendingInviteAcceptance> = OnceCell::new();
 
 
 
@@ -887,6 +897,8 @@ async fn migrate_nonce_files_to_hash<R: Runtime>(handle: &AppHandle<R>) -> Resul
 /// Pre-fetch the configs from our preferred NIP-96 servers to speed up uploads
 #[tauri::command]
 async fn warmup_nip96_servers() -> bool {
+    use nostr_sdk::nips::nip96::get_server_config;
+    
     // Public Fileserver
     if PUBLIC_NIP96_CONFIG.get().is_none() {
         let _ = match get_server_config(Url::parse(TRUSTED_PUBLIC_NIP96).unwrap(), None).await {
@@ -2014,6 +2026,37 @@ async fn encrypt(input: String, password: Option<String>) -> String {
         _ => ()
     }
 
+    // Check if we have a pending invite acceptance to broadcast
+    if let Some(pending_invite) = PENDING_INVITE.get() {
+        // Get the Nostr client
+        if let Some(client) = NOSTR_CLIENT.get() {
+            // Clone the data we need before the async block
+            let invite_code = pending_invite.invite_code.clone();
+            let inviter_pubkey = pending_invite.inviter_pubkey.clone();
+            
+            // Spawn the broadcast in a separate task to avoid blocking
+            tokio::spawn(async move {
+                // Create and publish the acceptance event
+                let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
+                    .tag(Tag::custom(TagKind::Custom("l".into()), vec!["vector"]))
+                    .tag(Tag::custom(TagKind::Custom("d".into()), vec![invite_code.as_str()]))
+                    .tag(Tag::public_key(inviter_pubkey));
+                
+                // Build the event
+                match client.sign_event_builder(event_builder).await {
+                    Ok(event) => {
+                        // Send only to trusted relay
+                        match client.send_event_to([TRUSTED_RELAY], &event).await {
+                            Ok(_) => println!("Successfully broadcast invite acceptance to trusted relay"),
+                            Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to sign invite acceptance event: {}", e),
+                }
+            });
+        }
+    }
+
     res
 }
 
@@ -2214,6 +2257,199 @@ async fn download_whisper_model<R: Runtime>(_handle: AppHandle<R>, _model_name: 
     Err("Whisper model download is not supported on this platform".to_string())
 }
 
+/// Generate a random alphanumeric invite code
+fn generate_invite_code() -> String {
+    thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect::<String>()
+        .to_uppercase()
+}
+
+/// Generate or retrieve existing invite code for the current user
+#[tauri::command]
+async fn get_or_create_invite_code() -> Result<String, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
+    
+    // Check if we already have a stored invite code
+    if let Ok(Some(existing_code)) = db::get_invite_code(handle.clone()) {
+        return Ok(existing_code);
+    }
+    
+    // No local code found, check the network
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    
+    // Get our public key
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    
+    // Check if we've already published an invite on the network
+    let filter = Filter::new()
+        .author(my_public_key)
+        .kind(Kind::ApplicationSpecificData)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
+        .limit(100);
+    
+    let events = client
+        .fetch_events(filter, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Look for existing invite events
+    for event in events {
+        if event.content == "vector_invite" {
+            // Extract the r tag (invite code)
+            if let Some(r_tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
+                if let Some(code) = r_tag.content() {
+                    // Store it locally
+                    db::set_invite_code(handle.clone(), code.to_string())
+                        .map_err(|e| e.to_string())?;
+                    return Ok(code.to_string());
+                }
+            }
+        }
+    }
+    
+    // No existing invite found anywhere, generate a new one
+    let new_code = generate_invite_code();
+    
+    // Create and publish the invite event
+    let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite")
+        .tag(Tag::custom(TagKind::d(), vec!["vector"]))
+        .tag(Tag::custom(TagKind::Custom("r".into()), vec![new_code.as_str()]));
+    
+    // Build the event
+    let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
+    
+    // Send only to trusted relay
+    client.send_event_to([TRUSTED_RELAY], &event).await.map_err(|e| e.to_string())?;
+    
+    // Store locally
+    db::set_invite_code(handle.clone(), new_code.clone())
+        .map_err(|e| e.to_string())?;
+    
+    Ok(new_code)
+}
+
+/// Accept an invite code from another user (deferred until after encryption setup)
+#[tauri::command]
+async fn accept_invite_code(invite_code: String) -> Result<String, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    
+    // Validate invite code format (8 alphanumeric characters)
+    if invite_code.len() != 8 || !invite_code.chars().all(|c| c.is_alphanumeric()) {
+        return Err("Invalid invite code format".to_string());
+    }
+    
+    // Search for the invite event
+    let filter = Filter::new()
+        .kind(Kind::ApplicationSpecificData)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::R), &invite_code)
+        .limit(1);
+    
+    let events = client
+        .fetch_events(filter, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Find the invite event
+    let invite_event = events
+        .into_iter()
+        .find(|e| e.content == "vector_invite")
+        .ok_or("Invite code not found")?;
+    
+    // Get the inviter's public key
+    let inviter_pubkey = invite_event.pubkey;
+    let inviter_npub = inviter_pubkey.to_bech32().map_err(|e| e.to_string())?;
+    
+    // Get our public key
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    
+    // Check if we're trying to accept our own invite
+    if inviter_pubkey == my_public_key {
+        return Err("Cannot accept your own invite code".to_string());
+    }
+    
+    // Store the pending invite acceptance (will be broadcast after encryption setup)
+    let pending_invite = PendingInviteAcceptance {
+        invite_code: invite_code.clone(),
+        inviter_pubkey: inviter_pubkey.clone(),
+    };
+    
+    // Try to set the pending invite, ignore if already set
+    let _ = PENDING_INVITE.set(pending_invite);
+    
+    // Return the inviter's npub so the frontend can initiate a chat
+    Ok(inviter_npub)
+}
+
+/// Get the count of unique users who accepted invites from a given npub
+#[tauri::command]
+async fn get_invited_users(npub: String) -> Result<u32, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    
+    // Convert npub to PublicKey
+    let inviter_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
+    
+    // First, get the inviter's invite code from the trusted relay
+    let filter = Filter::new()
+        .author(inviter_pubkey)
+        .kind(Kind::ApplicationSpecificData)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
+        .limit(100);
+    
+    let events = client
+        .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Find the invite event and extract the invite code
+    let invite_code = events
+        .iter()
+        .find(|e| e.content == "vector_invite")
+        .and_then(|e| e.tags.find(TagKind::Custom(Cow::Borrowed("r"))))
+        .and_then(|tag| tag.content())
+        .ok_or("No invite code found for this user")?;
+    
+    // Now fetch all acceptance events for this invite code from the trusted relay
+    let acceptance_filter = Filter::new()
+        .kind(Kind::ApplicationSpecificData)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), invite_code)
+        .limit(1000); // Allow fetching many acceptances
+    
+    let acceptance_events = client
+        .fetch_events_from(vec![TRUSTED_RELAY], acceptance_filter, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Filter for acceptance events that reference our inviter and collect unique acceptors
+    let mut unique_acceptors = std::collections::HashSet::new();
+    
+    for event in acceptance_events {
+        if event.content == "vector_invite_accepted" {
+            // Check if this acceptance references our inviter
+            let references_inviter = event.tags
+                .iter()
+                .any(|tag| {
+                    if let Some(TagStandard::PublicKey { public_key, .. }) = tag.as_standardized() {
+                        *public_key == inviter_pubkey
+                    } else {
+                        false
+                    }
+                });
+            
+            if references_inviter {
+                unique_acceptors.insert(event.pubkey);
+            }
+        }
+    }
+    
+    Ok(unique_acceptors.len() as u32)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -2383,6 +2619,11 @@ pub fn run() {
             get_platform_features,
             transcribe,
             download_whisper_model,
+            get_or_create_invite_code,
+            accept_invite_code,
+            get_invited_users,
+            db::get_invite_code,
+            db::set_invite_code,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

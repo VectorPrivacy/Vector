@@ -55,6 +55,10 @@
   mask-image: url("./icons/file-search.svg");
 }
 
+.icon-gift {
+  mask-image: url("./icons/gift.svg");
+}
+
 .icon-info {
   mask-image: url("./icons/info.svg");
 }
@@ -193,23 +197,29 @@ body {
 }
 
 .popup-container {
-  z-index: 1001;
+  z-index: 9999;
   width: 100%;
   height: 100%;
   display: flex;
   justify-content: center;
+  position: fixed;
+  top: 0;
+  left: 0;
+  pointer-events: none;
 }
 
 .popup {
-  position: absolute;
-  z-index: 100;
+  position: fixed;
+  z-index: 10000;
   /* Too many weird WebKit filter issues - disabling and going solid for now */
   /* backdrop-filter: blur(10px); */
   border-style: solid;
   border-radius: 8px;
   padding: 30px;
   border-width: 1px;
-  margin-top: 30vh;
+  top: 50%;
+  transform: translate(0%, -50%);
+  pointer-events: auto;
 }
 
 .text-gradient {
@@ -342,12 +352,6 @@ body {
   object-position: center;
 }
 
-/* Main Profile Content Area */
-.profile-content {
-  padding: 0 20px 20px;
-  text-align: center;
-}
-
 .profile-description-editor {
   resize: none;
   background-color: transparent;
@@ -474,10 +478,27 @@ body {
   background-color: var(--icon-color-primary);
 }
 
+.icon-vector-check {
+  mask-image: url("./icons/vector-check.svg");
+  -webkit-mask-image: url("./icons/vector-check.svg");
+  width: 16px;
+  height: 16px;
+  background-color: var(--icon-color-primary);
+}
+
+.icon-vector-badge {
+  mask-image: url("./icons/vector_badge_placeholder.svg");
+  -webkit-mask-image: url("./icons/vector_badge_placeholder.svg");
+  width: 16px;
+  height: 16px;
+  background-color: var(--icon-color-primary);
+}
+
 .icon-edit,
 .icon-plus-circle,
 .icon-copy,
-.icon-check {
+.icon-check,
+.icon-vector-check {
   background-color: var(--icon-color-primary);
 }
 
@@ -494,9 +515,12 @@ body {
 }
 
 .account .status {
+  width: fit-content;
   font-size: smaller;
   margin: 0;
   margin-top: 5px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .account .status .emoji,
@@ -625,7 +649,7 @@ body {
   height: 12px;
   /* Use "background-color" to explicitly set the Status Icon color */
   border-radius: 100%;
-  border-width: 2px;
+  border-width: 4px;
   border-style: solid;
   border-color: black;
 }
@@ -698,6 +722,7 @@ body {
   margin-bottom: 2px;
   display: block;
   width: 60%;
+  min-height: 25px;
   margin-left: auto;
   margin-right: auto;
 }
@@ -1700,10 +1725,13 @@ select:disabled:hover {
 
 .danger-title {
   color: #ff2ea9;
+  margin-top: 0px;
 }
 
 .logout-btn {
   backdrop-filter: none;
+  border-color: #ff2ea9;
+  background-color: #161616;
 }
 
 .navbar {
@@ -1786,7 +1814,11 @@ select:disabled:hover {
 
 .login-btn {
   width: 50px;
-  margin-right: 15px;
+  height: 50px;
+  background-color: transparent;
+  padding: 3px;
+  margin: 0;
+  margin-right: 5px;
 }
 
 .login-encrypt-container {
@@ -1810,6 +1842,134 @@ select:disabled:hover {
   margin-left: 8px;
 }
 
+/* Login Invite Styles */
+.login-invite-container {
+  position: absolute;
+  width: 100%;
+  bottom: 0px;
+}
+
+.login-invite-header {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.login-invite-icon {
+  width: 35px;
+  height: 35px;
+  margin-right: 10px;
+}
+
+.login-invite-title {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: 0.5px;
+}
+
+.login-invite-description {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 14px;
+  margin-bottom: 30px;
+  padding: 0 20px;
+}
+
+.login-skip-btn {
+  background: transparent;
+  border: 1px solid rgba(89, 252, 179, 0.3);
+  color: rgba(255, 255, 255, 0.7);
+  padding: 10px 20px;
+  margin-top: 20px;
+  margin-bottom: 20px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.login-skip-btn:hover {
+  border-color: rgba(89, 252, 179, 0.6);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Login Welcome Styles */
+.login-welcome-container {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #060606;
+  animation: fadeInWithoutTransform 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+.login-welcome-content {
+  text-align: center;
+  padding: 40px;
+  max-width: 500px;
+  animation: welcomeContentSlide 0.8s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+@keyframes welcomeContentSlide {
+  0% { 
+    opacity: 0; 
+    transform: translateY(30px) scale(0.95); 
+  }
+  100% { 
+    opacity: 1; 
+    transform: translateY(0) scale(1); 
+  }
+}
+
+.login-welcome-icon {
+  width: 111px;
+  height: 111px;
+  margin: 0 auto 30px;
+  display: block;
+  position: relative;
+  background-color: #59fcb3;
+  animation: checkPulse 2s ease-in-out infinite;
+}
+
+@keyframes checkPulse {
+  0%, 100% { 
+    transform: scale(1); 
+    box-shadow: 0 0 0 0 rgba(89, 252, 179, 0.4);
+  }
+  50% { 
+    transform: scale(1.05); 
+    box-shadow: 0 0 0 20px rgba(89, 252, 179, 0);
+  }
+}
+
+.login-welcome-title {
+  font-size: 36px;
+  font-weight: 600;
+  margin: 0 0 20px 0;
+  color: #59fcb3;
+  letter-spacing: 1px;
+}
+
+.login-welcome-subtitle {
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0 0 40px 0;
+  line-height: 1.5;
+}
+
+.login-welcome-footer {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0;
+  animation: loadingPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes loadingPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
 .scroll-return-btn {
   border-radius: 100%;
   height: 45px;
@@ -1823,8 +1983,8 @@ select:disabled:hover {
 .chat-bookmarks-btn {
   align-items: center;
   position: absolute;
-  top: 15px;
-  right: 15px;
+  top: 28px;
+  right: 23px;
 }
 
 .corner-float-bottom {
@@ -2198,4 +2358,172 @@ select:disabled:hover {
         padding: 0;
         margin: 0;
     }
+}
+
+/* Invites Tab Styles */
+#invites {
+  overflow-y: auto;
+  height: -webkit-fill-available;
+  overscroll-behavior: none;
+  animation: fadeInWithoutTransform 0.4s ease-out;
+}
+
+.invites-container {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.invites-header {
+  text-align: center;
+  margin-bottom: 20px;
+  margin-top: 20px;
+}
+
+.invites-main-icon {
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 20px;
+  display: block;
+  position: relative;
+  opacity: 0.9;
+  background-color: #59fcb3;
+}
+
+.invites-title {
+  font-size: 32px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 1px;
+  color: #59fcb3;
+}
+
+.invites-content {
+  text-align: center;
+}
+
+.invites-description {
+  font-size: 16px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 28px;
+}
+
+.invite-code-section {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 16px;
+  padding: 30px;
+  border: 1px solid rgba(89, 252, 179, 0.2);
+}
+
+.invite-code-label {
+  font-size: 18px;
+  margin-bottom: 20px;
+  color: rgba(255, 255, 255, 0.9);
+  margin-top: 0px;
+}
+
+.invite-code-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 15px;
+  margin-bottom: 15px;
+}
+
+.invite-code {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: #59fcb3;
+  font-family: 'Courier New', monospace;
+  text-transform: uppercase;
+  user-select: all;
+}
+
+.invite-code-copy-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  border: none;
+  flex-shrink: 0;
+}
+
+.invite-code-copy-btn:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 20px rgba(89, 252, 179, 0.5);
+}
+
+.invite-code-copy-btn .icon {
+  width: 25px;
+  height: 25px;
+  background-color: #000;
+}
+
+.invite-code-twitter-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 24px;
+  color: white;
+  text-decoration: none;
+  border-radius: 25px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  font-size: 16px;
+}
+
+.invite-code-twitter-link:hover {
+  transform: scale(1.05);
+  color: white;
+}
+
+.invite-code-twitter-link svg {
+  width: 20px;
+  height: 20px;
+  fill: white;
+}
+
+.invite-code-hint {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0;
+}
+
+.invite-benefits {
+  text-align: left;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 16px;
+  padding: 30px;
+}
+
+.invite-benefits h3 {
+  font-size: 20px;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.invite-benefits-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.invite-benefits-list li {
+  font-size: 16px;
+  line-height: 1.8;
+  margin-bottom: 15px;
+  padding-left: 10px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.invite-benefits-list li:last-child {
+  margin-bottom: 0;
 }

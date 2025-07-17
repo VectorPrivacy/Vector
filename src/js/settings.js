@@ -196,7 +196,9 @@ class VoiceSettings {
         const confirmDelete = await popupConfirm(
             'Delete Model?', 
             `Are you sure you want to delete the "${modelName}" model? This will free up disk space but you'll need to download it again to use it.`,
-            false
+            false,
+            '',
+            'vector_warning.svg'
         );
         
         if (!confirmDelete) return;
@@ -207,7 +209,7 @@ class VoiceSettings {
             this.updateModelStatus();
         } catch (error) {
             console.error('Failed to delete model:', error);
-            await popupConfirm('Deletion Failed', `Could not delete model: ${error.message}`, true);
+            await popupConfirm('Deletion Failed', `Could not delete model: ${error.message}`, true, '', 'vector_warning.svg');
         }
     }
 
@@ -437,7 +439,7 @@ async function askForUsername() {
     try {
         await invoke("update_profile", { name: strUsername, avatar: "", banner: "", about: "" });
     } catch (e) {
-        await popupConfirm('Username Update Failed!', 'An error occurred while updating your Username, the change may not have committed to the network, you can re-try any time.', true);
+        await popupConfirm('Username Update Failed!', 'An error occurred while updating your Username, the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
     }
 }
 
@@ -450,7 +452,7 @@ async function setAboutMe(about) {
     try {
         await invoke("update_profile", { name: "", avatar: "", banner: "", about: about });
     } catch (e) {
-        await popupConfirm('About Me Update Failed!', 'An error occurred while updating your "About Me", the change may not have committed to the network, you can re-try any time.', true);
+        await popupConfirm('About Me Update Failed!', 'An error occurred while updating your "About Me", the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
     }
 }
 
@@ -476,7 +478,7 @@ async function askForAvatar() {
     try {
         strUploadURL = await invoke("upload_avatar", { filepath: file });
     } catch (e) {
-        return await popupConfirm('Avatar Upload Failed!', e, true);
+        return await popupConfirm('Avatar Upload Failed!', e, true, '', 'vector_warning.svg');
     }
 
     // Display the change immediately
@@ -489,7 +491,7 @@ async function askForAvatar() {
     try {
         await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
     } catch (e) {
-        return await popupConfirm('Avatar Update Failed!', e, true);
+        return await popupConfirm('Avatar Update Failed!', e, true, '', 'vector_warning.svg');
     }
 }
 
@@ -515,7 +517,7 @@ async function askForBanner() {
     try {
         strUploadURL = await invoke("upload_avatar", { filepath: file });
     } catch (e) {
-        return await popupConfirm('Banner Upload Failed!', e, true);
+        return await popupConfirm('Banner Upload Failed!', e, true, '', 'vector_warning.svg');
     }
 
     // Display the change immediately
@@ -528,7 +530,7 @@ async function askForBanner() {
     try {
         await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL, about: "" });
     } catch (e) {
-        return await popupConfirm('Banner Update Failed!', e, true);
+        return await popupConfirm('Banner Update Failed!', e, true, '', 'vector_warning.svg');
     }
 }
 
@@ -550,7 +552,7 @@ async function askForStatus() {
     try {
         await invoke("update_status", { status: strStatus });
     } catch (e) {
-        await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true);
+        await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
     }
 }
 
@@ -587,7 +589,7 @@ domSettingsThemeSelect.onchange = (evt) => {
 // Listen for Logout clicks
 domSettingsLogout.onclick = async (evt) => {
     // Prompt for confirmation
-    const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?');
+    const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?', false, '', 'vector_warning.svg');
     if (!fConfirm) return;
 
     // Begin the logout sequence

@@ -174,7 +174,7 @@ select {
 }
 
 input[type="checkbox"]:checked + .neon-toggle {
-  background: linear-gradient(135deg, #00ff9d, #00d4ff);
+  background: linear-gradient(90deg, #33db98, #00ff9d);
   box-shadow: 
     0 0 5px rgba(0, 255, 157, 0.5),
     0 0 10px rgba(0, 212, 255, 0.3),

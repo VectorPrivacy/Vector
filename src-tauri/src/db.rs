@@ -16,6 +16,7 @@ pub struct VectorDB {
     pub theme: Option<String>,
     pub pkey: Option<String>,
     pub seed: Option<String>,
+    pub invite_code: Option<String>,
 }
 
 const DB_PATH: &str = "vector.json";
@@ -252,11 +253,17 @@ pub fn get_db<R: Runtime>(handle: AppHandle<R>) -> Result<VectorDB, String> {
         _ => None,
     };
     
+    let invite_code = match store.get("invite_code") {
+        Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
+        _ => None,
+    };
+    
     Ok(VectorDB {
         db_version,
         theme,
         pkey,
         seed,
+        invite_code,
     })
 }
 
@@ -377,6 +384,22 @@ pub async fn get_seed<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>
                 Err(_) => Err("Failed to decrypt seed phrase".to_string()),
             }
         },
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub fn set_invite_code<R: Runtime>(handle: AppHandle<R>, code: String) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("invite_code".to_string(), serde_json::json!(code));
+    Ok(())
+}
+
+#[command]
+pub fn get_invite_code<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
+    let store = get_store(&handle);
+    match store.get("invite_code") {
+        Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
         _ => Ok(None),
     }
 }

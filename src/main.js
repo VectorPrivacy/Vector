@@ -20,6 +20,12 @@ const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
+const domLoginInvite = document.getElementById('login-invite');
+const domInviteInput = document.getElementById('invite-input');
+const domInviteBtn = document.getElementById('invite-btn');
+
+const domLoginWelcome = document.getElementById('login-welcome');
+
 const domLoginEncrypt = document.getElementById('login-encrypt');
 const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
 const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
@@ -33,6 +39,7 @@ let domProfileBanner = document.getElementById('profile-banner');
 let domProfileAvatar = document.getElementById('profile-avatar');
 const domProfileNameSecondary = document.getElementById('profile-secondary-name');
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
+const domProfileBadgeInvite = document.getElementById('profile-badge-invites');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
@@ -47,6 +54,8 @@ const domSyncStatusContainer = document.getElementById('sync-status-container');
 const domSyncStatus = document.getElementById('sync-status');
 const domChatList = document.getElementById('chat-list');
 const domNavbar = document.getElementById('navbar');
+const domInvites = document.getElementById('invites');
+const domInvitesBtn = document.getElementById('invites-btn');
 const domProfileBtn = document.getElementById('profile-btn');
 const domChatlistBtn = document.getElementById('chat-btn');
 const domSettingsBtn = document.getElementById('settings-btn');
@@ -80,6 +89,7 @@ const domSettingsLogout = document.getElementById('logout-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
+const domPopupIcon = document.getElementById('popupIcon');
 const domPopupTitle = document.getElementById('popupTitle');
 const domPopupSubtext = document.getElementById('popupSubtext');
 const domPopupConfirmBtn = document.getElementById('popupConfirm');
@@ -696,9 +706,33 @@ async function sendFile(pubkey, replied_to, filepath) {
         await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
     } catch (e) {
         // Notify of an attachment send failure
-        popupConfirm(e, '', true);
+        popupConfirm(e, '', true, '', 'vector_warning.svg');
     }
     nLastTypingIndicator = 0;
+}
+
+/**
+ * Display the welcome screen after successful invite code acceptance
+ * @param {string} pkey - A private key to encrypt after the welcome screen
+ */
+function showWelcomeScreen(pkey) {
+    // Hide the logo and subtext
+    const domLogo = document.querySelector('.login-logo');
+    const domSubtext = document.querySelector('.login-subtext');
+    domLogo.style.display = 'none';
+    domSubtext.style.display = 'none';
+    
+    // Show the welcome screen
+    domLoginWelcome.style.display = '';
+    
+    // After 5 seconds, transition to the encryption flow
+    setTimeout(() => {
+        domLoginWelcome.style.display = 'none';
+        // Restore the logo and subtext
+        domLogo.style.display = '';
+        domSubtext.style.display = '';
+        openEncryptionFlow(pkey, false);
+    }, 5000);
 }
 
 /**
@@ -1347,6 +1381,17 @@ function renderProfileTab(cProfile) {
     // Secondary Status
     domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
 
+    // Badges
+    domProfileBadgeInvite.style.display = 'none';
+    invoke("get_invited_users", { npub: cProfile.id }).then(count => {
+        if (count > 0) {
+            domProfileBadgeInvite.style.display = '';
+            domProfileBadgeInvite.onclick = () => {
+                popupConfirm('Vector Beta Inviter', `${cProfile.mine ? 'You' : 'They' } have invited <b>${count} users</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
+            }
+        }
+    }).catch(e => {});
+
     // npub display
     const profileNpub = document.getElementById('profile-npub');
     if (profileNpub) {
@@ -1392,6 +1437,10 @@ function renderProfileTab(cProfile) {
         // Hide the 'Back' button and deregister its clickable function
         domProfileBackBtn.style.display = 'none';
         domProfileBackBtn.onclick = null;
+
+        // Force banner on profile edit screen
+        domProfileBanner.backgroundColor = 'rgb(27, 27, 27)';
+        domProfileBanner.height = '';
         
         // Display the Navbar
         domNavbar.style.display = '';
@@ -1422,7 +1471,7 @@ function renderProfileTab(cProfile) {
             // Check if they cancelled the nicknaming (resetting a nickname with an empty '' result is fine, though)
             if (nick === false) return;
             // Ensure it's not massive
-            if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true);
+            if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         }
 
@@ -1435,6 +1484,13 @@ function renderProfileTab(cProfile) {
         domProfileAvatar.classList.remove('btn');
         domProfileBanner.onclick = null;
         domProfileBanner.classList.remove('btn');
+        if (!cProfile.banner) {
+            domProfileBanner.style.backgroundColor = '';
+            domProfileBanner.style.height = '115px';
+        } else {
+            domProfileBanner.style.backgroundColor = 'rgb(27, 27, 27)';
+            domProfileBanner.style.height = '';
+        }
         
         // Show the 'Back' button and link it to the profile's chat
         domProfileBackBtn.style.display = '';
@@ -1458,6 +1514,80 @@ function renderProfileTab(cProfile) {
 }
 
 /**
+ * Display the Invite code input flow.
+ * @param {string} pkey - A private key to encrypt.
+ */
+function openInviteFlow(pkey) {
+    domLoginStart.style.display = 'none';
+    domLoginImport.style.display = 'none';
+    domLoginInvite.style.display = '';
+    
+    // Focus on the invite input
+    domInviteInput.focus();
+    
+    // Handle invite code submission
+    domInviteBtn.onclick = async () => {
+        const inviteCode = domInviteInput.value.trim();
+        if (!inviteCode) {
+            return popupConfirm('Please enter an invite code', '', true, '', 'vector_warning.svg');
+        }
+        
+        try {
+            // Accept the invite code
+            await invoke('accept_invite_code', { inviteCode });
+            
+            // Hide invite screen and show welcome screen
+            domLoginInvite.style.display = 'none';
+            showWelcomeScreen(pkey);
+        } catch (e) {
+            // Display the specific error from the backend
+            const errorMessage = e.toString() || 'Please check your invite code and try again.';
+            popupConfirm('Invalid invite code', errorMessage, true, '', 'vector_warning.svg');
+        }
+    };
+    
+    // Handle enter key on invite input
+    domInviteInput.onkeydown = async (evt) => {
+        if (evt.code === 'Enter' || evt.code === 'NumpadEnter') {
+            evt.preventDefault();
+            domInviteBtn.click();
+        }
+    };
+    
+    // Handle enter key on invite input
+    domInviteInput.onkeydown = async (evt) => {
+        if (evt.code === 'Enter' || evt.code === 'NumpadEnter') {
+            evt.preventDefault();
+            domInviteBtn.click();
+        }
+    };
+}
+
+/**
+ * Display the welcome screen after successful invite code acceptance
+ * @param {string} pkey - A private key to encrypt after the welcome screen
+ */
+function showWelcomeScreen(pkey) {
+    // Hide the logo and subtext
+    const domLogo = document.querySelector('.login-logo');
+    const domSubtext = document.querySelector('.login-subtext');
+    domLogo.style.display = 'none';
+    domSubtext.style.display = 'none';
+    
+    // Show the welcome screen
+    domLoginWelcome.style.display = '';
+    
+    // After 5 seconds, transition to the encryption flow
+    setTimeout(() => {
+        domLoginWelcome.style.display = 'none';
+        // Restore the logo and subtext
+        domLogo.style.display = '';
+        domSubtext.style.display = '';
+        openEncryptionFlow(pkey, false);
+    }, 5000);
+}
+
+/**
  * Display the Encryption/Decryption flow.
  * @param {string} pkey - A private key to encrypt.
  * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one.
@@ -1465,6 +1595,7 @@ function renderProfileTab(cProfile) {
 function openEncryptionFlow(pkey, fUnlock = false) {
     domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
+    domLoginInvite.style.display = 'none';
     domLoginEncrypt.style.display = '';
 
     let strPinLast = []; // Stores the first entered PIN for confirmation
@@ -1684,6 +1815,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         // Adjust our Contact Name class to manage space according to Status visibility
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
         domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
+        domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
 
         // Auto-mark messages as read when chat is opened
         if (profile?.messages?.length) {
@@ -1853,8 +1985,15 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 
         // Force wipe the 'Status' and it's styling
         domChatContactStatus.textContent = fNotes ? domChatContactStatus.textContent = 'Encrypted Notes to Self' : '';
-        domChatContact.classList.add('chat-contact-with-status');
-        domChatContact.classList.remove('chat-contact');
+        if (!domChatContactStatus.textContent) {
+            domChatContact.classList.add('chat-contact');
+            domChatContact.classList.remove('chat-contact-with-status');
+            domChatContactStatus.style.display = 'none';
+        } else {
+            domChatContact.classList.add('chat-contact-with-status');
+            domChatContact.classList.remove('chat-contact');
+            domChatContactStatus.style.display = '';
+        }
     }
 
     adjustSize();
@@ -2680,6 +2819,7 @@ function openProfile(cProfile) {
     navbarSelect('profile-btn');
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
 
     // Render our own profile by default, but otherwise; the given one
     if (!cProfile) cProfile = arrChats.find(a => a.mine);
@@ -2699,6 +2839,7 @@ function openChatlist() {
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
 
     if (domChats.style.display !== '') {
         // Run a subtle fade-in animation
@@ -2717,6 +2858,52 @@ function openSettings() {
     // Hide the other tabs
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
+    domInvites.style.display = 'none';
+}
+
+async function openInvites() {
+    navbarSelect('invites-btn');
+    domInvites.style.display = '';
+
+    // Hide the other tabs
+    domProfile.style.display = 'none';
+    domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+
+    // Fetch and display the invite code
+    const inviteCodeElement = document.getElementById('invite-code');
+    inviteCodeElement.textContent = 'Loading';
+    
+    try {
+        const inviteCode = await invoke('get_or_create_invite_code');
+        inviteCodeElement.textContent = inviteCode;
+        document.getElementById('invite-code-twitter').href = `https://x.com/intent/post?text=%F0%9F%90%87%20%20Wake%20up%2C%20the%20Matrix%20has%20you...%20%F0%9F%94%20%20Use%20my%20Vector%20Invite%20Code%3A%20${inviteCode}&via=VectorPrivacy&hashtags=Vector,Privacy`;
+        
+        // Add invite code copy functionality
+        const copyBtn = document.getElementById('invite-code-copy');
+        if (copyBtn) {
+            // Remove any existing listeners to prevent duplicates
+            copyBtn.replaceWith(copyBtn.cloneNode(true));
+            const newCopyBtn = document.getElementById('invite-code-copy');
+            
+            newCopyBtn.addEventListener('click', (e) => {
+                if (inviteCode && inviteCode !== 'Loading...' && inviteCode !== 'Error loading code') {
+                    navigator.clipboard.writeText(inviteCode).then(() => {
+                        const btn = e.target.closest('.invite-code-copy-btn');
+                        if (btn) {
+                            btn.innerHTML = '<span class="icon icon-check"></span>';
+                            setTimeout(() => {
+                                btn.innerHTML = '<span class="icon icon-copy"></span>';
+                            }, 2000);
+                        }
+                    });
+                }
+            });
+        }
+    } catch (error) {
+        inviteCodeElement.textContent = 'Error loading code';
+        console.error('Failed to get invite code:', error);
+    }
 }
 
 /**
@@ -2834,6 +3021,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     await invoke('set_db_version', { version: 1 });
 
     // Hook up our static buttons
+    domInvitesBtn.onclick = openInvites;
     domProfileBtn.onclick = () => openProfile();
     domChatlistBtn.onclick = openChatlist;
     domSettingsBtn.onclick = openSettings;
@@ -2841,11 +3029,15 @@ window.addEventListener("DOMContentLoaded", async () => {
         try {
             const { public, private } = await invoke("create_account");
             strPubkey = public;
-            // Open the Encryption Flow
-            openEncryptionFlow(private);
+            
+            // Connect to Nostr network early for invite validation
+            await invoke("connect");
+            
+            // Open the Invite Flow for new accounts
+            openInviteFlow(private);
         } catch (e) {
             // Display the backend error
-            popupConfirm(e, '', true);
+            popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
     };
     domLoginAccountBtn.onclick = () => {
@@ -2857,11 +3049,17 @@ window.addEventListener("DOMContentLoaded", async () => {
         try {
             const { public, private } = await invoke("login", { importKey: domLoginInput.value.trim() });
             strPubkey = public;
-            // Open the Encryption Flow
-            openEncryptionFlow(private);
+            // Check if user has an existing account (has encrypted private key)
+            if (await hasKey()) {
+                // Existing user - skip invite flow
+                openEncryptionFlow(private);
+            } else {
+                // New user logging in - show invite flow
+                openInviteFlow(private);
+            }
         } catch (e) {
             // Display the backend error
-            popupConfirm(e, '', true);
+            popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
     }
     domChatBackBtn.onclick = closeChat;
@@ -2872,6 +3070,12 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatNewStartBtn.onclick = () => {
         openChat(domChatNewInput.value.trim());
         domChatNewInput.value = ``;
+    };
+    domChatNewInput.onkeydown = async (evt) => {
+        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
+            evt.preventDefault();
+            domChatNewStartBtn.click();
+        }
     };
     domChatMessageInputCancel.onclick = cancelReply;
 
@@ -3036,7 +3240,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                         });
                     } catch (e) {
                         // Notify of an attachment send failure
-                        popupConfirm(e, '', true);
+                        popupConfirm(e, '', true, '', 'vector_warning.svg');
                     }
 
                     nLastTypingIndicator = 0;

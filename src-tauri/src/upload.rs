@@ -209,7 +209,7 @@ where
     // Track stalled uploads
     let mut last_bytes_sent = 0u64;
     let mut stall_counter = 0;
-    const STALL_THRESHOLD: u32 = 50; // 5 seconds (50 * 100ms) without progress
+    const STALL_THRESHOLD: u32 = 200; // 20 seconds (200 * 100ms) without progress
     
     // Use tokio::select to concurrently wait for the response and report progress
     let response = loop {

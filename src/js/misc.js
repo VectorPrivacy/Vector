@@ -49,11 +49,14 @@ const getNameInitials = str => (str.match(/[A-Z]/g) || []).slice(0, 3).join('');
  * @param {String} strSubtext - The subtext of the popup dialog.
  * @param {Boolean} fNotice - If this is a Notice or an Interactive Dialog.
  * @param {String} strInputPlaceholder - If specified, renders a text input with a custom placeholder, and returns a string instead of a boolean.
+ * @param {String} strIcon - If specified, an icon to be displayed above the popup.
  * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
  */
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '') {
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '') {
     // Display the popup and render the UI
     domPopup.style.display = '';
+    domPopupIcon.src = './icons/' + strIcon;
+    domPopupIcon.style.display = strIcon ? '' : 'none';
     domPopupTitle.innerText = strTitle;
     domPopupSubtext.innerHTML = strSubtext;
 

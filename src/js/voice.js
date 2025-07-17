@@ -30,7 +30,7 @@ class VoiceRecorder {
             return true;
         } catch (err) {
             console.error('Recording start failed:', err);
-            await popupConfirm('Recording Error', err, true);
+            await popupConfirm('Recording Error', err, true, '', 'vector_warning.svg');
             this.isRecording = false;
             return false;
         }
