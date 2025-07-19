@@ -38,7 +38,7 @@ The `expiration` tag MUST be set within the next 30 seconds, it CANNOT be higher
 }
 ```
 
-The [Event Creation Implementation Code](https://github.com/JSKitty/Vector/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L495) that generated this example (before redacting keys).
+The [Event Creation Implementation Code](https://github.com/VectorPrivacy/Vector/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L495) that generated this example (before redacting keys).
 
 # Client Implementation
 
@@ -46,11 +46,11 @@ A client SHOULD immediately display that a user is typing, if it receives a Typi
 
 A client SHOULD NOT handle a Typing Indicator Event sent from an unknown user.
 
-A client SHOULD immediately drop the Typing Indicator IF the sender has completed and sent their message. (i.e: if a received Message has a `created_at` newer than their Typing Indicator Event, then do NOT display them as typing). [Example Code](https://github.com/JSKitty/Vector/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L80).
+A client SHOULD immediately drop the Typing Indicator IF the sender has completed and sent their message. (i.e: if a received Message has a `created_at` newer than their Typing Indicator Event, then do NOT display them as typing). [Example Code](https://github.com/VectorPrivacy/Vector/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L80).
 
 A client SHOULD NOT accept Typing Indicator Events longer than 30 seconds from the current time.
 
-The [Client Receiver Implementation Code](https://github.com/JSKitty/Vector/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L627), which provides an example on how to handle incoming Typing Indicator Events.
+The [Client Receiver Implementation Code](https://github.com/VectorPrivacy/Vector/blob/cb616b75c8ba49960f887d1a7cf2a052898c49a4/src-tauri/src/lib.rs#L627), which provides an example on how to handle incoming Typing Indicator Events.
 
 # Giftwrapping (NIP-59)
 
@@ -64,4 +64,4 @@ If your client supports disappearing messages, and you are actively using them, 
 
 For additional privacy, you may select a singular "Trusted Relay" to handle Typing Indicator Events, an approach also taken by the Vector client.
 
-The [Event Giftwrapping Implementation Code](https://github.com/JSKitty/Vector/blob/f2fa50543c740a7054b04fa5d341ca14ed8b7a13/src-tauri/src/lib.rs#L508) of a giftwrapped Typing Indicator with extended public `expiration` timestamp.
+The [Event Giftwrapping Implementation Code](https://github.com/VectorPrivacy/Vector/blob/f2fa50543c740a7054b04fa5d341ca14ed8b7a13/src-tauri/src/lib.rs#L508) of a giftwrapped Typing Indicator with extended public `expiration` timestamp.
