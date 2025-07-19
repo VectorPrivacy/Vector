@@ -1308,7 +1308,7 @@ function renderCurrentProfile(cProfile) {
     // Render our status
     const pStatus = document.createElement('p');
     pStatus.textContent = cProfile?.status?.title || 'Set a Status';
-    pStatus.classList.add('status', 'btn', 'cutoff');
+    pStatus.classList.add('status', 'btn', 'cutoff', 'chat-contact-status');
     pStatus.onclick = askForStatus;
     twemojify(pStatus);
     domAccount.appendChild(pStatus);
@@ -2230,10 +2230,15 @@ function renderMessage(msg, sender, editID = '') {
             const assetUrl = convertFileSrc(cAttachment.path);
 
             // Render the attachment appropriately for it's type
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp'].includes(cAttachment.extension)) {
                 // Images
                 const imgPreview = document.createElement('img');
-                imgPreview.style.maxWidth = `100%`;
+                // SVGs need a specific width to scale properly
+                if (cAttachment.extension === 'svg') {
+                    imgPreview.style.width = `25vw`;
+                } else {
+                    imgPreview.style.maxWidth = `100%`;
+                }
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
@@ -2247,10 +2252,10 @@ function renderMessage(msg, sender, editID = '') {
                     softChatScroll();
                 }, { once: true });
                 pMessage.appendChild(imgPreview);
-                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
-                // Audio - use the enhanced handler with transcription
+                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
+                // Audio
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
-                } else if (['mp4', 'mov', 'webm'].includes(cAttachment.extension)) {
+                } else if (['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
                 // Videos
                 const handleMetadataLoaded = (video) => {
                     // Seek a tiny amount to force the frame 'poster' to load
@@ -2315,7 +2320,7 @@ function renderMessage(msg, sender, editID = '') {
                 pMessage.appendChild(divBar);
             }
         } else if (cAttachment.downloading) {
-            // For images, show blurhash preview while downloading
+            // For images, show blurhash preview while downloading (only for formats that support blurhash)
             if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                 // Generate blurhash preview for downloading image
                 invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
