@@ -661,7 +661,7 @@ function buildXIntentUrl(inviteCode, hashtags = ['Vector', 'Privacy'], via = 'Ve
     const baseUrl = 'https://x.com/intent/post';
     
     // Build tweet text with proper handling of special characters
-    const tweetText = `🐇  Wake up, the Matrix has you... 🔓  Use my Vector Invite Code: ${inviteCode}`;
+    const tweetText = `🐇  Wake up, the Matrix has you... 🔐  Use my Vector Invite Code: ${inviteCode}`;
     
     // Create URLSearchParams for reliable encoding
     const params = new URLSearchParams({
