@@ -1206,6 +1206,17 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     "image/jpeg" | "image/jpg" => "jpg",
                     "image/gif" => "gif",
                     "image/webp" => "webp",
+                    "image/svg+xml" => "svg",
+                    "image/bmp" | "image/x-ms-bmp" => "bmp",
+                    "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+                    "image/tiff" => "tiff",
+                    
+                    // Raw Images
+                    "image/x-adobe-dng" => "dng",
+                    "image/x-canon-cr2" => "cr2",
+                    "image/x-nikon-nef" => "nef",
+                    "image/x-sony-arw" => "arw",
+                    
                     // Audio
                     "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
                     "audio/mp3" | "audio/mpeg" => "mp3",
@@ -1213,12 +1224,91 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     "audio/ogg" => "ogg",
                     "audio/mp4" => "m4a",
                     "audio/aac" | "audio/x-aac" => "aac",
+                    "audio/x-ms-wma" => "wma",
+                    "audio/opus" => "opus",
+                    
                     // Videos
                     "video/mp4" => "mp4",
                     "video/webm" => "webm",
                     "video/quicktime" => "mov",
                     "video/x-msvideo" => "avi",
                     "video/x-matroska" => "mkv",
+                    "video/x-flv" => "flv",
+                    "video/x-ms-wmv" => "wmv",
+                    "video/mpeg" => "mpg",
+                    "video/3gpp" => "3gp",
+                    "video/ogg" => "ogv",
+                    "video/mp2t" => "ts",
+                    
+                    // Documents
+                    "application/pdf" => "pdf",
+                    "application/msword" => "doc",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+                    "application/vnd.ms-excel" => "xls",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+                    "application/vnd.ms-powerpoint" => "ppt",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+                    "application/vnd.oasis.opendocument.text" => "odt",
+                    "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+                    "application/vnd.oasis.opendocument.presentation" => "odp",
+                    "application/rtf" => "rtf",
+                    
+                    // Text/Data
+                    "text/plain" => "txt",
+                    "text/markdown" => "md",
+                    "text/csv" => "csv",
+                    "application/json" => "json",
+                    "application/xml" | "text/xml" => "xml",
+                    "application/x-yaml" | "text/yaml" => "yaml",
+                    "application/toml" => "toml",
+                    "application/sql" => "sql",
+                    
+                    // Archives
+                    "application/zip" => "zip",
+                    "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+                    "application/x-7z-compressed" => "7z",
+                    "application/x-tar" => "tar",
+                    "application/gzip" => "gz",
+                    "application/x-bzip2" => "bz2",
+                    "application/x-xz" => "xz",
+                    "application/x-iso9660-image" => "iso",
+                    "application/x-apple-diskimage" => "dmg",
+                    "application/vnd.android.package-archive" => "apk",
+                    "application/java-archive" => "jar",
+                    
+                    // 3D Files
+                    "model/obj" | "text/plain" => "obj",
+                    "model/gltf+json" => "gltf",
+                    "model/gltf-binary" => "glb",
+                    "model/stl" | "application/sla" => "stl",
+                    "model/vnd.collada+xml" => "dae",
+                    
+                    // Code
+                    "text/javascript" | "application/javascript" => "js",
+                    "text/typescript" | "application/typescript" => "ts",
+                    "text/x-python" | "application/x-python" => "py",
+                    "text/x-rust" => "rs",
+                    "text/x-go" => "go",
+                    "text/x-java" => "java",
+                    "text/x-c" => "c",
+                    "text/x-c++" => "cpp",
+                    "text/x-csharp" => "cs",
+                    "text/x-ruby" => "rb",
+                    "text/x-php" => "php",
+                    "text/x-swift" => "swift",
+                    
+                    // Web
+                    "text/html" => "html",
+                    "text/css" => "css",
+                    
+                    // Other
+                    "application/x-msdownload" | "application/x-dosexec" => "exe",
+                    "application/x-msi" => "msi",
+                    "application/x-font-ttf" | "font/ttf" => "ttf",
+                    "application/x-font-otf" | "font/otf" => "otf",
+                    "font/woff" => "woff",
+                    "font/woff2" => "woff2",
+                    
                     // Fallback - extract extension from mime subtype
                     _ => mime_type.split('/').nth(1).unwrap_or("bin"),
                 };

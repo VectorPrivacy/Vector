@@ -61,6 +61,20 @@ pub fn get_file_type_description(extension: &str) -> String {
         map.insert("jpeg", "Picture");
         map.insert("gif", "GIF Animation");
         map.insert("webp", "Picture");
+        map.insert("svg", "Vector Image");
+        map.insert("bmp", "Bitmap Image");
+        map.insert("ico", "Icon");
+        map.insert("tiff", "TIFF Image");
+        map.insert("tif", "TIFF Image");
+        
+        // Raw Images
+        map.insert("raw", "RAW Image");
+        map.insert("dng", "RAW Image");
+        map.insert("cr2", "Canon RAW");
+        map.insert("nef", "Nikon RAW");
+        map.insert("arw", "Sony RAW");
+        map.insert("orf", "Olympus RAW");
+        map.insert("rw2", "Panasonic RAW");
 
         // Audio
         map.insert("wav", "Voice Message");
@@ -69,6 +83,17 @@ pub fn get_file_type_description(extension: &str) -> String {
         map.insert("aac", "Audio Clip");
         map.insert("flac", "Audio Clip");
         map.insert("ogg", "Audio Clip");
+        map.insert("wma", "Audio Clip");
+        map.insert("opus", "Audio Clip");
+        map.insert("ape", "Audio Clip");
+        map.insert("wv", "Audio Clip");
+        
+        // Audio Project Files
+        map.insert("aup", "Audacity Project");
+        map.insert("flp", "FL Studio Project");
+        map.insert("als", "Ableton Project");
+        map.insert("logic", "Logic Project");
+        map.insert("band", "GarageBand Project");
 
         // Videos
         map.insert("mp4", "Video");
@@ -76,6 +101,202 @@ pub fn get_file_type_description(extension: &str) -> String {
         map.insert("mov", "Video");
         map.insert("avi", "Video");
         map.insert("mkv", "Video");
+        map.insert("flv", "Flash Video");
+        map.insert("wmv", "Windows Video");
+        map.insert("mpg", "MPEG Video");
+        map.insert("mpeg", "MPEG Video");
+        map.insert("m4v", "MPEG-4 Video");
+        map.insert("3gp", "3GP Video");
+        map.insert("3g2", "3G2 Video");
+        map.insert("f4v", "Flash MP4 Video");
+        map.insert("asf", "Advanced Systems Format");
+        map.insert("rm", "RealMedia");
+        map.insert("vob", "DVD Video");
+        map.insert("ogv", "Ogg Video");
+        map.insert("mxf", "Material Exchange Format");
+        map.insert("ts", "MPEG Transport Stream");
+        map.insert("m2ts", "Blu-ray Video");
+        
+        // Documents
+        map.insert("pdf", "PDF Document");
+        map.insert("doc", "Word Document");
+        map.insert("docx", "Word Document");
+        map.insert("xls", "Excel Spreadsheet");
+        map.insert("xlsx", "Excel Spreadsheet");
+        map.insert("ppt", "PowerPoint Presentation");
+        map.insert("pptx", "PowerPoint Presentation");
+        map.insert("odt", "OpenDocument Text");
+        map.insert("ods", "OpenDocument Spreadsheet");
+        map.insert("odp", "OpenDocument Presentation");
+        map.insert("rtf", "Rich Text Document");
+        map.insert("tex", "LaTeX Document");
+        map.insert("pages", "Pages Document");
+        map.insert("numbers", "Numbers Spreadsheet");
+        map.insert("key", "Keynote Presentation");
+        
+        // Text Files
+        map.insert("txt", "Text File");
+        map.insert("md", "Markdown");
+        map.insert("log", "Log File");
+        map.insert("csv", "CSV File");
+        map.insert("tsv", "TSV File");
+        
+        // Data Files
+        map.insert("json", "JSON File");
+        map.insert("xml", "XML File");
+        map.insert("yaml", "YAML File");
+        map.insert("yml", "YAML File");
+        map.insert("toml", "TOML File");
+        map.insert("sql", "SQL File");
+        map.insert("db", "Database File");
+        map.insert("sqlite", "SQLite Database");
+        
+        // Archives
+        map.insert("zip", "ZIP Archive");
+        map.insert("rar", "RAR Archive");
+        map.insert("7z", "7-Zip Archive");
+        map.insert("tar", "TAR Archive");
+        map.insert("gz", "GZip Archive");
+        map.insert("bz2", "BZip2 Archive");
+        map.insert("xz", "XZ Archive");
+        map.insert("tgz", "Compressed TAR");
+        map.insert("tbz", "Compressed TAR");
+        map.insert("txz", "Compressed TAR");
+        map.insert("cab", "Cabinet Archive");
+        map.insert("iso", "Disc Image");
+        map.insert("dmg", "macOS Disk Image");
+        map.insert("pkg", "Package File");
+        map.insert("deb", "Debian Package");
+        map.insert("rpm", "RPM Package");
+        map.insert("apk", "Android Package");
+        map.insert("ipa", "iOS App");
+        map.insert("jar", "Java Archive");
+        map.insert("war", "Web Archive");
+        map.insert("ear", "Enterprise Archive");
+        
+        // 3D Files
+        map.insert("obj", "3D Object");
+        map.insert("fbx", "Autodesk FBX");
+        map.insert("gltf", "GL Transmission Format");
+        map.insert("glb", "GL Binary");
+        map.insert("stl", "Stereolithography");
+        map.insert("ply", "Polygon File");
+        map.insert("dae", "COLLADA");
+        map.insert("3ds", "3D Studio");
+        map.insert("blend", "Blender File");
+        map.insert("c4d", "Cinema 4D");
+        map.insert("max", "3ds Max");
+        map.insert("ma", "Maya ASCII");
+        map.insert("mb", "Maya Binary");
+        map.insert("usdz", "Universal Scene");
+        
+        // CAD Files
+        map.insert("dwg", "AutoCAD Drawing");
+        map.insert("dxf", "Drawing Exchange");
+        map.insert("step", "STEP CAD");
+        map.insert("stp", "STEP CAD");
+        map.insert("iges", "IGES CAD");
+        map.insert("igs", "IGES CAD");
+        map.insert("sat", "ACIS SAT");
+        map.insert("ipt", "Inventor Part");
+        map.insert("iam", "Inventor Assembly");
+        map.insert("prt", "Part File");
+        map.insert("sldprt", "SolidWorks Part");
+        map.insert("sldasm", "SolidWorks Assembly");
+        map.insert("slddrw", "SolidWorks Drawing");
+        map.insert("catpart", "CATIA Part");
+        map.insert("catproduct", "CATIA Product");
+        
+        // Code Files
+        map.insert("js", "JavaScript");
+        map.insert("ts", "TypeScript");
+        map.insert("jsx", "React JSX");
+        map.insert("tsx", "React TSX");
+        map.insert("py", "Python");
+        map.insert("rs", "Rust");
+        map.insert("go", "Go");
+        map.insert("java", "Java");
+        map.insert("kt", "Kotlin");
+        map.insert("cpp", "C++");
+        map.insert("cc", "C++");
+        map.insert("cxx", "C++");
+        map.insert("c", "C");
+        map.insert("h", "Header File");
+        map.insert("hpp", "C++ Header");
+        map.insert("cs", "C#");
+        map.insert("rb", "Ruby");
+        map.insert("php", "PHP");
+        map.insert("swift", "Swift");
+        map.insert("m", "Objective-C");
+        map.insert("mm", "Objective-C++");
+        map.insert("lua", "Lua");
+        map.insert("r", "R Script");
+        map.insert("scala", "Scala");
+        map.insert("clj", "Clojure");
+        map.insert("dart", "Dart");
+        map.insert("ex", "Elixir");
+        map.insert("elm", "Elm");
+        map.insert("erl", "Erlang");
+        map.insert("fs", "F#");
+        map.insert("hs", "Haskell");
+        map.insert("jl", "Julia");
+        map.insert("nim", "Nim");
+        map.insert("pl", "Perl");
+        map.insert("sh", "Shell Script");
+        map.insert("bash", "Bash Script");
+        map.insert("zsh", "Zsh Script");
+        map.insert("fish", "Fish Script");
+        map.insert("ps1", "PowerShell");
+        map.insert("bat", "Batch File");
+        map.insert("cmd", "Command File");
+        map.insert("vb", "Visual Basic");
+        map.insert("vbs", "VBScript");
+        map.insert("asm", "Assembly");
+        map.insert("s", "Assembly");
+        
+        // Config Files
+        map.insert("ini", "INI Config");
+        map.insert("cfg", "Config File");
+        map.insert("conf", "Config File");
+        map.insert("config", "Config File");
+        map.insert("env", "Environment File");
+        map.insert("properties", "Properties File");
+        map.insert("plist", "Property List");
+        map.insert("gitignore", "Git Ignore");
+        map.insert("dockerignore", "Docker Ignore");
+        map.insert("editorconfig", "Editor Config");
+        map.insert("eslintrc", "ESLint Config");
+        map.insert("prettierrc", "Prettier Config");
+        
+        // Web Files
+        map.insert("html", "HTML File");
+        map.insert("htm", "HTML File");
+        map.insert("css", "CSS Stylesheet");
+        map.insert("scss", "SCSS Stylesheet");
+        map.insert("sass", "Sass Stylesheet");
+        map.insert("less", "Less Stylesheet");
+        map.insert("vue", "Vue Component");
+        map.insert("svelte", "Svelte Component");
+        
+        // Vector Graphics
+        map.insert("eps", "Encapsulated PostScript");
+        map.insert("ai", "Adobe Illustrator");
+        map.insert("sketch", "Sketch File");
+        map.insert("fig", "Figma File");
+        map.insert("xd", "Adobe XD");
+        
+        // Other
+        map.insert("exe", "Executable");
+        map.insert("msi", "Windows Installer");
+        map.insert("app", "macOS Application");
+        map.insert("ttf", "TrueType Font");
+        map.insert("otf", "OpenType Font");
+        map.insert("woff", "Web Font");
+        map.insert("woff2", "Web Font 2");
+        map.insert("eot", "Embedded OpenType");
+        map.insert("ics", "Calendar File");
+        map.insert("vcf", "vCard Contact");
+        map.insert("torrent", "Torrent File");
 
         map
     });

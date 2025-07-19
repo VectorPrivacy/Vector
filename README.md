@@ -30,7 +30,7 @@ Rust Stable and Tauri must be installed along with other dependencies. The easie
 Assuming you want Vector in an `apps` folder (adjust as necessary):  
 
 ```
-cd ~/apps && git pull https://github.com/JSKitty/Vector
+cd ~/apps && git pull https://github.com/VectorPrivacy/Vector
 ```
 
 ```
