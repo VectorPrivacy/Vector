@@ -430,6 +430,29 @@ function levenshteinDistance(str1, str2) {
 }
 
 /**
+ * Build an x.com Vector Invite intent URL
+ * @param {string} inviteCode - The invite code to include in the post
+ * @param {Array<string>} hashtags - The hashtags to include in the post
+ * @param {string} via - The tagged "Posted via" account
+ * @returns {string} An encoded x.com intent URL
+ */
+function buildXIntentUrl(inviteCode, hashtags = ['Vector', 'Privacy'], via = 'VectorPrivacy') {
+    const baseUrl = 'https://x.com/intent/post';
+    
+    // Build tweet text with proper handling of special characters
+    const tweetText = `🐇  Wake up, the Matrix has you... 🔓  Use my Vector Invite Code: ${inviteCode}`;
+    
+    // Create URLSearchParams for reliable encoding
+    const params = new URLSearchParams({
+        text: tweetText,
+        via: via,
+        hashtags: hashtags.join()
+    });
+    
+    return `${baseUrl}?${params.toString()}`;
+}
+
+/**
  * Pauses execution for a specified amount of time.
  * 
  * @param {number} ms - The number of milliseconds to sleep

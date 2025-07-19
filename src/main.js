@@ -1387,7 +1387,7 @@ function renderProfileTab(cProfile) {
         if (count > 0) {
             domProfileBadgeInvite.style.display = '';
             domProfileBadgeInvite.onclick = () => {
-                popupConfirm('Vector Beta Inviter', `${cProfile.mine ? 'You' : 'They' } have invited <b>${count} users</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
+                popupConfirm('Vector Beta Inviter', `${cProfile.mine ? 'You' : 'They' } have invited <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
             }
         }
     }).catch(e => {});
@@ -2877,7 +2877,7 @@ async function openInvites() {
     try {
         const inviteCode = await invoke('get_or_create_invite_code');
         inviteCodeElement.textContent = inviteCode;
-        document.getElementById('invite-code-twitter').href = `https://x.com/intent/post?text=%F0%9F%90%87%20%20Wake%20up%2C%20the%20Matrix%20has%20you...%20%F0%9F%94%20%20Use%20my%20Vector%20Invite%20Code%3A%20${inviteCode}&via=VectorPrivacy&hashtags=Vector,Privacy`;
+        document.getElementById('invite-code-twitter').href = buildXIntentUrl(inviteCode);
         
         // Add invite code copy functionality
         const copyBtn = document.getElementById('invite-code-copy');
