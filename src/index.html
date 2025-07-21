@@ -11,6 +11,7 @@
     <script src="/js/misc.js" defer></script>
     <script src="/js/db.js" defer></script>
     <script src="/js/voice.js" defer></script>
+    <script src="/js/updater.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <script src="/js/markdown.js"></script>
     <script src="/js/emoji.js"></script>
@@ -227,6 +228,29 @@
           <h2>Network</h2>
           <div id="network-list" class="network-list">
             <!-- Relay list will be dynamically populated here -->
+          </div>
+        </div>
+
+        <!-- Updates Section -->
+        <div id="settings-updates" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Updates</h2>
+          <div class="update-info">
+            <p>Current Version: <span id="current-version">Loading...</span></p>
+            <button id="check-updates-btn" class="btn">Check for Updates</button>
+            <p id="update-status-text" style="display: none; margin-top: 10px;"></p>
+            
+            <!-- Progress bar for downloads -->
+            <div id="update-progress-container" style="display: none; margin-top: 20px;">
+              <div class="progress-bar-track">
+                <div id="update-progress-bar" class="progress-bar-fill"></div>
+                <div class="progress-text" id="update-progress-text">0%</div>
+              </div>
+            </div>
+            
+            <!-- Action buttons -->
+            <button id="download-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Download Update</button>
+            <button id="restart-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart Now</button>
           </div>
           <hr class="divider settings-divider">
         </div>

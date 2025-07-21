@@ -1252,6 +1252,11 @@ async function login() {
 
                 // Render the initial relay list
                 renderRelayList();
+                
+                // Initialize the updater
+                if (window.initializeUpdater) {
+                    window.initializeUpdater();
+                }
             }, { once: true });
         });
 
@@ -3032,14 +3037,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     domSettingsBtn.onclick = openSettings;
     domLoginAccountCreationBtn.onclick = async () => {
         try {
-            const { public, private } = await invoke("create_account");
-            strPubkey = public;
+            const { public: pubKey, private: privKey } = await invoke("create_account");
+            strPubkey = pubKey;
             
             // Connect to Nostr network early for invite validation
             await invoke("connect");
             
             // Open the Invite Flow for new accounts
-            openInviteFlow(private);
+            openInviteFlow(privKey);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -3052,8 +3057,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
-            const { public, private } = await invoke("login", { importKey: domLoginInput.value.trim() });
-            strPubkey = public;
+            const { public: pubKey, private: privKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            strPubkey = pubKey;
 
             // Connect to Nostr
             await invoke("connect");
@@ -3061,10 +3066,10 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Check if user has an existing account (has encrypted private key)
             if (await hasKey()) {
                 // Existing user - skip invite flow
-                openEncryptionFlow(private);
+                openEncryptionFlow(privKey);
             } else {
                 // New user logging in - show invite flow
-                openInviteFlow(private);
+                openInviteFlow(privKey);
             }
         } catch (e) {
             // Display the backend error

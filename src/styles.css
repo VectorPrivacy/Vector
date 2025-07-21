@@ -1562,6 +1562,81 @@ select:focus::-ms-value {
   transform: translateY(-50%) scale(1.1);
 }
 
+/* Update Settings Section Styles */
+.update-info {
+  text-align: center;
+  padding: 20px 0;
+}
+
+.update-info p {
+  margin-bottom: 15px;
+  font-size: 16px;
+}
+
+#current-version {
+  color: #59fcb3;
+  font-weight: 600;
+}
+
+#check-updates-btn {
+  margin: 10px auto;
+  padding: 12px 24px;
+  background: rgba(89, 252, 179, 0.1);
+  border: 1px solid rgba(89, 252, 179, 0.3);
+  color: #59fcb3;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+#check-updates-btn:hover:not(:disabled) {
+  background: rgba(89, 252, 179, 0.2);
+  border-color: rgba(89, 252, 179, 0.5);
+  transform: translateY(-1px);
+}
+
+#check-updates-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+#update-status-text {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.8);
+  margin-top: 10px;
+  transition: color 0.3s ease;
+}
+
+#update-progress-container {
+  margin: 20px auto;
+  max-width: 300px;
+}
+
+#update-progress-bar {
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  box-shadow: 0 0 10px rgba(89, 252, 179, 0.4);
+}
+
+#download-update-btn,
+#restart-update-btn {
+  color: #000;
+  font-weight: bold;
+  border: none;
+  box-shadow: 0 4px 12px rgba(89, 252, 179, 0.3);
+  transition: all 0.3s ease;
+}
+
+#download-update-btn:hover,
+#restart-update-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(89, 252, 179, 0.5);
+}
+
+#download-update-btn:active,
+#restart-update-btn:active {
+  transform: translateY(0);
+}
+
 /* Adjust select to accommodate delete button */
 #whisper-model {
   padding-right: 30px;
@@ -1569,7 +1644,7 @@ select:focus::-ms-value {
   -webkit-appearance: none;
 }
 
-/* Fix to not get white border in model selection dropdown*/
+/* Fix to not get white border in model selection dropdown */
 #whisper-model:focus,
 #whisper-model:active,
 #whisper-model:focus-visible {

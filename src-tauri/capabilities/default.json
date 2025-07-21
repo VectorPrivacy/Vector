@@ -14,6 +14,8 @@
     "dialog:default",
     "fs:default",
     "clipboard-manager:default",
-    "clipboard-manager:allow-read-image"
+    "clipboard-manager:allow-read-image",
+    "updater:default",
+    "process:default"
   ]
 }
