@@ -277,6 +277,16 @@ async function downloadUpdate() {
 
 // Auto-check for updates on app start (silent check)
 function initializeUpdater() {
+    // Skip updater on mobile platforms (Android/iOS)
+    if (platformFeatures.os === 'android' || platformFeatures.os === 'ios') {
+        // Hide the updates section in settings
+        const updatesSection = document.getElementById('settings-updates');
+        if (updatesSection) {
+            updatesSection.style.display = 'none';
+        }
+        return;
+    }
+
     // Initialize UI when DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initializeUpdaterUI);
