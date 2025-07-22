@@ -1254,9 +1254,7 @@ async function login() {
                 renderRelayList();
                 
                 // Initialize the updater
-                if (window.initializeUpdater) {
-                    window.initializeUpdater();
-                }
+                initializeUpdater();
             }, { once: true });
         });
 
@@ -2869,6 +2867,20 @@ function openSettings() {
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domInvites.style.display = 'none';
+
+    // If an update is available, scroll to the updates section
+    const updateDot = document.getElementById('settings-update-dot');
+    if (updateDot && updateDot.style.display !== 'none') {
+        // Give the settings tab time to render
+        setTimeout(() => {
+            const updatesSection = document.getElementById('settings-updates');
+            if (updatesSection) {
+                updatesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                // Hide the notification dot after scrolling
+                updateDot.style.display = 'none';
+            }
+        }, 100);
+    }
 }
 
 async function openInvites() {

@@ -32,19 +32,22 @@ function initializeUpdaterUI() {
     // Add click handler for check updates button
     const checkButton = document.getElementById('check-updates-btn');
     if (checkButton) {
-        checkButton.addEventListener('click', () => checkForUpdates(false));
-    }
-    
-    // Add click handler for download button
-    const downloadButton = document.getElementById('download-update-btn');
-    if (downloadButton) {
-        downloadButton.addEventListener('click', downloadUpdate);
+        checkButton.addEventListener('click', handleButtonClick);
     }
     
     // Add click handler for restart button
     const restartButton = document.getElementById('restart-update-btn');
     if (restartButton) {
         restartButton.addEventListener('click', () => relaunch());
+    }
+}
+
+// Handle button click based on current state
+function handleButtonClick() {
+    if (updateState === 'available') {
+        downloadUpdate();
+    } else {
+        checkForUpdates(false);
     }
 }
 
@@ -57,11 +60,14 @@ function updateUI(state, message = '', progress = 0) {
     const progressBar = document.getElementById('update-progress-bar');
     const progressText = document.getElementById('update-progress-text');
     const checkButton = document.getElementById('check-updates-btn');
-    const downloadButton = document.getElementById('download-update-btn');
     const restartButton = document.getElementById('restart-update-btn');
+    const newVersionDisplay = document.getElementById('new-version-display');
+    const newVersionText = document.getElementById('new-version');
+    const changelogContainer = document.getElementById('update-changelog');
+    const changelogContent = document.getElementById('changelog-content');
+    const updateDot = document.getElementById('settings-update-dot');
     
     // Hide all action buttons by default
-    if (downloadButton) downloadButton.style.display = 'none';
     if (restartButton) restartButton.style.display = 'none';
     
     switch (state) {
@@ -71,6 +77,8 @@ function updateUI(state, message = '', progress = 0) {
                 statusText.style.display = 'none';
             }
             if (progressContainer) progressContainer.style.display = 'none';
+            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
+            if (changelogContainer) changelogContainer.style.display = 'none';
             if (checkButton) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
@@ -83,6 +91,8 @@ function updateUI(state, message = '', progress = 0) {
                 statusText.style.display = 'block';
             }
             if (progressContainer) progressContainer.style.display = 'none';
+            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
+            if (changelogContainer) changelogContainer.style.display = 'none';
             if (checkButton) {
                 checkButton.disabled = true;
                 checkButton.textContent = 'Checking...';
@@ -91,27 +101,47 @@ function updateUI(state, message = '', progress = 0) {
             
         case 'available':
             if (statusText) {
-                statusText.textContent = message;
-                statusText.style.display = 'block';
+                statusText.style.display = 'none';
             }
             if (progressContainer) progressContainer.style.display = 'none';
+            if (currentUpdate && newVersionDisplay && newVersionText) {
+                newVersionText.textContent = `v${currentUpdate.version}`;
+                newVersionDisplay.style.display = 'block';
+            }
+            if (currentUpdate && currentUpdate.body && changelogContainer && changelogContent) {
+                // Convert line breaks to HTML and escape HTML entities
+                const escapedBody = currentUpdate.body
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;')
+                    .replace(/\n/g, '<br>');
+                changelogContent.innerHTML = escapedBody;
+                changelogContainer.style.display = 'block';
+            }
             if (checkButton) {
                 checkButton.disabled = false;
-                checkButton.textContent = 'Check for Updates';
+                checkButton.textContent = 'Download Update';
+                checkButton.style.background = '';
             }
-            if (downloadButton) downloadButton.style.display = 'block';
+            // Show notification dot on settings button
+            if (updateDot) updateDot.style.display = 'block';
             break;
             
         case 'downloading':
             if (statusText) {
-                statusText.textContent = 'Downloading update...';
-                statusText.style.display = 'block';
+                statusText.style.display = 'none';
             }
             if (progressContainer) progressContainer.style.display = 'block';
             if (progressBar) progressBar.style.width = `${progress}%`;
             if (progressText) progressText.textContent = `${progress}%`;
-            if (checkButton) checkButton.disabled = true;
-            if (downloadButton) downloadButton.style.display = 'none';
+            if (checkButton) {
+                checkButton.disabled = true;
+                checkButton.textContent = 'Downloading...';
+            }
+            // Hide notification dot when downloading
+            if (updateDot) updateDot.style.display = 'none';
             break;
             
         case 'ready':
@@ -123,8 +153,11 @@ function updateUI(state, message = '', progress = 0) {
             if (checkButton) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
+                checkButton.style.background = '';
             }
             if (restartButton) restartButton.style.display = 'block';
+            // Hide notification dot when ready
+            if (updateDot) updateDot.style.display = 'none';
             break;
             
         case 'error':
@@ -134,9 +167,12 @@ function updateUI(state, message = '', progress = 0) {
                 statusText.style.color = '#ff5252';
             }
             if (progressContainer) progressContainer.style.display = 'none';
+            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
+            if (changelogContainer) changelogContainer.style.display = 'none';
             if (checkButton) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
+                checkButton.style.background = '';
             }
             setTimeout(() => {
                 if (statusText) statusText.style.color = '';
@@ -151,9 +187,12 @@ function updateUI(state, message = '', progress = 0) {
                 statusText.style.color = '#59fcb3';
             }
             if (progressContainer) progressContainer.style.display = 'none';
+            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
+            if (changelogContainer) changelogContainer.style.display = 'none';
             if (checkButton) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
+                checkButton.style.background = '';
             }
             setTimeout(() => {
                 if (statusText) statusText.style.color = '';
@@ -183,16 +222,14 @@ async function checkForUpdates(silent = false) {
         
         // Found an update
         currentUpdate = update;
-        console.log(`Update available: ${update.version} from ${update.date}`);
+        console.log(`Updater: Update available: ${update.version} from ${update.date}`);
         
-        if (!silent) {
-            const message = `Version ${update.version} is available`;
-            updateUI('available', message);
-        }
+        // Always update UI when an update is found, even in silent mode
+        updateUI('available');
         
         return true;
     } catch (error) {
-        console.error('Error checking for updates:', error);
+        console.error('Updater: Error checking for updates:', error);
         if (!silent) {
             updateUI('error', 'Failed to check for updates');
         }
@@ -214,27 +251,26 @@ async function downloadUpdate() {
             switch (event.event) {
                 case 'Started':
                     contentLength = event.data.contentLength || 0;
-                    console.log(`Started downloading ${contentLength} bytes`);
+                    console.log(`Updater: Started downloading ${contentLength} bytes`);
                     break;
                     
                 case 'Progress':
                     downloaded += event.data.chunkLength;
                     const percentage = contentLength > 0 ? Math.round((downloaded / contentLength) * 100) : 0;
-                    console.log(`Downloaded ${downloaded} of ${contentLength} bytes (${percentage}%)`);
                     updateUI('downloading', '', percentage);
                     break;
                     
                 case 'Finished':
-                    console.log('Download finished');
+                    console.log('Updater: Download finished');
                     break;
             }
         });
         
-        console.log('Update installed successfully');
+        console.log('Updater: Update installed successfully');
         updateUI('ready');
         
     } catch (error) {
-        console.error('Error installing update:', error);
+        console.error('Updater: Error installing update:', error);
         updateUI('error', 'Failed to download update');
     }
 }
@@ -247,17 +283,12 @@ function initializeUpdater() {
     } else {
         initializeUpdaterUI();
     }
-    
-    // Check for updates 10 seconds after app start
-    setTimeout(() => {
-        checkForUpdates(true);
-    }, 10000);
-    
+
+    // Check for updates immediately after app start
+    checkForUpdates(true);
+
     // Check for updates every 4 hours
     setInterval(() => {
         checkForUpdates(true);
     }, 4 * 60 * 60 * 1000);
 }
-
-// Make initializeUpdater available globally
-window.initializeUpdater = initializeUpdater;

@@ -1565,7 +1565,6 @@ select:focus::-ms-value {
 /* Update Settings Section Styles */
 .update-info {
   text-align: center;
-  padding: 20px 0;
 }
 
 .update-info p {
@@ -1573,7 +1572,8 @@ select:focus::-ms-value {
   font-size: 16px;
 }
 
-#current-version {
+#current-version,
+#new-version {
   color: #59fcb3;
   font-weight: 600;
 }
@@ -1819,10 +1819,40 @@ select:disabled:hover {
 .navbar-btn {
   margin-top: auto;
   margin-bottom: auto;
+  position: relative;
 }
 
 .navbar-btn-inactive {
   opacity: 0.5;
+}
+
+.update-notification-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  background-color: #59fcb3;
+  border-radius: 50%;
+  animation: pulse-notification 2s ease-in-out infinite;
+}
+
+@keyframes pulse-notification {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(89, 252, 179, 0.7);
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 0.8;
+    box-shadow: 0 0 0 6px rgba(89, 252, 179, 0);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(89, 252, 179, 0);
+  }
 }
 
 .navbar-icon {

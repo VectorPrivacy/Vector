@@ -236,7 +236,15 @@
           <hr class="divider settings-divider">
           <h2>Updates</h2>
           <div class="update-info">
-            <p>Current Version: <span id="current-version">Loading...</span></p>
+            <p style="opacity: 0.7;">Current Version: <span id="current-version">Loading...</span></p>
+            <p id="new-version-display" style="display: none;">New Version: <span id="new-version"></span></p>
+            
+            <!-- Changelog -->
+            <div id="update-changelog" style="display: none; margin-top: 20px; margin-bottom: 20px;">
+              <h3 style="font-size: 16px; margin-bottom: 10px;">What's New:</h3>
+              <div id="changelog-content" style="text-align: left; padding: 15px; background: rgba(0, 0, 0, 0.3); border-radius: 8px; border: 1px solid rgba(89, 252, 179, 0.2); max-height: 200px; overflow-y: auto; font-size: 14px; line-height: 1.6; color: rgba(255, 255, 255, 0.8);"></div>
+            </div>
+            
             <button id="check-updates-btn" class="btn">Check for Updates</button>
             <p id="update-status-text" style="display: none; margin-top: 10px;"></p>
             
@@ -249,7 +257,6 @@
             </div>
             
             <!-- Action buttons -->
-            <button id="download-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Download Update</button>
             <button id="restart-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart Now</button>
           </div>
           <hr class="divider settings-divider">
@@ -305,6 +312,7 @@
         <div id="settings-btn" class="btn navbar-btn navbar-btn-inactive">
           <span class="icon icon-settings navbar-icon"></span>
           <p class="navbar-text">Settings</p>
+          <span id="settings-update-dot" class="update-notification-dot" style="display: none;"></span>
         </div>
         <div id="invites-btn" class="btn navbar-btn navbar-btn-inactive">
           <span class="icon icon-gift navbar-icon"></span>

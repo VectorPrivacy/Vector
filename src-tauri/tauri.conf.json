@@ -68,6 +68,9 @@
       ],
       "windows": {
         "installMode": "passive"
+      },
+      "macos": {
+        "minimumSystemVersion": "10.15"
       }
     }
   }
