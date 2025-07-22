@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "SocialNetworking",
     "macOS": {
       "entitlements": "./Entitlements.plist",
@@ -58,5 +59,19 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQwRUU4N0Y0RTFEN0VCRTQKUldUazY5Zmg5SWZ1UUk0bEhjRlc2cWZsRWJpb3BSNXVjaFBKYzdmZzF4VENuREkrbEV4aFoxTXgK",
+      "endpoints": [
+        "https://github.com/VectorPrivacy/Vector/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "macos": {
+        "minimumSystemVersion": "10.15"
+      }
+    }
   }
 }

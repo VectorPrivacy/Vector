@@ -1252,6 +1252,9 @@ async function login() {
 
                 // Render the initial relay list
                 renderRelayList();
+                
+                // Initialize the updater
+                initializeUpdater();
             }, { once: true });
         });
 
@@ -2864,6 +2867,20 @@ function openSettings() {
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domInvites.style.display = 'none';
+
+    // If an update is available, scroll to the updates section
+    const updateDot = document.getElementById('settings-update-dot');
+    if (updateDot && updateDot.style.display !== 'none') {
+        // Give the settings tab time to render
+        setTimeout(() => {
+            const updatesSection = document.getElementById('settings-updates');
+            if (updatesSection) {
+                updatesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                // Hide the notification dot after scrolling
+                updateDot.style.display = 'none';
+            }
+        }, 100);
+    }
 }
 
 async function openInvites() {
@@ -3032,14 +3049,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     domSettingsBtn.onclick = openSettings;
     domLoginAccountCreationBtn.onclick = async () => {
         try {
-            const { public, private } = await invoke("create_account");
-            strPubkey = public;
+            const { public: pubKey, private: privKey } = await invoke("create_account");
+            strPubkey = pubKey;
             
             // Connect to Nostr network early for invite validation
             await invoke("connect");
             
             // Open the Invite Flow for new accounts
-            openInviteFlow(private);
+            openInviteFlow(privKey);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -3052,8 +3069,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
-            const { public, private } = await invoke("login", { importKey: domLoginInput.value.trim() });
-            strPubkey = public;
+            const { public: pubKey, private: privKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            strPubkey = pubKey;
 
             // Connect to Nostr
             await invoke("connect");
@@ -3061,10 +3078,10 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Check if user has an existing account (has encrypted private key)
             if (await hasKey()) {
                 // Existing user - skip invite flow
-                openEncryptionFlow(private);
+                openEncryptionFlow(privKey);
             } else {
                 // New user logging in - show invite flow
-                openInviteFlow(private);
+                openInviteFlow(privKey);
             }
         } catch (e) {
             // Display the backend error
