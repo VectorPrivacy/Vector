@@ -15,7 +15,8 @@
         "width": 375,
         "minHeight": 550,
         "height": 650,
-        "resizable": true
+        "resizable": true,
+        "backgroundThrottling": "throttle"
       }
     ],
     "security": {

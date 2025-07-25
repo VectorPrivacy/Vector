@@ -1277,7 +1277,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     "application/java-archive" => "jar",
                     
                     // 3D Files
-                    "model/obj" | "text/plain" => "obj",
+                    "model/obj" => "obj",
                     "model/gltf+json" => "gltf",
                     "model/gltf-binary" => "glb",
                     "model/stl" | "application/sla" => "stl",
@@ -1680,7 +1680,6 @@ async fn monitor_relay_connections() -> Result<bool, String> {
     let mut receiver = monitor.subscribe();
     
     // Spawn a task to handle real-time relay status notifications
-    let client_clone = client.clone();
     let handle_clone = handle.clone();
     tokio::spawn(async move {
         while let Ok(notification) = receiver.recv().await {
@@ -1703,16 +1702,8 @@ async fn monitor_relay_connections() -> Result<bool, String> {
                     // Handle reconnection logic
                     match status {
                         RelayStatus::Disconnected => {
-                            // For disconnected, attempt one reconnection after delay
-                            let client_inner = client_clone.clone();
-                            let url_clone = relay_url.clone();
-                            tokio::spawn(async move {
-                                // Wait 5 seconds before attempting reconnection
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                
-                                // Try to reconnect
-                                let _ = client_inner.connect_relay(url_clone.clone()).await;
-                            });
+                            // The aggressive health check system will handle reconnection
+                            // No action needed here to avoid race conditions
                         }
                         RelayStatus::Terminated => {
                             // Relay connection terminated (hard disconnect)
@@ -1733,7 +1724,90 @@ async fn monitor_relay_connections() -> Result<bool, String> {
         }
     });
     
-    // Spawn a separate task to periodically check and reconnect terminated relays
+    // Spawn aggressive health check task
+    let client_health = client.clone();
+    let handle_health = handle.clone();
+    tokio::spawn(async move {
+        // Wait 60 seconds before starting health checks
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        
+        loop {
+            // Get all relays
+            let relays = client_health.relays().await;
+            let mut unhealthy_relays = Vec::new();
+            
+            for (url, relay) in &relays {
+                let status = relay.status();
+                
+                // Only test relays that claim to be connected
+                if status == RelayStatus::Connected {
+                    // Create a simple query to test connectivity
+                    let test_filter = Filter::new()
+                        .kinds(vec![Kind::Metadata])
+                        .limit(1);
+                    
+                    // Try to fetch with short timeout
+                    let start = std::time::Instant::now();
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        client_health.fetch_events_from(
+                            vec![url.to_string()],
+                            test_filter,
+                            std::time::Duration::from_secs(2)
+                        )
+                    ).await;
+                    
+                    let elapsed = start.elapsed();
+                    
+                    match result {
+                        Ok(Ok(events)) => {
+                            // Check if we actually got events or just an empty response
+                            if events.is_empty() && elapsed.as_secs() >= 2 {
+                                // Empty response after 2+ seconds means relay is not responding properly
+                                unhealthy_relays.push((url.clone(), relay.clone()));
+                            }
+                            // else: Healthy - got response quickly
+                        }
+                        Ok(Err(_)) => {
+                            // Query failed
+                            unhealthy_relays.push((url.clone(), relay.clone()));
+                        }
+                        Err(_) => {
+                            // Timeout
+                            unhealthy_relays.push((url.clone(), relay.clone()));
+                        }
+                    }
+                } else if status == RelayStatus::Terminated || status == RelayStatus::Disconnected {
+                    // Already disconnected, add to reconnect list
+                    unhealthy_relays.push((url.clone(), relay.clone()));
+                }
+            }
+            
+            // Force reconnect unhealthy relays
+            for (url, relay) in unhealthy_relays {
+                // First disconnect if needed
+                if relay.status() == RelayStatus::Connected {
+                    let _ = relay.disconnect();
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                
+                // Try to reconnect
+                let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                
+                // Emit status update
+                handle_health.emit("relay_health_check", serde_json::json!({
+                    "url": url.to_string(),
+                    "healthy": false,
+                    "action": "force_reconnect"
+                })).unwrap();
+            }
+            
+            // Wait 15 seconds before next health check round
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
+    
+    // Keep the original periodic terminated relay check
     tokio::spawn(async move {
         // Wait 30 seconds before starting the polling loop
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
