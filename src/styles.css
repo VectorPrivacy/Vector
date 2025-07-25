@@ -2556,3 +2556,81 @@ select:disabled:hover {
 .invite-benefits-list li:last-child {
   margin-bottom: 0;
 }
+
+/* Update UI Layout Styles */
+.update-info {
+  text-align: center;
+}
+
+.update-info p {
+  margin-bottom: 15px;
+  font-size: 16px;
+}
+
+#check-updates-btn {
+  margin: 10px auto;
+  padding: 12px 24px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+#check-updates-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+#check-updates-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+#update-status-text {
+  font-size: 14px;
+  margin-top: 10px;
+  transition: color 0.3s ease;
+}
+
+#update-progress-container {
+  margin: 20px auto;
+  max-width: 300px;
+}
+
+#download-update-btn,
+#restart-update-btn {
+  margin: 10px auto;
+  font-weight: bold;
+  transition: all 0.3s ease;
+}
+
+#download-update-btn:hover,
+#restart-update-btn:hover {
+  transform: translateY(-2px);
+}
+
+#download-update-btn:active,
+#restart-update-btn:active {
+  transform: translateY(0);
+}
+
+#changelog-content {
+  text-align: left;
+  padding: 15px;
+  border-radius: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Update Changelog Styles */
+#update-changelog {
+  max-width: 400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#changelog-content {
+  max-width: 400px;
+  margin-left: auto;
+  margin-right: auto;
+}
