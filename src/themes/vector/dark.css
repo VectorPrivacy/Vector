@@ -117,7 +117,7 @@ button:hover {
 }
 
 .progress-bar {
-  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  background: linear-gradient(90deg, #33db98, #00ff9d);
 }
 
 select {
@@ -129,11 +129,13 @@ select {
 }
 
 #download-model {
-  background: linear-gradient(135deg, #59fcb3 0%, #00d4ff 100%);
+  background: linear-gradient(90deg, #33db98, #00ff9d);
 }
 
 #download-model:hover {
-  box-shadow: 0 5px 15px rgba(89, 252, 179, 0.3);
+  box-shadow: 0 0 5px rgba(0, 255, 157, 0.5),
+              0 0 10px rgba(0, 212, 255, 0.3),
+              inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .model-status {
@@ -167,8 +169,8 @@ select {
 }
 
 #update-progress-bar {
-  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
-  box-shadow: 0 0 10px rgba(89, 252, 179, 0.4);
+  background: linear-gradient(90deg, #33db98, #00ff9d);
+  box-shadow: 0 0 10px rgba(0, 255, 157, 0.4);
 }
 
 #download-update-btn,
@@ -191,9 +193,7 @@ select {
 }
 
 .progress-bar-fill {
-  background: linear-gradient(90deg, 
-    #59fcb3 0%, 
-    #00d4ff 100%);
+  background: linear-gradient(90deg, #33db98, #00ff9d);
 }
 
 .progress-text {
