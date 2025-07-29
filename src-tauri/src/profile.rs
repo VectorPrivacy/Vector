@@ -523,15 +523,53 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     let signer = client.signer().await.unwrap();
     let conf = PUBLIC_NIP96_CONFIG.wait();
 
-    match nostr_sdk::nips::nip96::upload_data(
+    // Create upload request
+    let upload_request = nostr_sdk::nips::nip96::UploadRequest::new(
         &signer,
         &conf,
-        attachment_file.bytes,
-        Some(mime_type),
-        None
-    ).await {
+        &attachment_file.bytes
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Get the upload URL and authorization header
+    let upload_url = upload_request.url();
+    let auth_header = upload_request.authorization();
+
+    // Create the HTTP client
+    let http_client = reqwest::Client::new();
+
+    // Create the multipart form
+    let form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(attachment_file.bytes)
+            .file_name(format!("avatar.{}", attachment_file.extension))
+            .mime_str(mime_type)
+            .map_err(|_| "Failed to set MIME type")?);
+
+    // Make the upload request
+    let response = http_client
+        .post(upload_url.clone())
+        .header("Authorization", auth_header)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send upload request: {}", e))?;
+
+    // Check if the request was successful
+    if !response.status().is_success() {
+        return Err(format!("Upload failed with status: {}", response.status()));
+    }
+
+    // Parse the response
+    let upload_response: nostr_sdk::nips::nip96::UploadResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
+
+    // Extract the URL from the response
+    match upload_response.download_url() {
         Ok(url) => Ok(url.to_string()),
-        Err(e) => Err(e.to_string())
+        Err(e) => Err(format!("Failed to extract download URL: {}", e))
     }
 }
 

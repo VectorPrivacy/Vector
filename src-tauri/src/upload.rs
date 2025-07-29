@@ -26,9 +26,9 @@ fn make_client(proxy: Option<SocketAddr>) -> Result<Client, Error> {
         if let Some(proxy) = proxy {
             let proxy = format!("socks5h://{proxy}");
             use reqwest::Proxy;
-            builder = builder.proxy(Proxy::all(proxy)?);
+            builder = builder.proxy(Proxy::all(proxy).map_err(|_e| Error::InvalidURL)?);
         }
-        builder.build()?
+        builder.build().map_err(|_e| Error::InvalidURL)?
     };
 
     Ok(client)
@@ -99,7 +99,7 @@ pub type ProgressCallback = Box<dyn Fn(Option<u8>, Option<u64>) -> Result<(), St
 
 /// Uploads data to a NIP-96 server with progress callback
 ///
-/// This function extends the standard NIP-96 upload_data function by adding progress reporting
+/// This function implements NIP-96 file upload with progress reporting
 /// via a callback function that is called periodically during the upload process.
 ///
 /// # Retry Parameters
@@ -187,7 +187,7 @@ where
             
         // Set MIME type if provided
         if let Some(mime_str) = mime_type {
-            part = part.mime_str(mime_str).map_err(|_| Error::MultipartMimeError)?;
+            part = part.mime_str(mime_str).map_err(|e| Error::UploadError(format!("Invalid MIME type: {}", e)))?;
         }
         
         part
@@ -216,7 +216,7 @@ where
         tokio::select! {
             // Check if the response is ready
             response = &mut response_future => {
-                break response?;
+                break response.map_err(|e| Error::UploadError(format!("Request failed: {}", e)))?;
             },
             // Report progress periodically
             _ = poll_interval.tick() => {
@@ -254,7 +254,7 @@ where
     progress_callback(Some(100), Some(total_size)).map_err(|e| Error::UploadError(e))?;
     
     // Decode response
-    let res: UploadResponse = response.json().await?;
+    let res: UploadResponse = response.json().await.map_err(|_e| Error::ResponseDecodeError)?;
 
     // Check status
     if res.status == UploadResponseStatus::Error {

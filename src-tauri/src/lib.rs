@@ -897,21 +897,86 @@ async fn migrate_nonce_files_to_hash<R: Runtime>(handle: &AppHandle<R>) -> Resul
 /// Pre-fetch the configs from our preferred NIP-96 servers to speed up uploads
 #[tauri::command]
 async fn warmup_nip96_servers() -> bool {
-    use nostr_sdk::nips::nip96::get_server_config;
+    use nostr_sdk::nips::nip96::{get_server_config_url, ServerConfig};
+    use reqwest::Client;
     
+    // Create HTTP client with timeout
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build() {
+        Ok(client) => client,
+        Err(_) => {
+            return false;
+        }
+    };
+
     // Public Fileserver
     if PUBLIC_NIP96_CONFIG.get().is_none() {
-        let _ = match get_server_config(Url::parse(TRUSTED_PUBLIC_NIP96).unwrap(), None).await {
-            Ok(conf) => PUBLIC_NIP96_CONFIG.set(conf),
-            Err(_) => return false
+        let config_url = match get_server_config_url(&Url::parse(TRUSTED_PUBLIC_NIP96).unwrap()) {
+            Ok(url) => url,
+            Err(_) => {
+                return false;
+            }
+        };
+        
+        // Fetch the JSON configuration from the URL
+        let config_json = match client.get(config_url.to_string()).send().await {
+            Ok(response) => {
+                match response.text().await {
+                    Ok(json) => json,
+                    Err(_) => {
+                        return false;
+                    }
+                }
+            },
+            Err(_) => {
+                return false;
+            }
+        };
+        
+        let _ = match ServerConfig::from_json(&config_json) {
+            Ok(conf) => {
+                PUBLIC_NIP96_CONFIG.set(conf).unwrap();
+                true
+            },
+            Err(_) => {
+                false
+            }
         };
     }
 
     // Private Fileserver
     if PRIVATE_NIP96_CONFIG.get().is_none() {
-        let _ = match get_server_config(Url::parse(TRUSTED_PRIVATE_NIP96).unwrap(), None).await {
-            Ok(conf) => PRIVATE_NIP96_CONFIG.set(conf),
-            Err(_) => return false
+        let config_url = match get_server_config_url(&Url::parse(TRUSTED_PRIVATE_NIP96).unwrap()) {
+            Ok(url) => url,
+            Err(_) => {
+                return false;
+            }
+        };
+        
+        // Fetch the JSON configuration from the URL
+        let config_json = match client.get(config_url.to_string()).send().await {
+            Ok(response) => {
+                match response.text().await {
+                    Ok(json) => json,
+                    Err(_) => {
+                        return false;
+                    }
+                }
+            },
+            Err(_) => {
+                return false;
+            }
+        };
+        
+        let _ = match ServerConfig::from_json(&config_json) {
+            Ok(conf) => {
+                PRIVATE_NIP96_CONFIG.set(conf).unwrap();
+                true
+            },
+            Err(_) => {
+                false
+            }
         };
     }
 
@@ -1661,6 +1726,7 @@ async fn get_relays() -> Result<Vec<RelayInfo>, String> {
                     RelayStatus::Disconnected => "disconnected",
                     RelayStatus::Terminated => "terminated",
                     RelayStatus::Banned => "banned",
+                    RelayStatus::Sleeping => "sleeping",
                 }.to_string(),
             }
         })
@@ -1696,6 +1762,7 @@ async fn monitor_relay_connections() -> Result<bool, String> {
                             RelayStatus::Disconnected => "disconnected",
                             RelayStatus::Terminated => "terminated",
                             RelayStatus::Banned => "banned",
+                            RelayStatus::Sleeping => "sleeping",
                         }
                     })).unwrap();
                     
@@ -2132,7 +2199,7 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
-        .opts(Options::new().gossip(false))
+        .opts(ClientOptions::new().gossip(false))
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
@@ -2278,7 +2345,7 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
-        .opts(Options::new().gossip(false))
+        .opts(ClientOptions::new().gossip(false))
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
