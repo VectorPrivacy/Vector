@@ -37,11 +37,40 @@
     </div>
 
     <main class="container">
-      <!-- The Global emoji picker popup -->
-      <div class="emoji-picker" tabindex="-1">
+    <!-- The Global emoji picker popup -->
+     <div class="emoji-picker" tabindex="-1">
+      <div class="emoji-search-container">
         <input id="emoji-search-input" placeholder="Search...">
-        <div id="emoji-results"></div>
       </div>
+      <div class="emoji-picker-content">
+        <div class="emoji-sidebar">
+          <button class="emoji-category-btn active" data-category="recents">
+            <span class="icon icon-clock"></span>
+          </button>
+          <button class="emoji-category-btn" data-category="favorites">
+            <span class="icon icon-star"></span>
+          </button>
+          <button class="emoji-category-btn" data-category="all">
+            <span class="icon icon-smile-face"></span>
+          </button>
+        </div>
+        <div class="emoji-main">
+          <div class="emoji-section" id="emoji-recents">
+            <div class="emoji-section-header">Recently Used</div>
+            <div class="emoji-grid" id="emoji-recents-grid"></div>
+          </div>
+          <div class="emoji-section" id="emoji-favorites">
+            <div class="emoji-section-header">Favorites</div>
+            <div class="emoji-grid" id="emoji-favorites-grid"></div>
+          </div>
+          <div class="emoji-section" id="emoji-all">
+            <div class="emoji-section-header">Emojis</div>
+            <div class="emoji-grid" id="emoji-all-grid"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
       
 <div id="profile" class="chats" style="display: none;">
   <div style="height: 60px; background-color: #161616;">

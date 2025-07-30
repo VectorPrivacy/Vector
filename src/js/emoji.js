@@ -1325,6 +1325,9 @@ const arrEmojis = [
     { emoji: '🛒', name: 'shopping cart trolley store supermarket' }
 ];
 
+let arrFavoriteEmojis = JSON.parse(localStorage.getItem('favoriteEmojis') || '[]');
+let arrRecentEmojis = JSON.parse(localStorage.getItem('recentEmojis') || '[]');
+
 // Apply some runtime changes to our EmojiDEX
 for (cEmoji of arrEmojis) {
     // Force everything in to lowercase
@@ -1517,4 +1520,25 @@ function isoToFlagEmoji(isoCode) {
  */
 function twemojify(domElement) {
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
+}
+
+function addToRecentEmojis(emoji) {
+  // Remove if already exists
+  arrRecentEmojis = arrRecentEmojis.filter(e => e.emoji !== emoji.emoji);
+  // Add to beginning
+  arrRecentEmojis.unshift(emoji);
+  // Keep only last 20
+  arrRecentEmojis = arrRecentEmojis.slice(0, 20);
+  localStorage.setItem('recentEmojis', JSON.stringify(arrRecentEmojis));
+}
+
+function toggleFavoriteEmoji(emoji) {
+  const index = arrFavoriteEmojis.findIndex(e => e.emoji === emoji.emoji);
+  if (index >= 0) {
+    arrFavoriteEmojis.splice(index, 1);
+  } else {
+    arrFavoriteEmojis.push(emoji);
+  }
+  localStorage.setItem('favoriteEmojis', JSON.stringify(arrFavoriteEmojis));
+  return index < 0; // Returns true if added, false if removed
 }
