@@ -4,7 +4,6 @@ use tauri_plugin_fs::FsExt;
 
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP, PUBLIC_NIP96_CONFIG};
 use crate::db;
-use crate::Message;
 use crate::message::AttachmentFile;
 
 #[cfg(target_os = "android")]
@@ -24,7 +23,10 @@ pub struct Profile {
     pub about: String,
     pub website: String,
     pub nip05: String,
-    pub messages: Vec<Message>,
+    /// Deprecated: Moved to Chat.last_read. This field is only kept for migration purposes.
+    /// Follow-up plan to drop this field:
+    /// 1. In the next release, stop using this field in the migration process
+    /// 2. In a subsequent release, remove this field from the struct and all related code
     pub last_read: String,
     pub status: Status,
     pub last_updated: u64,
@@ -53,7 +55,6 @@ impl Profile {
             about: String::new(),
             website: String::new(),
             nip05: String::new(),
-            messages: Vec::new(),
             last_read: String::new(),
             status: Status::new(),
             last_updated: 0,
@@ -61,31 +62,6 @@ impl Profile {
             mine: false,
             muted: false,
         }
-    }
-
-    /// Get the last message timestamp
-    pub fn last_message_time(&self) -> Option<u64> {
-        self.messages.last().map(|msg| msg.at)
-    }
-
-    /// Get a mutable message by ID
-    pub fn get_message_mut(&mut self, id: &str) -> Option<&mut Message> {
-        self.messages.iter_mut().find(|msg| msg.id == id)
-    }
-
-    /// Set the Last Received message as the "Last Read" message
-    pub fn set_as_read(&mut self) -> bool {
-        // Ensure we have at least one message received from them
-        for msg in self.messages.iter().rev() {
-            if !msg.mine {
-                // Found the most recent message from them
-                self.last_read = msg.id.clone();
-                return true;
-            }
-        }
-        
-        // No messages from them, can't mark anything as read
-        false
     }
 
     /// Merge Nostr Metadata with this Vector Profile
@@ -167,41 +143,6 @@ impl Profile {
         }
         
         changed
-    }
-
-    /// Add a Message to this Vector Profile
-    /// 
-    /// This method internally checks for and avoids duplicate messages.
-    pub fn internal_add_message(&mut self, message: Message) -> bool {
-        // Make sure we don't add the same message twice
-        if self.messages.iter().any(|m| m.id == message.id) {
-            // Message is already known by the state
-            return false;
-        }
-
-        // If it's their message; disable their typing indicator until further indicators are sent
-        if !message.mine {
-            self.typing_until = 0;
-        }
-
-        // Fast path for common cases: newest or oldest messages
-        if self.messages.is_empty() {
-            // First message
-            self.messages.push(message);
-        } else if message.at >= self.messages.last().unwrap().at {
-            // Common case 1: Latest message (append to end)
-            self.messages.push(message);
-        } else if message.at <= self.messages.first().unwrap().at {
-            // Common case 2: Oldest message (insert at beginning)
-            self.messages.insert(0, message);
-        } else {
-            // Less common case: Message belongs somewhere in the middle
-            self.messages.insert(
-                self.messages.binary_search_by(|m| m.at.cmp(&message.at)).unwrap_or_else(|idx| idx),
-                message
-            );
-        }
-        true
     }
 }
 
@@ -591,22 +532,47 @@ pub async fn mark_as_read(npub: String) -> bool {
             return false;
         }
 
-    // Get a mutable reference to the profile
-    let result = {
+    // Find the chat with this user and mark it as read
+    let (result, chat_id_for_save) = {
         let mut state = STATE.lock().await;
-        match state.get_profile_mut(&npub) {
-            Some(profile) => profile.set_as_read(),
-            None => false
+        // Find the DM chat that involves this participant
+        let mut result = false;
+        let mut chat_id_for_save = None;
+        
+        // Look for a DM chat with exactly this participant
+        if let Some(chat) = state.chats.iter_mut().find(|c| {
+            matches!(c.chat_type, crate::ChatType::DirectMessage) && 
+            c.participants.len() == 1 && 
+            c.participants.contains(&npub)
+        }) {
+            // This is a DM chat with this user, mark it as read
+            result = chat.set_as_read();
+            if result {
+                chat_id_for_save = Some(chat.id.clone());
+            }
         }
+        
+        (result, chat_id_for_save)
     };
     
-    // Update the unread counter if the marking was successful
+    // Update the unread counter and save to DB if the marking was successful
     if result {
         // Update the badge count
         crate::update_unread_counter(handle.clone()).await;
 
-        // Save the "Last Read" marker to the DB
-        db::set_profile(handle.clone(), STATE.lock().await.get_profile(&npub).unwrap().clone()).await.unwrap();
+        // Save the updated chat to the DB
+        if let Some(chat_id) = chat_id_for_save {
+            // Get the updated chat to save its metadata (including last_read)
+            let updated_chat = {
+                let state = STATE.lock().await;
+                state.get_chat(&chat_id).cloned()
+            };
+            
+            // Save to DB
+            if let Some(chat) = updated_chat {
+                let _ = crate::db_migration::save_chat(handle.clone(), &chat).await;
+            }
+        }
     }
     
     result

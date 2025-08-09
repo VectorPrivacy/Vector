@@ -74,10 +74,3 @@ async function saveWhisperAutoTranscribe(bool) {
 async function hasKey() {
     return await invoke('get_pkey') !== null;
 }
-
-/**
- * Nuke our Private Key, particularly as a "log out" feature
- */
-async function deleteKey() {
-    await await invoke('delete_setting', { key: 'pkey' });
-}
