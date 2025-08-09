@@ -179,7 +179,8 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
                 
                 // Save the failed message to our DB
                 if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat_messages(handle.clone(), &chat.id, chat.messages.clone()).await;
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
                 }
                 break;
             }
@@ -599,7 +600,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let handle = TAURI_APP.get().unwrap();
             if let Some(chat) = state.get_chat(&receiver) {
                 let _ = save_chat(handle.clone(), chat).await;
-                let _ = save_chat_messages(handle.clone(), &chat.id, chat.messages.clone()).await;
+                let all_messages = chat.messages.clone();
+                let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
             }
             return Ok(true);
         }
@@ -626,7 +628,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let handle = TAURI_APP.get().unwrap();
             if let Some(chat) = state.get_chat(&receiver) {
                 let _ = save_chat(handle.clone(), chat).await;
-                let _ = save_chat_messages(handle.clone(), &chat.id, chat.messages.clone()).await;
+                let all_messages = chat.messages.clone();
+                let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
             }
             return Ok(true);
         }
@@ -829,7 +832,8 @@ pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<
                 // Save the message's reaction to our DB
                 let handle = TAURI_APP.get().unwrap();
                 if let Some(chat) = state.get_chat(&npub) {
-                    let _ = save_chat_messages(handle.clone(), &chat.id, chat.messages.clone()).await;
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
                 }
             }
             return Ok(was_reaction_added_to_state);
@@ -890,7 +894,8 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
 
                     // Save the new Metadata to the DB
                     if let Some(chat) = state.get_chat(&npub) {
-                        let _ = save_chat_messages(handle.clone(), &chat.id, chat.messages.clone()).await;
+                        let all_messages = chat.messages.clone();
+                        let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
                     }
                     return true;
                 }

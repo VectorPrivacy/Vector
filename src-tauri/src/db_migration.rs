@@ -148,7 +148,7 @@ pub async fn get_chat_messages<R: Runtime>(handle: &AppHandle<R>, chat_id: &str)
 pub async fn save_chat_messages<R: Runtime>(
     handle: AppHandle<R>,
     chat_id: &str,
-    messages: Vec<Message>
+    messages: &[Message]
 ) -> Result<(), String> {
     let store = get_store(&handle);
     
@@ -260,7 +260,8 @@ pub async fn migrate_profile_messages_to_chats<R: Runtime>(
     // Save all chats and their messages
     for (index, chat) in chat_vec.iter().enumerate() {
         save_chat(handle.clone(), chat).await?;
-        save_chat_messages(handle.clone(), &chat.id, chat.messages.clone()).await?;
+        let all_messages = chat.messages.clone();
+        save_chat_messages(handle.clone(), &chat.id, &all_messages).await?;
         
         // Emit progress for chat saving
         handle.emit("progress_operation", serde_json::json!({

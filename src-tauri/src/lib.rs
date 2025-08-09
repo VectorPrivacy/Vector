@@ -868,7 +868,8 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
             let chat_id = chat.id().clone();
             
             // Save all messages for this chat
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, messages).await {
+            let all_messages = messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
                 eprintln!("Failed to update messages after filesystem check: {}", e);
             } else {
                 saved_count += 1;
@@ -928,7 +929,8 @@ async fn update_database_attachment_paths<R: Runtime>(
         
         // Save the messages back if any were updated
         if chat_updated {
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, messages).await {
+            let all_messages = messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
                 eprintln!("Failed to save updated messages in attachment migration: {}", e);
             }
         }
@@ -978,7 +980,8 @@ async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
         
         // Save the messages back if any were updated
         if chat_updated {
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, messages).await {
+            let all_messages = messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
                 eprintln!("Failed to save updated messages in timestamp migration: {}", e);
             }
         }
@@ -1385,7 +1388,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             let state = STATE.lock().await;
                             state.get_chat(&contact).map(|chat| chat.messages.clone()).unwrap_or_default()
                         };
-                        let _ = save_chat_messages(handle.clone(), &contact, all_messages).await;
+                        let _ = save_chat_messages(handle.clone(), &contact, &all_messages).await;
                     }
                 }
 
@@ -1435,7 +1438,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                     let state = STATE.lock().await;
                                     state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
                                 };
-                                let _ = save_chat_messages(handle.clone(), &chat_id, all_messages).await;
+                                let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
                             }
                         }
 
@@ -1838,7 +1841,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             let state = STATE.lock().await;
                             state.get_chat(&contact).map(|chat| chat.messages.clone()).unwrap_or_default()
                         };
-                        let _ = save_chat_messages(handle.clone(), &contact, all_messages).await;
+                        let _ = save_chat_messages(handle.clone(), &contact, &all_messages).await;
                     }
                 }
 
@@ -2263,32 +2266,32 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
     // Grab the attachment's metadata by searching through chats
     let attachment = {
         let mut state = STATE.lock().await;
-        
-                // Find the message and attachment in chats
-                let mut found_attachment = None;
-                for chat in &mut state.chats {
-                    if chat.has_participant(&npub) {
-                        if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                            if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
-                                // Check that we're not already downloading
-                                if attachment.downloading {
-                                    return false;
-                                }
-                                
-                                // Enable the downloading flag to prevent re-calls
-                                attachment.downloading = true;
-                                found_attachment = Some(attachment.clone());
-                                break;
-                            }
+
+        // Find the message and attachment in chats
+        let mut found_attachment = None;
+        for chat in &mut state.chats {
+            if chat.has_participant(&npub) {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
+                        // Check that we're not already downloading
+                        if attachment.downloading {
+                            return false;
                         }
+
+                        // Enable the downloading flag to prevent re-calls
+                        attachment.downloading = true;
+                        found_attachment = Some(attachment.clone());
+                        break;
                     }
                 }
-        
+            }
+        }
+
         if found_attachment.is_none() {
             eprintln!("Attachment not found for download: {} in message {}", attachment_id, msg_id);
             return false;
         }
-        
+
         found_attachment.unwrap()
     };
 
@@ -2402,12 +2405,18 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
 
                 // Persist updated message/attachment metadata to the database (outside of STATE lock)
                 if let Some(handle) = TAURI_APP.get() {
-                    // Grab all messages for this chat and save them
+                    // Grab all messages for this chat and save them.
+                    // NOTE: We intentionally clone the chat's messages here to obtain an owned Vec.
+                    // This is required because we must drop the STATE mutex before awaiting
+                    // `save_chat_messages(...)` (which performs async I/O). Holding the STATE lock
+                    // across an await could deadlock or block other tasks. Cloning produces an
+                    // owned snapshot we can safely use after dropping the lock.
                     let all_messages = {
-                        let state = STATE.lock().await;
                         state.get_chat(&npub).map(|chat| chat.messages.clone()).unwrap_or_default()
                     };
-                    let _ = save_chat_messages(handle.clone(), &npub, all_messages).await;
+                    // Drop the STATE lock before performing async I/O
+                    drop(state);
+                    let _ = save_chat_messages(handle.clone(), &npub, &all_messages).await;
                 }
             }
             
