@@ -204,3 +204,60 @@ impl From<&Chat> for SlimChat {
         }
     }
 }
+
+//// Marks a specific message as read for a chat.
+/// Behavior:
+///  - If message_id is Some(id): set chat.last_read = id.
+///  - Else: call chat.set_as_read() to pick the last non-mine message.
+///  - Persist the chat (outside the STATE lock) and update unread counter on success.
+#[tauri::command]
+pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
+    // Apply the read change regardless of window focus; frontend intent is authoritative
+    let handle = crate::TAURI_APP.get().unwrap();
+
+    // Apply the read change to the specified chat
+    let (result, chat_id_for_save) = {
+        let mut state = crate::STATE.lock().await;
+        let mut result = false;
+        let mut chat_id_for_save: Option<String> = None;
+
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+            if let Some(msg_id) = &message_id {
+                // Explicit message -> set that as last_read
+                chat.last_read = msg_id.clone();
+                result = true;
+                chat_id_for_save = Some(chat.id.clone());
+            } else {
+                // No explicit message -> fall back to set_as_read behaviour
+                result = chat.set_as_read();
+                if result {
+                    chat_id_for_save = Some(chat.id.clone());
+                }
+            }
+        }
+
+        (result, chat_id_for_save)
+    };
+
+    // Update the unread counter and save to DB if the marking was successful
+    if result {
+        // Update the badge count
+        crate::update_unread_counter(handle.clone()).await;
+
+        // Save the updated chat to the DB
+        if let Some(chat_id) = chat_id_for_save {
+            // Get the updated chat to save its metadata (including last_read)
+            let updated_chat = {
+                let state = crate::STATE.lock().await;
+                state.get_chat(&chat_id).cloned()
+            };
+
+            // Save to DB
+            if let Some(chat) = updated_chat {
+                let _ = crate::db_migration::save_chat(handle.clone(), &chat).await;
+            }
+        }
+    }
+
+    result
+}

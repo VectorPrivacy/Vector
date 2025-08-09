@@ -749,22 +749,22 @@ function countUnreadMessages(chat) {
 }
 
 /**
- * Sets a specific message as the last read message in a profile
- * @param {Profile} profile - The Profile to update
+ * Sets a specific message as the last read message
+ * @param {Chat} chat - The Chat to update
  * @param {Message|string} message - The Message object or message ID to set as last read
  */
-function markAsRead(profile, message) {
+function markAsRead(chat, message) {
     // If a Message object was provided, extract its ID
     const messageId = typeof message === 'string' ? message : message.id;
-    
-    // Update the profile's last_read property
-    profile.last_read = messageId;
-    
-    // Notify the backend about the read status change
-    // This ensures the updated last_read value is persisted
-    if (profile.id) {
-        invoke("mark_as_read", { npub: profile.id });
+
+    // If we have a chat, update its last_read and notify backend
+    if (chat) {
+        chat.last_read = messageId;
+
+        // Persist via backend using chat-based API
+        invoke("mark_as_read", { chatId: chat.id, messageId: messageId });
     }
+    // If no chat is supplied, do nothing (no profile-based persistence here)
 }
 
 /**
@@ -1895,10 +1895,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
                 // Update the chat's last_read
                 chat.last_read = lastContactMsg.id;
-                // Also update the profile's last_read for backend persistence
-                if (profile) {
-                    markAsRead(profile, lastContactMsg);
-                }
+                // Persist via chat-based API
+                markAsRead(chat, lastContactMsg);
             }
         }
 
@@ -3298,11 +3296,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                         }
                     }
                     
-                    // If we found a message, mark it as read
+                    // If we found a message, mark it as read on the chat
                     if (lastContactMsg) {
-                        const profile = getProfile(strOpenChat);
-                        if (profile) {
-                            markAsRead(profile, lastContactMsg);
+                        const currentChat = getDMChat(strOpenChat);
+                        if (currentChat) {
+                            markAsRead(currentChat, lastContactMsg);
                         }
                     }
                 }

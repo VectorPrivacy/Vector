@@ -1,5 +1,5 @@
 use nostr_sdk::prelude::*;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tauri_plugin_fs::FsExt;
 
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP, PUBLIC_NIP96_CONFIG};
@@ -514,69 +514,6 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     }
 }
 
-/// Marks a specific message as read
-#[tauri::command]
-pub async fn mark_as_read(npub: String) -> bool {
-    // Only mark as read if the Window is focused (user may have the chat open but the app in the background)
-    let handle = TAURI_APP.get().unwrap();
-    if !handle
-        .webview_windows()
-        .iter()
-        .next()
-        .unwrap()
-        .1
-        .is_focused()
-        .unwrap() {
-            // Update the counter to allow for background badge handling of in-chat messages
-            crate::update_unread_counter(handle.clone()).await;
-            return false;
-        }
-
-    // Find the chat with this user and mark it as read
-    let (result, chat_id_for_save) = {
-        let mut state = STATE.lock().await;
-        // Find the DM chat that involves this participant
-        let mut result = false;
-        let mut chat_id_for_save = None;
-        
-        // Look for a DM chat with exactly this participant
-        if let Some(chat) = state.chats.iter_mut().find(|c| {
-            matches!(c.chat_type, crate::ChatType::DirectMessage) && 
-            c.participants.len() == 1 && 
-            c.participants.contains(&npub)
-        }) {
-            // This is a DM chat with this user, mark it as read
-            result = chat.set_as_read();
-            if result {
-                chat_id_for_save = Some(chat.id.clone());
-            }
-        }
-        
-        (result, chat_id_for_save)
-    };
-    
-    // Update the unread counter and save to DB if the marking was successful
-    if result {
-        // Update the badge count
-        crate::update_unread_counter(handle.clone()).await;
-
-        // Save the updated chat to the DB
-        if let Some(chat_id) = chat_id_for_save {
-            // Get the updated chat to save its metadata (including last_read)
-            let updated_chat = {
-                let state = STATE.lock().await;
-                state.get_chat(&chat_id).cloned()
-            };
-            
-            // Save to DB
-            if let Some(chat) = updated_chat {
-                let _ = crate::db_migration::save_chat(handle.clone(), &chat).await;
-            }
-        }
-    }
-    
-    result
-}
 
 /// Toggles the muted status of a profile
 #[tauri::command]

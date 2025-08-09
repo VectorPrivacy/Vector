@@ -3091,7 +3091,7 @@ pub fn run() {
             profile::update_profile,
             profile::update_status,
             profile::upload_avatar,
-            profile::mark_as_read,
+            chat::mark_as_read,
             profile::toggle_muted,
             profile::set_nickname,
             message::message,
