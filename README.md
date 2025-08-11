@@ -1,3 +1,48 @@
+<img width="1293" height="646" alt="GitHub-Repo-Graphics-Header" src="https://github.com/user-attachments/assets/70ac808f-b2ea-499d-b2ab-ed76f7403e64"/>
+ 
+---
+<h3 align="center">
+  Private & Encrypted Messenger App
+</h3>
+
+<h4 align="center">
+  Designed for everyone, providing a safe and secure “hardline” between you and your contacts.
+</h4>
+
+<p align="center">
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.1.8/Vector_0.1.8_x64-setup.exe">Windows</a> | <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.1.8/Vector_0.1.8_x64.dmg">MacOS</a> | <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.1.8/Vector_aarch64.app.tar.gz">Linux</a>
+
+---
+
+<p align="center">
+  Vector is a decentralized communication platform built on the Nostr Protocol, offering no-compromise encryption with zero metadata leakage and plausible deniability for all content, including texts, media, voice notes, and files,     adhering to the NIP-17 standard.
+</p>
+
+---
+<img align="left" src="https://github.com/user-attachments/assets/8787ed84-612b-4480-955b-49c5fe6c2a0c" width="150">
+
+### Free-to-Use, Open-Source
+
+Vector Privacy is a free messenger application that was designed for anyone around the world that seeks to protect their basic human right to privacy and wants to speak freely, without being monitored by third-parties for any intrusive reason. Vector is also open source, which means that the codebase is public and anyone can review its technical design, verify authenticity, as well as contribute to improve the overall quality for all users.
+
+---
+
+<img align="left" src="https://github.com/user-attachments/assets/4f2e73d2-991c-47ec-bcf6-00cc03562583" width="150">
+
+### No Compromise Encryption
+
+Vector utilizes a decentralized relay network (Nostr) as the base infrastructure to communicate information and transmit data, which means it is not stored on a centralized server. The chosen standard, NIP-17, provides a secure and private way for users to communicate directly with each other on the Nostr network. It achieves this by using a combination of [NIP-44 encryption](https://github.com/nostr-protocol/nips/blob/master/44.md), [NIP-59 seals](https://github.com/nostr-protocol/nips/blob/master/59.md), and [gift wraps](https://github.com/nostr-protocol/nips/blob/master/59.md).
+
+---
+
+<img align="left" src="https://github.com/user-attachments/assets/4f2e73d2-991c-47ec-bcf6-00cc03562583" width="150">
+
+### No Personal Data Tracing, Breaches, & Leaks
+
+Vector doesn’t store your personal data in a centralized cloud service or on centralized servers, thus massively reducing the risk of data leaks and private information being shared against the will of the rightful owner. By design, Vector does not possess the technical permissions or abilities to access private information of Vector users. Even Vector developers, nor Formless Labs, have access or permission to your information and data.
+
+---
+
 # Purpose
 
 Vector was born out of a feeling of, for the lack of a better word; "necessity".
@@ -17,8 +62,10 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 ---
 
 # Compiling
-
-> *The following process was graciously written by [PalmTree](https://primal.net/p/npub1e3zglze5g2mq894pfw42kw8uwmyd8uc6m8mupctjfkfplgddglds4v7wja), give him a follow!*
+> [!NOTE]
+> For any additional help or questions, visit the [Vector Community Discord](https://discord.gg/ar2pnE9Huy).
+>
+> *The following process was written and contributed by [PalmTree](https://primal.net/p/npub1e3zglze5g2mq894pfw42kw8uwmyd8uc6m8mupctjfkfplgddglds4v7wja).*
 
 ### Install Dependencies
 
@@ -96,3 +143,8 @@ Currently, bare builds exclude:
 - **Bare Build**: Core functionality only, maximum security and efficiency.
 
 The bare build is perfect for users who prioritize security, privacy, and performance over additional features like Local AI and flashy utility features.
+
+--- 
+
+> [!WARNING]
+> Privacy is a basic human right.
