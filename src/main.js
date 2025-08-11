@@ -1344,7 +1344,7 @@ function renderCurrentProfile(cProfile) {
         domAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 50);
     }
     domAvatar.classList.add('btn');
-    domAvatar.onclick = askForAvatar;
+    domAvatar.onclick = () => openProfile();
     divRow.appendChild(domAvatar);
 
     // Render our Display Name and npub
@@ -1355,7 +1355,7 @@ function renderCurrentProfile(cProfile) {
     h2DisplayName.style.marginTop = `auto`;
     h2DisplayName.style.marginBottom = `auto`;
     h2DisplayName.style.maxWidth = `calc(100% - 150px)`;
-    h2DisplayName.onclick = askForUsername;
+    h2DisplayName.onclick = () => openProfile();
     if (cProfile?.nickname || cProfile?.name) twemojify(h2DisplayName);
     divRow.appendChild(h2DisplayName);
 

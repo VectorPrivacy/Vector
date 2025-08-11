@@ -2403,14 +2403,9 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                     "success": true,
                 })).unwrap();
 
-                // Persist updated message/attachment metadata to the database (outside of STATE lock)
+                // Persist updated message/attachment metadata to the database
                 if let Some(handle) = TAURI_APP.get() {
                     // Grab all messages for this chat and save them.
-                    // NOTE: We intentionally clone the chat's messages here to obtain an owned Vec.
-                    // This is required because we must drop the STATE mutex before awaiting
-                    // `save_chat_messages(...)` (which performs async I/O). Holding the STATE lock
-                    // across an await could deadlock or block other tasks. Cloning produces an
-                    // owned snapshot we can safely use after dropping the lock.
                     let all_messages = {
                         state.get_chat(&npub).map(|chat| chat.messages.clone()).unwrap_or_default()
                     };
