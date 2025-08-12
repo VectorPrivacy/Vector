@@ -1083,9 +1083,6 @@ async function setupRustListeners() {
         // If this user has the open chat, then update the chat too
         if (strOpenChat === evt.payload.chat_id) {
             updateChat(chat, [newMessage]);
-        } else {
-            // The chat of this message is not open: let's update the Unread Counters
-            invoke("update_unread_counter");
         }
 
         // Render the Chat List
@@ -1880,23 +1877,27 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
         domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
 
-        // Auto-mark messages as read when chat is opened
+        // Auto-mark messages as read when chat is opened AND window is focused
         if (chat?.messages?.length) {
-            // Find the latest message from the other person (not from current user)
-            let lastContactMsg = null;
-            for (let i = chat.messages.length - 1; i >= 0; i--) {
-                if (!chat.messages[i].mine) {
-                    lastContactMsg = chat.messages[i];
-                    break;
-                }
-            }
+            // Check window focus before auto-marking
+            const isWindowFocused = await getCurrentWindow().isFocused();
             
-            // If we found a message and it's not already marked as read, update the read status
-            if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
-                // Update the chat's last_read
-                chat.last_read = lastContactMsg.id;
-                // Persist via chat-based API
-                markAsRead(chat, lastContactMsg);
+            if (isWindowFocused) {
+                // Find the latest message from the other person (not from current user)
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                
+                // If we found a message and it's not already marked as read, update the read status
+                if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
+                    // Update the chat's last_read
+                    chat.last_read = lastContactMsg.id;
+                    markAsRead(chat, lastContactMsg);
+                }
             }
         }
 

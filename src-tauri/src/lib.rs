@@ -1390,6 +1390,10 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         };
                         let _ = save_chat_messages(handle.clone(), &contact, &all_messages).await;
                     }
+                    // Ensure OS badge is updated immediately after accepting the message
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = update_unread_counter(handle.clone()).await;
+                    }
                 }
 
                 was_msg_added_to_state
@@ -1842,6 +1846,10 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             state.get_chat(&contact).map(|chat| chat.messages.clone()).unwrap_or_default()
                         };
                         let _ = save_chat_messages(handle.clone(), &contact, &all_messages).await;
+                    }
+                    // Ensure OS badge is updated immediately after accepting the attachment
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = update_unread_counter(handle.clone()).await;
                     }
                 }
 
