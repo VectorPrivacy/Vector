@@ -451,13 +451,8 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     };
 
     // Format a Mime Type from the file extension
-    let mime_type = match attachment_file.extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "application/octet-stream",
-    };
+    let mime_type = crate::util::mime_from_extension_safe(&attachment_file.extension, true)
+        .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
     // Upload the file to the server
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -484,7 +479,7 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     let form = reqwest::multipart::Form::new()
         .part("file", reqwest::multipart::Part::bytes(attachment_file.bytes)
             .file_name(format!("avatar.{}", attachment_file.extension))
-            .mime_str(mime_type)
+            .mime_str(mime_type.as_str())
             .map_err(|_| "Failed to set MIME type")?);
 
     // Make the upload request

@@ -339,28 +339,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         }
 
         // Format a Mime Type from the file extension
-        let mime_type = match attached_file.extension.as_str() {
-            // Images
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            // Audio
-            "wav" => "audio/wav",
-            "mp3" => "audio/mp3",
-            "flac" => "audio/flac",
-            "ogg" => "audio/ogg",
-            "m4a" => "audio/mp4",
-            "aac" => "audio/aac",
-            // Videos
-            "mp4" => "video/mp4",
-            "webm" => "video/webm",
-            "mov" => "video/quicktime",
-            "avi" => "video/x-msvideo",
-            "mkv" => "video/x-matroska",
-            // Unknown
-            _ => "application/octet-stream",
-        };
+        let mime_type = util::mime_from_extension(&attached_file.extension);
 
         // Check if we found an existing attachment with the same hash
         let mut should_upload = true;
@@ -392,7 +371,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 
                 // Append decryption keys and file metadata (using existing attachment's params)
                     .tag(Tag::public_key(receiver_pubkey))
-                    .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                    .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
                     .tag(Tag::custom(TagKind::custom("size"), [existing_attachment.size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                     .tag(Tag::custom(TagKind::custom("decryption-key"), [existing_attachment.key.as_str()]))
@@ -438,7 +417,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
 
             // Upload the file with both a Progress Emitter and multiple re-try attempts in case of connection instability
-            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type.as_str()), None, progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -458,7 +437,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                     // Append decryption keys and file metadata
                         .tag(Tag::public_key(receiver_pubkey))
-                        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
                         .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
                         .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                         .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))

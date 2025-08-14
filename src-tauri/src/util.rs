@@ -496,3 +496,303 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
     
     result
 }
+
+
+// ===== MIME & Extension Conversion Utilities =====
+static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+
+    // Images
+    m.insert("png", "image/png");
+    m.insert("jpg", "image/jpeg");
+    m.insert("jpeg", "image/jpeg");
+    m.insert("gif", "image/gif");
+    m.insert("webp", "image/webp");
+    m.insert("svg", "image/svg+xml");
+    m.insert("bmp", "image/bmp");
+    m.insert("ico", "image/x-icon");
+    m.insert("tif", "image/tiff");
+    m.insert("tiff", "image/tiff");
+
+    // Raw images
+    m.insert("dng", "image/x-adobe-dng");
+    m.insert("cr2", "image/x-canon-cr2");
+    m.insert("nef", "image/x-nikon-nef");
+    m.insert("arw", "image/x-sony-arw");
+
+    // Audio
+    m.insert("wav", "audio/wav");
+    m.insert("mp3", "audio/mp3");
+    m.insert("flac", "audio/flac");
+    m.insert("ogg", "audio/ogg");
+    m.insert("m4a", "audio/mp4");
+    m.insert("aac", "audio/aac");
+    m.insert("wma", "audio/x-ms-wma");
+    m.insert("opus", "audio/opus");
+
+    // Video
+    m.insert("mp4", "video/mp4");
+    m.insert("webm", "video/webm");
+    m.insert("mov", "video/quicktime");
+    m.insert("avi", "video/x-msvideo");
+    m.insert("mkv", "video/x-matroska");
+    m.insert("flv", "video/x-flv");
+    m.insert("wmv", "video/x-ms-wmv");
+    m.insert("mpg", "video/mpeg");
+    m.insert("mpeg", "video/mpeg");
+    m.insert("3gp", "video/3gpp");
+    m.insert("ogv", "video/ogg");
+    m.insert("ts", "video/mp2t");
+
+    // Documents
+    m.insert("pdf", "application/pdf");
+    m.insert("doc", "application/msword");
+    m.insert("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    m.insert("xls", "application/vnd.ms-excel");
+    m.insert("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    m.insert("ppt", "application/vnd.ms-powerpoint");
+    m.insert("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    m.insert("odt", "application/vnd.oasis.opendocument.text");
+    m.insert("ods", "application/vnd.oasis.opendocument.spreadsheet");
+    m.insert("odp", "application/vnd.oasis.opendocument.presentation");
+    m.insert("rtf", "application/rtf");
+
+    // Text/Data
+    m.insert("txt", "text/plain");
+    m.insert("md", "text/markdown");
+    m.insert("csv", "text/csv");
+    m.insert("json", "application/json");
+    m.insert("xml", "application/xml");
+    m.insert("yaml", "application/x-yaml");
+    m.insert("yml", "application/x-yaml");
+    m.insert("toml", "application/toml");
+    m.insert("sql", "application/sql");
+
+    // Archives
+    m.insert("zip", "application/zip");
+    m.insert("rar", "application/vnd.rar");
+    m.insert("7z", "application/x-7z-compressed");
+    m.insert("tar", "application/x-tar");
+    m.insert("gz", "application/gzip");
+    m.insert("bz2", "application/x-bzip2");
+    m.insert("xz", "application/x-xz");
+    m.insert("iso", "application/x-iso9660-image");
+    m.insert("dmg", "application/x-apple-diskimage");
+    m.insert("apk", "application/vnd.android.package-archive");
+    m.insert("jar", "application/java-archive");
+
+    // 3D
+    m.insert("obj", "model/obj");
+    m.insert("gltf", "model/gltf+json");
+    m.insert("glb", "model/gltf-binary");
+    m.insert("stl", "model/stl");
+    m.insert("dae", "model/vnd.collada+xml");
+
+    // Code
+    m.insert("js", "text/javascript");
+    m.insert("ts", "text/typescript");
+    m.insert("py", "text/x-python");
+    m.insert("rs", "text/x-rust");
+    m.insert("go", "text/x-go");
+    m.insert("java", "text/x-java");
+    m.insert("c", "text/x-c");
+    m.insert("cpp", "text/x-c++");
+    m.insert("cs", "text/x-csharp");
+    m.insert("rb", "text/x-ruby");
+    m.insert("php", "text/x-php");
+    m.insert("swift", "text/x-swift");
+
+    // Web
+    m.insert("html", "text/html");
+    m.insert("css", "text/css");
+
+    // Other
+    m.insert("exe", "application/x-msdownload");
+    m.insert("msi", "application/x-msi");
+    m.insert("ttf", "font/ttf");
+    m.insert("otf", "font/otf");
+    m.insert("woff", "font/woff");
+    m.insert("woff2", "font/woff2");
+
+    m
+});
+
+static MIME_TO_EXT: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+
+    // Images
+    m.insert("image/png", "png");
+    m.insert("image/jpeg", "jpg");
+    m.insert("image/jpg", "jpg");
+    m.insert("image/gif", "gif");
+    m.insert("image/webp", "webp");
+    m.insert("image/svg+xml", "svg");
+    m.insert("image/bmp", "bmp");
+    m.insert("image/x-ms-bmp", "bmp");
+    m.insert("image/x-icon", "ico");
+    m.insert("image/vnd.microsoft.icon", "ico");
+    m.insert("image/tiff", "tiff");
+
+    // Raw Images
+    m.insert("image/x-adobe-dng", "dng");
+    m.insert("image/x-canon-cr2", "cr2");
+    m.insert("image/x-nikon-nef", "nef");
+    m.insert("image/x-sony-arw", "arw");
+
+    // Audio
+    m.insert("audio/wav", "wav");
+    m.insert("audio/x-wav", "wav");
+    m.insert("audio/wave", "wav");
+    m.insert("audio/mp3", "mp3");
+    m.insert("audio/mpeg", "mp3");
+    m.insert("audio/flac", "flac");
+    m.insert("audio/ogg", "ogg");
+    m.insert("audio/mp4", "m4a");
+    m.insert("audio/aac", "aac");
+    m.insert("audio/x-aac", "aac");
+    m.insert("audio/x-ms-wma", "wma");
+    m.insert("audio/opus", "opus");
+
+    // Video
+    m.insert("video/mp4", "mp4");
+    m.insert("video/webm", "webm");
+    m.insert("video/quicktime", "mov");
+    m.insert("video/x-msvideo", "avi");
+    m.insert("video/x-matroska", "mkv");
+    m.insert("video/x-flv", "flv");
+    m.insert("video/x-ms-wmv", "wmv");
+    m.insert("video/mpeg", "mpg");
+    m.insert("video/3gpp", "3gp");
+    m.insert("video/ogg", "ogv");
+    m.insert("video/mp2t", "ts");
+
+    // Documents
+    m.insert("application/pdf", "pdf");
+    m.insert("application/msword", "doc");
+    m.insert("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx");
+    m.insert("application/vnd.ms-excel", "xls");
+    m.insert("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx");
+    m.insert("application/vnd.ms-powerpoint", "ppt");
+    m.insert("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx");
+    m.insert("application/vnd.oasis.opendocument.text", "odt");
+    m.insert("application/vnd.oasis.opendocument.spreadsheet", "ods");
+    m.insert("application/vnd.oasis.opendocument.presentation", "odp");
+    m.insert("application/rtf", "rtf");
+
+    // Text/Data
+    m.insert("text/plain", "txt");
+    m.insert("text/markdown", "md");
+    m.insert("text/csv", "csv");
+    m.insert("application/json", "json");
+    m.insert("application/xml", "xml");
+    m.insert("text/xml", "xml");
+    m.insert("application/x-yaml", "yaml");
+    m.insert("text/yaml", "yaml");
+    m.insert("application/toml", "toml");
+    m.insert("application/sql", "sql");
+
+    // Archives
+    m.insert("application/zip", "zip");
+    m.insert("application/x-rar-compressed", "rar");
+    m.insert("application/vnd.rar", "rar");
+    m.insert("application/x-7z-compressed", "7z");
+    m.insert("application/x-tar", "tar");
+    m.insert("application/gzip", "gz");
+    m.insert("application/x-bzip2", "bz2");
+    m.insert("application/x-xz", "xz");
+    m.insert("application/x-iso9660-image", "iso");
+    m.insert("application/x-apple-diskimage", "dmg");
+    m.insert("application/vnd.android.package-archive", "apk");
+    m.insert("application/java-archive", "jar");
+
+    // 3D
+    m.insert("model/obj", "obj");
+    m.insert("model/gltf+json", "gltf");
+    m.insert("model/gltf-binary", "glb");
+    m.insert("model/stl", "stl");
+    m.insert("application/sla", "stl");
+    m.insert("model/vnd.collada+xml", "dae");
+
+    // Code
+    m.insert("text/javascript", "js");
+    m.insert("application/javascript", "js");
+    m.insert("text/typescript", "ts");
+    m.insert("application/typescript", "ts");
+    m.insert("text/x-python", "py");
+    m.insert("application/x-python", "py");
+    m.insert("text/x-rust", "rs");
+    m.insert("text/x-go", "go");
+    m.insert("text/x-java", "java");
+    m.insert("text/x-c", "c");
+    m.insert("text/x-c++", "cpp");
+    m.insert("text/x-csharp", "cs");
+    m.insert("text/x-ruby", "rb");
+    m.insert("text/x-php", "php");
+    m.insert("text/x-swift", "swift");
+
+    // Web
+    m.insert("text/html", "html");
+    m.insert("text/css", "css");
+
+    // Other
+    m.insert("application/x-msdownload", "exe");
+    m.insert("application/x-dosexec", "exe");
+    m.insert("application/x-msi", "msi");
+    m.insert("application/x-font-ttf", "ttf");
+    m.insert("font/ttf", "ttf");
+    m.insert("application/x-font-otf", "otf");
+    m.insert("font/otf", "otf");
+    m.insert("font/woff", "woff");
+    m.insert("font/woff2", "woff2");
+
+    m
+});
+
+/// Convert a file extension (with or without leading dot) to a MIME type.
+/// Returns "application/octet-stream" when unknown.
+pub fn mime_from_extension(extension: &str) -> String {
+    let ext = extension.trim().trim_start_matches('.').to_lowercase();
+    EXT_TO_MIME
+        .get(ext.as_str())
+        .copied()
+        .unwrap_or("application/octet-stream")
+        .to_string()
+}
+
+/// Convert a MIME type to a file extension.
+/// Falls back to using the MIME subtype when unknown (e.g. "application/x-foo" -> "x-foo"),
+/// and "bin" if MIME is malformed.
+pub fn extension_from_mime(mime: &str) -> String {
+    let lower = mime.trim().to_lowercase();
+
+    if let Some(ext) = MIME_TO_EXT.get(lower.as_str()) {
+        return (*ext).to_string();
+    }
+
+    // Fallback: best-effort subtype extraction, mirroring previous behavior
+    lower
+        .split('/')
+        .nth(1)
+        .unwrap_or("bin")
+        .to_string()
+}
+
+/// Convert a file extension (with or without leading dot) to a MIME type,
+/// with an optional restriction to image/* MIME types.
+///
+/// If `image_only` is true and the extension maps to a non-image MIME type,
+/// returns `Err` with the invalid MIME type.
+pub fn mime_from_extension_safe(extension: &str, image_only: bool) -> Result<String, String> {
+    let mime = mime_from_extension(extension);
+    
+    if image_only && !is_image_mime(&mime) {
+        return Err(mime);
+    }
+    
+    Ok(mime)
+}
+
+/// Returns true if the provided MIME type is an image/*
+pub fn is_image_mime(mime: &str) -> bool {
+    mime.trim().starts_with("image/")
+}
