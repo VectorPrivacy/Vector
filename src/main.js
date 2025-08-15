@@ -450,7 +450,6 @@ picker.addEventListener('contextmenu', (e) => {
  * @property {string} id - Unique identifier for the profile.
  * @property {string} name - The name of the user.
  * @property {string} avatar - URL to the user's avatar image.
- * @property {Message[]} messages - An array of messages associated with the profile.
  * @property {string} last_read - ID of the last message that was read.
  * @property {Status} status - The current status of the user.
  * @property {number} last_updated - Timestamp indicating when the profile was last updated.
@@ -519,8 +518,27 @@ picker.addEventListener('contextmenu', (e) => {
  */
 
 /**
- * A cache of all chats with linear chronological history
+ * Represents a chat between users.
+ * @typedef {Object} Chat
+ * @property {string} id - Chat ID (npub for DMs).
+ * @property {string} chat_type - Type of chat (DirectMessage, Group, etc).
+ * @property {string[]} participants - Array of participant npubs.
+ * @property {Message[]} messages - Array of messages in this chat.
+ * @property {string} last_read - ID of the last read message.
+ * @property {number} created_at - Timestamp when chat was created.
+ * @property {Object} metadata - Additional chat metadata.
+ * @property {boolean} muted - Whether the chat is muted.
+ */
+
+/**
+ * A cache of all profiles (without messages)
  * @type {Profile[]}
+ */
+let arrProfiles = [];
+
+/**
+ * A cache of all chats (with messages)
+ * @type {Chat[]}
  */
 let arrChats = [];
 
@@ -528,6 +546,47 @@ let arrChats = [];
  * The current open chat (by npub)
  */
 let strOpenChat = "";
+
+/**
+ * Get a DM chat for a user
+ * @param {string} npub - The user's npub
+ * @returns {Chat|undefined} - The chat if it exists
+ */
+function getDMChat(npub) {
+    return arrChats.find(c => c.chat_type === 'DirectMessage' && c.id === npub);
+}
+
+/**
+ * Get or create a DM chat for a user
+ * @param {string} npub - The user's npub
+ * @returns {Chat} - The chat (existing or newly created)
+ */
+function getOrCreateDMChat(npub) {
+    let chat = getDMChat(npub);
+    if (!chat) {
+        chat = {
+            id: npub,
+            chat_type: 'DirectMessage',
+            participants: [npub],
+            messages: [],
+            last_read: '',
+            created_at: Math.floor(Date.now() / 1000),
+            metadata: {},
+            muted: false
+        };
+        arrChats.push(chat);
+    }
+    return chat;
+}
+
+/**
+ * Get a profile by npub
+ * @param {string} npub - The user's npub
+ * @returns {Profile|undefined} - The profile if it exists
+ */
+function getProfile(npub) {
+    return arrProfiles.find(p => p.id === npub);
+}
 
 /**
  * Tracks if we're in the initial chat open period for auto-scrolling
@@ -558,7 +617,10 @@ async function init() {
         if (domChats.style.display !== 'none') renderChatlist();
 
         // If the chat is open; run a 'soft' render to update typing status
-        if (strOpenChat) updateChat(arrChats.find(a => a.id === strOpenChat), []);
+        if (strOpenChat) {
+            const chat = getDMChat(strOpenChat);
+            if (chat) updateChat(chat, []);
+        }
     }, 30000);
 }
 
@@ -567,8 +629,8 @@ async function init() {
  */
 async function fetchProfiles() {
     // Poll for changes in profiles
-    for (const chat of arrChats) {
-        await invoke("load_profile", { npub: chat.id });
+    for (const profile of arrProfiles) {
+        await invoke("load_profile", { npub: profile.id });
     }
 }
 
@@ -588,10 +650,10 @@ function renderChatlist() {
         if (chat.messages.length === 0) continue;
 
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
-        if (chat.mine) continue;
+        if (chat.id === strPubkey) continue;
 
         // If the chat order changed; append to fragment instead of directly to the DOM for full list re-render efficiency
-        const divContact = renderContact(chat);
+        const divContact = renderChat(chat);
         if (orderChanged) {
             fragment.appendChild(divContact);
         } else {
@@ -623,14 +685,18 @@ function renderChatlist() {
 }
 
 /**
- * Render a Contact for the Contact List
- * @param {Profile} chat - The profile we're rendering
+ * Render a Chat Preview for the Chat List
+ * @param {Chat} chat - The profile we're rendering
  */
-function renderContact(chat) {
+function renderChat(chat) {
     // Collect the Unread Message count for 'Unread' emphasis and badging
     const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
 
-    // The Contact container (The ID is the Contact's npub)
+    // Grab the profile (if this is a 1-to-1 chat)
+    const profile = chat.participants.length === 1 ? getProfile(chat.id) : null;
+    if (!profile) console.log(chat);
+
+    // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
     if (nUnread) divContact.style.borderColor = '#59fcb3';
     divContact.classList.add('chatlist-contact');
@@ -644,13 +710,13 @@ function renderContact(chat) {
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = `relative`;
     divAvatarContainer.style.zIndex = `-1`;
-    if (chat?.avatar) {
+    if (profile?.avatar) {
         const imgAvatar = document.createElement('img');
-        imgAvatar.src = chat?.avatar;
+        imgAvatar.src = profile?.avatar;
         divAvatarContainer.appendChild(imgAvatar);
     } else {
         // Otherwise, generate a Gradient Avatar
-        divAvatarContainer.appendChild(pubkeyToAvatar(chat.id, chat?.nickname || chat?.name, 50));
+        divAvatarContainer.appendChild(pubkeyToAvatar(profile.id, profile?.nickname || profile?.name, 50));
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -683,8 +749,8 @@ function renderContact(chat) {
 
     // Add the name (or, if missing metadata, their npub instead) to the chat preview
     const h4ContactName = document.createElement('h4');
-    h4ContactName.textContent = chat?.nickname || chat?.name || chat.id;
-    if (chat?.nickname || chat?.name) twemojify(h4ContactName);
+    h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
+    if (profile?.nickname || profile?.name) twemojify(h4ContactName);
     h4ContactName.classList.add('cutoff')
     divPreviewContainer.appendChild(h4ContactName);
 
@@ -729,48 +795,65 @@ function renderContact(chat) {
 
 /**
  * Count the quantity of unread messages
- * @param {Profile} profile - The Profile we're checking
+ * @param {Chat} chat - The Chat we're checking
  * @returns {number} - The amount of unread messages, if any
  */
-function countUnreadMessages(profile) {
-    // If no messages or no last_read ID, return 0
-    if (!profile.messages.length) return 0;
+function countUnreadMessages(chat) {
+    // If no messages, return 0
+    if (!chat.messages || !chat.messages.length) return 0;
     
-    // Start from the most recent message and count backward
+    // If last_read is set, count messages after it
+    if (chat.last_read) {
+        // Find the index of the last read message
+        const lastReadIndex = chat.messages.findIndex(msg => msg.id === chat.last_read);
+        if (lastReadIndex !== -1) {
+            // Count non-mine messages after the last read message
+            let unreadCount = 0;
+            for (let i = lastReadIndex + 1; i < chat.messages.length; i++) {
+                if (!chat.messages[i].mine) {
+                    unreadCount++;
+                }
+            }
+            return unreadCount;
+        }
+        // If last_read message not found, fall back to walk-back logic
+    }
+    
+    // No last_read set or not found - walk backwards from the end
     let unreadCount = 0;
     
-    // Iterate from the end of the array (most recent) backward
-    for (let i = profile.messages.length - 1; i >= 0; i--) {
-        if (profile.messages[i].mine) continue;
-
-        // If we've found the last read message, stop counting
-        if (profile.last_read && profile.messages[i].id === profile.last_read) {
+    // Iterate messages in reverse order (newest first)
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+        if (chat.messages[i].mine) {
+            // If we find our own message first, everything before it is considered read
+            // (because we responded to those messages)
             break;
+        } else {
+            // Count non-mine messages (unread)
+            unreadCount++;
         }
-        // Otherwise, increment the unread count
-        unreadCount++;
     }
     
     return unreadCount;
 }
 
 /**
- * Sets a specific message as the last read message in a profile
- * @param {Profile} profile - The Profile to update
+ * Sets a specific message as the last read message
+ * @param {Chat} chat - The Chat to update
  * @param {Message|string} message - The Message object or message ID to set as last read
  */
-function markAsRead(profile, message) {
+function markAsRead(chat, message) {
     // If a Message object was provided, extract its ID
     const messageId = typeof message === 'string' ? message : message.id;
-    
-    // Update the profile's last_read property
-    profile.last_read = messageId;
-    
-    // Notify the backend about the read status change
-    // This ensures the updated last_read value is persisted
-    if (profile.id) {
-        invoke("mark_as_read", { npub: profile.id });
+
+    // If we have a chat, update its last_read and notify backend
+    if (chat) {
+        chat.last_read = messageId;
+
+        // Persist via backend using chat-based API
+        invoke("mark_as_read", { chatId: chat.id, messageId: messageId });
     }
+    // If no chat is supplied, do nothing (no profile-based persistence here)
 }
 
 /**
@@ -798,30 +881,6 @@ async function sendFile(pubkey, replied_to, filepath) {
         popupConfirm(e, '', true, '', 'vector_warning.svg');
     }
     nLastTypingIndicator = 0;
-}
-
-/**
- * Display the welcome screen after successful invite code acceptance
- * @param {string} pkey - A private key to encrypt after the welcome screen
- */
-function showWelcomeScreen(pkey) {
-    // Hide the logo and subtext
-    const domLogo = document.querySelector('.login-logo');
-    const domSubtext = document.querySelector('.login-subtext');
-    domLogo.style.display = 'none';
-    domSubtext.style.display = 'none';
-    
-    // Show the welcome screen
-    domLoginWelcome.style.display = '';
-    
-    // After 5 seconds, transition to the encryption flow
-    setTimeout(() => {
-        domLoginWelcome.style.display = 'none';
-        // Restore the logo and subtext
-        domLogo.style.display = '';
-        domSubtext.style.display = '';
-        openEncryptionFlow(pkey, false);
-    }, 5000);
 }
 
 /**
@@ -939,11 +998,15 @@ async function setupRustListeners() {
     // Listen for Attachment Download Results
     await listen('attachment_download_result', async (evt) => {
         // Update the in-memory attachment
-        let cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
-        let cMsg = cProfile.messages.find(m => m.id === evt.payload.msg_id);
+        let cChat = getDMChat(evt.payload.profile_id);
+        if (!cChat) return;
+        
+        let cMsg = cChat.messages.find(m => m.id === evt.payload.msg_id);
+        if (!cMsg) return;
     
         // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
         let cAttachment = cMsg.attachments.find(a => a.id === evt.payload?.old_id || evt.payload.id);
+        if (!cAttachment) return;
 
         cAttachment.downloading = false;
         if (evt.payload.success) {
@@ -957,7 +1020,8 @@ async function setupRustListeners() {
             // If this user has an open chat, then update the rendered message
             if (strOpenChat === evt.payload.profile_id) {
                 const domMsg = document.getElementById(evt.payload.msg_id);
-                domMsg?.replaceWith(renderMessage(cMsg, cProfile, evt.payload.msg_id));
+                const profile = getProfile(evt.payload.profile_id);
+                domMsg?.replaceWith(renderMessage(cMsg, profile, evt.payload.msg_id));
 
                 // Scroll accordingly
                 softChatScroll();
@@ -979,118 +1043,106 @@ async function setupRustListeners() {
     // Listen for profile updates
     await listen('profile_update', (evt) => {
         // Check if the frontend is already aware
-        const nProfileIdx = arrChats.findIndex(p => p.id === evt.payload.id);
+        const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
         if (nProfileIdx >= 0) {
             // Update our frontend memory
-            arrChats[nProfileIdx] = evt.payload;
+            arrProfiles[nProfileIdx] = evt.payload;
 
             // If this is our profile, make sure to render it's changes
-            if (arrChats[nProfileIdx].mine) {
-                renderCurrentProfile(arrChats[nProfileIdx]);
+            if (arrProfiles[nProfileIdx].mine) {
+                renderCurrentProfile(arrProfiles[nProfileIdx]);
             }
         } else {
             // Add the new profile
-            arrChats.unshift(evt.payload);
-
-            // Sort by last-message-time in case of backwards incremental sync
-            arrChats.sort((a, b) => b?.messages[b.messages.length - 1]?.at - a?.messages[a?.messages.length - 1]?.at);
+            arrProfiles.push(evt.payload);
         }
-        // If this user has an open chat, then soft-update the chat too
+        
+        // If this user has an open chat, then soft-update the chat header
         if (strOpenChat === evt.payload.id) {
-            updateChat(arrChats[nProfileIdx], []);
+            const chat = getDMChat(evt.payload.id);
+            const profile = getProfile(evt.payload.id);
+            if (chat && profile) {
+                updateChat(chat, [], profile);
+            }
         }
+        
         // If this user is being viewed in the Expanded Profile View, update it
         // Note: no need to update our own, it makes editing very weird
-        if (!arrChats[nProfileIdx].mine && domProfileId.textContent === evt.payload.id) {
-            renderProfileTab(arrChats[nProfileIdx]);
+        if (!evt.payload.mine && domProfileId.textContent === evt.payload.id) {
+            renderProfileTab(evt.payload);
         }
+        
         // Render the Chat List
         renderChatlist();
     });
 
     await listen('profile_muted', (evt) => {
-        const cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
-        cProfile.muted = evt.payload.value;
+        // Update the chat's muted status
+        const cChat = getDMChat(evt.payload.profile_id);
+        if (cChat) {
+            cChat.muted = evt.payload.value;
+        }
+        
+        // Also update profile if it exists
+        const cProfile = getProfile(evt.payload.profile_id);
+        if (cProfile) {
+            cProfile.muted = evt.payload.value;
+        }
 
         // If this profile is Expanded, update the Mute UI
-        if (domProfileId.textContent === cProfile.id) {
+        if (domProfileId.textContent === evt.payload.profile_id && cProfile) {
             domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
             domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
         }
     });
 
     await listen('profile_nick_changed', (evt) => {
-        const cProfile = arrChats.find(p => p.id === evt.payload.profile_id);
-        cProfile.nickname = evt.payload.value;
-
-        // If this profile is Expanded, update the UI
-        if (domProfileId.textContent === cProfile.id) {
-            renderProfileTab(cProfile);
+        // Update the profile's nickname
+        const cProfile = getProfile(evt.payload.profile_id);
+        if (cProfile) {
+            cProfile.nickname = evt.payload.value;
+            
+            // If this profile is Expanded, update the UI
+            if (domProfileId.textContent === evt.payload.profile_id) {
+                renderProfileTab(cProfile);
+            }
         }
     });
 
     // Listen for incoming messages
     await listen('message_new', (evt) => {
-        // Grab our profile index (a profile should be guaranteed before its first message event)
-        const nProfileIdx = arrChats.findIndex(p => p.id === evt.payload.chat_id);
-
+        // Get the chat for this message (chat_id is the npub for DMs)
+        let chat = getOrCreateDMChat(evt.payload.chat_id);
+        
         // Get the new message
         const newMessage = evt.payload.message;
 
-        // Double-check we haven't received this twice (unless this is their first message)
-        const cFirstMsg = arrChats[nProfileIdx].messages[0];
-        if (arrChats[nProfileIdx].messages.length === 1 && cFirstMsg.id === newMessage.id && !cFirstMsg.mine) return;
+        // Double-check we haven't received this twice
+        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
+        if (existingMsg) return;
 
-        // Reset their typing status
-        if (!newMessage.mine) arrChats[nProfileIdx].typing_until = 0;
+        // Reset typing status for the sender's profile
+        const profile = getProfile(evt.payload.chat_id);
+        if (profile && !newMessage.mine) {
+            profile.typing_until = 0;
+        }
 
         // Find the correct position to insert the message based on timestamp
-        const messages = arrChats[nProfileIdx].messages;
+        const messages = chat.messages;
 
         // Check if the array is empty or the new message is newer than the newest message
         if (messages.length === 0 || newMessage.at > messages[messages.length - 1].at) {
             // Insert at the end (newest)
             messages.push(newMessage);
 
-            // Only move the chat to the top if this message is newer than all other chats' latest messages
-            if (nProfileIdx > 0) {
-                let shouldMoveToTop = true;
-
-                // Compare with all other chats' latest messages
-                for (let i = 0; i < nProfileIdx; i++) {
-                    const otherChat = arrChats[i];
-                    if (otherChat.messages && otherChat.messages.length > 0) {
-                        const otherLatestMsg = otherChat.messages[otherChat.messages.length - 1];
-
-                        // If any other chat has a newer message, don't move this one to top
-                        if (otherLatestMsg.at > newMessage.at) {
-                            shouldMoveToTop = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (shouldMoveToTop) {
-                    // Remove the profile at index and get it
-                    const [profile] = arrChats.splice(nProfileIdx, 1);
-                    // Add it to the beginning
-                    arrChats.unshift(profile);
-                } else {
-                    // Find the correct position to place this chat based on message time
-                    let insertIdx = 0;
-                    while (insertIdx < nProfileIdx &&
-                        arrChats[insertIdx].messages.length > 0 &&
-                        arrChats[insertIdx].messages[arrChats[insertIdx].messages.length - 1].at > newMessage.at) {
-                        insertIdx++;
-                    }
-
-                    if (insertIdx < nProfileIdx) {
-                        // Remove the profile and insert it at the correct position
-                        const [profile] = arrChats.splice(nProfileIdx, 1);
-                        arrChats.splice(insertIdx, 0, profile);
-                    }
-                }
-            }
+            // Sort chats by last message time
+            arrChats.sort((a, b) => {
+                const aLastMsg = a.messages[a.messages.length - 1];
+                const bLastMsg = b.messages[b.messages.length - 1];
+                if (!aLastMsg) return 1;
+                if (!bLastMsg) return -1;
+                return bLastMsg.at - aLastMsg.at;
+            });
         }
         // Check if the new message is older than the oldest message
         else if (newMessage.at < messages[0].at) {
@@ -1119,10 +1171,7 @@ async function setupRustListeners() {
 
         // If this user has the open chat, then update the chat too
         if (strOpenChat === evt.payload.chat_id) {
-            updateChat(arrChats.find(p => p.id === evt.payload.chat_id), [newMessage]);
-        } else {
-            // The chat of this message is not open: let's update the Unread Counters
-            invoke("update_unread_counter");
+            updateChat(chat, [newMessage]);
         }
 
         // Render the Chat List
@@ -1132,19 +1181,20 @@ async function setupRustListeners() {
     // Listen for existing message updates
     await listen('message_update', (evt) => {
         // Find the message we're updating
-        const cProfile = arrChats.find(p => p.id === evt.payload.chat_id);
-        if (!cProfile) return;
-        const nMsgIdx = cProfile.messages.findIndex(m => m.id === evt.payload.old_id);
+        const cChat = getDMChat(evt.payload.chat_id);
+        if (!cChat) return;
+        const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
 
         // Update it
-        cProfile.messages[nMsgIdx] = evt.payload.message;
+        cChat.messages[nMsgIdx] = evt.payload.message;
 
         // If this user has an open chat, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
             // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
             const domMsg = document.getElementById(evt.payload.old_id);
-            domMsg?.replaceWith(renderMessage(evt.payload.message, cProfile, evt.payload.old_id));
+            const profile = getProfile(evt.payload.chat_id);
+            domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
 
             // If the old ID was a pending ID (our message), make sure to update and scroll accordingly
             if (evt.payload.old_id.startsWith('pending')) {
@@ -1277,8 +1327,9 @@ async function login() {
 
         // Setup a Rust Listener for the backend's init finish
         await listen('init_finished', (evt) => {
-            // Set our full Chat State
-            arrChats = evt.payload;
+            // The backend now sends both profiles (without messages) and chats (with messages)
+            arrProfiles = evt.payload.profiles || [];
+            arrChats = evt.payload.chats || [];
 
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
@@ -1301,7 +1352,7 @@ async function login() {
                 }, { once: true });
 
                 // Render our profile with an intro animation
-                const cProfile = arrChats.find(p => p.mine);
+                const cProfile = arrProfiles.find(p => p.mine);
                 renderCurrentProfile(cProfile);
                 domAccount.style.display = ``;
                 domAccount.classList.add('fadein-anim');
@@ -1379,7 +1430,7 @@ function renderCurrentProfile(cProfile) {
         domAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 50);
     }
     domAvatar.classList.add('btn');
-    domAvatar.onclick = askForAvatar;
+    domAvatar.onclick = () => openProfile();
     divRow.appendChild(domAvatar);
 
     // Render our Display Name and npub
@@ -1390,7 +1441,7 @@ function renderCurrentProfile(cProfile) {
     h2DisplayName.style.marginTop = `auto`;
     h2DisplayName.style.marginBottom = `auto`;
     h2DisplayName.style.maxWidth = `calc(100% - 150px)`;
-    h2DisplayName.onclick = askForUsername;
+    h2DisplayName.onclick = () => openProfile();
     if (cProfile?.nickname || cProfile?.name) twemojify(h2DisplayName);
     divRow.appendChild(h2DisplayName);
 
@@ -1865,15 +1916,21 @@ let strCurrentReplyReference = "";
 
 /**
  * Updates the current chat (to display incoming and outgoing messages)
- * @param {Profile} profile 
+ * @param {Chat} chat - The chat to update
  * @param {Array<Message>} arrMessages - The messages to efficiently insert into the chat
+ * @param {Profile} profile - Optional profile for display info
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
-async function updateChat(profile, arrMessages = [], fClicked = false) {
+async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
+    // If no profile is provided, try to get it from the chat ID
+    if (!profile && chat) {
+        profile = getProfile(chat.id);
+    }
+    
     // If this chat is our own npub: then we consider this our Bookmarks/Notes section
     const fNotes = strOpenChat === strPubkey;
 
-    if (profile?.messages.length || arrMessages.length) {
+    if (chat?.messages.length || arrMessages.length) {
         // Prefer displaying their name, otherwise, npub
         if (fNotes) {
             domChatContact.textContent = 'Notes';
@@ -1909,20 +1966,27 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
         domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
 
-        // Auto-mark messages as read when chat is opened
-        if (profile?.messages?.length) {
-            // Find the latest message from the other person (not from current user)
-            let lastContactMsg = null;
-            for (let i = profile.messages.length - 1; i >= 0; i--) {
-                if (!profile.messages[i].mine) {
-                    lastContactMsg = profile.messages[i];
-                    break;
-                }
-            }
+        // Auto-mark messages as read when chat is opened AND window is focused
+        if (chat?.messages?.length) {
+            // Check window focus before auto-marking
+            const isWindowFocused = await getCurrentWindow().isFocused();
             
-            // If we found a message and it's not already marked as read, update the read status
-            if (lastContactMsg && profile.last_read !== lastContactMsg.id) {
-                markAsRead(profile, lastContactMsg);
+            if (isWindowFocused) {
+                // Find the latest message from the other person (not from current user)
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                
+                // If we found a message and it's not already marked as read, update the read status
+                if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
+                    // Update the chat's last_read
+                    chat.last_read = lastContactMsg.id;
+                    markAsRead(chat, lastContactMsg);
+                }
             }
         }
 
@@ -1949,7 +2013,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
 
             // Get the newest message in the DOM
             const newestMsgElement = domChatMessages.lastElementChild;
-            const newestMsg = profile.messages.find(m => m.id === newestMsgElement.id);
+            const newestMsg = chat.messages.find(m => m.id === newestMsgElement.id);
             if (newestMsg && msg.at > newestMsg.at) {
                 // It's the newest message, append it
 
@@ -1991,7 +2055,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             }
 
             if (oldestMsgElement) {
-                const oldestMsg = profile.messages.find(m => m.id === oldestMsgElement.id);
+                const oldestMsg = chat.messages.find(m => m.id === oldestMsgElement.id);
                 if (oldestMsg && msg.at < oldestMsg.at) {
                     // It's the oldest message, prepend it
                     const domMsg = renderMessage(msg, profile);
@@ -2010,7 +2074,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
             for (let i = 0; i < domChatMessages.children.length; i++) {
                 const child = domChatMessages.children[i];
                 if (child.id && child.getAttribute('sender')) {
-                    const childMsg = profile.messages.find(m => m.id === child.id);
+                    const childMsg = chat.messages.find(m => m.id === child.id);
                     if (childMsg) {
                         messageNodes.push({ element: child, message: childMsg });
                     }
@@ -2056,7 +2120,7 @@ async function updateChat(profile, arrMessages = [], fClicked = false) {
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open)
         const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
         if (pxFromBottom < 500 || fClicked) {
-            const cLastMsg = profile.messages[profile.messages.length - 1];
+            const cLastMsg = chat.messages[chat.messages.length - 1];
             if (strLastMsgID !== cLastMsg.id || fClicked) {
                 strLastMsgID = cLastMsg.id;
                 adjustSize();
@@ -2222,8 +2286,9 @@ function renderMessage(msg, sender, editID = '') {
 
     // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
     if (msg.replied_to) {
-        // Try to find the referenced message
-        const cMsg = sender.messages.find(m => m.id === msg.replied_to);
+        // Try to find the referenced message in the current chat
+        const chat = getDMChat(sender.id);
+        const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
         if (cMsg) {
             // Render the reply in a quote-like fashion
             const divRef = document.createElement('div');
@@ -2235,12 +2300,12 @@ function renderMessage(msg, sender, editID = '') {
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
 
             // Name
-            const cSenderProfile = !cMsg.mine ? sender : arrChats.find(a => a.mine);
-            if (cSenderProfile.nickname || cSenderProfile.name) {
+            const cSenderProfile = !cMsg.mine ? sender : getProfile(strPubkey);
+            if (cSenderProfile?.nickname || cSenderProfile?.name) {
                 spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
                 twemojify(spanName);
             } else {
-                spanName.textContent = cSenderProfile.id.substring(0, 10) + '…';
+                spanName.textContent = cSenderProfile?.id?.substring(0, 10) + '…' || 'Unknown';
             }
 
             // Replied-to content (Text or Attachment)
@@ -2805,8 +2870,9 @@ function openChat(contact) {
     // Hide the Navbar
     domNavbar.style.display = `none`;
 
-    // Render the current contact's messages
-    const cProfile = arrChats.find(p => p.id === contact);
+    // Get the chat for this contact
+    const chat = getDMChat(contact);
+    const profile = getProfile(contact);
     strOpenChat = contact;
 
     // Clear any existing auto-scroll timer
@@ -2825,7 +2891,7 @@ function openChat(contact) {
     }, 100);
 
     // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
-    updateChat(cProfile, (cProfile?.messages || []).slice(-50), true);
+    updateChat(chat, (chat?.messages || []).slice(-50), profile, true);
 }
 
 /**
@@ -2919,7 +2985,7 @@ function openProfile(cProfile) {
     domInvites.style.display = 'none';
 
     // Render our own profile by default, but otherwise; the given one
-    if (!cProfile) cProfile = arrChats.find(a => a.mine);
+    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
     renderProfileTab(cProfile);
 
     if (domProfile.style.display !== '') {
@@ -3022,7 +3088,7 @@ async function openInvites() {
  */
 function editProfileDescription() {
     // Get the current profile
-    const cProfile = arrChats.find(a => a.mine);
+    const cProfile = arrProfiles.find(a => a.mine);
     if (!cProfile) return;
 
     // Set the textarea content to current description
@@ -3129,7 +3195,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // By this point, it should be safe to set our DB version
-    await invoke('set_db_version', { version: 1 });
+    // TODO: remove this? the backend db_migration.rs now sets it to 2 post-migration, this would override it each init
+    //await invoke('set_db_version', { version: 1 });
 
     // Hook up our static buttons
     domInvitesBtn.onclick = openInvites;
@@ -3308,7 +3375,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         if (event.payload) {
             // If we have a chat open, but Vector was prev. in the background; mark these messages as read
             if (strOpenChat) {
-                const currentChat = arrChats.find(p => p.id === strOpenChat);
+                const currentChat = getDMChat(strOpenChat);
                 if (currentChat && currentChat.messages.length > 0) {
                     // Find the last message from the contact (not from current user)
                     let lastContactMsg = null;
@@ -3319,9 +3386,12 @@ window.addEventListener("DOMContentLoaded", async () => {
                         }
                     }
                     
-                    // If we found a message, mark it as read
+                    // If we found a message, mark it as read on the chat
                     if (lastContactMsg) {
-                        markAsRead(currentChat, lastContactMsg);
+                        const currentChat = getDMChat(strOpenChat);
+                        if (currentChat) {
+                            markAsRead(currentChat, lastContactMsg);
+                        }
                     }
                 }
             }

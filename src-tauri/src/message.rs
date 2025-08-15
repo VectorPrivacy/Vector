@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
-use crate::db;
+use crate::db_migration::{save_chat, save_chat_messages};
 use crate::net;
 use crate::STATE;
 use crate::util::{self, calculate_file_hash};
@@ -17,7 +17,7 @@ use crate::PRIVATE_NIP96_CONFIG;
 #[cfg(target_os = "android")]
 use crate::android::{clipboard, filesystem};
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Message {
     pub id: String,
     pub content: String,
@@ -29,6 +29,23 @@ pub struct Message {
     pub pending: bool,
     pub failed: bool,
     pub mine: bool,
+}
+
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            content: String::new(),
+            replied_to: String::new(),
+            preview_metadata: None,
+            attachments: Vec::new(),
+            reactions: Vec::new(),
+            at: 0,
+            pending: false,
+            failed: false,
+            mine: false,
+        }
+    }
 }
 
 impl Message {
@@ -141,18 +158,34 @@ pub struct Reaction {
 
 /// Helper function to mark message as failed and update frontend
 async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
+    // Find the message in chats and mark it as failed
     let mut state = STATE.lock().await;
-    let chat = state.get_profile_mut(receiver).unwrap();
-    let failed_msg = chat.get_message_mut(pending_id.as_ref()).unwrap();
-    failed_msg.failed = true;
-
-    // Update the frontend
-    let handle = TAURI_APP.get().unwrap();
-    handle.emit("message_update", serde_json::json!({
-        "old_id": pending_id.as_ref(),
-        "message": &failed_msg,
-        "chat_id": receiver
-    })).unwrap();
+    
+    // Search through all chats to find the message with this pending ID
+    for chat in &mut state.chats {
+        if chat.has_participant(receiver) {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == *pending_id) {
+                // Mark the message as failed
+                message.failed = true;
+                message.pending = false;
+                
+                // Update the frontend
+                let handle = TAURI_APP.get().unwrap();
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": pending_id.as_ref(),
+                    "message": message,
+                    "chat_id": receiver
+                })).unwrap();
+                
+                // Save the failed message to our DB
+                if let Some(chat) = state.get_chat(&receiver) {
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                }
+                break;
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -175,7 +208,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         failed: false,
         mine: true,
     };
-    STATE.lock().await.add_message(&receiver, msg.clone());
+    STATE.lock().await.add_message_to_participant(&receiver, msg.clone());
 
     // Grab our pubkey
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -207,14 +240,17 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let state = STATE.lock().await;
             let mut found_attachment: Option<(String, Attachment)> = None;
             
-            // Search through all profiles for an attachment with matching hash
-            for profile in &state.profiles {
-                for message in &profile.messages {
+            // Search through all chats for an attachment with matching hash
+            for chat in &state.chats {
+                for message in &chat.messages {
                     for attachment in &message.attachments {
                         if attachment.id == file_hash && !attachment.url.is_empty() {
                             // Found a matching attachment with a valid URL
-                            found_attachment = Some((profile.id.clone(), attachment.clone()));
-                            break;
+                            // Use the first participant as the profile ID for compatibility
+                            if let Some(participant_id) = chat.participants.first() {
+                                found_attachment = Some((participant_id.clone(), attachment.clone()));
+                                break;
+                            }
                         }
                     }
                     if found_attachment.is_some() {
@@ -247,8 +283,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             
             // Retrieve the Pending Message
             let mut state = STATE.lock().await;
-            let chat = state.get_profile_mut(&receiver).unwrap();
-            let message = chat.get_message_mut(pending_id_clone.as_ref()).unwrap();
+            let message = state.chats.iter_mut()
+                .find(|chat| chat.has_participant(&receiver))
+                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_clone))
+                .unwrap();
 
             // Choose the appropriate base directory based on platform
             let base_directory = if cfg!(target_os = "ios") {
@@ -301,28 +339,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         }
 
         // Format a Mime Type from the file extension
-        let mime_type = match attached_file.extension.as_str() {
-            // Images
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            // Audio
-            "wav" => "audio/wav",
-            "mp3" => "audio/mp3",
-            "flac" => "audio/flac",
-            "ogg" => "audio/ogg",
-            "m4a" => "audio/mp4",
-            "aac" => "audio/aac",
-            // Videos
-            "mp4" => "video/mp4",
-            "webm" => "video/webm",
-            "mov" => "video/quicktime",
-            "avi" => "video/x-msvideo",
-            "mkv" => "video/x-matroska",
-            // Unknown
-            _ => "application/octet-stream",
-        };
+        let mime_type = util::mime_from_extension(&attached_file.extension);
 
         // Check if we found an existing attachment with the same hash
         let mut should_upload = true;
@@ -340,8 +357,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 {
                     let pending_id_for_update = Arc::clone(&pending_id);
                     let mut state = STATE.lock().await;
-                    let chat = state.get_profile_mut(&receiver).unwrap();
-                    let message = chat.get_message_mut(pending_id_for_update.as_ref()).unwrap();
+                    let message = state.chats.iter_mut()
+                        .find(|chat| chat.has_participant(&receiver))
+                        .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_update))
+                        .unwrap();
                     if let Some(attachment) = message.attachments.last_mut() {
                         attachment.url = existing_attachment.url.clone();
                     }
@@ -352,7 +371,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 
                 // Append decryption keys and file metadata (using existing attachment's params)
                     .tag(Tag::public_key(receiver_pubkey))
-                    .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                    .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
                     .tag(Tag::custom(TagKind::custom("size"), [existing_attachment.size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                     .tag(Tag::custom(TagKind::custom("decryption-key"), [existing_attachment.key.as_str()]))
@@ -398,14 +417,16 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
 
             // Upload the file with both a Progress Emitter and multiple re-try attempts in case of connection instability
-            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type), None, progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type.as_str()), None, progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
                         let pending_id_for_url_update = Arc::clone(&pending_id);
                         let mut state = STATE.lock().await;
-                        let chat = state.get_profile_mut(&receiver).unwrap();
-                        let message = chat.get_message_mut(pending_id_for_url_update.as_ref()).unwrap();
+                        let message = state.chats.iter_mut()
+                            .find(|chat| chat.has_participant(&receiver))
+                            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_url_update))
+                            .unwrap();
                         if let Some(attachment) = message.attachments.last_mut() {
                             attachment.url = url.to_string();
                         }
@@ -416,7 +437,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                     // Append decryption keys and file metadata
                         .tag(Tag::public_key(receiver_pubkey))
-                        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
+                        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
                         .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
                         .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
                         .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
@@ -475,7 +496,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     // Send message to the real receiver with retry logic
     let mut send_attempts = 0;
     const MAX_ATTEMPTS: u32 = 12;
-    const RETRY_DELAY_MS: u64 = 5; // 5 seconds
+    const RETRY_DELAY: u64 = 5; // 5 seconds
 
     let mut final_output = None;
 
@@ -506,7 +527,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 
                 // If we're here and haven't reached max attempts, wait before retrying
                 if send_attempts < MAX_ATTEMPTS {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
                 }
             }
             Err(e) => {
@@ -520,7 +541,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 }
                 
                 // Wait before retrying
-                tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
             }
         }
     }
@@ -540,8 +561,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Mark the message as a success
             let pending_id_for_success = Arc::clone(&pending_id);
             let mut state = STATE.lock().await;
-            let chat = state.get_profile_mut(&receiver).unwrap();
-            let sent_msg = chat.get_message_mut(pending_id_for_success.as_ref()).unwrap();
+            let sent_msg = state.chats.iter_mut()
+                .find(|chat| chat.has_participant(&receiver))
+                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_success))
+                .unwrap();
             sent_msg.id = rumor_id.to_hex();
             sent_msg.pending = false;
 
@@ -554,7 +577,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
             // Save the message to our DB
             let handle = TAURI_APP.get().unwrap();
-            db::save_message(handle.clone(), sent_msg.clone(), receiver).await.unwrap();
+            if let Some(chat) = state.get_chat(&receiver) {
+                let _ = save_chat(handle.clone(), chat).await;
+                let all_messages = chat.messages.clone();
+                let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+            }
             return Ok(true);
         }
         Err(_) => {
@@ -562,8 +589,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // We'll class it as sent, for now...
             let pending_id_for_partial = Arc::clone(&pending_id);
             let mut state = STATE.lock().await;
-            let chat = state.get_profile_mut(&receiver).unwrap();
-            let sent_ish_msg = chat.get_message_mut(pending_id_for_partial.as_ref()).unwrap();
+            let sent_ish_msg = state.chats.iter_mut()
+                .find(|chat| chat.has_participant(&receiver))
+                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_partial))
+                .unwrap();
             sent_ish_msg.id = rumor_id.to_hex();
             sent_ish_msg.pending = false;
 
@@ -576,7 +605,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
             // Save the message to our DB
             let handle = TAURI_APP.get().unwrap();
-            db::save_message(handle.clone(), sent_ish_msg.clone(), receiver).await.unwrap();
+            if let Some(chat) = state.get_chat(&receiver) {
+                let _ = save_chat(handle.clone(), chat).await;
+                let all_messages = chat.messages.clone();
+                let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+            }
             return Ok(true);
         }
     }
@@ -768,14 +801,19 @@ pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<
 
             // Commit it to our local state
             let mut state = STATE.lock().await;
-            let profile = state.get_profile_mut(&npub).unwrap();
-            let chat_id = profile.id.clone();
-            let msg = profile.get_message_mut(&reference_id).unwrap();
+            let msg = state.chats.iter_mut()
+                .find(|chat| chat.has_participant(&npub))
+                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == reference_id))
+                .unwrap();
+            let chat_id = npub.clone();
             let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
             if was_reaction_added_to_state {
                 // Save the message's reaction to our DB
                 let handle = TAURI_APP.get().unwrap();
-                db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
+                if let Some(chat) = state.get_chat(&npub) {
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                }
             }
             return Ok(was_reaction_added_to_state);
         }
@@ -791,8 +829,10 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
     // Find the message we're extracting metadata from
     let text = {
         let mut state = STATE.lock().await;
-        let chat = state.get_profile_mut(&npub).unwrap();
-        let message = chat.get_message_mut(&msg_id).unwrap();
+        let message = state.chats.iter_mut()
+            .find(|chat| chat.has_participant(&npub))
+            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
+            .unwrap();
         message.content.clone()
     };
 
@@ -817,8 +857,10 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
                 if has_content {
                     // Re-fetch the message and add our metadata
                     let mut state = STATE.lock().await;
-                    let chat = state.get_profile_mut(&npub).unwrap();
-                    let msg = chat.get_message_mut(&msg_id).unwrap();
+                    let msg = state.chats.iter_mut()
+                        .find(|chat| chat.has_participant(&npub))
+                        .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
+                        .unwrap();
                     msg.preview_metadata = Some(metadata);
 
                     // Update the renderer
@@ -830,7 +872,10 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
                     })).unwrap();
 
                     // Save the new Metadata to the DB
-                    db::save_message(handle.clone(), msg.clone(), npub).await.unwrap();
+                    if let Some(chat) = state.get_chat(&npub) {
+                        let all_messages = chat.messages.clone();
+                        let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                    }
                     return true;
                 }
             }

@@ -430,7 +430,7 @@ async function askForUsername() {
     if (!strUsername) return;
 
     // Display the change immediately
-    const cProfile = arrChats.find(a => a.mine);
+    const cProfile = arrProfiles.find(a => a.mine);
     cProfile.name = strUsername;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
@@ -482,7 +482,7 @@ async function askForAvatar() {
     }
 
     // Display the change immediately
-    const cProfile = arrChats.find(a => a.mine);
+    const cProfile = arrProfiles.find(a => a.mine);
     cProfile.avatar = strUploadURL;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
@@ -521,7 +521,7 @@ async function askForBanner() {
     }
 
     // Display the change immediately
-    const cProfile = arrChats.find(a => a.mine);
+    const cProfile = arrProfiles.find(a => a.mine);
     cProfile.banner = strUploadURL;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
@@ -543,7 +543,7 @@ async function askForStatus() {
     if (strStatus === false) return;
 
     // Display the change immediately
-    const cProfile = arrChats.find(a => a.mine);
+    const cProfile = arrProfiles.find(a => a.mine);
     cProfile.status.title = strStatus;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);

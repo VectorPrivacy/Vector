@@ -13,6 +13,9 @@ mod crypto;
 mod db;
 use db::SlimProfile;
 
+mod db_migration;
+use db_migration::save_chat_messages;
+
 mod voice;
 use voice::AudioRecorder;
 
@@ -39,6 +42,9 @@ pub use message::{Message, Attachment, Reaction};
 
 mod profile;
 pub use profile::{Profile, Status};
+
+mod chat;
+pub use chat::{Chat, ChatType, ChatMetadata};
 
 /// # Trusted Relay
 ///
@@ -88,6 +94,7 @@ enum SyncMode {
 #[derive(serde::Serialize, Clone, Debug)]
 struct ChatState {
     profiles: Vec<Profile>,
+    chats: Vec<Chat>,
     is_syncing: bool,
     sync_window_start: u64,  // Start timestamp of current window
     sync_window_end: u64,    // End timestamp of current window
@@ -100,6 +107,7 @@ impl ChatState {
     fn new() -> Self {
         Self {
             profiles: Vec::new(),
+            chats: Vec::new(),
             is_syncing: false,
             sync_window_start: 0,
             sync_window_end: 0,
@@ -123,10 +131,7 @@ impl ChatState {
             let profile_pubkey = PublicKey::from_bech32(&full_profile.id).unwrap();
             full_profile.mine = my_public_key == profile_pubkey;
 
-            // Preserve existing messages to avoid data loss
-            let existing_messages = std::mem::take(&mut self.profiles[position].messages);
             self.profiles[position] = full_profile;
-            self.profiles[position].messages = existing_messages;
         } else {
             // Add new profile
             self.profiles.push(slim.to_profile());
@@ -150,31 +155,47 @@ impl ChatState {
         self.profiles.iter_mut().find(|p| p.id == id)
     }
 
-    /// Add a message to a Vector Profile via it's ID
-    fn add_message(&mut self, npub: &str, message: Message) -> bool {
-        let is_msg_added = match self.get_profile_mut(npub) {
-            Some(profile) =>
-                // Add the message to the existing profile
-                profile.internal_add_message(message),
+    /// Get a chat by ID
+    fn get_chat(&self, id: &str) -> Option<&Chat> {
+        self.chats.iter().find(|c| c.id == id)
+    }
+    
+    /// Get a mutable chat by ID
+    fn get_chat_mut(&mut self, id: &str) -> Option<&mut Chat> {
+        self.chats.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Create a new chat for a DM with a specific user
+    fn create_dm_chat(&mut self, their_npub: &str) -> String {
+        // Check if chat already exists
+        if self.get_chat(&their_npub).is_none() {
+            let chat = Chat::new_dm(their_npub.to_string());
+            self.chats.push(chat);
+        }
+        
+        their_npub.to_string()
+    }
+
+    /// Add a message to a chat via its ID
+    fn add_message_to_chat(&mut self, chat_id: &str, message: Message) -> bool {
+        let is_msg_added = match self.get_chat_mut(chat_id) {
+            Some(chat) => {
+                // Add the message to the existing chat
+                chat.internal_add_message(message)
+            },
             None => {
-                // Generate the profile and add the message to it
-                let mut profile = Profile::new();
-                profile.id = npub.to_string();
-                profile.internal_add_message(message);
-
-                // Update the frontend
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("profile_update", &profile).unwrap();
-
-                // Push to the Profile (after emission; to save on a clone)
-                self.profiles.push(profile);
-                true
+                // Chat doesn't exist, create it and add the message
+                // For now, we'll create a basic chat - in the future this should be more sophisticated
+                let mut chat = Chat::new(chat_id.to_string(), ChatType::DirectMessage, vec![]);
+                let was_added = chat.internal_add_message(message);
+                self.chats.push(chat);
+                was_added
             }
         };
 
-        // Sort our profile positions based on last message time
-        self.profiles.sort_by(|a, b| {
-            // Get last message time for both profiles
+        // Sort our chat positions based on last message time
+        self.chats.sort_by(|a, b| {
+            // Get last message time for both chats
             let a_time = a.last_message_time();
             let b_time = b.last_message_time();
 
@@ -184,44 +205,105 @@ impl ChatState {
 
         is_msg_added
     }
+
+
+    /// Add a message to a chat via its participant npub
+    fn add_message_to_participant(&mut self, their_npub: &str, message: Message) -> bool {
+        // Ensure profiles exist for the participant
+        if self.get_profile(their_npub).is_none() {
+            // Create a basic profile for the participant
+            let mut profile = Profile::new();
+            profile.id = their_npub.to_string();
+            profile.mine = false; // It's not our profile
+            
+            // Update the frontend about the new profile
+            if let Some(handle) = TAURI_APP.get() {
+                handle.emit("profile_update", &profile).unwrap();
+            }
+            
+            // Add to our profiles list
+            self.profiles.push(profile);
+        }
+        
+        // Create or get the chat ID
+        let chat_id = self.create_dm_chat(their_npub);
+        
+        // Add the message to the chat
+        self.add_message_to_chat(&chat_id, message)
+    }
     
     /// Count unread messages across all profiles
     fn count_unread_messages(&self) -> u32 {
         let mut total_unread = 0;
          
-        for profile in &self.profiles {
-            // Skip our own profile, as well as muted profiles
-            if profile.mine || profile.muted {
-                continue;
-            }
+        // Count unread messages in all chats
+        for chat in &self.chats {
+            // Find the last read message ID for this chat
+            let last_read_id = &chat.last_read;
             
-            // If last_read is empty, all messages are unread
-            if profile.last_read.is_empty() {
-                // Only count messages from others (not mine)
-                total_unread += profile.messages.iter()
-                    .filter(|msg| !msg.mine)
-                    .count() as u32;
-                continue;
-            }
-            
-            // Start from newest message, work backwards until we hit last_read
-            let mut unread_count = 0;
-            for msg in profile.messages.iter().rev() {
-                // Only count messages from others, not our own
-                if !msg.mine {
-                    if msg.id == profile.last_read {
-                        // Found the last read message, stop counting
+            let unread_count = if last_read_id.is_empty() {
+                // No last_read_id set - walk backwards from the end to find unread messages
+                let mut unread_messages = 0;
+                // Iterate messages in reverse order (newest first)
+                for msg in chat.messages.iter().rev() {
+                    if msg.mine {
+                        // If we find our own message first, everything before it is considered read
+                        // (because we responded to those messages)
                         break;
+                    } else {
+                        // Count non-mine messages (unread)
+                        unread_messages += 1;
                     }
-                    unread_count += 1;
                 }
-            }
+                unread_messages
+            } else {
+                // Last read message ID is set - count messages after it
+                if let Some(last_read_index) = chat.messages.iter().position(|msg| msg.id == *last_read_id) {
+                    // Count messages after the last read message that are not mine
+                    chat.messages.iter().skip(last_read_index + 1).filter(|msg| !msg.mine).count()
+                } else {
+                    // If last_read_id not found, fall back to walking backwards
+                    let mut unread_messages = 0;
+                    // Iterate messages in reverse order (newest first)
+                    for msg in chat.messages.iter().rev() {
+                        if msg.mine {
+                            // If we find our own message first, everything before it is considered read
+                            break;
+                        } else {
+                            // Count non-mine messages (unread)
+                            unread_messages += 1;
+                        }
+                    }
+                    unread_messages
+                }
+            };
             
-            total_unread += unread_count;
+            total_unread += unread_count as u32;
         }
         
         total_unread
     }
+
+    /// Find a message by its ID across all chats
+    fn find_message(&self, message_id: &str) -> Option<(&Chat, &Message)> {
+        for chat in &self.chats {
+            if let Some(message) = chat.messages.iter().find(|m| m.id == message_id) {
+                return Some((chat, message));
+            }
+        }
+        None
+    }
+
+    /// Find a chat and message by message ID across all chats (mutable)
+    fn find_chat_and_message_mut(&mut self, message_id: &str) -> Option<(&str, &mut Message)> {
+        for chat in &mut self.chats {
+            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+                return Some((&chat.id, message));
+            }
+        }
+        None
+    }
+
 }
 
 lazy_static! {
@@ -274,22 +356,112 @@ async fn fetch_messages<R: Runtime>(
             // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
             if state.profiles.len() == 1 {
                 let profiles = db::get_all_profiles(&handle).await.unwrap();
-                let msgs = db::get_all_messages(&handle).await.unwrap();
-
                 // Load our Profile Cache into the state
                 state.merge_db_profiles(profiles).await;
 
-                // Add each message to the state
-                for (msg, npub) in msgs {
-                    state.add_message(&npub, msg);
+                // Load chats and their messages from database
+                let slim_chats_result = db_migration::get_all_chats(&handle).await;
+                if let Ok(slim_chats) = slim_chats_result {
+                    // Convert slim chats to full chats and load their messages
+                    for slim_chat in slim_chats {
+                        let mut chat = slim_chat.to_chat();
+                        
+                        // Load messages for this chat
+                        let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
+                        if let Ok(messages) = messages_result {
+                            // Add all messages to the chat
+                            for message in messages {
+                                chat.internal_add_message(message);
+                            }
+                        } else {
+                            eprintln!("Failed to load messages for chat {}: {:?}", chat.id(), messages_result);
+                        }
+                        
+                        // Ensure profiles exist for all chat participants
+                        for participant in chat.participants() {
+                            if state.get_profile(participant).is_none() {
+                                // Create a basic profile for the participant
+                                let mut profile = Profile::new();
+                                profile.id = participant.clone();
+                                profile.mine = false; // It's not our profile
+                                state.profiles.push(profile);
+                            }
+                        }
+
+                        // Add chat to state
+                        state.chats.push(chat);
+
+                        // Sort the chats by their last received message
+                        state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
+                    }
+                } else {
+                    eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
+                    // Fall back to old profile-based message loading for migration
+                    let msgs = db::old_get_all_messages(&handle).await.unwrap();
+                    for (msg, npub) in msgs {
+                        // Create chat if it doesn't exist and add message
+                        state.add_message_to_participant(&npub, msg);
+                    }
+                }
+            }
+
+            // Run chat migration if needed
+            if db_migration::is_migration_needed(&handle).await.unwrap_or(true) {
+                // Get all existing messages from the old profile-based storage
+                let profile_messages = db::old_get_all_messages(&handle).await.unwrap_or_else(|e| {
+                    eprintln!("Failed to get profile messages for migration: {}", e);
+                    Vec::new()
+                });
+                
+                if !profile_messages.is_empty() {
+                    println!("Migrating {} messages from profile-based to chat-based storage...", profile_messages.len());
+                    
+                    // Emit migration start event to frontend
+                    handle.emit("progress_operation", serde_json::json!({
+                        "type": "start",
+                        "message": "Migrating chats"
+                    })).unwrap();
+                    
+                    // Perform the migration
+                    match db_migration::migrate_profile_messages_to_chats(&handle, profile_messages).await {
+                        Ok(chats) => {
+                            println!("Successfully migrated {} chats", chats.len());
+                            
+                            // Load the migrated chats into state (we already have the lock)
+                            for chat in chats {
+                                // Ensure profiles exist for all chat participants
+                                for participant in chat.participants() {
+                                    if state.get_profile(participant).is_none() {
+                                        // Create a basic profile for the participant
+                                        let mut profile = Profile::new();
+                                        profile.id = participant.clone();
+                                        profile.mine = false; // It's not our profile
+                                        state.profiles.push(profile);
+                                    }
+                                }
+                                
+                                state.chats.push(chat);
+                            }
+                            
+                            // Mark migration as complete
+                            if let Err(e) = db_migration::complete_migration(handle.clone()).await {
+                                eprintln!("Failed to mark chat migration as complete: {}", e);
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to migrate chats: {}", e);
+                            // Emit error event
+                            handle.emit("progress_operation", serde_json::json!({
+                                "type": "error",
+                                "message": format!("Chat migration error: {}", e)
+                            })).unwrap();
+                        }
+                    }
                 }
             }
 
             // Check if we need to migrate timestamps from seconds to milliseconds
-            // Drop state before migration
-            drop(state);
-            
-            // Run timestamp migration
+            // Run timestamp migration without dropping lock
             match migrate_unix_to_millisecond_timestamps(&handle).await {
                 Ok(count) => {
                     if count > 0 {
@@ -300,19 +472,12 @@ async fn fetch_messages<R: Runtime>(
                     eprintln!("Failed to migrate timestamps: {}", e);
                 }
             }
-            
-            // Re-acquire state after timestamp migration
-            state = STATE.lock().await;
-            
+
             // Check if we have pending migrations to apply to the database
             let has_pending_migrations = PENDING_MIGRATION.get().map(|m| !m.is_empty()).unwrap_or(false);
             
             if has_pending_migrations {
-                // Drop state before migration
-                drop(state);
-                
                 let migration_map = PENDING_MIGRATION.get().unwrap();
-                println!("Applying pending database migrations for {} files", migration_map.len());
                 
                 // Emit migration start event to frontend
                 handle.emit("progress_operation", serde_json::json!({
@@ -320,9 +485,13 @@ async fn fetch_messages<R: Runtime>(
                     "message": "Migrating DB"
                 })).unwrap();
                 
+                // Drop state during expensive migration operations
+                drop(state);
+                
                 // Apply the database migrations synchronously
                 match update_database_attachment_paths(&handle, migration_map).await {
-                    Ok(_) => (/* Yay! */),
+                    Ok(_) => {
+                    },
                     Err(e) => {
                         eprintln!("Failed to update database attachment paths: {}", e);
                         // Emit error event
@@ -337,27 +506,74 @@ async fn fetch_messages<R: Runtime>(
                 state = STATE.lock().await;
                 
                 // Reload messages from database with updated paths
-                let messages = db::get_all_messages(&handle).await.unwrap();
-                
-                // Clear existing messages and reload with updated paths
-                for profile in &mut state.profiles {
-                    profile.messages.clear();
-                }
-                
-                // Add each message to the state with updated paths
-                for (msg, npub) in messages {
-                    state.add_message(&npub, msg);
+                let slim_chats_result = db_migration::get_all_chats(&handle).await;
+                if let Ok(slim_chats) = slim_chats_result {
+                    // Convert slim chats to full chats and load their messages
+                    for slim_chat in slim_chats {
+                        let mut chat = slim_chat.to_chat();
+                        
+                        // Load messages for this chat
+                        let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
+                        if let Ok(messages) = messages_result {
+                            // Add all messages to the chat
+                            for message in messages {
+                                chat.internal_add_message(message);
+                            }
+                        } else {
+                            eprintln!("Failed to load messages for chat {}: {:?}", chat.id(), messages_result);
+                        }
+                        
+                        // Ensure profiles exist for all chat participants
+                        for participant in chat.participants() {
+                            if state.get_profile(participant).is_none() {
+                                // Create a basic profile for the participant
+                                let mut profile = Profile::new();
+                                profile.id = participant.clone();
+                                profile.mine = false; // It's not our profile
+                                state.profiles.push(profile);
+                            }
+                        }
+    
+                        // Add chat to state
+                        state.chats.push(chat);
+    
+                        // Sort the chats by their last received message
+                        state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
+                    }
+                } else {
+                    eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
                 }
                 
                 // Send the state to our frontend to signal finalised init with a full state
-                handle.emit("init_finished", &state.profiles).unwrap();
+                handle.emit("init_finished", serde_json::json!({
+                    "profiles": &state.profiles,
+                    "chats": &state.chats
+                })).unwrap();
             } else {
-                // Check that our filesystem hasn't changed since the app was last opened
-                // i.e: if an attachment file was deleted, we should mark it's attachment with "downloaded = false"
-                check_attachment_filesystem_integrity(&handle, &mut state).await;
-
-                // Send the state to our frontend to signal finalised init with a full state
-                handle.emit("init_finished", &state.profiles).unwrap();
+                println!("[INIT] Checking filesystem integrity...");
+                // Check if filesystem integrity check is needed
+                let needs_integrity_check = state.chats.iter().any(|chat| 
+                    chat.messages.iter().any(|msg| 
+                        msg.attachments.iter().any(|att| att.downloaded)
+                    )
+                );
+                
+                if needs_integrity_check {
+                    // Check integrity without dropping state
+                    check_attachment_filesystem_integrity(&handle, &mut state).await;
+                    
+                    // Send the state to our frontend to signal finalised init with a full state
+                    handle.emit("init_finished", serde_json::json!({
+                        "profiles": &state.profiles,
+                        "chats": &state.chats
+                    })).unwrap();
+                } else {
+                    // No integrity check needed, send init immediately
+                    handle.emit("init_finished", serde_json::json!({
+                        "profiles": &state.profiles,
+                        "chats": &state.chats
+                    })).unwrap();
+                }
             }
 
             // ALWAYS begin with an initial sync of at least the last 2 days
@@ -459,7 +675,7 @@ async fn fetch_messages<R: Runtime>(
             .unwrap()
     };
 
-    // Decrypt every GiftWrap and process their contents
+    // Process events without holding any locks
     let mut new_messages_count: u16 = 0;
     for event in events.into_iter() {
         // Count the amount of accepted (new) events
@@ -491,21 +707,29 @@ async fn fetch_messages<R: Runtime>(
             let found_then_empty = new_messages_count > 0 && state.sync_empty_iterations >= 3;
 
             if found_then_empty || enough_empty_iterations {
-                // Release the mutex before performing potentially slow operations
-                drop(state);
+                // Time to switch mode - calculate oldest timestamp while holding lock
+                let mut oldest_timestamp = None;
+                
+                // Check each chat's messages for oldest timestamp
+                for chat in &state.chats {
+                    if let Some(oldest_msg_time) = chat.last_message_time() {
+                        match oldest_timestamp {
+                            None => oldest_timestamp = Some(oldest_msg_time),
+                            Some(current_oldest) => {
+                                if oldest_msg_time < current_oldest {
+                                    oldest_timestamp = Some(oldest_msg_time);
+                                }
+                            }
+                        }
+                    }
+                }
 
-                // Start backward sync from the oldest message
-                let oldest_ts_result = get_oldest_message_timestamp().await;
-
-                // Re-acquire mutex after operation
-                let mut state = STATE.lock().await;
-
-                // Time to switch mode regardless of result
+                // Switch to backward sync mode
                 state.sync_mode = SyncMode::BackwardSync;
                 state.sync_empty_iterations = 0;
                 state.sync_total_iterations = 0;
 
-                if let Some(oldest_ts) = oldest_ts_result {
+                if let Some(oldest_ts) = oldest_timestamp {
                     state.sync_window_end = oldest_ts;
                     state.sync_window_start = oldest_ts - (60 * 60 * 24 * 2); // 2 days before oldest
                 } else {
@@ -540,44 +764,19 @@ async fn fetch_messages<R: Runtime>(
             handle.emit("sync_slice_finished", ()).unwrap();
         }
     } else {
-        // We're done with sync
-        let mut state = STATE.lock().await;
-        state.sync_mode = SyncMode::Finished;
-        state.is_syncing = false;
-        state.sync_empty_iterations = 0;
-        state.sync_total_iterations = 0;
+        // We're done with sync - update state first, then emit event
+        {
+            let mut state = STATE.lock().await;
+            state.sync_mode = SyncMode::Finished;
+            state.is_syncing = false;
+            state.sync_empty_iterations = 0;
+            state.sync_total_iterations = 0;
+        } // Release lock before emitting event
 
         if relay_url.is_none() {
             handle.emit("sync_finished", ()).unwrap();
         }
     }
-}
-
-async fn get_oldest_message_timestamp() -> Option<u64> {
-    let state = STATE.lock().await;
-    let profiles = &state.profiles;
-    
-    let mut oldest_timestamp = None;
-    
-    // Check each profile's messages
-    for profile in profiles {
-        // If this profile has messages
-        if !profile.messages.is_empty() {
-            // Since messages are already ordered by time, the first one is the oldest
-            if let Some(oldest_msg) = profile.messages.first() {
-                match oldest_timestamp {
-                    None => oldest_timestamp = Some(oldest_msg.at),
-                    Some(current_oldest) => {
-                        if oldest_msg.at < current_oldest {
-                            oldest_timestamp = Some(oldest_msg.at);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    oldest_timestamp
 }
 
 /// Checks if downloaded attachments still exist on the filesystem
@@ -587,15 +786,15 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
     state: &mut ChatState,
 ) {
     let mut total_checked = 0;
-    let mut updates_needed = Vec::new();
+    let mut chats_with_updates = std::collections::HashMap::new();
     
     // Capture the starting timestamp
     let start_time = std::time::Instant::now();
     
     // First pass: count total attachments to check
     let mut total_attachments = 0;
-    for profile in &state.profiles {
-        for message in &profile.messages {
+    for chat in &state.chats {
+        for message in &chat.messages {
             for attachment in &message.attachments {
                 if attachment.downloaded {
                     total_attachments += 1;
@@ -604,12 +803,14 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
         }
     }
     
-    // Iterate through all profiles and their messages
-    for (profile_idx, profile) in state.profiles.iter_mut().enumerate() {
-        for (message_idx, message) in profile.messages.iter_mut().enumerate() {
+    // Iterate through all chats and their messages with mutable access to update downloaded status
+    for (chat_idx, chat) in state.chats.iter_mut().enumerate() {
+        let mut updated_messages = Vec::new();
+        
+        for message in &mut chat.messages {
             let mut message_updated = false;
             
-            for attachment in message.attachments.iter_mut() {
+            for attachment in &mut message.attachments {
                 // Only check attachments that are marked as downloaded
                 if attachment.downloaded {
                     total_checked += 1;
@@ -627,46 +828,59 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
                     // Check if the file exists on the filesystem
                     let file_path = std::path::Path::new(&attachment.path);
                     if !file_path.exists() {
-                        // File is missing, mark as not downloaded
+                        // File is missing, set downloaded to false
                         attachment.downloaded = false;
                         message_updated = true;
                     }
                 }
             }
             
-            // Mark this message for database update if any attachment was updated
+            // If any attachment in this message was updated, we need to save the message
             if message_updated {
-                updates_needed.push((profile_idx, message_idx));
+                updated_messages.push(message.clone());
             }
+        }
+        
+        // If any messages in this chat were updated, store them for database update
+        if !updated_messages.is_empty() {
+            chats_with_updates.insert(chat_idx, updated_messages);
         }
     }
     
     // Update database for any messages with missing attachments
-    if !updates_needed.is_empty() {
+    if !chats_with_updates.is_empty() {
         // Only emit progress if process has taken >1 second
         if start_time.elapsed().as_secs() >= 1 {
             handle.emit("progress_operation", serde_json::json!({
                 "type": "progress",
-                "total": updates_needed.len(),
+                "total": chats_with_updates.len(),
                 "current": 0,
                 "message": "Updating database..."
             })).unwrap();
         }
         
-        for (i, (profile_idx, message_idx)) in updates_needed.iter().enumerate() {
-            let message = state.profiles[*profile_idx].messages[*message_idx].clone();
-            let contact_id = state.profiles[*profile_idx].id.clone();
+        // Save updated messages for each chat that had changes
+        let mut saved_count = 0;
+        let total_chats = chats_with_updates.len();
+        for (chat_idx, messages) in chats_with_updates {
+            // Since we're iterating over existing indices, we know the chat exists
+            let chat = &state.chats[chat_idx];
+            let chat_id = chat.id().clone();
             
-            if let Err(e) = db::save_message(handle.clone(), message, contact_id).await {
-                eprintln!("Failed to update message after filesystem check: {}", e);
+            // Save all messages for this chat
+            let all_messages = messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
+                eprintln!("Failed to update messages after filesystem check: {}", e);
+            } else {
+                saved_count += 1;
             }
             
             // Emit progress for database updates, but only if process has taken >1 second
-            if ((i + 1) % 5 == 0 || i + 1 == updates_needed.len()) && start_time.elapsed().as_secs() >= 1 {
+            if ((saved_count) % 5 == 0 || saved_count == total_chats) && start_time.elapsed().as_secs() >= 1 {
                 handle.emit("progress_operation", serde_json::json!({
                     "type": "progress",
-                    "current": i + 1,
-                    "total": updates_needed.len(),
+                    "current": saved_count,
+                    "total": total_chats,
                     "message": "Updating database"
                 })).unwrap();
             }
@@ -677,47 +891,48 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
 /// Updates database attachment paths after login when encryption key is available
 /// Returns the number of attachments that were updated
 async fn update_database_attachment_paths<R: Runtime>(
-    handle: &AppHandle<R>, 
+    handle: &AppHandle<R>,
     migration_map: &std::collections::HashMap<String, (String, String)>
 ) -> Result<u32, Box<dyn std::error::Error>> {
-    // Get all messages from database
-    let messages = db::get_all_messages(handle).await?;
+    // Get all chats from database
+    let slim_chats = db_migration::get_all_chats(handle).await?;
     let mut updated_count = 0;
-    let total_messages = messages.len();
-    let mut processed_messages = 0;
     
-    // Update attachment paths in messages
-    for (mut message, contact_id) in messages {
-        let mut updated = false;
+    // Process each chat and its messages
+    for slim_chat in slim_chats {
+        let chat_id = slim_chat.id.clone();
+        let mut messages = db_migration::get_chat_messages(handle, &chat_id).await.unwrap_or_default();
+        let mut chat_updated = false;
         
-        // Check each attachment
-        for attachment in &mut message.attachments {
-            // Check if this attachment needs migration based on nonce
-            if let Some((old_path, new_path)) = migration_map.get(&attachment.nonce) {
-                // Update the path if it matches the old path or contains the nonce
-                if attachment.path == *old_path || attachment.path.contains(&attachment.nonce) {
-                    attachment.path = new_path.clone();
-                    attachment.downloaded = true;
-                    updated = true;
-                    updated_count += 1;
+        // Update attachment paths in messages
+        for message in &mut messages {
+            let mut updated = false;
+            
+            // Check each attachment
+            for attachment in &mut message.attachments {
+                // Check if this attachment needs migration based on nonce
+                if let Some((old_path, new_path)) = migration_map.get(&attachment.nonce) {
+                    // Update the path if it matches the old path or contains the nonce
+                    if attachment.path == *old_path || attachment.path.contains(&attachment.nonce) {
+                        attachment.path = new_path.clone();
+                        attachment.downloaded = true;
+                        updated = true;
+                        updated_count += 1;
+                    }
                 }
+            }
+            
+            if updated {
+                chat_updated = true;
             }
         }
         
-        // Save the message back if it was updated
-        if updated {
-            db::save_message(handle.clone(), message, contact_id).await?;
-        }
-        
-        // Emit progress
-        processed_messages += 1;
-        if processed_messages % 10 == 0 || processed_messages == total_messages {
-            handle.emit("progress_operation", serde_json::json!({
-                "type": "progress",
-                "current": processed_messages,
-                "total": total_messages,
-                "message": "Migrating DB"
-            })).unwrap();
+        // Save the messages back if any were updated
+        if chat_updated {
+            let all_messages = messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
+                eprintln!("Failed to save updated messages in attachment migration: {}", e);
+            }
         }
     }
     
@@ -733,60 +948,50 @@ async fn update_database_attachment_paths<R: Runtime>(
 async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
     handle: &AppHandle<R>
 ) -> Result<u32, Box<dyn std::error::Error>> {
-    // Get all messages from database
-    let messages = db::get_all_messages(handle).await?;
+    // Get all chats from database
+    let slim_chats = db_migration::get_all_chats(handle).await?;
     
     // Define threshold - timestamps below this are likely in seconds
     // Using year 2000 (946684800000 ms) as a reasonable cutoff
     const MILLISECOND_THRESHOLD: u64 = 946684800000;
     
-    // Collect messages that need updating
-    let mut messages_to_update: Vec<(Message, String)> = Vec::new();
+    let mut updated_count = 0;
     
-    for (mut message, contact_id) in messages {
-        // Check if timestamp appears to be in seconds (too small to be milliseconds)
-        if message.at < MILLISECOND_THRESHOLD {
-            // Convert seconds to milliseconds
-            let old_timestamp = message.at;
-            message.at = old_timestamp * 1000;
-            
-            println!("Migrating timestamp for message {}: {} -> {}", message.id, old_timestamp, message.at);
-            
-            // Add to batch
-            messages_to_update.push((message, contact_id));
+    // Process each chat and its messages
+    for slim_chat in slim_chats {
+        let chat_id = slim_chat.id.clone();
+        let mut messages = db_migration::get_chat_messages(handle, &chat_id).await.unwrap_or_default();
+        let mut chat_updated = false;
+        
+        // Check each message for timestamp migration
+        for message in &mut messages {
+            // Check if timestamp appears to be in seconds (too small to be milliseconds)
+            if message.at < MILLISECOND_THRESHOLD {
+                // Convert seconds to milliseconds
+                let old_timestamp = message.at;
+                message.at = old_timestamp * 1000;
+                
+                println!("Migrating timestamp for message {}: {} -> {}", message.id, old_timestamp, message.at);
+                
+                updated_count += 1;
+                chat_updated = true;
+            }
+        }
+        
+        // Save the messages back if any were updated
+        if chat_updated {
+            let all_messages = messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
+                eprintln!("Failed to save updated messages in timestamp migration: {}", e);
+            }
         }
     }
     
-    let updated_count = messages_to_update.len() as u32;
-    
-    if !messages_to_update.is_empty() {
-        // Emit progress for saving
-        handle.emit("progress_operation", serde_json::json!({
-            "type": "progress",
-            "current": 0,
-            "total": updated_count,
-            "message": "Updating timestamps"
-        })).unwrap();
-        
-        // Save all updated messages in batches
-        const BATCH_SIZE: usize = 250;
-        for (i, chunk) in messages_to_update.chunks(BATCH_SIZE).enumerate() {
-            db::save_messages(handle, chunk.to_vec()).await?;
-            
-            // Emit progress for batch save
-            let processed = ((i + 1) * BATCH_SIZE).min(updated_count as usize);
-            handle.emit("progress_operation", serde_json::json!({
-                "type": "progress",
-                "current": processed,
-                "total": updated_count,
-                "message": "Updating timestamps"
-            })).unwrap();
-        }
-        
+    if updated_count > 0 {
         println!("Successfully migrated {} message timestamps from seconds to milliseconds", updated_count);
     }
     
-    Ok(updated_count)
+    Ok(updated_count as u32)
 }
 
 // TODO: REMOVE AFTER SEVERAL UPDATES - This migration code is only needed for users upgrading from nonce-based to hash-based storage
@@ -1090,34 +1295,6 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     None => (),
                 };
 
-                // Send an OS notification for incoming messages
-                if !is_mine && is_new {
-                    // Find the name of the sender and check if muted
-                    let _ = match STATE.lock().await.get_profile(&contact) {
-                        Some(profile) => {
-                            if profile.muted {
-                                false // Profile is muted, don't send notification
-                            } else {
-                                // Profile is not muted, send notification
-                                let display_name = if !profile.nickname.is_empty() {
-                                    profile.nickname.clone()
-                                } else if !profile.name.is_empty() {
-                                    profile.name.clone()
-                                } else {
-                                    String::from("New Message")
-                                };
-                                show_notification(display_name, rumor.content.clone());
-                                true
-                            }
-                        }
-                        // No profile, send notification with default name
-                        None => {
-                            show_notification(String::from("New Message"), rumor.content.clone());
-                            true
-                        }
-                    };
-                }
-
                 // Extract milliseconds from custom tag if present
                 let ms_timestamp = match rumor.tags.find(TagKind::Custom(Cow::Borrowed("ms"))) {
                     Some(ms_tag) => {
@@ -1155,21 +1332,68 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     failed: false,
                 };
 
-                // Add the message to the state
-                let was_msg_added_to_state = STATE.lock().await.add_message(&contact, msg.clone());
+            // Send an OS notification for incoming messages (do this before locking state)
+            if !is_mine && is_new {
+                // Clone necessary data for notification (avoid holding lock during notification)
+                let display_info = {
+                    let state = STATE.lock().await;
+                    match state.get_profile(&contact) {
+                        Some(profile) => {
+                            if profile.muted {
+                                None // Profile is muted, don't send notification
+                            } else {
+                                // Profile is not muted, send notification
+                                let display_name = if !profile.nickname.is_empty() {
+                                    profile.nickname.clone()
+                                } else if !profile.name.is_empty() {
+                                    profile.name.clone()
+                                } else {
+                                    String::from("New Message")
+                                };
+                                Some((display_name, msg.content.clone()))
+                            }
+                        }
+                        // No profile, send notification with default name
+                        None => Some((String::from("New Message"), msg.content.clone())),
+                    }
+                };
+                    
+                    // Send notification outside of state lock
+                    if let Some((display_name, content)) = display_info {
+                        show_notification(display_name, content);
+                    }
+                }
+
+                // Add the message to the state and handle database save in one operation to avoid multiple locks
+                let (was_msg_added_to_state, _should_emit, _should_save) = {
+                    let mut state = STATE.lock().await;
+                    let was_added = state.add_message_to_participant(&contact, msg.clone());
+                    (was_added, was_added, was_added)
+                };
 
                 // If accepted in-state: commit to the DB and emit to the frontend
                 if was_msg_added_to_state {
                     // Send it to the frontend
-                    let handle = TAURI_APP.get().unwrap();
-                    handle.emit("message_new", serde_json::json!({
-                        "message": &msg,
-                        "chat_id": &contact
-                    })).unwrap();
+                    if let Some(handle) = TAURI_APP.get() {
+                        handle.emit("message_new", serde_json::json!({
+                            "message": &msg,
+                            "chat_id": &contact
+                        })).unwrap();
+                    }
 
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), msg, contact).await.unwrap();
+                    // Save the chat/messages to DB (chat_id = contact npub for DMs)
+                    if let Some(handle) = TAURI_APP.get() {
+                        // Get all messages for this chat and save them
+                        let all_messages = {
+                            let state = STATE.lock().await;
+                            state.get_chat(&contact).map(|chat| chat.messages.clone()).unwrap_or_default()
+                        };
+                        let _ = save_chat_messages(handle.clone(), &contact, &all_messages).await;
+                    }
+                    // Ensure OS badge is updated immediately after accepting the message
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = update_unread_counter(handle.clone()).await;
+                    }
                 }
 
                 was_msg_added_to_state
@@ -1178,42 +1402,51 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
             else if rumor.kind == Kind::Reaction {
                 match rumor.tags.find(TagKind::e()) {
                     Some(react_reference_tag) => {
-                        // The message ID being 'reacted' to
-                        let reference_id = react_reference_tag.content().unwrap();
-
-                        // Create the Reaction
+                        // Add the reaction to the appropriate chat message
                         let reaction = Reaction {
                             id: rumor.id.unwrap().to_hex(),
-                            reference_id: reference_id.to_string(),
-                            author_id: sender.to_hex(),
-                            emoji: rumor.content,
+                            reference_id: react_reference_tag.content().unwrap().to_string(),
+                            author_id: rumor.pubkey.to_hex(),
+                            emoji: rumor.content.clone(),
                         };
 
-                        // Add the reaction
-                        // TODO: since we typically sync "backwards", a reaction may be received before we have any
-                        // ... concept of the Profile or Message, sometime in the future, we need to track these "ahead"
-                        // ... reactions and re-apply them once sync has finished.
-                        let mut state = STATE.lock().await;
-                        let maybe_profile = state.get_profile_mut(&contact);
-                        if maybe_profile.is_some() {
-                            let profile = maybe_profile.unwrap();
-                            let chat_id = profile.id.clone();
-                            let maybe_msg = profile.get_message_mut(&reference_id);
-                            if maybe_msg.is_some() {
-                                let msg = maybe_msg.unwrap();
-                                let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
-                                if was_reaction_added_to_state {
-                                    // Save the message's reaction to our DB
-                                    let handle = TAURI_APP.get().unwrap();
-                                    db::save_message(handle.clone(), msg.clone(), contact).await.unwrap();
-                                }
-                                was_reaction_added_to_state
+                        // Find the chat containing the referenced message and add the reaction
+                        // Use a single lock scope to avoid nested locks
+                        let (reaction_added, chat_id_for_save, _message_for_save) = {
+                            let mut state = STATE.lock().await;
+                            let reaction_added = if let Some((chat_id, msg_mut)) = state.find_chat_and_message_mut(&react_reference_tag.content().unwrap()) {
+                                msg_mut.add_reaction(reaction, Some(chat_id))
                             } else {
+                                // Message not found in any chat - this can happen during sync
+                                // TODO: track these "ahead" reactions and re-apply them once sync has finished
                                 false
+                            };
+                            
+                            // If reaction was added, get the message for saving
+                            let message_for_save = if reaction_added {
+                                // Find the message again for saving
+                                state.find_message(&react_reference_tag.content().unwrap())
+                                    .map(|(chat, message)| (chat.id().clone(), message.clone()))
+                            } else {
+                                None
+                            };
+                            
+                            (reaction_added, message_for_save.as_ref().map(|(chat_id, _)| chat_id.clone()), message_for_save.map(|(_, message)| message))
+                        };
+
+                        // Save all messages for the chat with the new reaction to our DB (outside of state lock)
+                        if let Some(chat_id) = chat_id_for_save {
+                            if let Some(handle) = TAURI_APP.get() {
+                                // Get all messages for this chat
+                                let all_messages = {
+                                    let state = STATE.lock().await;
+                                    state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
+                                };
+                                let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
                             }
-                        } else {
-                            false
                         }
+
+                        reaction_added
                     }
                     None => false /* No Reference (Note ID) supplied */,
                 }
@@ -1265,118 +1498,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
                 // Figure out the file extension from the mime-type
                 let mime_type = rumor.tags.find(TagKind::Custom(Cow::Borrowed("file-type"))).unwrap().content().unwrap();
-                let extension = match mime_type {
-                    // Images
-                    "image/png" => "png",
-                    "image/jpeg" | "image/jpg" => "jpg",
-                    "image/gif" => "gif",
-                    "image/webp" => "webp",
-                    "image/svg+xml" => "svg",
-                    "image/bmp" | "image/x-ms-bmp" => "bmp",
-                    "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
-                    "image/tiff" => "tiff",
-                    
-                    // Raw Images
-                    "image/x-adobe-dng" => "dng",
-                    "image/x-canon-cr2" => "cr2",
-                    "image/x-nikon-nef" => "nef",
-                    "image/x-sony-arw" => "arw",
-                    
-                    // Audio
-                    "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
-                    "audio/mp3" | "audio/mpeg" => "mp3",
-                    "audio/flac" => "flac",
-                    "audio/ogg" => "ogg",
-                    "audio/mp4" => "m4a",
-                    "audio/aac" | "audio/x-aac" => "aac",
-                    "audio/x-ms-wma" => "wma",
-                    "audio/opus" => "opus",
-                    
-                    // Videos
-                    "video/mp4" => "mp4",
-                    "video/webm" => "webm",
-                    "video/quicktime" => "mov",
-                    "video/x-msvideo" => "avi",
-                    "video/x-matroska" => "mkv",
-                    "video/x-flv" => "flv",
-                    "video/x-ms-wmv" => "wmv",
-                    "video/mpeg" => "mpg",
-                    "video/3gpp" => "3gp",
-                    "video/ogg" => "ogv",
-                    "video/mp2t" => "ts",
-                    
-                    // Documents
-                    "application/pdf" => "pdf",
-                    "application/msword" => "doc",
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-                    "application/vnd.ms-excel" => "xls",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
-                    "application/vnd.ms-powerpoint" => "ppt",
-                    "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-                    "application/vnd.oasis.opendocument.text" => "odt",
-                    "application/vnd.oasis.opendocument.spreadsheet" => "ods",
-                    "application/vnd.oasis.opendocument.presentation" => "odp",
-                    "application/rtf" => "rtf",
-                    
-                    // Text/Data
-                    "text/plain" => "txt",
-                    "text/markdown" => "md",
-                    "text/csv" => "csv",
-                    "application/json" => "json",
-                    "application/xml" | "text/xml" => "xml",
-                    "application/x-yaml" | "text/yaml" => "yaml",
-                    "application/toml" => "toml",
-                    "application/sql" => "sql",
-                    
-                    // Archives
-                    "application/zip" => "zip",
-                    "application/x-rar-compressed" | "application/vnd.rar" => "rar",
-                    "application/x-7z-compressed" => "7z",
-                    "application/x-tar" => "tar",
-                    "application/gzip" => "gz",
-                    "application/x-bzip2" => "bz2",
-                    "application/x-xz" => "xz",
-                    "application/x-iso9660-image" => "iso",
-                    "application/x-apple-diskimage" => "dmg",
-                    "application/vnd.android.package-archive" => "apk",
-                    "application/java-archive" => "jar",
-                    
-                    // 3D Files
-                    "model/obj" => "obj",
-                    "model/gltf+json" => "gltf",
-                    "model/gltf-binary" => "glb",
-                    "model/stl" | "application/sla" => "stl",
-                    "model/vnd.collada+xml" => "dae",
-                    
-                    // Code
-                    "text/javascript" | "application/javascript" => "js",
-                    "text/typescript" | "application/typescript" => "ts",
-                    "text/x-python" | "application/x-python" => "py",
-                    "text/x-rust" => "rs",
-                    "text/x-go" => "go",
-                    "text/x-java" => "java",
-                    "text/x-c" => "c",
-                    "text/x-c++" => "cpp",
-                    "text/x-csharp" => "cs",
-                    "text/x-ruby" => "rb",
-                    "text/x-php" => "php",
-                    "text/x-swift" => "swift",
-                    
-                    // Web
-                    "text/html" => "html",
-                    "text/css" => "css",
-                    
-                    // Other
-                    "application/x-msdownload" | "application/x-dosexec" => "exe",
-                    "application/x-msi" => "msi",
-                    "application/x-font-ttf" | "font/ttf" => "ttf",
-                    "application/x-font-otf" | "font/otf" => "otf",
-                    "font/woff" => "woff",
-                    "font/woff2" => "woff2",
-                    
-                    // Fallback - extract extension from mime subtype
-                    _ => mime_type.split('/').nth(1).unwrap_or("bin"),
-                };
+                let extension = crate::util::extension_from_mime(mime_type);
 
                 let handle = TAURI_APP.get().unwrap();
                 // Choose the appropriate base directory based on platform
@@ -1406,8 +1528,8 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     if !ox_hash.is_empty() {
                         // Check if a local file exists with this hash across all messages
                         let state = STATE.lock().await;
-                        for profile in &state.profiles {
-                            for message in &profile.messages {
+                        for chat in &state.chats {
+                            for message in &chat.messages {
                                 for attachment in &message.attachments {
                                     if attachment.id == ox_hash && attachment.downloaded {
                                         // Found existing attachment with same original hash
@@ -1501,52 +1623,6 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     None => (),
                 };
 
-                // Send an OS notification for incoming files
-                if !is_mine && is_new {
-                    // Find the name of the sender and check if muted
-                    let _ = match STATE.lock().await.get_profile(&contact) {
-                        Some(profile) => {
-                            if profile.muted {
-                                false // Profile is muted, don't send notification
-                            } else {
-                                // Profile is not muted, send notification
-                                let display_name = if !profile.nickname.is_empty() {
-                                    profile.nickname.clone()
-                                } else if !profile.name.is_empty() {
-                                    profile.name.clone()
-                                } else {
-                                    String::from("New Message")
-                                };
-                                // Create a "description" of the attachment file
-                                show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(extension));
-                                true
-                            }
-                        }
-                        // No profile, send notification with default name
-                        None => {
-                            show_notification(String::from("New Message"), "Sent a ".to_string() + &get_file_type_description(extension));
-                            true
-                        }
-                    };
-                }
-
-                // Create an attachment
-                // Note: The path will be updated to hash-based when the file is downloaded
-                let mut attachments = Vec::new();
-                let attachment = Attachment {
-                    id: if downloaded { file_hash } else { decryption_nonce.to_string() },
-                    key: decryption_key.to_string(),
-                    nonce: decryption_nonce.to_string(),
-                    extension: extension.to_string(),
-                    url: content_url,
-                    path: file_path.to_string_lossy().to_string(), // Will be updated to hash-based path on download
-                    size,
-                    img_meta,
-                    downloading: false,
-                    downloaded
-                };
-                attachments.push(attachment);
-
                 // Extract milliseconds from custom tag if present (same as for text messages)
                 let ms_timestamp = match rumor.tags.find(TagKind::Custom(Cow::Borrowed("ms"))) {
                     Some(ms_tag) => {
@@ -1570,6 +1646,23 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     None => rumor.created_at.as_u64() * 1000
                 };
 
+                // Create an attachment
+                // Note: The path will be updated to hash-based when the file is downloaded
+                let mut attachments = Vec::new();
+                let attachment = Attachment {
+                    id: if downloaded { file_hash } else { decryption_nonce.to_string() },
+                    key: decryption_key.to_string(),
+                    nonce: decryption_nonce.to_string(),
+                    extension: extension.to_string(),
+                    url: content_url,
+                    path: file_path.to_string_lossy().to_string(), // Will be updated to hash-based path on download
+                    size,
+                    img_meta,
+                    downloading: false,
+                    downloaded
+                };
+                attachments.push(attachment);
+
                 // Create the message
                 let msg = Message {
                     id: rumor.id.unwrap().to_hex(),
@@ -1584,21 +1677,69 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     failed: false,
                 };
 
-                // Add the message to the state
-                let was_msg_added_to_state = STATE.lock().await.add_message(&contact, msg.clone());
+                // Send an OS notification for incoming files (do this before locking state)
+                if !is_mine && is_new {
+                    // Clone necessary data for notification (avoid holding lock during notification)
+                    let display_info = {
+                        let state = STATE.lock().await;
+                        match state.get_profile(&contact) {
+                            Some(profile) => {
+                                if profile.muted {
+                                    None // Profile is muted, don't send notification
+                                } else {
+                                    // Profile is not muted, send notification
+                                    let display_name = if !profile.nickname.is_empty() {
+                                        profile.nickname.clone()
+                                    } else if !profile.name.is_empty() {
+                                        profile.name.clone()
+                                    } else {
+                                        String::from("New Message")
+                                    };
+                                    // Create a "description" of the attachment file
+                                    Some((display_name, extension.to_string()))
+                                }
+                            }
+                            // No profile, send notification with default name
+                            None => Some((String::from("New Message"), extension.to_string())),
+                        }
+                    };
+                    
+                    // Send notification outside of state lock
+                    if let Some((display_name, file_extension)) = display_info {
+                        show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(&file_extension));
+                    }
+                }
+
+                // Add the message to the state and handle database save in one operation to avoid multiple locks
+                let (was_msg_added_to_state, _should_emit, _should_save) = {
+                    let mut state = STATE.lock().await;
+                    let was_added = state.add_message_to_participant(&contact, msg.clone());
+                    (was_added, was_added, was_added)
+                };
 
                 // If accepted in-state: commit to the DB and emit to the frontend
                 if was_msg_added_to_state {
                     // Send it to the frontend
-                    let handle = TAURI_APP.get().unwrap();
-                    handle.emit("message_new", serde_json::json!({
-                        "message": &msg,
-                        "chat_id": &contact
-                    })).unwrap();
+                    if let Some(handle) = TAURI_APP.get() {
+                        handle.emit("message_new", serde_json::json!({
+                            "message": &msg,
+                            "chat_id": &contact
+                        })).unwrap();
+                    }
 
-                    // Save the message to our DB
-                    let handle = TAURI_APP.get().unwrap();
-                    db::save_message(handle.clone(), msg, contact).await.unwrap();
+                    // Save the chat/messages to DB (chat_id = contact npub for DMs)
+                    if let Some(handle) = TAURI_APP.get() {
+                        // Get all messages for this chat and save them
+                        let all_messages = {
+                            let state = STATE.lock().await;
+                            state.get_chat(&contact).map(|chat| chat.messages.clone()).unwrap_or_default()
+                        };
+                        let _ = save_chat_messages(handle.clone(), &contact, &all_messages).await;
+                    }
+                    // Ensure OS badge is updated immediately after accepting the attachment
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = update_unread_counter(handle.clone()).await;
+                    }
                 }
 
                 was_msg_added_to_state
@@ -1625,21 +1766,20 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                         if expiry_timestamp <= current_timestamp + 30
                                             && expiry_timestamp > current_timestamp
                                         {
-                                            // Now we apply the typing indicator to it's author profile
-                                            match STATE.lock().await
-                                                .get_profile_mut(&rumor.pubkey.to_bech32().unwrap())
-                                            {
-                                                Some(profile) => {
-                                                    // Apply typing indicator
-                                                    profile.typing_until = expiry_timestamp;
+                                        // Now we apply the typing indicator to it's author profile
+                                        let mut state = STATE.lock().await;
+                                        match state.get_profile_mut(&rumor.pubkey.to_bech32().unwrap()) {
+                                            Some(profile) => {
+                                                // Apply typing indicator
+                                                profile.typing_until = expiry_timestamp;
 
-                                                    // Update the frontend
-                                                    let handle = TAURI_APP.get().unwrap();
-                                                    handle.emit("profile_update", &profile).unwrap();
-                                                    true
-                                                }
-                                                None => false, /* Received a Typing Indicator from an unknown contact, ignoring... */
+                                                // Update the frontend
+                                                let handle = TAURI_APP.get().unwrap();
+                                                handle.emit("profile_update", &profile).unwrap();
+                                                true
                                             }
+                                            None => false, /* Received a Typing Indicator from an unknown contact, ignoring... */
+                                        }
                                         } else {
                                             false
                                         }
@@ -1983,22 +2123,28 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
 
 #[tauri::command]
 async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<String, String> {
-    // Get the first attachment from the message
+    // Get the first attachment from the message by searching through chats
     let img_meta = {
         let state = STATE.lock().await;
-        let profile = state.get_profile(&npub)
-            .ok_or_else(|| "Profile not found".to_string())?;
-        let message = profile.messages.iter()
-            .find(|m| m.id == msg_id)
-            .ok_or_else(|| "Message not found".to_string())?;
         
-        // Get the first attachment
-        let attachment = message.attachments.first()
-            .ok_or_else(|| "No attachments found".to_string())?;
+        // Search through all chats to find the message
+        let mut found_attachment = None;
         
-        // Get image metadata
-        attachment.img_meta.clone()
-            .ok_or_else(|| "No image metadata available".to_string())?
+        for chat in &state.chats {
+            // Check if this chat involves the specified profile
+            if chat.has_participant(&npub) {
+                // Look for the message in this chat
+                if let Some(message) = chat.messages.iter().find(|m| m.id == msg_id) {
+                    // Get the first attachment
+                    if let Some(attachment) = message.attachments.first() {
+                        found_attachment = attachment.img_meta.clone();
+                        break;
+                    }
+                }
+            }
+        }
+        
+        found_attachment.ok_or_else(|| "No image attachment found".to_string())?
     };
     
     // Generate the Base64 image using the decode_blurhash_to_base64 function
@@ -2014,24 +2160,36 @@ async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<Strin
 
 #[tauri::command]
 async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
-    // Grab the attachment's metadata
+    // Grab the attachment's metadata by searching through chats
     let attachment = {
         let mut state = STATE.lock().await;
-        let mut_attachment = state
-            .get_profile_mut(&npub).unwrap()
-            .get_message_mut(&msg_id).unwrap()
-            .get_attachment_mut(&attachment_id).unwrap();
 
-        // Check that we're not already downloading
-        if mut_attachment.downloading {
+        // Find the message and attachment in chats
+        let mut found_attachment = None;
+        for chat in &mut state.chats {
+            if chat.has_participant(&npub) {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
+                        // Check that we're not already downloading
+                        if attachment.downloading {
+                            return false;
+                        }
+
+                        // Enable the downloading flag to prevent re-calls
+                        attachment.downloading = true;
+                        found_attachment = Some(attachment.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        if found_attachment.is_none() {
+            eprintln!("Attachment not found for download: {} in message {}", attachment_id, msg_id);
             return false;
         }
 
-        // Enable the downloading flag to prevent re-calls
-        mut_attachment.downloading = true;
-
-        // Return a clone to allow dropping the State Mutex lock during the download
-        mut_attachment.clone()
+        found_attachment.unwrap()
     };
 
     // Begin our download progress events
@@ -2047,24 +2205,25 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
         Err(error) => {
             // Handle download error
             let mut state = STATE.lock().await;
-            let mut_profile = state.get_profile_mut(&npub).unwrap();
-
-            // Store all necessary IDs first
-            let profile_id = mut_profile.id.clone();
-            let msg_id_clone = msg_id.clone();
-            let attachment_id_clone = attachment_id.clone();
-
-            // Update the attachment status
-            let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
-            let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
-            mut_attachment.downloading = false;
-            mut_attachment.downloaded = false;
+            
+            // Find and update the attachment status
+            for chat in &mut state.chats {
+                if chat.has_participant(&npub) {
+                    if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                        if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
+                            attachment.downloading = false;
+                            attachment.downloaded = false;
+                            break;
+                        }
+                    }
+                }
+            }
 
             // Emit the error
             handle.emit("attachment_download_result", serde_json::json!({
-                "profile_id": profile_id,
-                "msg_id": msg_id_clone,
-                "id": attachment_id_clone,
+                "profile_id": npub,
+                "msg_id": msg_id,
+                "id": attachment_id,
                 "success": false,
                 "result": error
             })).unwrap();
@@ -2078,31 +2237,32 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
     // Process the result
     match result {
         Err(error) => {
-        // Handle decryption/saving error
-        let mut state = STATE.lock().await;
-        let mut_profile = state.get_profile_mut(&npub).unwrap();
+            // Handle decryption/saving error
+            let mut state = STATE.lock().await;
+            
+            // Find and update the attachment status
+            for chat in &mut state.chats {
+                if chat.has_participant(&npub) {
+                    if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                        if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
+                            attachment.downloading = false;
+                            attachment.downloaded = false;
+                            break;
+                        }
+                    }
+                }
+            }
 
-        // Store all necessary IDs first
-        let profile_id = mut_profile.id.clone();
-        let msg_id_clone = msg_id.clone();
-        let attachment_id_clone = attachment_id.clone();
-
-        // Update the attachment status
-        let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
-        let mut_attachment = mut_msg.get_attachment_mut(&attachment_id).unwrap();
-        mut_attachment.downloading = false;
-        mut_attachment.downloaded = false;
-
-        // Emit the error
-        handle.emit("attachment_download_result", serde_json::json!({
-            "profile_id": profile_id,
-            "msg_id": msg_id_clone,
-            "id": attachment_id_clone,
-            "success": false,
-            "result": error
-        })).unwrap();
-        return false;
-    }
+            // Emit the error
+            handle.emit("attachment_download_result", serde_json::json!({
+                "profile_id": npub,
+                "msg_id": msg_id,
+                "id": attachment_id,
+                "success": false,
+                "result": error
+            })).unwrap();
+            return false;
+        }
         Ok(hash_file_path) => {
             // Successfully decrypted and saved
             // Extract the hash from the filename (format: {hash}.{extension})
@@ -2114,36 +2274,42 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
             // Update state with successful download
             {
                 let mut state = STATE.lock().await;
-                let mut_profile = state.get_profile_mut(&npub).unwrap();
-
-                // Store all necessary IDs first
-                let profile_id = mut_profile.id.clone();
-                let msg_id_clone = msg_id.clone();
-                let old_attachment_id = attachment_id.clone();
-
-                // Update the attachment status, ID (from nonce to hash), and path
-                let mut_msg = mut_profile.get_message_mut(&msg_id).unwrap();
                 
-                // Find the attachment by the old ID (nonce) and update it
-                if let Some(attachment_index) = mut_msg.attachments.iter().position(|a| a.id == old_attachment_id) {
-                    let mut_attachment = &mut mut_msg.attachments[attachment_index];
-                    mut_attachment.id = file_hash.clone(); // Update ID from nonce to hash
-                    mut_attachment.downloading = false;
-                    mut_attachment.downloaded = true;
-                    mut_attachment.path = hash_file_path.to_string_lossy().to_string(); // Update to hash-based path
+                // Find and update the attachment
+                for chat in &mut state.chats {
+                    if chat.has_participant(&npub) {
+                        if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                            if let Some(attachment_index) = message.attachments.iter().position(|a| a.id == attachment_id) {
+                                let attachment = &mut message.attachments[attachment_index];
+                                attachment.id = file_hash.clone(); // Update ID from nonce to hash
+                                attachment.downloading = false;
+                                attachment.downloaded = true;
+                                attachment.path = hash_file_path.to_string_lossy().to_string(); // Update to hash-based path
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 // Emit the finished download with both old and new IDs
                 handle.emit("attachment_download_result", serde_json::json!({
-                    "profile_id": profile_id,
-                    "msg_id": msg_id_clone,
-                    "old_id": old_attachment_id,
+                    "profile_id": npub,
+                    "msg_id": msg_id,
+                    "old_id": attachment_id,
                     "id": file_hash,
                     "success": true,
                 })).unwrap();
 
-                // Save to the DB with updated ID and path
-                db::save_message(handle.clone(), mut_msg.clone(), npub).await.unwrap();
+                // Persist updated message/attachment metadata to the database
+                if let Some(handle) = TAURI_APP.get() {
+                    // Grab all messages for this chat and save them.
+                    let all_messages = {
+                        state.get_chat(&npub).map(|chat| chat.messages.clone()).unwrap_or_default()
+                    };
+                    // Drop the STATE lock before performing async I/O
+                    drop(state);
+                    let _ = save_chat_messages(handle.clone(), &npub, &all_messages).await;
+                }
             }
             
             true
@@ -2826,7 +2992,7 @@ pub fn run() {
             profile::update_profile,
             profile::update_status,
             profile::upload_avatar,
-            profile::mark_as_read,
+            chat::mark_as_read,
             profile::toggle_muted,
             profile::set_nickname,
             message::message,
