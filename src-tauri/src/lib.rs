@@ -2533,6 +2533,46 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     })
 }
 
+/// Export account keys (nsec and seed phrase if available)
+#[tauri::command]
+async fn export_keys() -> Result<serde_json::Value, String> {
+    // Try to get nsec from database first
+    let handle = TAURI_APP.get().unwrap();
+    let nsec = if let Some(enc_pkey) = db::get_pkey(handle.clone())? {
+        // Decrypt the nsec
+        match crypto::internal_decrypt(enc_pkey, None).await {
+            Ok(decrypted_nsec) => decrypted_nsec,
+            Err(_) => return Err("Failed to decrypt nsec".to_string()),
+        }
+    } else {
+        return Err("No nsec found in database".to_string());
+    };
+    
+    // Try to get seed phrase from memory first
+    let seed_phrase = if let Some(seed) = MNEMONIC_SEED.get() {
+        Some(seed.clone())
+    } else {
+        // If not in memory, try to get from database
+        if ENCRYPTION_KEY.get().is_some() {
+            match db::get_seed(handle.clone()).await {
+                Ok(Some(seed)) => Some(seed),
+                Ok(None) => None,
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    };
+    
+    // Create response object
+    let response = serde_json::json!({
+        "nsec": nsec,
+        "seed_phrase": seed_phrase
+    });
+    
+    Ok(response)
+}
+
 /// Updates the OS taskbar badge with the count of unread messages
 /// Platform feature list structure
 #[derive(serde::Serialize, Clone)]
@@ -3026,6 +3066,7 @@ pub fn run() {
             get_invited_users,
             db::get_invite_code,
             db::set_invite_code,
+            export_keys,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

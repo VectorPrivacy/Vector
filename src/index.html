@@ -25,14 +25,17 @@
   <body>
     <div id="popup-container" class="popup-container">
       <center id="popup" class="popup" style="display: none;">
-        <img id="popupIcon" src="./icons/vector_warning.svg" style="height: 100px;">
-        <h2 id="popupTitle"></h2>
-        <p id="popupSubtext"><br><i style="opacity: 0.5"></i></p>
+        <div class="popup-content">
+          <img id="popupIcon" src="./icons/vector_warning.svg" style="height: 100px;">
+          <h2 id="popupTitle"></h2>
+          <p id="popupSubtext"><br><i style="opacity: 0.5"></i></p>
 
-        <input id="popupInput">
-        <hr class="divider">
-
-        <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
+          <input id="popupInput">
+          <hr class="divider">
+        </div>
+        <div class="popup-buttons">
+          <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
+        </div>
       </center>
     </div>
 
@@ -264,6 +267,7 @@
 
         <img src="./icons/aggro-glitch.gif">
         <h2 class="danger-title">Dangerzone</h2>
+        <button id="export-account-btn" class="logout-btn">Export Account</button>
         <button id="logout-btn" class="logout-btn">Logout</button>
       </div>
 

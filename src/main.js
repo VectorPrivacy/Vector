@@ -86,6 +86,7 @@ const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info'
 const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-auto-translate-info');
 const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
 const domSettingsLogout = document.getElementById('logout-btn');
+const domSettingsExport = document.getElementById('export-account-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
