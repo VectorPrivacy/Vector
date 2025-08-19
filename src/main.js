@@ -3093,22 +3093,9 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // If a local encrypted key exists, boot up the decryption UI
     if (await hasKey()) {
-        // Check the DB is at least Version 1: otherwise, it's using old & inferior encryption
-        // TODO: nuke this by v1.0? Very few users are affected by the earliest VectorDB changes
-        if (await invoke('get_db_version') < 1) {
-            // Nuke old Private Key
-            await invoke('remove_setting', { key: 'pkey' });
-            // Alert user
-            await popupConfirm('Sorry! 👉👈', `I upgraded the DB with Profile + Message Storage and a 6-pin system.<br><br>You'll have to login again, but this should be the last time! (No promises)<br>- JSKitty`, true);
-        } else {
-            // Private Key is available and we have a good DB version, login screen!
-            openEncryptionFlow(null, true);
-        }
+        // Private Key is available, login screen!
+        openEncryptionFlow(null, true);
     }
-
-    // By this point, it should be safe to set our DB version
-    // TODO: remove this? the backend db_migration.rs now sets it to 2 post-migration, this would override it each init
-    //await invoke('set_db_version', { version: 1 });
 
     // Hook up our static buttons
     domInvitesBtn.onclick = openInvites;
