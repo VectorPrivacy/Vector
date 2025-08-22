@@ -238,6 +238,27 @@ impl ChatState {
          
         // Count unread messages in all chats
         for chat in &self.chats {
+            // Skip muted chats entirely
+            if chat.muted {
+                continue;
+            }
+
+            // Skip chats where the corresponding profile is muted (for DMs)
+            let mut skip_for_profile_mute = false;
+            match chat.chat_type {
+                ChatType::DirectMessage => {
+                    // For DMs, chat.id is the other participant's npub
+                    if let Some(profile) = self.get_profile(&chat.id) {
+                        if profile.muted {
+                            skip_for_profile_mute = true;
+                        }
+                    }
+                }
+            }
+            if skip_for_profile_mute {
+                continue;
+            }
+
             // Find the last read message ID for this chat
             let last_read_id = &chat.last_read;
             

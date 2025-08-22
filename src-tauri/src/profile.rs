@@ -514,9 +514,8 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn toggle_muted(npub: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
-    let mut state = STATE.lock().await;
 
-    match state.get_profile_mut(&npub) {
+    let muted = match STATE.lock().await.get_profile_mut(&npub) {
         Some(profile) => {
             profile.muted = !profile.muted;
 
@@ -532,7 +531,11 @@ pub async fn toggle_muted(npub: String) -> bool {
             profile.muted
         }
         None => false
-    }
+    };
+
+    // Refresh unread badge count to reflect mute changes immediately
+    let _ = crate::update_unread_counter(handle.clone()).await;
+    muted
 }
 
 /// Sets a nickname for a profile

@@ -601,12 +601,13 @@ function renderChatlist() {
  * @param {Chat} chat - The profile we're rendering
  */
 function renderChat(chat) {
-    // Collect the Unread Message count for 'Unread' emphasis and badging
-    const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
-
     // Grab the profile (if this is a 1-to-1 chat)
     const profile = chat.participants.length === 1 ? getProfile(chat.id) : null;
     if (!profile) console.log(chat);
+
+    // Collect the Unread Message count for 'Unread' emphasis and badging
+    // Ensure muted chats OR muted profiles do not show unread glow
+    const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
 
     // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
@@ -1006,6 +1007,9 @@ async function setupRustListeners() {
             domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
             domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
         }
+
+        // Re-render the chat list to immediately reflect glow/badge changes
+        renderChatlist();
     });
 
     await listen('profile_nick_changed', (evt) => {
