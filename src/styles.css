@@ -228,6 +228,25 @@ body {
   top: 50%;
   transform: translate(0%, -50%);
   pointer-events: auto;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.popup-content {
+  overflow-y: auto;
+  max-height: calc(90vh - 150px);
+  margin-bottom: 20px;
+  padding: 5px;
+  word-break: keep-all;
+}
+
+#popupSubtext {
+  word-break: keep-all;
+}
+
+.popup-buttons {
+  margin-top: auto;
 }
 
 .text-gradient {

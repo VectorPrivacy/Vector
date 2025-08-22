@@ -238,6 +238,27 @@ impl ChatState {
          
         // Count unread messages in all chats
         for chat in &self.chats {
+            // Skip muted chats entirely
+            if chat.muted {
+                continue;
+            }
+
+            // Skip chats where the corresponding profile is muted (for DMs)
+            let mut skip_for_profile_mute = false;
+            match chat.chat_type {
+                ChatType::DirectMessage => {
+                    // For DMs, chat.id is the other participant's npub
+                    if let Some(profile) = self.get_profile(&chat.id) {
+                        if profile.muted {
+                            skip_for_profile_mute = true;
+                        }
+                    }
+                }
+            }
+            if skip_for_profile_mute {
+                continue;
+            }
+
             // Find the last read message ID for this chat
             let last_read_id = &chat.last_read;
             
@@ -405,58 +426,51 @@ async fn fetch_messages<R: Runtime>(
                 }
             }
 
-            // Run chat migration if needed
-            if db_migration::is_migration_needed(&handle).await.unwrap_or(true) {
-                // Get all existing messages from the old profile-based storage
-                let profile_messages = db::old_get_all_messages(&handle).await.unwrap_or_else(|e| {
-                    eprintln!("Failed to get profile messages for migration: {}", e);
-                    Vec::new()
-                });
-                
-                if !profile_messages.is_empty() {
-                    println!("Migrating {} messages from profile-based to chat-based storage...", profile_messages.len());
-                    
-                    // Emit migration start event to frontend
-                    handle.emit("progress_operation", serde_json::json!({
-                        "type": "start",
-                        "message": "Migrating chats"
-                    })).unwrap();
-                    
-                    // Perform the migration
-                    match db_migration::migrate_profile_messages_to_chats(&handle, profile_messages).await {
-                        Ok(chats) => {
-                            println!("Successfully migrated {} chats", chats.len());
-                            
-                            // Load the migrated chats into state (we already have the lock)
-                            for chat in chats {
-                                // Ensure profiles exist for all chat participants
-                                for participant in chat.participants() {
-                                    if state.get_profile(participant).is_none() {
-                                        // Create a basic profile for the participant
-                                        let mut profile = Profile::new();
-                                        profile.id = participant.clone();
-                                        profile.mine = false; // It's not our profile
-                                        state.profiles.push(profile);
-                                    }
-                                }
-                                
-                                state.chats.push(chat);
+            // Run database migrations
+            if let Err(e) = db::run_migrations(handle.clone()).await {
+                eprintln!("Failed to run database migrations: {}", e);
+                // Emit error event if needed
+                handle.emit("progress_operation", serde_json::json!({
+                    "type": "error",
+                    "message": format!("Database migration error: {}", e)
+                })).unwrap();
+            }
+
+            // If we've just migrated to v2 and no chats are in memory yet,
+            // reload chats/messages from DB before any init_finished emit
+            if db::get_db_version(handle.clone()).unwrap_or(None).unwrap_or(0) >= 2 && state.chats.is_empty() {
+                let slim_chats_result = db_migration::get_all_chats(&handle).await;
+                if let Ok(slim_chats) = slim_chats_result {
+                    for slim_chat in slim_chats {
+                        let mut chat = slim_chat.to_chat();
+
+                        // Load messages for this chat
+                        let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
+                        if let Ok(messages) = messages_result {
+                            for message in messages {
+                                chat.internal_add_message(message);
                             }
-                            
-                            // Mark migration as complete
-                            if let Err(e) = db_migration::complete_migration(handle.clone()).await {
-                                eprintln!("Failed to mark chat migration as complete: {}", e);
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("Failed to migrate chats: {}", e);
-                            // Emit error event
-                            handle.emit("progress_operation", serde_json::json!({
-                                "type": "error",
-                                "message": format!("Chat migration error: {}", e)
-                            })).unwrap();
+                        } else {
+                            eprintln!("Failed to load messages for chat {}: {:?}", chat.id(), messages_result);
                         }
+
+                        // Ensure profiles exist for chat participants
+                        for participant in chat.participants() {
+                            if state.get_profile(participant).is_none() {
+                                let mut profile = Profile::new();
+                                profile.id = participant.clone();
+                                profile.mine = false;
+                                state.profiles.push(profile);
+                            }
+                        }
+
+                        // Add chat
+                        state.chats.push(chat);
                     }
+                    // Keep chats sorted by last message time
+                    state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
+                } else {
+                    eprintln!("Failed to load chats after migration: {:?}", slim_chats_result);
                 }
             }
 
@@ -536,10 +550,10 @@ async fn fetch_messages<R: Runtime>(
     
                         // Add chat to state
                         state.chats.push(chat);
-    
-                        // Sort the chats by their last received message
-                        state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
                     }
+
+                    // Sort the chats by their last received message
+                    state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
                 } else {
                     eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
                 }
@@ -550,7 +564,6 @@ async fn fetch_messages<R: Runtime>(
                     "chats": &state.chats
                 })).unwrap();
             } else {
-                println!("[INIT] Checking filesystem integrity...");
                 // Check if filesystem integrity check is needed
                 let needs_integrity_check = state.chats.iter().any(|chat| 
                     chat.messages.iter().any(|msg| 
@@ -936,10 +949,6 @@ async fn update_database_attachment_paths<R: Runtime>(
         }
     }
     
-    if updated_count > 0 {
-        println!("Successfully updated {} attachment references in database", updated_count);
-    }
-    
     Ok(updated_count)
 }
 
@@ -970,9 +979,6 @@ async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
                 // Convert seconds to milliseconds
                 let old_timestamp = message.at;
                 message.at = old_timestamp * 1000;
-                
-                println!("Migrating timestamp for message {}: {} -> {}", message.id, old_timestamp, message.at);
-                
                 updated_count += 1;
                 chat_updated = true;
             }
@@ -985,10 +991,6 @@ async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
                 eprintln!("Failed to save updated messages in timestamp migration: {}", e);
             }
         }
-    }
-    
-    if updated_count > 0 {
-        println!("Successfully migrated {} message timestamps from seconds to milliseconds", updated_count);
     }
     
     Ok(updated_count as u32)
@@ -2533,6 +2535,46 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     })
 }
 
+/// Export account keys (nsec and seed phrase if available)
+#[tauri::command]
+async fn export_keys() -> Result<serde_json::Value, String> {
+    // Try to get nsec from database first
+    let handle = TAURI_APP.get().unwrap();
+    let nsec = if let Some(enc_pkey) = db::get_pkey(handle.clone())? {
+        // Decrypt the nsec
+        match crypto::internal_decrypt(enc_pkey, None).await {
+            Ok(decrypted_nsec) => decrypted_nsec,
+            Err(_) => return Err("Failed to decrypt nsec".to_string()),
+        }
+    } else {
+        return Err("No nsec found in database".to_string());
+    };
+    
+    // Try to get seed phrase from memory first
+    let seed_phrase = if let Some(seed) = MNEMONIC_SEED.get() {
+        Some(seed.clone())
+    } else {
+        // If not in memory, try to get from database
+        if ENCRYPTION_KEY.get().is_some() {
+            match db::get_seed(handle.clone()).await {
+                Ok(Some(seed)) => Some(seed),
+                Ok(None) => None,
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    };
+    
+    // Create response object
+    let response = serde_json::json!({
+        "nsec": nsec,
+        "seed_phrase": seed_phrase
+    });
+    
+    Ok(response)
+}
+
 /// Updates the OS taskbar badge with the count of unread messages
 /// Platform feature list structure
 #[derive(serde::Serialize, Clone)]
@@ -3026,6 +3068,7 @@ pub fn run() {
             get_invited_users,
             db::get_invite_code,
             db::set_invite_code,
+            export_keys,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

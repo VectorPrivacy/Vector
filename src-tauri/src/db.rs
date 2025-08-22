@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::{Profile, Status, Attachment, Message, Reaction};
 use crate::net::SiteMetadata;
 use crate::crypto::{internal_encrypt, internal_decrypt};
+use crate::db_migration;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VectorDB {
@@ -20,6 +21,9 @@ pub struct VectorDB {
 }
 
 const DB_PATH: &str = "vector.json";
+
+/// Latest database version
+pub const LATEST_DB_VERSION: u64 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -471,4 +475,68 @@ pub async fn old_get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<V
     }
     
     Ok(result)
+}
+
+/// Run database migrations sequentially from current version to LATEST_DB_VERSION
+/// This function ensures migrations are applied in order and the dbver is updated after each
+pub async fn run_migrations<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
+    let current_version = get_db_version(handle.clone())?.unwrap_or(1); // Default to 1 if not set
+    println!("Current database version: {}", current_version);
+    
+    // If already at or above latest version, nothing to do
+    if current_version >= LATEST_DB_VERSION {
+        return Ok(());
+    }
+    
+    println!("Database needs migration from version {} to {}", current_version, LATEST_DB_VERSION);
+    
+    // Run migrations sequentially
+    // Since LATEST_DB_VERSION is 2, we only need to handle version 2 migration
+    if current_version < 2 {
+        println!("Starting migration to version 2...");
+        // Migration from profile-based to chat-based storage (version 2)
+        // This is the main migration that was previously handled in lib.rs
+        if db_migration::is_migration_needed(&handle).await.unwrap_or(true) {
+            println!("Migration is needed. Fetching profile messages...");
+            // Get all existing messages from the old profile-based storage
+            let profile_messages = old_get_all_messages(&handle).await.unwrap_or_else(|e| {
+                eprintln!("Failed to get profile messages for migration: {}", e);
+                Vec::new()
+            });
+            println!("Found {} profile messages to migrate.", profile_messages.len());
+            
+            if !profile_messages.is_empty() {
+                println!("Migrating {} messages from profile-based to chat-based storage...", profile_messages.len());
+                
+                // Perform the migration
+                match db_migration::migrate_profile_messages_to_chats(&handle, profile_messages).await {
+                    Ok(chats) => {
+                        println!("Successfully migrated {} chats", chats.len());
+                    },
+                    Err(e) => {
+                        return Err(format!("Failed to migrate chats for version 2: {}", e));
+                    }
+                }
+            } else {
+                println!("No profile messages to migrate.");
+            }
+            
+            println!("Marking migration as complete...");
+            // Mark migration as complete
+            db_migration::complete_migration(handle.clone()).await
+                .map_err(|e| format!("Failed to complete migration to version 2: {}", e))?;
+            println!("Migration to version 2 marked as complete.");
+        } else {
+            println!("Migration to version 2 is not needed according to is_migration_needed().");
+        }
+        
+        println!("Updating database version to 2...");
+        // Update database version after successful migration
+        set_db_version(handle.clone(), 2).await
+            .map_err(|e| format!("Failed to set database version to 2: {}", e))?;
+        println!("Database version successfully updated to 2.");
+    }
+    
+    println!("Database migrations completed successfully.");
+    Ok(())
 }

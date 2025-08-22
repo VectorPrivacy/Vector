@@ -595,3 +595,33 @@ domSettingsLogout.onclick = async (evt) => {
     // Begin the logout sequence
     await invoke('logout');
 };
+
+// Listen for Export Account clicks
+domSettingsExport.onclick = async (evt) => {
+    try {
+        // Call the backend to export keys
+        const keys = await invoke('export_keys');
+        
+        // Create the export content with security warnings
+        let exportContent = `<h3>Account Export</h3>
+            <p style="color: #ff2ea9; font-weight: bold;">SECURITY WARNING</p>
+            <p>These are your private keys. Anyone with access to them can access your account.</p>
+            <p>Store them securely and never share them with anyone.</p><br>`;
+
+        // Add seed phrase first if available (prioritized for users)
+        if (keys.seed_phrase) {
+            exportContent += `<p><strong>Seed Phrase:</strong></p>
+                <p style="word-break: break-all; background: #1a1a1a; padding: 10px; border-radius: 5px; font-family: 'Courier New', monospace;">${keys.seed_phrase}</p><br>`;
+        }
+
+        // Always add the private key (nsec)
+        exportContent += `<p><strong>Private Key (nsec):</strong></p>
+            <p style="word-break: break-all; background: #1a1a1a; padding: 10px; border-radius: 5px; font-family: 'Courier New', monospace;">${keys.nsec}</p>`;
+
+        // Show the export information in a popup
+        await popupConfirm('', exportContent, true, '', 'vector_warning.svg');
+    } catch (error) {
+        console.error('Export failed:', error);
+        await popupConfirm('Export Failed', error.toString(), true, '', 'vector_warning.svg');
+    }
+};
