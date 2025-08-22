@@ -1231,6 +1231,10 @@ body {
   transform: scale(1.1);
 }
 
+.emoji-grid span img {
+  pointer-events: none;
+}
+
 .emoji-search-container {
   padding: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);

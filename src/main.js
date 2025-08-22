@@ -311,8 +311,8 @@ document.querySelectorAll('.emoji-category-btn').forEach(btn => {
 // Emoji selection handler
 picker.addEventListener('click', (e) => {
     if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
-        const emoji = e.target.textContent;
-        const cEmoji = arrEmojis.find(e => e.emoji === emoji);
+        const emoji = e.target.getAttribute('title');
+        const cEmoji = arrEmojis.find(e => e.name === emoji);
         
         if (cEmoji) {
             // Register usage
@@ -364,7 +364,7 @@ emojiSearch.onkeydown = async (e) => {
         if (!emojiElement) return;
 
         // Register the selection in the emoji-dex
-        const cEmoji = arrEmojis.find(a => a.emoji === emojiElement.textContent);
+        const cEmoji = arrEmojis.find(a => a.name === emojiElement.getAttribute('title'));
         if (!cEmoji) return;
         
         cEmoji.used++;
