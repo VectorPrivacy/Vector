@@ -1885,7 +1885,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Auto-mark messages as read when chat is opened AND window is focused
         if (chat?.messages?.length) {
             // Check window focus before auto-marking
-            const isWindowFocused = await getCurrentWindow().isFocused();
+            const isWindowFocused = (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios')
+                ? await getCurrentWindow().isFocused()
+                : true;
             
             if (isWindowFocused) {
                 // Find the latest message from the other person (not from current user)
@@ -3257,27 +3259,25 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
 
     // Hook up our drag-n-drop listeners
-    await getCurrentWebview().onDragDropEvent(async (event) => {
-        // Only accept File Drops if a chat is open
-        if (strOpenChat) {
-            if (event.payload.type === 'over') {
-                // TODO: add hover effects
-            } else if (event.payload.type === 'drop') {
-                // Reset reply selection while passing a copy of the reference to the backend
-                const strReplyRef = strCurrentReplyReference;
-                cancelReply();
-                await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
-            } else {
-                // TODO: remove hover effects
-            }
-        }
-    });
-
-    // Hook up window focus-change events
-    await getCurrentWindow().onFocusChanged(async (event) => {
-        if (event.payload) {
-            // If we have a chat open, but Vector was prev. in the background; mark these messages as read
+    if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+        await getCurrentWebview().onDragDropEvent(async (event) => {
+            // Only accept File Drops if a chat is open
             if (strOpenChat) {
+                if (event.payload.type === 'over') {
+                    // TODO: add hover effects
+                } else if (event.payload.type === 'drop') {
+                    // Reset reply selection while passing a copy of the reference to the backend
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
+                } else {
+                    // TODO: remove hover effects
+                }
+            }
+        });
+
+        await getCurrentWindow().onFocusChanged(async (event) => {
+            if (event.payload && strOpenChat) {
                 const currentChat = getDMChat(strOpenChat);
                 if (currentChat && currentChat.messages.length > 0) {
                     // Find the last message from the contact (not from current user)
@@ -3288,18 +3288,13 @@ window.addEventListener("DOMContentLoaded", async () => {
                             break;
                         }
                     }
-                    
-                    // If we found a message, mark it as read on the chat
                     if (lastContactMsg) {
-                        const currentChat = getDMChat(strOpenChat);
-                        if (currentChat) {
-                            markAsRead(currentChat, lastContactMsg);
-                        }
+                        markAsRead(currentChat, lastContactMsg);
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     // Hook up our voice message recorder listener
     const recorder = new VoiceRecorder(domChatMessageInputVoice);
