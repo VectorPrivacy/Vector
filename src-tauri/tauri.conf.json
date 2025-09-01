@@ -50,6 +50,11 @@
         }
 			}
     },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    },
     "android": {
       "minSdkVersion": 26
     },

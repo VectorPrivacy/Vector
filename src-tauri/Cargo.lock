@@ -2774,9 +2774,9 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "lru"
-version = "0.14.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f8cc7106155f10bdf99a6f379688f543ad6596a415375b36a59a054ceda1198"
+checksum = "86ea4e65087ff52f3862caff188d489f1fab49a0cb09e01b2e3f1a617b10aaed"
 
 [[package]]
 name = "mac"
@@ -3011,9 +3011,9 @@ dependencies = [
 
 [[package]]
 name = "nostr"
-version = "0.42.1"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9c1891da0e58e7eb48a1d2cd704a16f39a61bac3564a1426b26621e21073594"
+checksum = "f30e6dcb36d88017587b0b5578d1ed3398afe8e4f45fdb910e48b8675aaf6f68"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -3025,8 +3025,6 @@ dependencies = [
  "chacha20poly1305",
  "getrandom 0.2.15",
  "instant",
- "regex",
- "reqwest",
  "scrypt",
  "secp256k1",
  "serde",
@@ -3037,9 +3035,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.42.0"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aafe85dc7c039c399796043b76009fa744c3a45ac073a023932f7b7d91b1e7"
+checksum = "b1c75a8c2175d2785ba73cfddef21d1e30da5fbbdf158569b6808ba44973a15b"
 dependencies = [
  "lru",
  "nostr",
@@ -3048,9 +3046,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-relay-pool"
-version = "0.42.0"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df4d5628d2444349570fb185b0c2d92cfdb7e68d62b13bf3e8a4348b5de7430b"
+checksum = "265d9b44771ed15db93b183a0c93dbb703b2b0d0b74dffb5c2a081be52373a5a"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -3065,16 +3063,15 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.42.0"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e928ba9ac2695fbe10b8aefda59f2abfeb23c10a0e86a0b3e0f6a27bb274a2"
+checksum = "599f8963d6a1522a13b1a2b0ea6e168acfc367706606f1d33fa595e91fa22db0"
 dependencies = [
  "async-utility",
  "nostr",
  "nostr-database",
  "nostr-relay-pool",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -6265,7 +6262,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vector"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aes",
  "aes-gcm",

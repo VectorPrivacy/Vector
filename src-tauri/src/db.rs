@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::{Profile, Status, Attachment, Message, Reaction};
 use crate::net::SiteMetadata;
 use crate::crypto::{internal_encrypt, internal_decrypt};
+use crate::db_migration;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VectorDB {
@@ -20,6 +21,9 @@ pub struct VectorDB {
 }
 
 const DB_PATH: &str = "vector.json";
+
+/// Latest database version
+pub const LATEST_DB_VERSION: u64 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -35,6 +39,10 @@ pub struct SlimProfile {
     about: String,
     website: String,
     nip05: String,
+    /// Deprecated: Moved to Chat.last_read. This field is only kept for migration purposes.
+    /// Follow-up plan to drop this field:
+    /// 1. In the next release, stop using this field in the migration process
+    /// 2. In a subsequent release, remove this field from the struct and all related code
     last_read: String,
     status: Status,
     muted: bool,
@@ -98,7 +106,6 @@ impl SlimProfile {
             about: self.about.clone(),
             website: self.website.clone(),
             nip05: self.nip05.clone(),
-            messages: Vec::new(), // Will be populated separately
             last_read: self.last_read.clone(),
             status: self.status.clone(),
             last_updated: 0,      // Default value
@@ -106,6 +113,11 @@ impl SlimProfile {
             mine: false,          // Default value
             muted: self.muted,
         }
+    }
+    
+    // Getter for last_read field
+    pub fn last_read(&self) -> &str {
+        &self.last_read
     }
 }
 
@@ -170,15 +182,15 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SlimMessage {
-    id: String,
-    content: String,
-    replied_to: String,
-    preview_metadata: Option<SiteMetadata>,
-    attachments: Vec<Attachment>,
-    reactions: Vec<Reaction>,
-    at: u64,
-    mine: bool,
-    contact: String,  // Reference to which contact/profile this message belongs to
+    pub id: String,
+    pub content: String,
+    pub replied_to: String,
+    pub preview_metadata: Option<SiteMetadata>,
+    pub attachments: Vec<Attachment>,
+    pub reactions: Vec<Reaction>,
+    pub at: u64,
+    pub mine: bool,
+    pub contact: String,  // Reference to which contact/profile this message belongs to
 }
 
 impl From<(&Message, String)> for SlimMessage {
@@ -220,9 +232,9 @@ impl SlimMessage {
     }
 }
 
-fn get_store<R: Runtime>(handle: &AppHandle<R>) -> Arc<tauri_plugin_store::Store<R>> {
+pub fn get_store<R: Runtime>(handle: &AppHandle<R>) -> Arc<tauri_plugin_store::Store<R>> {
     StoreBuilder::new(handle, PathBuf::from(DB_PATH))
-        .auto_save(Duration::from_millis(100))
+        .auto_save(Duration::from_secs(2))
         .build()
         .unwrap()
 }
@@ -268,7 +280,7 @@ pub fn get_db<R: Runtime>(handle: AppHandle<R>) -> Result<VectorDB, String> {
 }
 
 #[command]
-pub fn set_db_version<R: Runtime>(handle: AppHandle<R>, version: u64) -> Result<(), String> {
+pub async fn set_db_version<R: Runtime>(handle: AppHandle<R>, version: u64) -> Result<(), String> {
     let store = get_store(&handle);
     store.set("dbver".to_string(), serde_json::json!(version));
     Ok(())
@@ -419,83 +431,10 @@ pub fn nuke<R: Runtime>(handle: AppHandle<R>) -> Result<(), tauri_plugin_store::
     store.save()
 }
 
-#[command]
-pub async fn save_message<R: Runtime>(
-    handle: AppHandle<R>, 
-    message: Message, 
-    contact_id: String
-) -> Result<(), String> {
-    // 1. Convert to slim message with contact info
-    let slim_message = SlimMessage::from((&message, contact_id));
-    
-    // 2. Serialize to JSON
-    let json = serde_json::to_string(&slim_message)
-        .map_err(|e| format!("Failed to serialize message: {}", e))?;
-    
-    // 3. Encrypt the JSON
-    let encrypted = internal_encrypt(json, None).await;
-    
-    // 4. Store in the DB
-    let store = get_store(&handle);
-    
-    // Get the current messages map (or create empty one)
-    let mut messages: HashMap<String, String> = match store.get("messages") {
-        Some(value) => serde_json::from_value(value.clone())
-            .unwrap_or_default(),
-        None => HashMap::new(),
-    };
-    
-    // Add the message
-    messages.insert(message.id.clone(), encrypted);
-    
-    // Save back to store
-    store.set("messages".to_string(), serde_json::json!(messages));
-    
-    Ok(())
-}
+// OLD MESSAGE FUNCTIONS - ONLY FOR READING DURING MIGRATION
+// DO NOT USE FOR NEW WRITES - USE THE CHAT-BASED SYSTEM IN db_migration.rs
 
-/// Save multiple messages in a single batch operation
-/// This is much more efficient than calling save_message multiple times
-pub async fn save_messages<R: Runtime>(
-    handle: &AppHandle<R>, 
-    messages_batch: Vec<(Message, String)> // Vec of (message, contact_id)
-) -> Result<(), String> {
-    if messages_batch.is_empty() {
-        return Ok(());
-    }
-    
-    let store = get_store(handle);
-    
-    // Get the current messages map (or create empty one)
-    let mut messages_map: HashMap<String, String> = match store.get("messages") {
-        Some(value) => serde_json::from_value(value.clone())
-            .unwrap_or_default(),
-        None => HashMap::new(),
-    };
-    
-    // Process all messages in the batch
-    for (message, contact_id) in messages_batch {
-        // 1. Convert to slim message with contact info
-        let slim_message = SlimMessage::from((&message, contact_id));
-        
-        // 2. Serialize to JSON
-        let json = serde_json::to_string(&slim_message)
-            .map_err(|e| format!("Failed to serialize message: {}", e))?;
-        
-        // 3. Encrypt the JSON
-        let encrypted = internal_encrypt(json, None).await;
-        
-        // Add to the map
-        messages_map.insert(message.id.clone(), encrypted);
-    }
-    
-    // Save the entire map back to store in one operation
-    store.set("messages".to_string(), serde_json::json!(messages_map));
-    
-    Ok(())
-}
-
-pub async fn get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(Message, String)>, String> {
+pub async fn old_get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(Message, String)>, String> {
     let store = get_store(handle);
     
     // Get the messages map
@@ -536,4 +475,68 @@ pub async fn get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(
     }
     
     Ok(result)
+}
+
+/// Run database migrations sequentially from current version to LATEST_DB_VERSION
+/// This function ensures migrations are applied in order and the dbver is updated after each
+pub async fn run_migrations<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
+    let current_version = get_db_version(handle.clone())?.unwrap_or(1); // Default to 1 if not set
+    println!("Current database version: {}", current_version);
+    
+    // If already at or above latest version, nothing to do
+    if current_version >= LATEST_DB_VERSION {
+        return Ok(());
+    }
+    
+    println!("Database needs migration from version {} to {}", current_version, LATEST_DB_VERSION);
+    
+    // Run migrations sequentially
+    // Since LATEST_DB_VERSION is 2, we only need to handle version 2 migration
+    if current_version < 2 {
+        println!("Starting migration to version 2...");
+        // Migration from profile-based to chat-based storage (version 2)
+        // This is the main migration that was previously handled in lib.rs
+        if db_migration::is_migration_needed(&handle).await.unwrap_or(true) {
+            println!("Migration is needed. Fetching profile messages...");
+            // Get all existing messages from the old profile-based storage
+            let profile_messages = old_get_all_messages(&handle).await.unwrap_or_else(|e| {
+                eprintln!("Failed to get profile messages for migration: {}", e);
+                Vec::new()
+            });
+            println!("Found {} profile messages to migrate.", profile_messages.len());
+            
+            if !profile_messages.is_empty() {
+                println!("Migrating {} messages from profile-based to chat-based storage...", profile_messages.len());
+                
+                // Perform the migration
+                match db_migration::migrate_profile_messages_to_chats(&handle, profile_messages).await {
+                    Ok(chats) => {
+                        println!("Successfully migrated {} chats", chats.len());
+                    },
+                    Err(e) => {
+                        return Err(format!("Failed to migrate chats for version 2: {}", e));
+                    }
+                }
+            } else {
+                println!("No profile messages to migrate.");
+            }
+            
+            println!("Marking migration as complete...");
+            // Mark migration as complete
+            db_migration::complete_migration(handle.clone()).await
+                .map_err(|e| format!("Failed to complete migration to version 2: {}", e))?;
+            println!("Migration to version 2 marked as complete.");
+        } else {
+            println!("Migration to version 2 is not needed according to is_migration_needed().");
+        }
+        
+        println!("Updating database version to 2...");
+        // Update database version after successful migration
+        set_db_version(handle.clone(), 2).await
+            .map_err(|e| format!("Failed to set database version to 2: {}", e))?;
+        println!("Database version successfully updated to 2.");
+    }
+    
+    println!("Database migrations completed successfully.");
+    Ok(())
 }

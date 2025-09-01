@@ -82,6 +82,7 @@ function updateUI(state, message = '', progress = 0) {
             if (checkButton) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
+                checkButton.style.display = 'block';
             }
             break;
             
@@ -124,6 +125,7 @@ function updateUI(state, message = '', progress = 0) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Download Update';
                 checkButton.style.background = '';
+                checkButton.style.display = 'block';
             }
             // Show notification dot on settings button
             if (updateDot) updateDot.style.display = 'block';
@@ -151,9 +153,7 @@ function updateUI(state, message = '', progress = 0) {
             }
             if (progressContainer) progressContainer.style.display = 'none';
             if (checkButton) {
-                checkButton.disabled = false;
-                checkButton.textContent = 'Check for Updates';
-                checkButton.style.background = '';
+                checkButton.style.display = 'none';
             }
             if (restartButton) restartButton.style.display = 'block';
             // Hide notification dot when ready
@@ -173,6 +173,7 @@ function updateUI(state, message = '', progress = 0) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
                 checkButton.style.background = '';
+                checkButton.style.display = 'block';
             }
             setTimeout(() => {
                 if (statusText) statusText.style.color = '';
@@ -193,6 +194,7 @@ function updateUI(state, message = '', progress = 0) {
                 checkButton.disabled = false;
                 checkButton.textContent = 'Check for Updates';
                 checkButton.style.background = '';
+                checkButton.style.display = 'block';
             }
             setTimeout(() => {
                 if (statusText) statusText.style.color = '';

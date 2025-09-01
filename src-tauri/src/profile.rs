@@ -1,10 +1,9 @@
 use nostr_sdk::prelude::*;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tauri_plugin_fs::FsExt;
 
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP, PUBLIC_NIP96_CONFIG};
 use crate::db;
-use crate::Message;
 use crate::message::AttachmentFile;
 
 #[cfg(target_os = "android")]
@@ -24,7 +23,10 @@ pub struct Profile {
     pub about: String,
     pub website: String,
     pub nip05: String,
-    pub messages: Vec<Message>,
+    /// Deprecated: Moved to Chat.last_read. This field is only kept for migration purposes.
+    /// Follow-up plan to drop this field:
+    /// 1. In the next release, stop using this field in the migration process
+    /// 2. In a subsequent release, remove this field from the struct and all related code
     pub last_read: String,
     pub status: Status,
     pub last_updated: u64,
@@ -53,7 +55,6 @@ impl Profile {
             about: String::new(),
             website: String::new(),
             nip05: String::new(),
-            messages: Vec::new(),
             last_read: String::new(),
             status: Status::new(),
             last_updated: 0,
@@ -61,31 +62,6 @@ impl Profile {
             mine: false,
             muted: false,
         }
-    }
-
-    /// Get the last message timestamp
-    pub fn last_message_time(&self) -> Option<u64> {
-        self.messages.last().map(|msg| msg.at)
-    }
-
-    /// Get a mutable message by ID
-    pub fn get_message_mut(&mut self, id: &str) -> Option<&mut Message> {
-        self.messages.iter_mut().find(|msg| msg.id == id)
-    }
-
-    /// Set the Last Received message as the "Last Read" message
-    pub fn set_as_read(&mut self) -> bool {
-        // Ensure we have at least one message received from them
-        for msg in self.messages.iter().rev() {
-            if !msg.mine {
-                // Found the most recent message from them
-                self.last_read = msg.id.clone();
-                return true;
-            }
-        }
-        
-        // No messages from them, can't mark anything as read
-        false
     }
 
     /// Merge Nostr Metadata with this Vector Profile
@@ -167,41 +143,6 @@ impl Profile {
         }
         
         changed
-    }
-
-    /// Add a Message to this Vector Profile
-    /// 
-    /// This method internally checks for and avoids duplicate messages.
-    pub fn internal_add_message(&mut self, message: Message) -> bool {
-        // Make sure we don't add the same message twice
-        if self.messages.iter().any(|m| m.id == message.id) {
-            // Message is already known by the state
-            return false;
-        }
-
-        // If it's their message; disable their typing indicator until further indicators are sent
-        if !message.mine {
-            self.typing_until = 0;
-        }
-
-        // Fast path for common cases: newest or oldest messages
-        if self.messages.is_empty() {
-            // First message
-            self.messages.push(message);
-        } else if message.at >= self.messages.last().unwrap().at {
-            // Common case 1: Latest message (append to end)
-            self.messages.push(message);
-        } else if message.at <= self.messages.first().unwrap().at {
-            // Common case 2: Oldest message (insert at beginning)
-            self.messages.insert(0, message);
-        } else {
-            // Less common case: Message belongs somewhere in the middle
-            self.messages.insert(
-                self.messages.binary_search_by(|m| m.at.cmp(&message.at)).unwrap_or_else(|idx| idx),
-                message
-            );
-        }
-        true
     }
 }
 
@@ -510,77 +451,71 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     };
 
     // Format a Mime Type from the file extension
-    let mime_type = match attachment_file.extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "application/octet-stream",
-    };
+    let mime_type = crate::util::mime_from_extension_safe(&attachment_file.extension, true)
+        .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
     // Upload the file to the server
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let conf = PUBLIC_NIP96_CONFIG.wait();
 
-    match nostr_sdk::nips::nip96::upload_data(
+    // Create upload request
+    let upload_request = nostr_sdk::nips::nip96::UploadRequest::new(
         &signer,
         &conf,
-        attachment_file.bytes,
-        Some(mime_type),
-        None
-    ).await {
+        &attachment_file.bytes
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Get the upload URL and authorization header
+    let upload_url = upload_request.url();
+    let auth_header = upload_request.authorization();
+
+    // Create the HTTP client
+    let http_client = reqwest::Client::new();
+
+    // Create the multipart form
+    let form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(attachment_file.bytes)
+            .file_name(format!("avatar.{}", attachment_file.extension))
+            .mime_str(mime_type.as_str())
+            .map_err(|_| "Failed to set MIME type")?);
+
+    // Make the upload request
+    let response = http_client
+        .post(upload_url.clone())
+        .header("Authorization", auth_header)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send upload request: {}", e))?;
+
+    // Check if the request was successful
+    if !response.status().is_success() {
+        return Err(format!("Upload failed with status: {}", response.status()));
+    }
+
+    // Parse the response
+    let upload_response: nostr_sdk::nips::nip96::UploadResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
+
+    // Extract the URL from the response
+    match upload_response.download_url() {
         Ok(url) => Ok(url.to_string()),
-        Err(e) => Err(e.to_string())
+        Err(e) => Err(format!("Failed to extract download URL: {}", e))
     }
 }
 
-/// Marks a specific message as read
-#[tauri::command]
-pub async fn mark_as_read(npub: String) -> bool {
-    // Only mark as read if the Window is focused (user may have the chat open but the app in the background)
-    let handle = TAURI_APP.get().unwrap();
-    if !handle
-        .webview_windows()
-        .iter()
-        .next()
-        .unwrap()
-        .1
-        .is_focused()
-        .unwrap() {
-            // Update the counter to allow for background badge handling of in-chat messages
-            crate::update_unread_counter(handle.clone()).await;
-            return false;
-        }
-
-    // Get a mutable reference to the profile
-    let result = {
-        let mut state = STATE.lock().await;
-        match state.get_profile_mut(&npub) {
-            Some(profile) => profile.set_as_read(),
-            None => false
-        }
-    };
-    
-    // Update the unread counter if the marking was successful
-    if result {
-        // Update the badge count
-        crate::update_unread_counter(handle.clone()).await;
-
-        // Save the "Last Read" marker to the DB
-        db::set_profile(handle.clone(), STATE.lock().await.get_profile(&npub).unwrap().clone()).await.unwrap();
-    }
-    
-    result
-}
 
 /// Toggles the muted status of a profile
 #[tauri::command]
 pub async fn toggle_muted(npub: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
-    let mut state = STATE.lock().await;
 
-    match state.get_profile_mut(&npub) {
+    let muted = match STATE.lock().await.get_profile_mut(&npub) {
         Some(profile) => {
             profile.muted = !profile.muted;
 
@@ -596,7 +531,11 @@ pub async fn toggle_muted(npub: String) -> bool {
             profile.muted
         }
         None => false
-    }
+    };
+
+    // Refresh unread badge count to reflect mute changes immediately
+    let _ = crate::update_unread_counter(handle.clone()).await;
+    muted
 }
 
 /// Sets a nickname for a profile

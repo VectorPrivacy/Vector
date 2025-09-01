@@ -262,15 +262,6 @@ select:disabled {
 }
 
 /* Update Settings Section Styles */
-.update-info {
-  text-align: center;
-}
-
-.update-info p {
-  margin-bottom: 15px;
-  font-size: 16px;
-}
-
 #current-version,
 #new-version {
   color: #b188e2;
@@ -278,37 +269,18 @@ select:disabled {
 }
 
 #check-updates-btn {
-  margin: 10px auto;
-  padding: 12px 24px;
   background: rgba(177, 136, 226, 0.1);
   border: 1px solid rgba(177, 136, 226, 0.3);
   color: #b188e2;
-  font-weight: 600;
-  transition: all 0.3s ease;
 }
 
 #check-updates-btn:hover:not(:disabled) {
   background: rgba(177, 136, 226, 0.2);
   border-color: rgba(177, 136, 226, 0.5);
-  transform: translateY(-1px);
-}
-
-#check-updates-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
 }
 
 #update-status-text {
-  font-size: 14px;
   color: rgba(255, 255, 255, 0.8);
-  margin-top: 10px;
-  transition: color 0.3s ease;
-}
-
-#update-progress-container {
-  margin: 20px auto;
-  max-width: 300px;
 }
 
 #update-progress-bar {
@@ -319,32 +291,12 @@ select:disabled {
 #download-update-btn,
 #restart-update-btn {
   color: #000;
-  font-weight: bold;
   border: none;
   box-shadow: 0 4px 12px rgba(177, 136, 226, 0.3);
-  transition: all 0.3s ease;
-}
-
-#download-update-btn:hover,
-#restart-update-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(177, 136, 226, 0.5);
-}
-
-#download-update-btn:active,
-#restart-update-btn:active {
-  transform: translateY(0);
 }
 
 #changelog-content {
-  text-align: left;
-  padding: 15px;
   background: rgba(0, 0, 0, 0.3);
-  border-radius: 8px;
   border: 1px solid rgba(177, 136, 226, 0.2);
-  max-height: 200px;
-  overflow-y: auto;
-  font-size: 14px;
-  line-height: 1.6;
   color: rgba(255, 255, 255, 0.8);
 }

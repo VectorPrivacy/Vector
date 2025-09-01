@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.1.8"
+version = "0.1.9"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -22,14 +22,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.2.0", features = [] }
 
 [dependencies]
-nostr-sdk = { version = "0.42.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+#tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+nostr-sdk = { version = "0.43.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
 bip39 = { version = "2.1.0", features = ["rand"] }
 tokio = { version = "1.45.1", features = ["sync"] }
 futures-util = "0.3.31"
 tauri = { version = "2.7.0", features = ["protocol-asset", "image-png"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-reqwest = { version = "0.12.20", features = ["rustls-tls", "stream", "blocking"] }
+reqwest = { version = "0.12.20", features = ["rustls-tls", "stream", "blocking", "multipart"] }
 scraper = "0.23.1"
 aes = "0.8.4"
 aes-gcm = "0.10.3"
