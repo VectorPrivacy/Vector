@@ -1189,6 +1189,16 @@ audio {
   opacity: 0.75;
 }
 
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-bounce:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
 .fadeout-top-msgs {
   position: absolute;
   z-index: 100;
@@ -1580,7 +1590,6 @@ select:focus::-ms-value {
   opacity: 1;
   transform: translateY(-50%) scale(1.1);
 }
-
 
 /* Adjust select to accommodate delete button */
 #whisper-model {
@@ -2590,17 +2599,6 @@ select:disabled:hover {
   margin: 10px auto;
   padding: 12px 24px;
   font-weight: 600;
-  transition: all 0.3s ease;
-}
-
-#check-updates-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-}
-
-#check-updates-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
 }
 
 #update-status-text {
@@ -2652,4 +2650,65 @@ select:disabled:hover {
   max-width: 400px;
   margin-left: auto;
   margin-right: auto;
+}
+
+/* MLS Group Invite Styles */
+.mls-invite-item {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(89, 252, 179, 0.2);
+  border-radius: 12px;
+  padding: 15px;
+  margin-bottom: 10px;
+  transition: all 0.3s ease;
+}
+
+.mls-invite-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(89, 252, 179, 0.4);
+}
+
+.mls-invite-item h4 {
+  margin: 0 0 8px 0;
+  color: #59fcb3;
+  font-size: 16px;
+}
+
+.mls-invite-item p {
+  margin: 0 0 12px 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center; /* center buttons horizontally */
+}
+
+.invite-actions button {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-small {
+  font-size: 12px;
+  padding: 5px 10px !important;
+}
+
+.empty-state {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+  padding: 20px;
+}
+
+/* Override: show real checkboxes inside Create Group panel only */
+#create-group input[type="checkbox"] {
+  display: inline-block !important;
+  -webkit-appearance: checkbox;
+  appearance: checkbox;
 }

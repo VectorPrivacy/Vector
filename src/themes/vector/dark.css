@@ -153,13 +153,13 @@ select {
   font-weight: 600;
 }
 
-#check-updates-btn {
+.accept-btn {
   background: rgba(89, 252, 179, 0.1);
   border: 1px solid rgba(89, 252, 179, 0.3);
   color: #59fcb3;
 }
 
-#check-updates-btn:hover:not(:disabled) {
+.accept-btn:hover:not(:disabled) {
   background: rgba(89, 252, 179, 0.2);
   border-color: rgba(89, 252, 179, 0.5);
 }

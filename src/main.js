@@ -80,6 +80,15 @@ const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
+// Create Group UI refs
+const domCreateGroup = document.getElementById('create-group');
+const domCreateGroupBackBtn = document.getElementById('create-group-back-text-btn');
+const domCreateGroupName = document.getElementById('create-group-name');
+const domCreateGroupFilter = document.getElementById('create-group-filter');
+const domCreateGroupList = document.getElementById('create-group-list');
+const domCreateGroupCreateBtn = document.getElementById('create-group-create-btn');
+const domCreateGroupCancelBtn = document.getElementById('create-group-cancel-btn');
+const domCreateGroupStatus = document.getElementById('create-group-status');
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
@@ -443,6 +452,30 @@ picker.addEventListener('click', (e) => {
  */
 
 /**
+ * Represents an MLS group invite.
+ * @typedef {Object} MLSWelcome
+ * @property {string} id - Unique identifier for the welcome/invite.
+ * @property {string} group_id - The MLS group ID.
+ * @property {string} group_name - Name of the group.
+ * @property {string} welcomer_pubkey - Pubkey of the person who invited.
+ * @property {number} member_count - Number of members in the group.
+ * @property {string} [image] - Optional group avatar image.
+ * @property {string} [description] - Optional group description.
+ */
+
+/**
+ * Represents an MLS message record.
+ * @typedef {Object} MLSMessageRecord
+ * @property {string} inner_event_id - The inner event ID for deduplication.
+ * @property {string} wrapper_event_id - The wrapper event ID.
+ * @property {string} author_pubkey - The sender's pubkey.
+ * @property {string} content - The message content.
+ * @property {number} created_at - Timestamp in seconds.
+ * @property {Array<Array<string>>} tags - Nostr tags.
+ * @property {boolean} mine - Whether this message was sent by the current user.
+ */
+
+/**
  * A cache of all profiles (without messages)
  * @type {Profile[]}
  */
@@ -453,6 +486,12 @@ let arrProfiles = [];
  * @type {Chat[]}
  */
 let arrChats = [];
+
+/**
+ * A cache of MLS group invites
+ * @type {MLSWelcome[]}
+ */
+let arrMLSInvites = [];
 
 /**
  * The current open chat (by npub)
@@ -469,26 +508,45 @@ function getDMChat(npub) {
 }
 
 /**
- * Get or create a DM chat for a user
- * @param {string} npub - The user's npub
+ * Get a group chat by ID
+ * @param {string} groupId - The group's ID
+ * @returns {Chat|undefined} - The chat if it exists
+ */
+function getGroupChat(groupId) {
+    return arrChats.find(c => c.chat_type === 'Group' && c.id === groupId);
+}
+
+/**
+ * Get or create a chat (DM or Group)
+ * @param {string} id - The chat ID (npub for DM, group_id for Group)
+ * @param {string} chatType - 'DirectMessage' or 'Group'
  * @returns {Chat} - The chat (existing or newly created)
  */
-function getOrCreateDMChat(npub) {
-    let chat = getDMChat(npub);
+function getOrCreateChat(id, chatType = 'DirectMessage') {
+    let chat = chatType === 'Group' ? getGroupChat(id) : getDMChat(id);
     if (!chat) {
         chat = {
-            id: npub,
-            chat_type: 'DirectMessage',
-            participants: [npub],
+            id: id,
+            chat_type: chatType,
+            participants: chatType === 'Group' ? [] : [id],
             messages: [],
             last_read: '',
             created_at: Math.floor(Date.now() / 1000),
-            metadata: {},
+            metadata: chatType === 'Group' ? { group_id: id } : {},
             muted: false
         };
         arrChats.push(chat);
     }
     return chat;
+}
+
+/**
+ * Get or create a DM chat for a user
+ * @param {string} npub - The user's npub
+ * @returns {Chat} - The chat (existing or newly created)
+ */
+function getOrCreateDMChat(npub) {
+    return getOrCreateChat(npub, 'DirectMessage');
 }
 
 /**
@@ -523,6 +581,10 @@ async function init() {
         setAsyncInterval(fetchProfiles, 45000);
     });
 
+    // Load MLS groups and sync welcomes on init
+    loadMLSGroups();
+    syncMLSWelcomes();
+
     // Run a very slow loop to update dynamic elements, like "last message time" and "typing status".
     setInterval(() => {
         // If the chatlist is open: re-render to update timestamps and typing statuses
@@ -530,10 +592,281 @@ async function init() {
 
         // If the chat is open; run a 'soft' render to update typing status
         if (strOpenChat) {
-            const chat = getDMChat(strOpenChat);
+            const chat = arrChats.find(c => c.id === strOpenChat);
             if (chat) updateChat(chat, []);
         }
     }, 30000);
+}
+
+/**
+ * Load MLS groups and integrate them into the chat list
+ */
+async function loadMLSGroups() {
+    try {
+        const detailed = await invoke('list_mls_groups_detailed');
+        const groupsToRefresh = new Set();
+
+        console.log('MLS groups loaded (detailed):', Array.isArray(detailed) ? detailed.length : 0);
+        if (!Array.isArray(detailed)) {
+            throw new Error('Backend did not return detailed MLS groups array');
+        }
+
+        for (const info of detailed) {
+            const groupId = info.group_id || info.groupId || info.id;
+            if (!groupId) continue;
+            groupsToRefresh.add(groupId);
+
+            const chat = getOrCreateChat(groupId, 'Group');
+
+            // Populate metadata for UI rendering and send path
+            chat.metadata = chat.metadata || {};
+            chat.metadata.name = info.name || chat.metadata.name || `Group ${String(groupId).substring(0, 8)}...`;
+            chat.metadata.engine_group_id = info.engine_group_id || info.engineGroupId || chat.metadata.engine_group_id || '';
+            chat.metadata.avatar_ref = info.avatar_ref || info.avatarRef || chat.metadata.avatar_ref || null;
+            chat.metadata.created_at = info.created_at || info.createdAt || chat.metadata.created_at || 0;
+            chat.metadata.updated_at = info.updated_at || info.updatedAt || chat.metadata.updated_at || 0;
+            // Preserve member count from detailed API to avoid showing "0 members" before refresh
+            chat.metadata.member_count = (typeof info.member_count === 'number')
+                ? info.member_count
+                : (typeof info.memberCount === 'number' ? info.memberCount : chat.metadata.member_count);
+
+            // Load initial messages if not already in memory
+            if ((chat.messages || []).length === 0) {
+                try {
+                    const timeline = await invoke('get_mls_group_timeline', {
+                        groupId: groupId,
+                        beforeTimestamp: null,
+                        limit: 50
+                    }) || [];
+
+                    console.log(`Loaded ${timeline.length} messages for group ${String(groupId).substring(0, 8)}...`);
+
+                    chat.messages = timeline.map(msg => ({
+                        id: msg.inner_event_id,
+                        content: msg.content,
+                        replied_to: null,
+                        preview_metadata: null,
+                        attachments: [],
+                        reactions: [],
+                        at: msg.created_at * 1000, // Convert to milliseconds
+                        pending: false,
+                        failed: false,
+                        mine: msg.mine,
+                        // Include author for group rendering context
+                        author_id: msg.author_pubkey
+                    }));
+                } catch (e) {
+                    console.error(`Failed to load timeline for group ${groupId}:`, e);
+                    chat.messages = [];
+                }
+            }
+        }
+
+        // After loading groups, refresh their member counts
+        await Promise.all(Array.from(groupsToRefresh).map(gid => refreshGroupMemberCount(gid)));
+        
+        // Sort chats to ensure groups appear properly
+        arrChats.sort((a, b) => {
+            // Groups without messages go to the bottom
+            const aLastMsg = a.messages[a.messages.length - 1];
+            const bLastMsg = b.messages[b.messages.length - 1];
+
+            if (!aLastMsg && !bLastMsg) return 0;
+            if (!aLastMsg) return 1;
+            if (!bLastMsg) return -1;
+
+            return bLastMsg.at - aLastMsg.at;
+        });
+
+        // Re-render the chat list
+        renderChatlist();
+    } catch (e) {
+        console.error('Failed to load MLS groups (detailed):', e);
+    }
+}
+
+/**
+ * Refresh and cache the member count for a given MLS group.
+ * Also updates open chat header and re-renders chat list.
+ */
+async function refreshGroupMemberCount(groupId) {
+    try {
+        const members = await invoke('get_mls_group_members', { groupId });
+        const chat = getOrCreateChat(groupId, 'Group');
+        if (Array.isArray(members)) {
+            chat.metadata = chat.metadata || {};
+            chat.metadata.member_count = members.length;
+            chat.participants = members.slice();
+        }
+        if (strOpenChat === groupId) {
+            const count = chat.metadata?.member_count;
+            if (typeof count === 'number') {
+                domChatContactStatus.textContent = `${count} ${count === 1 ? 'member' : 'members'}`;
+            } else {
+                domChatContactStatus.textContent = 'Members syncing...';
+            }
+            domChatContactStatus.classList.remove('text-gradient');
+        }
+    } catch (e) {
+        console.warn('Failed to refresh group member count for', groupId, e);
+    }
+}
+
+/**
+ * Sync MLS welcomes/invites from the relay
+ */
+async function syncMLSWelcomes() {
+    try {
+        // First sync from relay
+        const count = await invoke('sync_mls_welcomes_now');
+        console.log('Synced MLS welcomes:', count);
+        
+        // Then load the pending welcomes
+        await loadMLSInvites();
+    } catch (e) {
+        console.error('Failed to sync MLS welcomes:', e);
+    }
+}
+
+/**
+ * Load pending MLS invites and render them
+ */
+async function loadMLSInvites() {
+    try {
+        const raw = await invoke('list_pending_mls_welcomes');
+        // Normalize shape: backend should return an array; support {welcomes} or {items} fallback
+        const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
+        arrMLSInvites = (welcomes || []).filter(Boolean);
+
+        console.log('Pending MLS invites:', arrMLSInvites.length);
+
+        // Render the invites UI
+        renderMLSInvites();
+    } catch (e) {
+        console.error('Failed to load MLS invites:', e);
+        // Ensure the section hides on error
+        const invitesSection = document.getElementById('mls-invites-section');
+        if (invitesSection) invitesSection.style.display = 'none';
+    }
+}
+
+/**
+ * Render MLS invites in the chat tab
+ */
+function renderMLSInvites() {
+    const invitesSection = document.getElementById('mls-invites-section');
+    const invitesContainer = document.getElementById('mls-invites-container');
+    if (!invitesSection || !invitesContainer) return;
+
+    // Clear existing content
+    invitesContainer.innerHTML = '';
+
+    // Hide section if no invites
+    const count = Array.isArray(arrMLSInvites) ? arrMLSInvites.length : 0;
+    if (!count) {
+        invitesSection.style.display = 'none';
+        return;
+    }
+
+    // Show section if there are invites
+    invitesSection.style.display = '';
+
+    // Render each invite safely (avoid exceptions on missing fields)
+    for (const invite of arrMLSInvites) {
+        try {
+            const divInvite = document.createElement('div');
+            divInvite.classList.add('mls-invite-item');
+
+            const groupId = invite.group_id || invite.id || '';
+            const groupName =
+                invite.group_name ||
+                invite.name ||
+                (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
+
+            const welcomerHex =
+                invite.welcomer_pubkey ||
+                invite.welcomer ||
+                invite.inviter_pubkey ||
+                invite.inviter ||
+                invite.author_pubkey ||
+                '';
+
+            const welcomerShort = welcomerHex
+                ? `${String(welcomerHex).substring(0, 8)}...`
+                : 'Unknown';
+
+            const memberCount =
+                (invite.member_count ??
+                    (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
+
+            // Group name
+            const h4Name = document.createElement('h4');
+            h4Name.textContent = groupName;
+            divInvite.appendChild(h4Name);
+
+            // Inviter info
+            const pInfo = document.createElement('p');
+            pInfo.textContent = `Invited by ${welcomerShort} • ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+            divInvite.appendChild(pInfo);
+
+            // Action buttons
+            const divActions = document.createElement('div');
+            divActions.classList.add('invite-actions');
+
+            const btnAccept = document.createElement('button');
+            btnAccept.classList.add('btn', 'btn-bounce', 'accept-btn');
+            btnAccept.textContent = 'Accept';
+            btnAccept.onclick = () => acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
+
+            const btnDecline = document.createElement('button');
+            btnDecline.classList.add('btn', 'btn-bounce', 'logout-btn');
+            btnDecline.textContent = 'Decline';
+            btnDecline.onclick = () => declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
+
+            divActions.appendChild(btnAccept);
+            divActions.appendChild(btnDecline);
+            divInvite.appendChild(divActions);
+
+            invitesContainer.appendChild(divInvite);
+        } catch (err) {
+            console.warn('Failed to render MLS invite', invite, err);
+        }
+    }
+}
+
+/**
+ * Accept an MLS group invite
+ * @param {string} welcomeEventId - The welcome event ID
+ */
+async function acceptMLSInvite(welcomeEventId) {
+    try {
+        console.log('Accepting MLS invite:', welcomeEventId);
+        const success = await invoke('accept_mls_welcome', {
+            welcomeEventIdHex: welcomeEventId
+        });
+        
+        if (success) {
+            // Show success notification
+            popupConfirm('Joined group', 'Successfully joined the group!', true);
+            
+            // Reload invites and groups
+            await loadMLSInvites();
+            await loadMLSGroups();
+        }
+    } catch (e) {
+        console.error('Failed to accept invite:', e);
+        popupConfirm('Error', 'Failed to join group: ' + e, true, '', 'vector_warning.svg');
+    }
+}
+
+/**
+ * Decline an MLS invite (UI-only hide; backend filtering handles persistence)
+ * @param {string} welcomeEventId - The welcome event ID
+ */
+function declineMLSInvite(welcomeEventId) {
+    // Remove from UI; next backend fetch will exclude if server persisted dismissal
+    arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
+    renderMLSInvites();
 }
 
 /**
@@ -559,7 +892,9 @@ function renderChatlist() {
     // If the order of the chatlist changes (i.e: new message), prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
     for (const chat of arrChats) {
-        if (chat.messages.length === 0) continue;
+        // For groups, we show them even if they have no messages yet
+        // For DMs, we only show them if they have messages
+        if (chat.chat_type !== 'Group' && chat.messages.length === 0) continue;
 
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
@@ -601,10 +936,10 @@ function renderChatlist() {
  * @param {Chat} chat - The profile we're rendering
  */
 function renderChat(chat) {
-    // Grab the profile (if this is a 1-to-1 chat)
-    const profile = chat.participants.length === 1 ? getProfile(chat.id) : null;
-    if (!profile) console.log(chat);
-
+    // For groups, we don't have a profile, for DMs we do
+    const isGroup = chat.chat_type === 'Group';
+    const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+    
     // Collect the Unread Message count for 'Unread' emphasis and badging
     // Ensure muted chats OR muted profiles do not show unread glow
     const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
@@ -623,13 +958,26 @@ function renderChat(chat) {
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = `relative`;
     divAvatarContainer.style.zIndex = `-1`;
-    if (profile?.avatar) {
+    
+    if (isGroup) {
+        // For groups, show a group icon or placeholder
+        const groupIcon = document.createElement('div');
+        groupIcon.style.width = '50px';
+        groupIcon.style.height = '50px';
+        groupIcon.style.borderRadius = '50%';
+        groupIcon.style.backgroundColor = '#444';
+        groupIcon.style.display = 'flex';
+        groupIcon.style.alignItems = 'center';
+        groupIcon.style.justifyContent = 'center';
+        groupIcon.innerHTML = '<span class="icon icon-chats" style="color: #fff;"></span>';
+        divAvatarContainer.appendChild(groupIcon);
+    } else if (profile?.avatar) {
         const imgAvatar = document.createElement('img');
         imgAvatar.src = profile?.avatar;
         divAvatarContainer.appendChild(imgAvatar);
     } else {
         // Otherwise, generate a Gradient Avatar
-        divAvatarContainer.appendChild(pubkeyToAvatar(profile.id, profile?.nickname || profile?.name, 50));
+        divAvatarContainer.appendChild(pubkeyToAvatar(profile?.id || chat.id, profile?.nickname || profile?.name, 50));
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -660,10 +1008,15 @@ function renderChat(chat) {
     
     divContact.appendChild(divAvatarContainer);
 
-    // Add the name (or, if missing metadata, their npub instead) to the chat preview
+    // Add the name to the chat preview
     const h4ContactName = document.createElement('h4');
-    h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
-    if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+    if (isGroup) {
+        // For groups, extract name from metadata or use a default
+        h4ContactName.textContent = chat.metadata?.name || `Group ${chat.id.substring(0, 8)}...`;
+    } else {
+        h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
+        if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+    }
     h4ContactName.classList.add('cutoff')
     divPreviewContainer.appendChild(h4ContactName);
 
@@ -671,21 +1024,39 @@ function renderChat(chat) {
     const cLastMsg = chat.messages[chat.messages.length - 1];
     const pChatPreview = document.createElement('p');
     pChatPreview.classList.add('cutoff');
-    const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
-    pChatPreview.classList.toggle('text-gradient', fIsTyping);
-    if (fIsTyping) {
-        // Typing; display the glowy indicator!
-        pChatPreview.textContent = `Typing...`;
-    } else if (!cLastMsg.content && !cLastMsg.pending) {
-        // Not typing, and no text; display as an attachment
-        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
-    } else if (cLastMsg.pending) {
-        // A message is pending: thus, we're still sending one
-        pChatPreview.textContent = `Sending...`;
+    
+    if (isGroup) {
+        // For groups, no typing indicator
+        const memberCount = chat.metadata?.member_count;
+        if (!cLastMsg) {
+            pChatPreview.textContent = (memberCount != null)
+                ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`
+                : 'No messages yet';
+        } else if (cLastMsg.pending) {
+            pChatPreview.textContent = `Sending...`;
+        } else {
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+            twemojify(pChatPreview);
+        }
     } else {
-        // Not typing; display their last message
-        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
-        twemojify(pChatPreview);
+        const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
+        pChatPreview.classList.toggle('text-gradient', fIsTyping);
+        if (fIsTyping) {
+            // Typing; display the glowy indicator!
+            pChatPreview.textContent = `Typing...`;
+        } else if (!cLastMsg) {
+            pChatPreview.textContent = 'Start a conversation';
+        } else if (!cLastMsg.content && cLastMsg.attachments?.length && !cLastMsg.pending) {
+            // Not typing, and no text; display as an attachment
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+        } else if (cLastMsg.pending) {
+            // A message is pending: thus, we're still sending one
+            pChatPreview.textContent = `Sending...`;
+        } else {
+            // Not typing; display their last message
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+            twemojify(pChatPreview);
+        }
     }
     divPreviewContainer.appendChild(pChatPreview);
 
@@ -697,8 +1068,10 @@ function renderChat(chat) {
     // Display the "last message" time
     const pTimeAgo = document.createElement('p');
     pTimeAgo.classList.add('chatlist-contact-timestamp');
-    pTimeAgo.textContent = timeAgo(cLastMsg.at);
-    if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
+    if (cLastMsg) {
+        pTimeAgo.textContent = timeAgo(cLastMsg.at);
+        if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
+    }
     // Apply 'Unread' final styling
     if (nUnread) pTimeAgo.style.color = '#59fcb3';
     divContact.appendChild(pTimeAgo);
@@ -814,6 +1187,123 @@ async function warmupUploadServers() {
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
+    // Listen for MLS message events
+    await listen('mls_message_new', async (evt) => {
+        const { group_id, message } = evt.payload;
+        console.log('MLS message received for group:', group_id);
+        
+        // Find or create the group chat
+        const chat = getOrCreateChat(group_id, 'Group');
+        
+        // Convert MLS message to our format
+        const newMessage = {
+            id: message.inner_event_id,
+            content: message.content,
+            replied_to: null,
+            preview_metadata: null,
+            attachments: [],
+            reactions: [],
+            at: message.created_at * 1000, // Convert to milliseconds
+            pending: false,
+            failed: false,
+            mine: message.mine,
+            // Include author for group rendering context
+            author_id: message.author_pubkey
+        };
+        
+        // Check for duplicates
+        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
+        if (existingMsg) return;
+        
+        // Add message to chat
+        chat.messages.push(newMessage);
+        
+        // Sort messages by time
+        chat.messages.sort((a, b) => a.at - b.at);
+        
+        // If this group has the open chat, update it
+        if (strOpenChat === group_id) {
+            updateChat(chat, [newMessage]);
+        }
+        
+        // Resort chat list order by last message time so groups bubble to the top
+        arrChats.sort((a, b) => {
+            const aLast = a.messages[a.messages.length - 1];
+            const bLast = b.messages[b.messages.length - 1];
+            if (!aLast) return 1;
+            if (!bLast) return -1;
+            return bLast.at - aLast.at;
+        });
+        
+        // Re-render chat list
+        renderChatlist();
+    });
+
+    // Listen for MLS welcome accepted events
+    await listen('mls_welcome_accepted', async (evt) => {
+        console.log('MLS welcome accepted, refreshing groups and invites');
+        // Reload invites and groups
+        await loadMLSInvites();
+        await loadMLSGroups();
+    });
+
+    // Listen for MLS initial sync completion after joining a group
+    await listen('mls_group_initial_sync', async (evt) => {
+        try {
+            const { group_id, processed, new: newCount } = evt.payload || {};
+            console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
+
+            // Ensure the group chat exists even if there are no messages yet
+            const chat = getOrCreateChat(group_id, 'Group');
+            await refreshGroupMemberCount(group_id);
+
+            // If there are no messages loaded yet, fetch a small recent slice so we can render previews/order
+            if (!chat.messages || chat.messages.length === 0) {
+                try {
+                    const timeline = await invoke('get_mls_group_timeline', {
+                        groupId: group_id,
+                        beforeTimestamp: null,
+                        limit: 50
+                    }) || [];
+
+                    // Convert MLS messages to our Message format
+                    chat.messages = timeline.map(msg => ({
+                        id: msg.inner_event_id,
+                        content: msg.content,
+                        replied_to: null,
+                        preview_metadata: null,
+                        attachments: [],
+                        reactions: [],
+                        at: msg.created_at * 1000, // Convert to milliseconds
+                        pending: false,
+                        failed: false,
+                        mine: msg.mine,
+                        // Include author for group rendering context
+                        author_id: msg.author_pubkey
+                    }));
+                } catch (e) {
+                    console.warn('Failed to load initial group timeline after sync:', group_id, e);
+                    // Keep chat with zero messages; UI will show "No messages yet"
+                    chat.messages = [];
+                }
+            }
+
+            // Resort chat list order by last message time to reflect any loaded timeline
+            arrChats.sort((a, b) => {
+                const aLast = a.messages[a.messages.length - 1];
+                const bLast = b.messages[b.messages.length - 1];
+                if (!aLast) return 1;
+                if (!bLast) return -1;
+                return bLast.at - aLast.at;
+            });
+
+            // Re-render the chat list so empty groups show with "No messages yet" preview
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_initial_sync:', e);
+        }
+    });
+
     // Listen for Synchronisation Finish updates
     await listen('sync_finished', async (_) => {
         // Display that we finished syncing
@@ -1025,7 +1515,7 @@ async function setupRustListeners() {
         }
     });
 
-    // Listen for incoming messages
+    // Listen for incoming DM messages
     await listen('message_new', (evt) => {
         // Get the chat for this message (chat_id is the npub for DMs)
         let chat = getOrCreateDMChat(evt.payload.chat_id);
@@ -1296,6 +1786,8 @@ async function login() {
                 btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
                 domChatList.before(btnStartChat);
                 adjustSize();
+                // After login UI finishes and "Start a New Chat" button exists, add "Create Group" launcher
+                ensureCreateGroupButton();
 
                 // Setup a subscription for new websocket messages
                 invoke("notifs");
@@ -1838,8 +2330,11 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
-    // If no profile is provided, try to get it from the chat ID
-    if (!profile && chat) {
+    // Check if this is a group chat
+    const isGroup = chat?.chat_type === 'Group';
+    
+    // If no profile is provided and it's not a group, try to get it from the chat ID
+    if (!profile && chat && !isGroup) {
         profile = getProfile(chat.id);
     }
     
@@ -1847,9 +2342,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     const fNotes = strOpenChat === strPubkey;
 
     if (chat?.messages.length || arrMessages.length) {
-        // Prefer displaying their name, otherwise, npub
+        // Prefer displaying their name, otherwise, npub/group name
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+            domChatContact.classList.remove('btn');
+        } else if (isGroup) {
+            domChatContact.textContent = chat.metadata?.name || `Group ${strOpenChat.substring(0, 10)}...`;
             domChatContact.classList.remove('btn');
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
@@ -1862,9 +2360,19 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.classList.add('btn');
         }
 
-        // Display either their Status or Typing Indicator
+        // Display either their Status or Typing Indicator (no typing for groups)
         if (fNotes) {
             domChatContactStatus.textContent = 'Encrypted Notes to Self';
+        } else if (isGroup) {
+            const memberCount = chat.metadata?.member_count;
+            if (typeof memberCount === 'number') {
+                const label = memberCount === 1 ? 'member' : 'members';
+                domChatContactStatus.textContent = `${memberCount} ${label}`;
+            } else {
+                // Avoid misleading "0 members" before first count refresh
+                domChatContactStatus.textContent = 'Members syncing...';
+            }
+            domChatContactStatus.classList.remove('text-gradient');
         } else {
             const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
             if (fIsTyping) {
@@ -1913,8 +2421,13 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
-        // Process each message for insertion
+        /* Dedup guard: skip any message already present in the DOM by ID */
+         // Process each message for insertion
         for (const msg of arrMessages) {
+            // Guard against duplicate insertions if the DOM already contains this message ID
+            if (document.getElementById(msg.id)) {
+                continue;
+            }
             // Quick check for empty chat - simple append
             if (domChatMessages.children.length === 0) {
                 domChatMessages.appendChild(renderMessage(msg, profile));
@@ -2050,6 +2563,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+        } else if (isGroup) {
+            domChatContact.textContent = chat?.metadata?.name || `Group ${strOpenChat.substring(0, 10)}...`;
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
         }
@@ -2112,7 +2627,9 @@ function renderMessage(msg, sender, editID = '') {
     divMessage.id = msg.id;
 
     // Add a subset of the sender's ID so we have context of WHO sent it, even in group contexts
-    const strShortSenderID = (msg.mine ? strPubkey : sender.id).substring(0, 8);
+    // For group chats, sender can be null; fall back to msg.author_id
+    const otherId = sender?.id || msg.author_id || '';
+    const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
 
     // Render it appropriately depending on who sent it
@@ -2204,8 +2721,8 @@ function renderMessage(msg, sender, editID = '') {
 
     // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
     if (msg.replied_to) {
-        // Try to find the referenced message in the current chat
-        const chat = getDMChat(sender.id);
+        // Try to find the referenced message in the current chat (guard for group chats with no sender profile)
+        const chat = sender ? getDMChat(sender.id) : null;
         const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
         if (cMsg) {
             // Render the reply in a quote-like fashion
@@ -2788,10 +3305,12 @@ function openChat(contact) {
     // Hide the Navbar
     domNavbar.style.display = `none`;
 
-    // Get the chat for this contact
-    const chat = getDMChat(contact);
-    const profile = getProfile(contact);
+    // Get the chat (could be DM or Group)
+    const chat = arrChats.find(c => c.id === contact);
+    const isGroup = chat?.chat_type === 'Group';
+    const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    if (isGroup) { refreshGroupMemberCount(contact); }
 
     // Clear any existing auto-scroll timer
     if (chatOpenAutoScrollTimer) {
@@ -2808,8 +3327,54 @@ function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
+    // If it's a group, sync messages first
+    if (isGroup && chat) {
+        // Sync group messages in the background
+        invoke('sync_mls_groups_now', { groupId: contact }).then(async () => {
+            // Load the timeline
+            try {
+                const timeline = await invoke('get_mls_group_timeline', {
+                    groupId: contact,
+                    beforeTimestamp: null,
+                    limit: 50
+                });
+
+                // Convert timeline to Message format
+                const mappedTimeline = timeline.map(msg => ({
+                    id: msg.inner_event_id,
+                    content: msg.content,
+                    replied_to: null,
+                    preview_metadata: null,
+                    attachments: [],
+                    reactions: [],
+                    at: msg.created_at * 1000,
+                    pending: false,
+                    failed: false,
+                    mine: msg.mine,
+                    // Include author for group rendering context
+                    author_id: msg.author_pubkey
+                }));
+
+                // Merge with existing messages instead of overwriting to avoid duplicate DOM inserts
+                const existingIds = new Set((chat.messages || []).map(m => m.id));
+                const newOnly = mappedTimeline.filter(m => !existingIds.has(m.id));
+
+                // Append new messages and keep chronological order
+                chat.messages = (chat.messages || []).concat(newOnly);
+                chat.messages.sort((a, b) => a.at - b.at);
+
+                // Insert only the new messages into the open chat
+                if (newOnly.length) {
+                    updateChat(chat, newOnly, null, false);
+                }
+            } catch (e) {
+                console.error('Failed to load group timeline:', e);
+            }
+        });
+    }
+
     // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
-    updateChat(chat, (chat?.messages || []).slice(-50), profile, true);
+    updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
 }
 
 /**
@@ -2916,7 +3481,7 @@ function openProfile(cProfile) {
     }
 }
 
-function openChatlist() {
+async function openChatlist() {
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
@@ -2930,6 +3495,9 @@ function openChatlist() {
         // Open the tab
         domChats.style.display = '';
     }
+    
+    // Load and display MLS invites in the Chat tab
+    await loadMLSInvites();
 }
 
 function openSettings() {
@@ -2999,6 +3567,8 @@ async function openInvites() {
         inviteCodeElement.textContent = 'Error loading code';
         console.error('Failed to get invite code:', error);
     }
+
+    // Note: MLS invites are now shown in the Chat tab, not here
 }
 
 /**
@@ -3220,9 +3790,27 @@ window.addEventListener("DOMContentLoaded", async () => {
         try {
             const replyRef = strCurrentReplyReference;
             cancelReply();
-            await message(strOpenChat, messageText.trim(), replyRef, "");
+            
+            // Check if current chat is a group
+            const chat = arrChats.find(c => c.id === strOpenChat);
+            if (chat?.chat_type === 'Group') {
+                // Ensure group state is ready before sending
+                const wrapperId = await invoke('send_mls_group_message', {
+                    groupId: strOpenChat,
+                    text: messageText.trim()
+                });
+                
+                // Sync in background to get the message
+                invoke('sync_mls_groups_now', { groupId: strOpenChat });
+            } else {
+                // Send regular DM
+                await message(strOpenChat, messageText.trim(), replyRef, "");
+            }
+            
             nLastTypingIndicator = 0;
-        } catch(_) {}
+        } catch(e) {
+            console.error('Failed to send message:', e);
+        }
     }
 
     // Desktop/iOS - traditional keydown approach
@@ -3434,8 +4022,10 @@ document.addEventListener('click', (e) => {
         return openUrl(e.target.getAttribute('pay-uri'));
     }
 
-    // If we're clicking a Contact, open the chat with the embedded npub (ID)
-    if (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact")) {
+    // If we're clicking a Contact in the main chat list (NOT inside the Create Group panel), open the chat
+    const cg = document.getElementById('create-group');
+    const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
+    if (!inCreateGroup && (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact"))) {
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
         return openChat(strID);
     }
@@ -3491,3 +4081,351 @@ function softChatScroll() {
 }
 
 window.onresize = adjustSize;
+
+// ===== Create Group: state and helpers =====
+/**
+ * Selected members (npubs) for the group being created.
+ * Keep this decoupled from arrChats.
+ */
+let arrSelectedGroupMembers = [];
+/**
+ * Tracks whether the user attempted to create the group.
+ * Used to only show inline validation after an explicit attempt.
+ */
+let fCreateGroupAttempt = false;
+
+/**
+ * Ensure the "Create Group" launcher button exists next to "Start New Chat".
+ * Safe to call multiple times.
+ */
+function ensureCreateGroupButton() {
+    if (document.getElementById('create-group-btn')) return;
+    if (!domChatList) return;
+    // Only render after login/init is complete: navbar visible, login form hidden, and anchor exists
+    if (!domNavbar || domNavbar.style.display === 'none') return;
+    if (typeof domLogin !== 'undefined' && domLogin && domLogin.style.display !== 'none') return;
+
+    const btnCreateGroup = document.createElement('button');
+    btnCreateGroup.id = 'create-group-btn';
+    btnCreateGroup.classList.add('new-chat-btn', 'btn', 'intro-anim');
+    btnCreateGroup.style.marginTop = '10px';
+    btnCreateGroup.innerHTML = '<span style="width: 100%">Create Group</span><span class="icon icon-chats"></span>';
+    btnCreateGroup.addEventListener('animationend', () => btnCreateGroup.classList.remove('intro-anim'), { once: true });
+    btnCreateGroup.onclick = openCreateGroup;
+
+    // Place below the existing "Start a New Chat" button if present, else place before chat list
+    const btnStartChat = document.getElementById('new-chat-btn');
+    if (btnStartChat && btnStartChat.parentElement) {
+        btnStartChat.insertAdjacentElement('afterend', btnCreateGroup);
+    } else {
+        domChatList.before(btnCreateGroup);
+    }
+
+    // Recompute layout
+    adjustSize();
+}
+
+/**
+ * Render the filterable, scrollable contact list with checkboxes.
+ * Reuses arrProfiles as the source of truth.
+ */
+function renderCreateGroupList(filterText = '') {
+    if (!domCreateGroupList) return;
+    domCreateGroupList.innerHTML = '';
+
+    const f = (filterText || '').trim().toLowerCase();
+
+    // Exclude our own profile from selection
+    const mine = arrProfiles.find(p => p.mine)?.id;
+
+    // Build a fragment for performance
+    const frag = document.createDocumentFragment();
+
+    for (const p of arrProfiles) {
+        if (!p || !p.id) continue;
+        if (p.id === mine) continue;
+
+        // Filter by nickname/name/npub
+        const name = p.nickname || p.name || '';
+        const hay = (name + ' ' + p.id).toLowerCase();
+        if (f && !hay.includes(f)) continue;
+
+        // Row container (reuse existing styling conventions)
+        const row = document.createElement('div');
+        row.classList.add('chatlist-contact');
+        row.id = `cg-${p.id}`;
+
+        // Avatar
+        const avatarContainer = document.createElement('div');
+        avatarContainer.style.position = 'relative';
+        avatarContainer.style.zIndex = '-1';
+        if (p.avatar) {
+            const img = document.createElement('img');
+            img.src = p.avatar;
+            avatarContainer.appendChild(img);
+        } else {
+            avatarContainer.appendChild(pubkeyToAvatar(p.id, name, 50));
+        }
+        row.appendChild(avatarContainer);
+
+        // Title and subtitle
+        const preview = document.createElement('div');
+        preview.classList.add('chatlist-contact-preview');
+
+        const title = document.createElement('h4');
+        title.classList.add('cutoff');
+        title.textContent = name || p.id;
+        if (name) twemojify(title);
+        preview.appendChild(title);
+
+        const subtitle = document.createElement('p');
+        subtitle.classList.add('cutoff');
+        subtitle.style.opacity = '0.7';
+        subtitle.textContent = p.id;
+        preview.appendChild(subtitle);
+        preview.style.zIndex = '-1';
+        row.appendChild(preview);
+
+        // Checkbox
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.style.marginLeft = 'auto';
+        chk.style.marginRight = 'auto';
+        chk.style.width = '18px';
+        chk.style.height = '18px';
+        chk.style.marginTop = 'auto';
+        chk.style.marginBottom = 'auto';
+        chk.checked = arrSelectedGroupMembers.includes(p.id);
+        chk.setAttribute('aria-label', `Select ${name || p.id}`);
+        chk.onchange = () => {
+            if (chk.checked) {
+                if (!arrSelectedGroupMembers.includes(p.id)) {
+                    arrSelectedGroupMembers.push(p.id);
+                }
+            } else {
+                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== p.id);
+            }
+            updateCreateGroupValidation(true);
+        };
+        row.appendChild(chk);
+
+        // Row click toggles checkbox for better UX (avoid toggling when clicking the checkbox itself)
+        // Important: stop propagation to avoid the global document click handler opening the DM chat.
+        row.onclick = null;
+        row.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.target === chk) return;
+            chk.click();
+        });
+        // Also stop propagation when the checkbox itself is clicked
+        chk.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+
+        frag.appendChild(row);
+    }
+
+    // If no matches
+    if (!frag.childElementCount) {
+        const empty = document.createElement('p');
+        empty.style.textAlign = 'center';
+        empty.style.opacity = '0.7';
+        empty.textContent = f ? 'No matches' : 'No contacts found';
+        domCreateGroupList.appendChild(empty);
+    } else {
+        domCreateGroupList.appendChild(frag);
+    }
+}
+
+/**
+ * Enable/disable Create button and show inline hint
+ */
+function updateCreateGroupValidation(showInline = false) {
+    if (!domCreateGroupCreateBtn) return;
+    const nameOk = !!domCreateGroupName?.value.trim();
+    const membersOk = arrSelectedGroupMembers.length > 0;
+
+    const enabled = nameOk && membersOk;
+
+    // Toggle both property and attribute to avoid any CSS/UA inconsistencies
+    domCreateGroupCreateBtn.disabled = !enabled;
+    if (enabled) {
+        domCreateGroupCreateBtn.removeAttribute('disabled');
+    } else {
+        domCreateGroupCreateBtn.setAttribute('disabled', '');
+    }
+
+    // Only show status after an explicit attempt, or when forced via parameter
+    const shouldShow = showInline || fCreateGroupAttempt;
+
+    if (domCreateGroupStatus) {
+        if (shouldShow && (!nameOk || !membersOk)) {
+            domCreateGroupStatus.style.display = '';
+            domCreateGroupStatus.textContent = !nameOk
+                ? 'Group name is required'
+                : 'Select at least one contact';
+        } else {
+            domCreateGroupStatus.style.display = 'none';
+            domCreateGroupStatus.textContent = '';
+        }
+    }
+}
+
+/**
+ * Open Create Group tab
+ */
+function openCreateGroup() {
+    // Show panel
+    domCreateGroup.style.display = '';
+    // Hide others
+    domChats.style.display = 'none';
+    domChat.style.display = 'none';
+    domNavbar.style.display = 'none';
+
+    // Reset state
+    arrSelectedGroupMembers = [];
+    fCreateGroupAttempt = false;
+    if (domCreateGroupName) domCreateGroupName.value = '';
+    if (domCreateGroupFilter) domCreateGroupFilter.value = '';
+    if (domCreateGroupStatus) {
+        domCreateGroupStatus.style.display = 'none';
+        domCreateGroupStatus.textContent = '';
+    }
+
+    // Render list
+    renderCreateGroupList('');
+    updateCreateGroupValidation(false);
+
+    // Focus name
+    domCreateGroupName?.focus();
+}
+
+/**
+ * Close Create Group tab and go back to Chat list
+ */
+async function closeCreateGroup() {
+    domCreateGroup.style.display = 'none';
+    fCreateGroupAttempt = false;
+
+    // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
+    domNavbar.style.display = '';
+
+    // Navigate back to chat list
+    await openChatlist();
+
+    // Adjust layout after UI visibility changes
+    adjustSize();
+}
+
+/**
+ * Wire up Create Group UI events
+ */
+/*
+Create Group UI wiring
+- Validation: Create button disabled until non-empty group name and at least one member selected. See updateCreateGroupValidation() for state sync.
+- Loading states:
+  • Button text toggles to 'Creating...' and disabled during IPC.
+  • Inline status text shows 'Preparing devices...' then 'Finalizing...' on success.
+- IPC flow:
+  • invoke('create_group_chat', { groupName, memberIds })
+    - Backend validates inputs and refreshes each member's device KeyPackage.
+    - If any member fails refresh/fetch, backend returns Err with a user-facing string. We surface that string directly via popupConfirm and status label.
+  • On success:
+    - loadMLSGroups() ensures immediate discoverability in chat list.
+    - openChat(newGroupId) navigates to the newly created group.
+- Error handling:
+  • popupConfirm('Group creation failed', errorString, ...) shows a clear toast/modal.
+  • domCreateGroupStatus also mirrors the exact error string for inline context.
+  • We do not partially create groups: any device refresh failure aborts.
+- Notes:
+  • Tauri expects camelCase params from JS for Rust snake_case args.
+  • Backend emits 'mls_group_initial_sync' on success; the chat list also refreshes via loadMLSGroups().
+*/
+(function wireCreateGroupUI() {
+    if (!domCreateGroup) return;
+
+    domCreateGroupBackBtn.onclick = closeCreateGroup;
+    domCreateGroupCancelBtn.onclick = closeCreateGroup;
+
+    domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
+    domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
+
+    domCreateGroupCreateBtn.onclick = async () => {
+        const groupName = (domCreateGroupName?.value || '').trim();
+        const memberIds = [...arrSelectedGroupMembers];
+
+        // Mark that the user attempted to create a group
+        fCreateGroupAttempt = true;
+
+        if (!groupName || memberIds.length === 0) {
+            updateCreateGroupValidation(true);
+            return;
+        }
+
+        // Loading state
+        const prevTxt = domCreateGroupCreateBtn.textContent;
+        domCreateGroupCreateBtn.textContent = 'Creating...';
+        domCreateGroupCreateBtn.disabled = true;
+
+        if (domCreateGroupStatus) {
+            domCreateGroupStatus.style.display = '';
+            domCreateGroupStatus.textContent = 'Preparing devices...';
+        }
+
+        try {
+            // Backend orchestration: refresh keypackages per member, create group, persist
+            // Note: Tauri expects camelCase arg keys for Rust snake_case params.
+            const newGroupId = await invoke('create_group_chat', {
+                groupName: groupName,
+                memberIds: memberIds
+            });
+
+            // On success: refresh groups, open the new group chat, and close panel
+            if (domCreateGroupStatus) {
+                domCreateGroupStatus.textContent = 'Finalizing...';
+            }
+
+            // Ensure groups list is current and visible in UI immediately
+            await loadMLSGroups();
+
+            // Navigate to the new group
+            openChat(newGroupId);
+
+            // Hide panel
+            domCreateGroup.style.display = 'none';
+        } catch (e) {
+            const raw = (e || '').toString();
+            // Map backend "no device keypackages" errors to a friendlier UX message
+            let friendly = raw;
+            let isHtml = false;
+            try {
+                const m = raw.match(/no device keypackag(?:e|es) found for (\S+)/i);
+                if (m && m[1]) {
+                    const npub = m[1];
+                    const prof = arrProfiles.find(p => p.id === npub);
+                    const display = prof?.nickname || prof?.name || 'This user';
+                    friendly = `${display} is using an older Vector version!<br>Please ask them to upgrade before inviting them to a Group Chat.`;
+                    isHtml = true;
+                }
+            } catch (_) {}
+            popupConfirm('Group creation failed', friendly, true, '', 'vector_warning.svg');
+            if (domCreateGroupStatus) {
+                domCreateGroupStatus.style.display = '';
+                if (isHtml) domCreateGroupStatus.innerHTML = friendly;
+                else domCreateGroupStatus.textContent = friendly;
+            }
+        } finally {
+            domCreateGroupCreateBtn.textContent = prevTxt || 'Create';
+            updateCreateGroupValidation();
+        }
+    };
+
+    // Ensure launch button appears once init completes
+    // Safe to attach extra listener; main code also listens to this event
+    listen('init_finished', () => {
+        ensureCreateGroupButton();
+    });
+})();
+
+
