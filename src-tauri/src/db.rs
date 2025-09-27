@@ -23,7 +23,7 @@ pub struct VectorDB {
 const DB_PATH: &str = "vector.json";
 
 /// Latest database version
-pub const LATEST_DB_VERSION: u64 = 2;
+pub const LATEST_DB_VERSION: u64 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -535,6 +535,29 @@ pub async fn run_migrations<R: Runtime>(handle: AppHandle<R>) -> Result<(), Stri
         set_db_version(handle.clone(), 2).await
             .map_err(|e| format!("Failed to set database version to 2: {}", e))?;
         println!("Database version successfully updated to 2.");
+    }
+    
+    // Run migration to version 3 (MLS group chats)
+    if current_version < 3 {
+        println!("Starting migration to version 3 (MLS group chats)...");
+        
+        // Check if MLS migration is needed
+        if db_migration::is_mls_migration_needed(&handle).await.unwrap_or(true) {
+            println!("MLS migration is needed. Initializing MLS collections...");
+            
+            // Run the MLS migration
+            db_migration::migrate_to_v3_mls_group_chats(handle.clone()).await
+                .map_err(|e| format!("Failed to migrate to version 3 (MLS): {}", e))?;
+            
+            println!("MLS migration to version 3 completed successfully.");
+        } else {
+            println!("MLS migration to version 3 is not needed according to is_mls_migration_needed().");
+            
+            // Still update the version if somehow we're at version 2 but MLS check says not needed
+            set_db_version(handle.clone(), 3).await
+                .map_err(|e| format!("Failed to set database version to 3: {}", e))?;
+            println!("Database version updated to 3.");
+        }
     }
     
     println!("Database migrations completed successfully.");

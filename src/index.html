@@ -106,6 +106,14 @@
         <div id="sync-status-container" class="sync-status-container" style="display: none;">
           <p id="sync-status" class="text-gradient"></p>
         </div>
+        
+        <!-- MLS Group Invites Section (hidden by default) -->
+        <div id="mls-invites-section" class="mls-invites-section" style="display: none; margin: 10px 15px 20px;">
+          <div id="mls-invites-container" style="max-height: 145px; overflow-y: auto;">
+            <!-- Invites will be rendered here dynamically -->
+          </div>
+        </div>
+        
         <div id="chat-list">
           
         </div>
@@ -172,6 +180,40 @@
         </div>
       </div>
 
+      <div id="create-group" style="display: none; overflow-x: hidden;">
+        <div class="chat-new-header">
+          <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+            <p class="chat-new-back-text">Back</p>
+          </div>
+        </div>
+
+        <center class="chat-new-content">
+          <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
+          <hr class="divider chat-new-divider">
+          <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+            <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
+          </div>
+        </center>
+
+        <center class="chat-new-center-content" style="position: static; padding: 0 15px; box-sizing: border-box; width: 100%;">
+          <h2 class="chat-new-subtitle">Select Members</h2>
+          <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
+          <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
+            <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input" style="width: 75%" />
+            <div id="create-group-list" style="margin-top: 10px; max-height: 150px; overflow-y: auto; width: 100%; box-sizing: border-box;"></div>
+          </div>
+        </center>
+
+        <div style="display: flex; gap: 10px; padding: 15px; justify-content: center;">
+          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
+          <button id="create-group-cancel-btn" class="btn logout-btn">Cancel</button>
+        </div>
+
+        <center>
+          <p id="create-group-status" class="chat-contact-status" style="display: none; opacity: 0.8;"></p>
+        </center>
+      </div>
       <div id="settings" style="display: none;">
         <h2 style="margin-top: 40px">Choose your Theme</h2>
         <select id="theme-select">
@@ -248,7 +290,7 @@
               <div id="changelog-content"></div>
             </div>
             
-            <button id="check-updates-btn" class="btn">Check for Updates</button>
+            <button id="check-updates-btn" class="btn accept-btn btn-bounce">Check for Updates</button>
             <p id="update-status-text" style="display: none; margin-top: 10px;"></p>
             
             <!-- Progress bar for downloads -->
