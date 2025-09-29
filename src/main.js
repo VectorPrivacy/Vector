@@ -846,9 +846,6 @@ async function acceptMLSInvite(welcomeEventId) {
         });
         
         if (success) {
-            // Show success notification
-            popupConfirm('Joined group', 'Successfully joined the group!', true);
-            
             // Reload invites and groups
             await loadMLSInvites();
             await loadMLSGroups();
