@@ -1966,12 +1966,12 @@ async fn notifs() -> Result<bool, String> {
                             return Ok(false);
                         }
 
-                        // Resolve my pubkey hex for 'mine' flag
-                        let my_pubkey_hex = {
+                        // Resolve my pubkey bech32 for 'mine' flag
+                        let my_pubkey_bech32 = {
                             let client = NOSTR_CLIENT.get().unwrap();
                             if let Ok(signer) = client.signer().await {
                                 if let Ok(pk) = signer.get_public_key().await {
-                                    pk.to_hex()
+                                    pk.to_bech32().unwrap()
                                 } else {
                                     String::new()
                                 }
@@ -1982,7 +1982,7 @@ async fn notifs() -> Result<bool, String> {
 
                         // Process with non-Send MLS engine on a blocking thread (no awaits in scope)
                         let app_handle = TAURI_APP.get().unwrap().clone();
-                        let my_pk_for_block = my_pubkey_hex.clone();
+                        let my_npub_for_block = my_pubkey_bech32.clone();
                         let group_id_for_persist = group_wire_id.clone();
                         
                         // Process message and persist in one blocking operation to avoid Send issues
@@ -1999,16 +1999,16 @@ async fn notifs() -> Result<bool, String> {
                                     // Convert native structured result into MessageRecord for ApplicationMessage only
                                     match res {
                                         nostr_mls::prelude::MessageProcessingResult::ApplicationMessage(msg) => {
-                                            let author_hex = msg.pubkey.to_hex();
+                                            let author_bech32 = msg.pubkey.to_bech32().unwrap();
                                             let record = crate::mls::MessageRecord {
                                                 inner_event_id: msg.id.to_hex(),
                                                 wrapper_event_id: msg.wrapper_event_id.to_hex(),
-                                                author_pubkey: author_hex.clone(),
+                                                author_pubkey: author_bech32.clone(),
                                                 content: msg.content.clone(),
                                                 created_at: msg.created_at.as_u64(),
                                                 // Tags not currently persisted; keep empty for compatibility
                                                 tags: Vec::new(),
-                                                mine: !my_pk_for_block.is_empty() && author_hex == my_pk_for_block,
+                                                mine: !my_npub_for_block.is_empty() && author_bech32 == my_npub_for_block,
                                             };
 
                                             // Persist using runtime handle to drive async from blocking context

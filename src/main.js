@@ -2653,15 +2653,39 @@ function renderMessage(msg, sender, editID = '') {
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
     if (!domPrevMsg || domPrevMsg.getAttribute('sender') != strShortSenderID) {
         // Add an avatar if this is not OUR message
-        if (!msg.mine && sender?.avatar) {
-            const imgAvatar = document.createElement('img');
-            imgAvatar.classList.add('avatar', 'btn');
-            imgAvatar.onclick = () => {
-                closeChat();
-                openProfile(sender);
-            };
-            imgAvatar.src = sender.avatar;
-            divMessage.appendChild(imgAvatar);
+        if (!msg.mine) {
+            let avatarEl = null;
+            // Resolve sender profile for group chats when not provided
+            const otherFullId = otherId || '';
+            const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
+            if (authorProfile?.avatar) {
+                const imgAvatar = document.createElement('img');
+                imgAvatar.classList.add('avatar', 'btn');
+                imgAvatar.onclick = () => {
+                    closeChat();
+                    openProfile(authorProfile);
+                };
+                imgAvatar.src = authorProfile.avatar;
+                avatarEl = imgAvatar;
+            } else {
+                // Provide a deterministic placeholder when no avatar URL is available
+                const displayName = authorProfile?.nickname || authorProfile?.name || '';
+                const placeholder = pubkeyToAvatar(otherFullId, displayName, 35);
+                // Ensure visual sizing and interactivity match real avatars
+                placeholder.classList.add('avatar', 'btn');
+                // Only wire profile click if we have an identifiable user
+                if (otherFullId) {
+                    placeholder.onclick = () => {
+                        const prof = getProfile(otherFullId) || authorProfile;
+                        closeChat();
+                        openProfile(prof || { id: otherFullId });
+                    };
+                }
+                avatarEl = placeholder;
+            }
+            if (avatarEl) {
+                divMessage.appendChild(avatarEl);
+            }
         }
 
         // If there is a message before them, and it isn't theirs, apply additional edits
@@ -2705,7 +2729,8 @@ function renderMessage(msg, sender, editID = '') {
         // This check happens after the message is rendered (at the end of the function)
     } else {
         // Add additional margin to simulate avatar space
-        if (!msg.mine && sender?.avatar) {
+        // We always reserve space for non-mine messages since we render an avatar or placeholder for the first in a streak
+        if (!msg.mine) {
             pMessage.style.marginLeft = `45px`;
         }
 
