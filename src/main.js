@@ -747,6 +747,8 @@ async function loadMLSInvites() {
         // Ensure the section hides on error
         const invitesSection = document.getElementById('mls-invites-section');
         if (invitesSection) invitesSection.style.display = 'none';
+        // Recompute layout after invites section visibility change
+        adjustSize();
     }
 }
 
@@ -765,6 +767,8 @@ function renderMLSInvites() {
     const count = Array.isArray(arrMLSInvites) ? arrMLSInvites.length : 0;
     if (!count) {
         invitesSection.style.display = 'none';
+        // Recompute layout since invites section visibility changed
+        adjustSize();
         return;
     }
 
@@ -832,6 +836,9 @@ function renderMLSInvites() {
             console.warn('Failed to render MLS invite', invite, err);
         }
     }
+
+    // After rendering invites, recompute layout to avoid oversized chat list
+    adjustSize();
 }
 
 /**
@@ -849,6 +856,9 @@ async function acceptMLSInvite(welcomeEventId) {
             // Reload invites and groups
             await loadMLSInvites();
             await loadMLSGroups();
+
+            // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+            adjustSize();
         }
     } catch (e) {
         console.error('Failed to accept invite:', e);
@@ -864,6 +874,9 @@ function declineMLSInvite(welcomeEventId) {
     // Remove from UI; next backend fetch will exclude if server persisted dismissal
     arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
     renderMLSInvites();
+
+    // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+    adjustSize();
 }
 
 /**
