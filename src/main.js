@@ -74,6 +74,16 @@ const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 
+const domChatMenuBtn = document.getElementById('chat-menu-btn');
+const domChatMenuPopup = document.getElementById('chat-menu-popup');
+const domChatMenuSelfDestruct = document.getElementById('chat-menu-self-destruct');
+const domChatMenuNickname = document.getElementById('chat-menu-nickname');
+const domChatMenuShare = document.getElementById('chat-menu-share');
+const domChatMenuGift = document.getElementById('chat-menu-gift');
+const domChatMenuBlock = document.getElementById('chat-menu-block');
+const domChatMenuRemove = document.getElementById('chat-menu-remove');
+const domChatMenuReport = document.getElementById('chat-menu-report');
+
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
 const domShareNpub = document.getElementById('share-npub');
@@ -311,8 +321,8 @@ document.querySelectorAll('.emoji-category-btn').forEach(btn => {
 // Emoji selection handler
 picker.addEventListener('click', (e) => {
     if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
-        const emoji = e.target.textContent;
-        const cEmoji = arrEmojis.find(e => e.emoji === emoji);
+        const emoji = e.target.getAttribute('title');
+        const cEmoji = arrEmojis.find(e => e.name === emoji);
         
         if (cEmoji) {
             // Register usage
@@ -364,7 +374,7 @@ emojiSearch.onkeydown = async (e) => {
         if (!emojiElement) return;
 
         // Register the selection in the emoji-dex
-        const cEmoji = arrEmojis.find(a => a.emoji === emojiElement.textContent);
+        const cEmoji = arrEmojis.find(a => a.name === emojiElement.getAttribute('title'));
         if (!cEmoji) return;
         
         cEmoji.used++;
@@ -1243,6 +1253,129 @@ async function setupRustListeners() {
         }
     });
 }
+
+// Toggle chat menu popup
+domChatMenuBtn.onclick = (e) => {
+    e.stopPropagation();
+    const isVisible = domChatMenuPopup.style.display === 'block';
+    domChatMenuPopup.style.display = isVisible ? 'none' : 'block';
+};
+
+// Close menu when clicking outside
+document.addEventListener('click', (e) => {
+    if (domChatMenuPopup.style.display === 'block' && 
+        !domChatMenuPopup.contains(e.target) && 
+        e.target !== domChatMenuBtn && 
+        !domChatMenuBtn.contains(e.target)) {
+        domChatMenuPopup.style.display = 'none';
+    }
+});
+
+// Self-Destructing Messages
+domChatMenuSelfDestruct.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    popupConfirm(
+        'Self-Destructing Messages',
+        'This feature allows messages to automatically delete after a set time period.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Change Nickname
+domChatMenuNickname.onclick = async () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
+    if (nick === false) return;
+    
+    if (nick.length >= 30) {
+        return popupConfirm(
+            'Woah woah!',
+            'A ' + nick.length + '-character nickname seems excessive!',
+            true,
+            '',
+            'vector_warning.svg'
+        );
+    }
+    
+    await invoke('set_nickname', { npub: profile.id, nickname: nick });
+};
+
+// Share a Profile
+domChatMenuShare.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Share Profile',
+        'Share this profile with others.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Send a Gift
+domChatMenuGift.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    popupConfirm(
+        'Send a Gift',
+        'Send digital gifts to your contact.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Block
+domChatMenuBlock.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Block User',
+        'Blocking will prevent this user from contacting you.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Remove
+domChatMenuRemove.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Remove Chat',
+        'This will delete all messages from this conversation. This action cannot be undone.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Report
+domChatMenuReport.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Report User',
+        'Report this user for violating community guidelines.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
 
 /**
  * A flag that indicates when Vector is still in it's initiation sequence
