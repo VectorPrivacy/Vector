@@ -130,7 +130,7 @@ pub struct MessageRecord {
     pub inner_event_id: String,
     /// Wrapper event ID (hex) - the Kind 445 wrapper event ID
     pub wrapper_event_id: String,
-    /// Author public key (hex)
+    /// Author public key (bech32 npub)
     pub author_pubkey: String,
     /// Message content
     pub content: String,
@@ -141,10 +141,6 @@ pub struct MessageRecord {
     /// Whether this message is from ourselves
     pub mine: bool,
 }
-
-/* removed: parse_message_record_from_engine_debug
-   Reason: rely on nostr-mls native MessageProcessingResult::ApplicationMessage for structured access */
-
 
 /// Main MLS service facade
 /// 
@@ -705,7 +701,7 @@ impl MlsService {
             let message_record = MessageRecord {
                 inner_event_id: inner_event_id.clone(),
                 wrapper_event_id: wrapper_event.id.to_hex(),
-                author_pubkey: my_pubkey.to_hex(),
+                author_pubkey: my_pubkey.to_bech32().unwrap(),
                 content: text.to_string(),
                 created_at,
                 tags: Vec::new(), // Could extract from rumor.tags if needed
@@ -1051,16 +1047,16 @@ impl MlsService {
                 
                         match res {
                             MessageProcessingResult::ApplicationMessage(msg) => {
-                                let author_hex = msg.pubkey.to_hex();
                                 let rec = MessageRecord {
                                     inner_event_id: msg.id.to_hex(),
                                     wrapper_event_id: msg.wrapper_event_id.to_hex(),
-                                    author_pubkey: author_hex.clone(),
+                                    author_pubkey: msg.pubkey.to_bech32().unwrap(),
                                     content: msg.content.clone(),
                                     created_at: msg.created_at.as_u64(),
                                     // We don't persist tags today; keep empty for compatibility with send path
                                     tags: Vec::new(),
-                                    mine: !my_pubkey_hex.is_empty() && author_hex == my_pubkey_hex,
+                                    // Compare using hex to maintain correctness of 'mine' flag
+                                    mine: !my_pubkey_hex.is_empty() && msg.pubkey.to_hex() == my_pubkey_hex,
                                 };
                 
                                 let author_short: String = rec.author_pubkey.chars().take(8).collect();

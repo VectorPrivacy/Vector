@@ -747,6 +747,8 @@ async function loadMLSInvites() {
         // Ensure the section hides on error
         const invitesSection = document.getElementById('mls-invites-section');
         if (invitesSection) invitesSection.style.display = 'none';
+        // Recompute layout after invites section visibility change
+        adjustSize();
     }
 }
 
@@ -765,6 +767,8 @@ function renderMLSInvites() {
     const count = Array.isArray(arrMLSInvites) ? arrMLSInvites.length : 0;
     if (!count) {
         invitesSection.style.display = 'none';
+        // Recompute layout since invites section visibility changed
+        adjustSize();
         return;
     }
 
@@ -832,6 +836,9 @@ function renderMLSInvites() {
             console.warn('Failed to render MLS invite', invite, err);
         }
     }
+
+    // After rendering invites, recompute layout to avoid oversized chat list
+    adjustSize();
 }
 
 /**
@@ -846,12 +853,12 @@ async function acceptMLSInvite(welcomeEventId) {
         });
         
         if (success) {
-            // Show success notification
-            popupConfirm('Joined group', 'Successfully joined the group!', true);
-            
             // Reload invites and groups
             await loadMLSInvites();
             await loadMLSGroups();
+
+            // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+            adjustSize();
         }
     } catch (e) {
         console.error('Failed to accept invite:', e);
@@ -867,6 +874,9 @@ function declineMLSInvite(welcomeEventId) {
     // Remove from UI; next backend fetch will exclude if server persisted dismissal
     arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
     renderMLSInvites();
+
+    // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+    adjustSize();
 }
 
 /**
@@ -2631,6 +2641,10 @@ function renderMessage(msg, sender, editID = '') {
     const otherId = sender?.id || msg.author_id || '';
     const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
+    
+    // Check if we're in a group chat
+    const currentChat = arrChats.find(c => c.id === strOpenChat);
+    const isGroupChat = currentChat?.chat_type === 'Group';
 
     // Render it appropriately depending on who sent it
     divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
@@ -2643,15 +2657,69 @@ function renderMessage(msg, sender, editID = '') {
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
     if (!domPrevMsg || domPrevMsg.getAttribute('sender') != strShortSenderID) {
         // Add an avatar if this is not OUR message
-        if (!msg.mine && sender?.avatar) {
-            const imgAvatar = document.createElement('img');
-            imgAvatar.classList.add('avatar', 'btn');
-            imgAvatar.onclick = () => {
-                closeChat();
-                openProfile(sender);
-            };
-            imgAvatar.src = sender.avatar;
-            divMessage.appendChild(imgAvatar);
+        if (!msg.mine) {
+            let avatarEl = null;
+            // Resolve sender profile for group chats when not provided
+            const otherFullId = otherId || '';
+            const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
+            if (authorProfile?.avatar) {
+                const imgAvatar = document.createElement('img');
+                imgAvatar.classList.add('avatar', 'btn');
+                imgAvatar.onclick = () => {
+                    closeChat();
+                    openProfile(authorProfile);
+                };
+                imgAvatar.src = authorProfile.avatar;
+                avatarEl = imgAvatar;
+            } else {
+                // Provide a deterministic placeholder when no avatar URL is available
+                const displayName = authorProfile?.nickname || authorProfile?.name || '';
+                const placeholder = pubkeyToAvatar(otherFullId, displayName, 35);
+                // Ensure visual sizing and interactivity match real avatars
+                placeholder.classList.add('avatar', 'btn');
+                // Only wire profile click if we have an identifiable user
+                if (otherFullId) {
+                    placeholder.onclick = () => {
+                        const prof = getProfile(otherFullId) || authorProfile;
+                        closeChat();
+                        openProfile(prof || { id: otherFullId });
+                    };
+                }
+                avatarEl = placeholder;
+            }
+            
+            // Create a container for avatar and username
+            if (avatarEl) {
+                const avatarContainer = document.createElement('div');
+                avatarContainer.style.position = 'relative';
+                avatarContainer.style.marginRight = '10px';
+                
+                // Only add username label in group chats
+                if (isGroupChat) {
+                    const usernameLabel = document.createElement('span');
+                    usernameLabel.classList.add('msg-username-label', 'btn');
+                    const displayName = authorProfile?.nickname || authorProfile?.name || '';
+                    usernameLabel.textContent = displayName || otherFullId.substring(0, 8);
+                    if (displayName) twemojify(usernameLabel);
+                    
+                    // Make username clickable to open profile
+                    if (otherFullId) {
+                        usernameLabel.onclick = () => {
+                            const prof = getProfile(otherFullId) || authorProfile;
+                            closeChat();
+                            openProfile(prof || { id: otherFullId });
+                        };
+                    }
+                    
+                    avatarContainer.appendChild(usernameLabel);
+                }
+                
+                avatarContainer.appendChild(avatarEl);
+                
+                // Remove the margin from the avatar since container handles it
+                avatarEl.style.marginRight = '0';
+                divMessage.appendChild(avatarContainer);
+            }
         }
 
         // If there is a message before them, and it isn't theirs, apply additional edits
@@ -2687,15 +2755,16 @@ function renderMessage(msg, sender, editID = '') {
                 }
             }
 
-            // Add some additional margin to separate the senders visually
-            divMessage.style.marginTop = `15px`;
+            // Add some additional margin to separate the senders visually (extra space for username in groups)
+            divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
         }
         
         // Check if this is a singular message (no next message from same sender)
         // This check happens after the message is rendered (at the end of the function)
     } else {
         // Add additional margin to simulate avatar space
-        if (!msg.mine && sender?.avatar) {
+        // We always reserve space for non-mine messages since we render an avatar or placeholder for the first in a streak
+        if (!msg.mine) {
             pMessage.style.marginLeft = `45px`;
         }
 
