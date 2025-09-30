@@ -766,7 +766,7 @@ body {
 
 .chat-messages > div:first-child {
   /* The first message should have extra margin from the top */
-  margin-top: 15px;
+  margin-top: 45px;
 }
 
 .chat-messages > div:last-child {
@@ -835,6 +835,30 @@ body {
   min-width: 35px;
   max-height: 35px;
   max-width: 35px;
+}
+
+.msg-username-label {
+  position: absolute;
+  top: -25px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.75);
+  text-align: center;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.msg-username-label:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.msg-username-label .emoji {
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
 }
 
 .msg-reply {

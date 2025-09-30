@@ -2641,6 +2641,10 @@ function renderMessage(msg, sender, editID = '') {
     const otherId = sender?.id || msg.author_id || '';
     const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
+    
+    // Check if we're in a group chat
+    const currentChat = arrChats.find(c => c.id === strOpenChat);
+    const isGroupChat = currentChat?.chat_type === 'Group';
 
     // Render it appropriately depending on who sent it
     divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
@@ -2683,8 +2687,38 @@ function renderMessage(msg, sender, editID = '') {
                 }
                 avatarEl = placeholder;
             }
+            
+            // Create a container for avatar and username
             if (avatarEl) {
-                divMessage.appendChild(avatarEl);
+                const avatarContainer = document.createElement('div');
+                avatarContainer.style.position = 'relative';
+                avatarContainer.style.marginRight = '10px';
+                
+                // Only add username label in group chats
+                if (isGroupChat) {
+                    const usernameLabel = document.createElement('span');
+                    usernameLabel.classList.add('msg-username-label', 'btn');
+                    const displayName = authorProfile?.nickname || authorProfile?.name || '';
+                    usernameLabel.textContent = displayName || otherFullId.substring(0, 8);
+                    if (displayName) twemojify(usernameLabel);
+                    
+                    // Make username clickable to open profile
+                    if (otherFullId) {
+                        usernameLabel.onclick = () => {
+                            const prof = getProfile(otherFullId) || authorProfile;
+                            closeChat();
+                            openProfile(prof || { id: otherFullId });
+                        };
+                    }
+                    
+                    avatarContainer.appendChild(usernameLabel);
+                }
+                
+                avatarContainer.appendChild(avatarEl);
+                
+                // Remove the margin from the avatar since container handles it
+                avatarEl.style.marginRight = '0';
+                divMessage.appendChild(avatarContainer);
             }
         }
 
@@ -2721,8 +2755,8 @@ function renderMessage(msg, sender, editID = '') {
                 }
             }
 
-            // Add some additional margin to separate the senders visually
-            divMessage.style.marginTop = `15px`;
+            // Add some additional margin to separate the senders visually (extra space for username in groups)
+            divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
         }
         
         // Check if this is a singular message (no next message from same sender)
