@@ -139,6 +139,15 @@
   mask-image: url("./icons/star.svg");
 }
 
+
+.icon-forward {
+  mask-image: url("./icons/forward.svg");
+}
+
+.icon-pin {
+  mask-image: url("./icons/pin.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -842,6 +851,174 @@ body {
 /* Report button*/
 .chat-menu-report-btn .icon {
   background-color: #ff1493;
+}
+
+/* Message Context Menu */
+.msg-context-menu {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%) translateY(100%);
+  background: rgba(0, 0, 0, 0.95);
+  border: 1px solid var(--icon-color-primary);
+  border-radius: 12px 12px 0 0;
+  padding: 12px;
+  z-index: 2000;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  opacity: 0;
+}
+
+.msg-context-menu.visible {
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+  opacity: 1;
+}
+
+/* Quick Emoji Reactions Row */
+.msg-context-emoji-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 8px;
+  justify-content: space-between;
+}
+
+.msg-context-emoji-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 24px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.msg-context-emoji-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--icon-color-primary);
+  transform: scale(1.1);
+}
+
+.msg-context-emoji-btn .emoji {
+  width: 26px !important;
+  height: 26px !important;
+}
+
+.msg-context-emoji-btn .icon {
+  width: 22px;
+  height: 22px;
+  background-color: var(--icon-color-primary);
+}
+
+/* Context Menu Actions */
+.msg-context-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.msg-context-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 12px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.03);
+  text-align: left;
+}
+
+.msg-context-action:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--icon-color-primary);
+}
+
+.msg-context-action:hover span:last-child {
+  color: var(--icon-color-primary);
+}
+
+.msg-context-action .icon {
+  width: 20px;
+  height: 20px;
+  position: relative;
+  margin-right: 12px;
+  background-color: var(--icon-color-primary);
+  flex-shrink: 0;
+}
+
+.msg-context-action span:last-child {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+  transition: color 0.2s ease;
+  text-align: left;
+  flex: 1;
+}
+
+/* Delete action should be red */
+.msg-context-action.delete-action {
+  border-color: rgba(255, 82, 82, 0.2);
+}
+
+.msg-context-action.delete-action:hover {
+  background: rgba(255, 82, 82, 0.1);
+  border-color: #ff5252;
+}
+
+.msg-context-action.delete-action .icon {
+  background-color: #ff5252;
+}
+
+.msg-context-action.delete-action span:last-child {
+  color: #ff5252;
+}
+
+.msg-context-action.delete-action:hover span:last-child {
+  color: #ff5252;
+}
+
+/* Hide the old hover-based extras */
+.msg-extras .hideable {
+  display: none !important;
+}
+
+/* Touch/long-press highlight */
+.msg-me.context-active,
+.msg-them.context-active {
+  background: rgba(89, 252, 179, 0.1);
+  border-radius: 8px;
+  padding: 4px;
+  margin: -4px;
+}
+
+.msg-me.context-active p,
+.msg-them.context-active p {
+  border-color: var(--icon-color-primary);
+  box-shadow: 0 0 12px rgba(89, 252, 179, 0.3);
+}
+
+.icon-copy-text {
+  mask-image: url("./icons/copy.svg");
+}
+
+.icon-delete {
+  mask-image: url("./icons/trash.svg");
 }
 
 .chats {

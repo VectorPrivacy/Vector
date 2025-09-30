@@ -3718,3 +3718,322 @@ function softChatScroll() {
 }
 
 window.onresize = adjustSize;
+
+// Message Context Menu Implementation
+
+let contextMenu = null;
+let contextMenuTarget = null;
+let longPressTimer = null;
+const LONG_PRESS_DURATION = 500; // milliseconds
+
+/**
+ * Creates the context menu element
+ */
+function createContextMenu() {
+    if (contextMenu) return contextMenu;
+    
+    const menu = document.createElement('div');
+    menu.className = 'msg-context-menu';
+    menu.id = 'msg-context-menu';
+    
+    // Quick emoji reactions row
+    const emojiRow = document.createElement('div');
+    emojiRow.className = 'msg-context-emoji-row';
+    
+    // Get 5 most used emojis
+    const topEmojis = getMostUsedEmojis().slice(0, 5);
+    
+    topEmojis.forEach(emojiData => {
+        const btn = document.createElement('button');
+        btn.className = 'msg-context-emoji-btn btn';
+        btn.innerHTML = emojiData.emoji;
+        btn.dataset.emoji = emojiData.emoji;
+        btn.dataset.emojiName = emojiData.name;
+        twemojify(btn);
+        emojiRow.appendChild(btn);
+    });
+    
+    // Add "more emojis" button
+    const moreBtn = document.createElement('button');
+    moreBtn.className = 'msg-context-emoji-btn btn';
+    moreBtn.innerHTML = '<span class="icon icon-smile-face"></span>';
+    moreBtn.dataset.action = 'more-emojis';
+    emojiRow.appendChild(moreBtn);
+    
+    menu.appendChild(emojiRow);
+    
+    // Actions
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'msg-context-actions';
+    
+    const actions = [
+        { icon: 'edit', label: 'Edit Message', action: 'edit' },
+        { icon: 'reply', label: 'Reply', action: 'reply' },
+        { icon: 'forward', label: 'Forward', action: 'forward' },
+        { icon: 'copy-text', label: 'Copy Text', action: 'copy' },
+        { icon: 'pin', label: 'Pin Message', action: 'pin' },
+        { icon: 'delete', label: 'Delete Message', action: 'delete', className: 'delete-action' }
+    ];
+    
+    actions.forEach(actionData => {
+        const actionBtn = document.createElement('div');
+        actionBtn.className = `msg-context-action btn ${actionData.className || ''}`;
+        actionBtn.dataset.action = actionData.action;
+        actionBtn.innerHTML = `
+            <span class="icon icon-${actionData.icon}"></span>
+            <span>${actionData.label}</span>
+        `;
+        actionsDiv.appendChild(actionBtn);
+    });
+    
+    menu.appendChild(actionsDiv);
+    document.body.appendChild(menu);
+    
+    contextMenu = menu;
+    return menu;
+}
+
+/**
+ * Shows the context menu for a message
+ */
+function showContextMenu(messageElement) {
+    const menu = createContextMenu();
+    contextMenuTarget = messageElement;
+    
+    // Add active state to message
+    messageElement.classList.add('context-active');
+    
+    // Show the menu (it slides up from bottom via CSS)
+    menu.classList.add('visible');
+}
+
+/**
+ * Hides the context menu
+ */
+function hideContextMenu() {
+    if (!contextMenu) return;
+    
+    contextMenu.classList.remove('visible');
+    
+    // Remove active state from message
+    if (contextMenuTarget) {
+        contextMenuTarget.classList.remove('context-active');
+        contextMenuTarget = null;
+    }
+}
+
+/**
+ * Handles context menu action clicks
+ */
+function handleContextAction(action, messageElement) {
+    const messageId = messageElement.id;
+    
+    switch (action) {
+        case 'edit':
+            // TODO: Implement edit functionality
+            popupConfirm('Edit Message', 'Edit functionality coming soon!', true, '', 'vector_warning.svg');
+            break;
+            
+        case 'reply':
+            // Use existing reply functionality
+            const replyEvent = { target: messageElement };
+            selectReplyingMessage(replyEvent);
+            break;
+            
+        case 'forward':
+            // TODO: Implement forward functionality
+            popupConfirm('Forward Message', 'Forward functionality coming soon!', true, '', 'vector_warning.svg');
+            break;
+            
+        case 'copy':
+            // Copy message text to clipboard
+            const messageText = messageElement.querySelector('p')?.textContent;
+            if (messageText) {
+                navigator.clipboard.writeText(messageText).then(() => {
+                    // Could show a brief "Copied!" toast here
+                });
+            }
+            break;
+            
+        case 'pin':
+            // TODO: Implement pin functionality
+            popupConfirm('Pin Message', 'Are you sure you want to pin this message?', true, '', 'vector_warning.svg');
+            break;
+            
+        case 'delete':
+            // TODO: Implement delete functionality
+            popupConfirm('Delete Message', 'Are you sure you want to delete this message?', false, '', 'vector_warning.svg')
+                .then(confirmed => {
+                    if (confirmed) {
+                        // Call delete function
+                    }
+                });
+            break;
+            
+        case 'more-emojis':
+            // Set the reaction reference
+            strCurrentReactionReference = messageId;
+            
+            // Create the proper DOM structure that openEmojiPanel expects
+            // It looks for: target.classList.contains('add-reaction') and then gets parentElement.parentElement.id
+            const msgExtras = document.createElement('div');
+            msgExtras.className = 'msg-extras';
+            
+            const addReactionBtn = document.createElement('span');
+            addReactionBtn.classList.add('add-reaction');
+            msgExtras.appendChild(addReactionBtn);
+            
+            const msgContainer = document.createElement('div');
+            msgContainer.id = messageId;
+            msgContainer.appendChild(msgExtras);
+            
+            // Create a proper mouse event
+            const fakeEvent = new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            });
+            
+            // Override the target to be our add-reaction button
+            Object.defineProperty(fakeEvent, 'target', {
+                value: addReactionBtn,
+                enumerable: true
+            });
+            
+            // Hide context menu first
+            hideContextMenu();
+            
+            // Open the emoji panel
+            openEmojiPanel(fakeEvent);
+            return; // Return early since we already hid the menu
+            
+        default:
+            // Handle emoji reactions
+            if (action.startsWith('emoji:')) {
+                const emoji = action.substring(6);
+                handleEmojiReaction(messageId, emoji);
+            }
+    }
+    
+    hideContextMenu();
+}
+
+/**
+ * Handles emoji reaction selection
+ */
+function handleEmojiReaction(messageId, emoji) {
+    const cEmoji = arrEmojis.find(e => e.emoji === emoji);
+    if (!cEmoji) return;
+    
+    // Register usage
+    cEmoji.used++;
+    addToRecentEmojis(cEmoji);
+    
+    // Find the message in chats
+    for (const cChat of arrChats) {
+        const cMsg = cChat.messages.find(a => a.id === messageId);
+        if (!cMsg) continue;
+        
+        const strReceiverPubkey = cChat.id;
+        const spanReaction = document.createElement('span');
+        spanReaction.classList.add('reaction');
+        spanReaction.textContent = `${cEmoji.emoji} 1`;
+        twemojify(spanReaction);
+        
+        const divMessage = document.getElementById(cMsg.id);
+        const existingReaction = divMessage.querySelector('.msg-extras span');
+        if (existingReaction) {
+            existingReaction.replaceWith(spanReaction);
+        }
+        
+        invoke('react', { 
+            referenceId: messageId, 
+            npub: strReceiverPubkey, 
+            emoji: cEmoji.emoji 
+        });
+        
+        break;
+    }
+}
+
+/**
+ * Initialize context menu event listeners
+ */
+function initContextMenu() {
+    // Touch events for long-press
+    document.addEventListener('touchstart', (e) => {
+        const messageElement = e.target.closest('.msg-me, .msg-them');
+        if (!messageElement) return;
+        
+        longPressTimer = setTimeout(() => {
+            showContextMenu(messageElement);
+            // Prevent default to avoid text selection
+            e.preventDefault();
+        }, LONG_PRESS_DURATION);
+    }, { passive: false });
+    
+    document.addEventListener('touchend', () => {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    });
+    
+    document.addEventListener('touchmove', () => {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    });
+    
+    // Right-click for desktop
+    document.addEventListener('contextmenu', (e) => {
+        const messageElement = e.target.closest('.msg-me, .msg-them');
+        if (!messageElement) return;
+        
+        e.preventDefault();
+        showContextMenu(messageElement);
+    });
+    
+    // Click outside to close
+    document.addEventListener('click', (e) => {
+        if (!contextMenu || !contextMenu.classList.contains('visible')) return;
+        
+        if (!contextMenu.contains(e.target) && !e.target.closest('.emoji-picker')) {
+            hideContextMenu();
+        }
+    });
+    
+    // Handle context menu clicks
+    document.addEventListener('click', (e) => {
+        if (!contextMenu) return;
+        
+        // Emoji button click
+        const emojiBtn = e.target.closest('.msg-context-emoji-btn');
+        if (emojiBtn && contextMenuTarget) {
+            e.stopPropagation(); // Prevent click from bubbling
+            
+            if (emojiBtn.dataset.action === 'more-emojis') {
+                handleContextAction('more-emojis', contextMenuTarget);
+            } else if (emojiBtn.dataset.emoji) {
+                handleEmojiReaction(contextMenuTarget.id, emojiBtn.dataset.emoji);
+                hideContextMenu();
+            }
+            return;
+        }
+        
+        // Action button click
+        const actionBtn = e.target.closest('.msg-context-action');
+        if (actionBtn && contextMenuTarget) {
+            e.stopPropagation(); // Prevent click from bubbling
+            handleContextAction(actionBtn.dataset.action, contextMenuTarget);
+        }
+    });
+}
+
+// Initialize when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initContextMenu);
+} else {
+    initContextMenu();
+}
