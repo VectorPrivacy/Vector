@@ -746,7 +746,6 @@ body {
 .icon-report {
   mask-image: url("./icons/vector_warning.svg");
 }
-
 /* Chat menu popup*/
 .chat-menu-popup {
   position: absolute;
@@ -754,7 +753,7 @@ body {
   right: 10px;
   width: 280px;
   border-radius: 12px;
-  padding: 8px;
+  padding: 6px;
   z-index: 1000;
   background-color: #000000;
   border: 1px solid var(--icon-color-primary);
@@ -766,8 +765,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 12px 16px;
-  margin-bottom: 4px;
+  padding: 10px 12px;
+  margin-bottom: 2px;
   border-radius: 8px;
   transition: all 0.2s ease;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -785,8 +784,8 @@ body {
 }
 
 .chat-menu-option .icon {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   position: relative;
   margin-right: 10px;
   background-color: var(--icon-color-primary);
@@ -805,9 +804,9 @@ body {
 /* Action buttons row*/
 .chat-menu-actions {
   display: flex;
-  gap: 6px;
-  margin-top: 8px;
-  padding-top: 8px;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--icon-color-primary);
 }
 
@@ -817,7 +816,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 8px 6px;
+  padding: 6px 4px;
   border-radius: 8px;
   transition: all 0.2s ease;
   border: 1px solid transparent;
@@ -830,15 +829,15 @@ body {
 }
 
 .chat-menu-action-btn .icon {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   position: relative;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   background-color: var(--icon-color-primary);
 }
 
 .chat-menu-action-btn span:last-child {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   text-align: center;
   color: #ffffff;
@@ -862,7 +861,7 @@ body {
   background: rgba(0, 0, 0, 0.95);
   border: 1px solid var(--icon-color-primary);
   border-radius: 12px 12px 0 0;
-  padding: 12px;
+  padding: 10px;
   z-index: 2000;
   width: 90%;
   max-width: 500px;
@@ -883,16 +882,16 @@ body {
 /* Quick Emoji Reactions Row */
 .msg-context-emoji-row {
   display: flex;
-  gap: 8px;
-  padding: 8px 4px;
+  gap: 6px;
+  padding: 6px 4px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   justify-content: space-between;
 }
 
 .msg-context-emoji-btn {
-  width: 44px;
-  height: 44px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -901,7 +900,7 @@ body {
   justify-content: center;
   cursor: pointer;
   transition: all 0.2s ease;
-  font-size: 24px;
+  font-size: 22px;
   padding: 0;
   flex-shrink: 0;
 }
@@ -913,13 +912,13 @@ body {
 }
 
 .msg-context-emoji-btn .emoji {
-  width: 26px !important;
-  height: 26px !important;
+  width: 24px !important;
+  height: 24px !important;
 }
 
 .msg-context-emoji-btn .icon {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   background-color: var(--icon-color-primary);
 }
 
@@ -927,7 +926,7 @@ body {
 .msg-context-actions {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   align-items: stretch;
 }
 
@@ -935,7 +934,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 12px 12px;
+  padding: 10px 12px;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -957,7 +956,7 @@ body {
   width: 20px;
   height: 20px;
   position: relative;
-  margin-right: 12px;
+  margin-right: 10px;
   background-color: var(--icon-color-primary);
   flex-shrink: 0;
 }
@@ -978,19 +977,19 @@ body {
 
 .msg-context-action.delete-action:hover {
   background: rgba(255, 82, 82, 0.1);
-  border-color: #ff5252;
+  border-color: #ff1493;
 }
 
 .msg-context-action.delete-action .icon {
-  background-color: #ff5252;
+  background-color: #ff1493;
 }
 
 .msg-context-action.delete-action span:last-child {
-  color: #ff5252;
+  color: #ff1493;
 }
 
 .msg-context-action.delete-action:hover span:last-child {
-  color: #ff5252;
+  color: #ff1493;
 }
 
 /* Hide the old hover-based extras */
