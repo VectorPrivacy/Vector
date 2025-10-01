@@ -77,10 +77,12 @@ const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMenuBtn = document.getElementById('chat-menu-btn');
 const domChatMenuPopup = document.getElementById('chat-menu-popup');
 const domChatMenuSelfDestruct = document.getElementById('chat-menu-self-destruct');
+const domChatMenuWallpaper = document.getElementById('chat-menu-wallpaper');
 const domChatMenuNickname = document.getElementById('chat-menu-nickname');
 const domChatMenuShare = document.getElementById('chat-menu-share');
 const domChatMenuGift = document.getElementById('chat-menu-gift');
 const domChatMenuBlock = document.getElementById('chat-menu-block');
+const domChatMenuMute = document.getElementById('chat-menu-mute');
 const domChatMenuRemove = document.getElementById('chat-menu-remove');
 const domChatMenuReport = document.getElementById('chat-menu-report');
 
@@ -1259,6 +1261,11 @@ domChatMenuBtn.onclick = (e) => {
     e.stopPropagation();
     const isVisible = domChatMenuPopup.style.display === 'block';
     domChatMenuPopup.style.display = isVisible ? 'none' : 'block';
+    
+    // Update mute button state based on current chat
+    if (!isVisible && strOpenChat) {
+        updateMuteButtonUI(strOpenChat);
+    }
 };
 
 // Close menu when clicking outside
@@ -1277,6 +1284,21 @@ domChatMenuSelfDestruct.onclick = () => {
     popupConfirm(
         'Self-Destructing Messages',
         'This feature allows messages to automatically delete after a set time period.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Change Wallpaper
+domChatMenuWallpaper.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Change Wallpaper',
+        'Select a new wallpaper for this chat.',
         true,
         '',
         'vector_warning.svg'
@@ -1345,6 +1367,37 @@ domChatMenuBlock.onclick = () => {
         '',
         'vector_warning.svg'
     );
+};
+
+// Helper function to update mute button UI based on profile state
+function updateMuteButtonUI(npub) {
+    const profile = getProfile(npub);
+    if (!profile) return;
+    
+    const isMuted = profile.muted || false;
+    const muteIcon = domChatMenuMute.querySelector('.icon');
+    const muteText = domChatMenuMute.querySelector('span:last-child');
+    
+    if (isMuted) {
+        muteIcon.classList.remove('icon-volume-max');
+        muteIcon.classList.add('icon-volume-mute');
+        muteText.textContent = 'Unmute';
+        domChatMenuMute.classList.add('muted');
+    } else {
+        muteIcon.classList.remove('icon-volume-mute');
+        muteIcon.classList.add('icon-volume-max');
+        muteText.textContent = 'Mute';
+        domChatMenuMute.classList.remove('muted');
+    }
+}
+
+// Mute/Unmute 
+domChatMenuMute.onclick = async () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    await invoke('toggle_muted', { npub: profile.id });
 };
 
 // Remove

@@ -739,6 +739,10 @@ body {
   mask-image: url("./icons/self-destruct-msg.svg");
 }
 
+.icon-brush {
+  mask-image: url("./icons/brush.svg");
+}
+
 .icon-share {
   mask-image: url("./icons/share.svg");
 }
@@ -746,6 +750,15 @@ body {
 .icon-report {
   mask-image: url("./icons/vector_warning.svg");
 }
+
+.icon-volume-max {
+  mask-image: url("./icons/volume-max.svg");
+}
+
+.icon-volume-mute {
+  mask-image: url("./icons/volume-mute.svg");
+}
+
 /* Chat menu popup*/
 .chat-menu-popup {
   position: absolute;
