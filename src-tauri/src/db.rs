@@ -191,6 +191,8 @@ pub struct SlimMessage {
     pub at: u64,
     pub mine: bool,
     pub contact: String,  // Reference to which contact/profile this message belongs to
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub npub: Option<String>,  // Sender's npub (for group chats)
 }
 
 impl From<(&Message, String)> for SlimMessage {
@@ -205,6 +207,7 @@ impl From<(&Message, String)> for SlimMessage {
             at: msg.at,
             mine: msg.mine,
             contact: contact_id.clone(),
+            npub: msg.npub.clone(),
         }
     }
 }
@@ -223,6 +226,7 @@ impl SlimMessage {
             pending: false, // Default values
             failed: false,  // Default values
             mine: self.mine,
+            npub: self.npub.clone(),
         }
     }
     

@@ -513,26 +513,26 @@ function getDMChat(npub) {
  * @returns {Chat|undefined} - The chat if it exists
  */
 function getGroupChat(groupId) {
-    return arrChats.find(c => c.chat_type === 'Group' && c.id === groupId);
+    return arrChats.find(c => c.chat_type === 'MlsGroup' && c.id === groupId);
 }
 
 /**
- * Get or create a chat (DM or Group)
- * @param {string} id - The chat ID (npub for DM, group_id for Group)
- * @param {string} chatType - 'DirectMessage' or 'Group'
+ * Get or create a chat (DM or MLS Group)
+ * @param {string} id - The chat ID (npub for DM, group_id for MlsGroup)
+ * @param {string} chatType - 'DirectMessage' or 'MlsGroup'
  * @returns {Chat} - The chat (existing or newly created)
  */
 function getOrCreateChat(id, chatType = 'DirectMessage') {
-    let chat = chatType === 'Group' ? getGroupChat(id) : getDMChat(id);
+    let chat = chatType === 'MlsGroup' ? getGroupChat(id) : getDMChat(id);
     if (!chat) {
         chat = {
             id: id,
             chat_type: chatType,
-            participants: chatType === 'Group' ? [] : [id],
+            participants: chatType === 'MlsGroup' ? [] : [id],
             messages: [],
             last_read: '',
             created_at: Math.floor(Date.now() / 1000),
-            metadata: chatType === 'Group' ? { group_id: id } : {},
+            metadata: chatType === 'MlsGroup' ? { group_id: id } : {},
             muted: false
         };
         arrChats.push(chat);
@@ -585,17 +585,46 @@ async function init() {
     loadMLSGroups();
     syncMLSWelcomes();
 
-    // Run a very slow loop to update dynamic elements, like "last message time" and "typing status".
+    // Run a very slow loop to update dynamic elements, like "last message time"
     setInterval(() => {
-        // If the chatlist is open: re-render to update timestamps and typing statuses
+        // If the chatlist is open: re-render to update timestamps
         if (domChats.style.display !== 'none') renderChatlist();
 
-        // If the chat is open; run a 'soft' render to update typing status
+        // If the chat is open; run a 'soft' render
         if (strOpenChat) {
             const chat = arrChats.find(c => c.id === strOpenChat);
             if (chat) updateChat(chat, []);
         }
     }, 30000);
+
+    // Run a faster loop to clear expired typing indicators (every 5 seconds)
+    setInterval(() => {
+        // Check all chats for expired typing indicators
+        const now = Date.now() / 1000;
+        arrChats.forEach(chat => {
+            if (chat.active_typers && chat.active_typers.length > 0) {
+                // Clear the array if we haven't received an update in 35 seconds
+                // (30s expiry + 5s grace period for network delays)
+                if (!chat.last_typing_update || now - chat.last_typing_update > 35) {
+                    // Only log for groups
+                    if (chat.chat_type === 'MlsGroup') {
+                        console.log('[TYPING] ⏰ Clearing expired typing indicators for group:', chat.id.substring(0, 16));
+                    }
+                    chat.active_typers = [];
+                    
+                    // If this is the open chat, refresh the display
+                    if (strOpenChat === chat.id) {
+                        openChat(chat.id);
+                    }
+                    
+                    // Refresh chat list
+                    if (domChats.style.display !== 'none') {
+                        renderChatlist();
+                    }
+                }
+            }
+        });
+    }, 5000);
 }
 
 /**
@@ -616,47 +645,43 @@ async function loadMLSGroups() {
             if (!groupId) continue;
             groupsToRefresh.add(groupId);
 
-            const chat = getOrCreateChat(groupId, 'Group');
+            const chat = getOrCreateChat(groupId, 'MlsGroup');
 
             // Populate metadata for UI rendering and send path
             chat.metadata = chat.metadata || {};
-            chat.metadata.name = info.name || chat.metadata.name || `Group ${String(groupId).substring(0, 8)}...`;
-            chat.metadata.engine_group_id = info.engine_group_id || info.engineGroupId || chat.metadata.engine_group_id || '';
-            chat.metadata.avatar_ref = info.avatar_ref || info.avatarRef || chat.metadata.avatar_ref || null;
-            chat.metadata.created_at = info.created_at || info.createdAt || chat.metadata.created_at || 0;
-            chat.metadata.updated_at = info.updated_at || info.updatedAt || chat.metadata.updated_at || 0;
+            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+            
+            // Store in custom_fields (backend format)
+            const groupName = info.name || chat.metadata.custom_fields.name || `Group ${String(groupId).substring(0, 8)}...`;
+            chat.metadata.custom_fields.name = groupName;
+            chat.metadata.custom_fields.engine_group_id = info.engine_group_id || info.engineGroupId || chat.metadata.custom_fields.engine_group_id || '';
+            chat.metadata.custom_fields.avatar_ref = info.avatar_ref || info.avatarRef || chat.metadata.custom_fields.avatar_ref || null;
+            chat.metadata.custom_fields.created_at = String(info.created_at || info.createdAt || chat.metadata.custom_fields.created_at || 0);
+            chat.metadata.custom_fields.updated_at = String(info.updated_at || info.updatedAt || chat.metadata.custom_fields.updated_at || 0);
+            
             // Preserve member count from detailed API to avoid showing "0 members" before refresh
-            chat.metadata.member_count = (typeof info.member_count === 'number')
+            const memberCount = (typeof info.member_count === 'number')
                 ? info.member_count
-                : (typeof info.memberCount === 'number' ? info.memberCount : chat.metadata.member_count);
+                : (typeof info.memberCount === 'number' ? info.memberCount : (chat.metadata.custom_fields.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null));
+            if (typeof memberCount === 'number') {
+                chat.metadata.custom_fields.member_count = String(memberCount);
+            }
 
             // Load initial messages if not already in memory
             if ((chat.messages || []).length === 0) {
                 try {
-                    const timeline = await invoke('get_mls_group_timeline', {
-                        groupId: groupId,
-                        beforeTimestamp: null,
+                    // Use unified chat message storage (same as DMs)
+                    const messages = await invoke('get_chat_messages', {
+                        chatId: groupId,
                         limit: 50
                     }) || [];
 
-                    console.log(`Loaded ${timeline.length} messages for group ${String(groupId).substring(0, 8)}...`);
+                    console.log(`Loaded ${messages.length} messages for group ${String(groupId).substring(0, 8)}...`);
 
-                    chat.messages = timeline.map(msg => ({
-                        id: msg.inner_event_id,
-                        content: msg.content,
-                        replied_to: null,
-                        preview_metadata: null,
-                        attachments: [],
-                        reactions: [],
-                        at: msg.created_at * 1000, // Convert to milliseconds
-                        pending: false,
-                        failed: false,
-                        mine: msg.mine,
-                        // Include author for group rendering context
-                        author_id: msg.author_pubkey
-                    }));
+                    // Messages are already in the correct format from unified storage!
+                    chat.messages = messages;
                 } catch (e) {
-                    console.error(`Failed to load timeline for group ${groupId}:`, e);
+                    console.error(`Failed to load messages for group ${groupId}:`, e);
                     chat.messages = [];
                 }
             }
@@ -692,14 +717,15 @@ async function loadMLSGroups() {
 async function refreshGroupMemberCount(groupId) {
     try {
         const members = await invoke('get_mls_group_members', { groupId });
-        const chat = getOrCreateChat(groupId, 'Group');
+        const chat = getOrCreateChat(groupId, 'MlsGroup');
         if (Array.isArray(members)) {
             chat.metadata = chat.metadata || {};
-            chat.metadata.member_count = members.length;
+            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+            chat.metadata.custom_fields.member_count = String(members.length);
             chat.participants = members.slice();
         }
         if (strOpenChat === groupId) {
-            const count = chat.metadata?.member_count;
+            const count = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
             if (typeof count === 'number') {
                 domChatContactStatus.textContent = `${count} ${count === 1 ? 'member' : 'members'}`;
             } else {
@@ -904,7 +930,7 @@ function renderChatlist() {
     for (const chat of arrChats) {
         // For groups, we show them even if they have no messages yet
         // For DMs, we only show them if they have messages
-        if (chat.chat_type !== 'Group' && chat.messages.length === 0) continue;
+        if (chat.chat_type !== 'MlsGroup' && chat.messages.length === 0) continue;
 
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
@@ -947,7 +973,7 @@ function renderChatlist() {
  */
 function renderChat(chat) {
     // For groups, we don't have a profile, for DMs we do
-    const isGroup = chat.chat_type === 'Group';
+    const isGroup = chat.chat_type === 'MlsGroup';
     const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
     
     // Collect the Unread Message count for 'Unread' emphasis and badging
@@ -1022,7 +1048,7 @@ function renderChat(chat) {
     const h4ContactName = document.createElement('h4');
     if (isGroup) {
         // For groups, extract name from metadata or use a default
-        h4ContactName.textContent = chat.metadata?.name || `Group ${chat.id.substring(0, 8)}...`;
+        h4ContactName.textContent = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`;
     } else {
         h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
@@ -1036,21 +1062,51 @@ function renderChat(chat) {
     pChatPreview.classList.add('cutoff');
     
     if (isGroup) {
-        // For groups, no typing indicator
-        const memberCount = chat.metadata?.member_count;
-        if (!cLastMsg) {
-            pChatPreview.textContent = (memberCount != null)
-                ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`
-                : 'No messages yet';
-        } else if (cLastMsg.pending) {
-            pChatPreview.textContent = `Sending...`;
+        // Check for typing indicators in groups
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        pChatPreview.classList.toggle('text-gradient', fIsTyping);
+        
+        if (fIsTyping) {
+            // Display typing indicator with Discord-style multi-user support
+            if (activeTypers.length === 1) {
+                const typer = getProfile(activeTypers[0]);
+                const name = typer?.nickname || typer?.name || 'Someone';
+                pChatPreview.textContent = `${name} is typing...`;
+            } else if (activeTypers.length === 2) {
+                const typer1 = getProfile(activeTypers[0]);
+                const typer2 = getProfile(activeTypers[1]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                pChatPreview.textContent = `${name1} and ${name2} are typing...`;
+            } else {
+                // 3+ people typing
+                const typer1 = getProfile(activeTypers[0]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                pChatPreview.textContent = `${name1} and ${activeTypers.length - 1} others are typing...`;
+            }
         } else {
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
-            twemojify(pChatPreview);
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            if (!cLastMsg) {
+                pChatPreview.textContent = (memberCount != null)
+                    ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`
+                    : 'No messages yet';
+            } else if (cLastMsg.pending) {
+                pChatPreview.textContent = `Sending...`;
+            } else if (!cLastMsg.content && cLastMsg.attachments?.length) {
+                // No text content but has attachments; display as an attachment
+                pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+            } else {
+                pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+                twemojify(pChatPreview);
+            }
         }
     } else {
-        const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
+        // Check for typing indicators in DMs (using chat.active_typers)
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
         pChatPreview.classList.toggle('text-gradient', fIsTyping);
+        
         if (fIsTyping) {
             // Typing; display the glowy indicator!
             pChatPreview.textContent = `Typing...`;
@@ -1163,14 +1219,14 @@ async function message(pubkey, content, replied_to) {
 }
 
 /**
- * Send a file via NIP-96 server to a Nostr user
- * @param {string} pubkey - The user's pubkey
+ * Send a file via NIP-96 server to a Nostr user or group
+ * @param {string} pubkey - The user's pubkey or group_id
  * @param {string?} replied_to - The reference of the message, if any
  * @param {string} filepath - The absolute file path
  */
 async function sendFile(pubkey, replied_to, filepath) {
     try {
-        // Send the attachment file
+        // Use the protocol-agnostic file_message command for both DMs and MLS groups
         await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
     } catch (e) {
         // Notify of an attachment send failure
@@ -1200,30 +1256,51 @@ async function setupRustListeners() {
     // Listen for MLS message events
     await listen('mls_message_new', async (evt) => {
         const { group_id, message } = evt.payload;
-        console.log('MLS message received for group:', group_id);
+        console.log('MLS message received for group:', group_id, 'pending:', message?.pending, 'attachments:', message?.attachments?.length);
+        
+        // Validate message has required fields
+        if (!message || !message.id || !message.at) {
+            console.warn('Invalid message received (missing id or timestamp):', message);
+            return;
+        }
         
         // Find or create the group chat
-        const chat = getOrCreateChat(group_id, 'Group');
+        const chat = getOrCreateChat(group_id, 'MlsGroup');
         
-        // Convert MLS message to our format
+        // Message is now a full Message object from unified storage!
+        // It already has the correct format with attachments, reactions, etc.
         const newMessage = {
-            id: message.inner_event_id,
+            id: message.id,
             content: message.content,
-            replied_to: null,
-            preview_metadata: null,
-            attachments: [],
-            reactions: [],
-            at: message.created_at * 1000, // Convert to milliseconds
-            pending: false,
-            failed: false,
+            replied_to: message.replied_to || null,
+            preview_metadata: message.preview_metadata || null,
+            attachments: message.attachments || [],
+            reactions: message.reactions || [],
+            at: message.at, // Already in milliseconds
+            pending: message.pending || false,
+            failed: message.failed || false,
             mine: message.mine,
-            // Include author for group rendering context
-            author_id: message.author_pubkey
+            npub: message.npub || null // Sender's npub for group chats
         };
         
         // Check for duplicates
         const existingMsg = chat.messages.find(m => m.id === newMessage.id);
-        if (existingMsg) return;
+        if (existingMsg) {
+            console.log('Duplicate message detected (already in memory):', newMessage.id);
+            return;
+        }
+        
+        // Clear typing indicator for the sender when they send a message
+        if (!newMessage.mine && chat.active_typers && message.sender_npub) {
+            // Remove the sender from active typers
+            chat.active_typers = chat.active_typers.filter(npub => npub !== message.sender_npub);
+            console.log('[TYPING] 💬 Cleared typing indicator after group message from:', message.sender_npub.substring(0, 16));
+            
+            // If this is the open chat, refresh the display
+            if (strOpenChat === group_id) {
+                openChat(group_id);
+            }
+        }
         
         // Add message to chat
         chat.messages.push(newMessage);
@@ -1233,7 +1310,10 @@ async function setupRustListeners() {
         
         // If this group has the open chat, update it
         if (strOpenChat === group_id) {
+            console.log('Updating open group chat with new message, pending:', newMessage.pending);
             updateChat(chat, [newMessage]);
+        } else {
+            console.log('Group chat not open, message added to background chat');
         }
         
         // Resort chat list order by last message time so groups bubble to the top
@@ -1264,35 +1344,22 @@ async function setupRustListeners() {
             console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
 
             // Ensure the group chat exists even if there are no messages yet
-            const chat = getOrCreateChat(group_id, 'Group');
+            const chat = getOrCreateChat(group_id, 'MlsGroup');
             await refreshGroupMemberCount(group_id);
 
             // If there are no messages loaded yet, fetch a small recent slice so we can render previews/order
             if (!chat.messages || chat.messages.length === 0) {
                 try {
-                    const timeline = await invoke('get_mls_group_timeline', {
-                        groupId: group_id,
-                        beforeTimestamp: null,
+                    // Use unified chat message storage (same as DMs)
+                    const messages = await invoke('get_chat_messages', {
+                        chatId: group_id,
                         limit: 50
                     }) || [];
 
-                    // Convert MLS messages to our Message format
-                    chat.messages = timeline.map(msg => ({
-                        id: msg.inner_event_id,
-                        content: msg.content,
-                        replied_to: null,
-                        preview_metadata: null,
-                        attachments: [],
-                        reactions: [],
-                        at: msg.created_at * 1000, // Convert to milliseconds
-                        pending: false,
-                        failed: false,
-                        mine: msg.mine,
-                        // Include author for group rendering context
-                        author_id: msg.author_pubkey
-                    }));
+                    // Messages are already in the correct format from unified storage!
+                    chat.messages = messages;
                 } catch (e) {
-                    console.warn('Failed to load initial group timeline after sync:', group_id, e);
+                    console.warn('Failed to load initial group messages after sync:', group_id, e);
                     // Keep chat with zero messages; UI will show "No messages yet"
                     chat.messages = [];
                 }
@@ -1525,6 +1592,39 @@ async function setupRustListeners() {
         }
     });
 
+    // Listen for typing indicator updates (both DMs and Groups)
+    await listen('typing-update', (evt) => {
+        const { conversation_id, typers } = evt.payload;
+        
+        // Find the chat (could be DM or group)
+        const chat = arrChats.find(c => c.id === conversation_id);
+        if (!chat) return;
+        
+        // Only log for groups
+        const isGroup = chat.chat_type === 'MlsGroup';
+        if (isGroup) {
+            console.log('[TYPING] 📥 Frontend received typing-update:', { conversation_id: conversation_id.substring(0, 16), typers });
+        }
+        
+        // Store the typers array and update timestamp
+        chat.active_typers = typers || [];
+        chat.last_typing_update = Date.now() / 1000;
+        
+        if (isGroup) {
+            console.log('[TYPING] 💾 Updated chat.active_typers:', { chat_id: chat.id.substring(0, 16), active_typers: chat.active_typers });
+        }
+        
+        // If this chat is currently open, update the display
+        if (strOpenChat === conversation_id) {
+            if (isGroup) console.log('[TYPING] 🔄 Refreshing open chat display');
+            openChat(conversation_id);
+        }
+        
+        // Update the chat list preview
+        if (isGroup) console.log('[TYPING] 🔄 Refreshing chat list');
+        renderChatlist();
+    });
+
     // Listen for incoming DM messages
     await listen('message_new', (evt) => {
         // Get the chat for this message (chat_id is the npub for DMs)
@@ -1537,10 +1637,16 @@ async function setupRustListeners() {
         const existingMsg = chat.messages.find(m => m.id === newMessage.id);
         if (existingMsg) return;
 
-        // Reset typing status for the sender's profile
-        const profile = getProfile(evt.payload.chat_id);
-        if (profile && !newMessage.mine) {
-            profile.typing_until = 0;
+        // Clear typing indicator for the sender when they send a message
+        if (!newMessage.mine && chat.active_typers) {
+            // Remove the sender from active typers
+            const senderNpub = evt.payload.chat_id;
+            chat.active_typers = chat.active_typers.filter(npub => npub !== senderNpub);
+            
+            // If this is the open chat, refresh the display
+            if (strOpenChat === evt.payload.chat_id) {
+                openChat(evt.payload.chat_id);
+            }
         }
 
         // Find the correct position to insert the message based on timestamp
@@ -1596,8 +1702,8 @@ async function setupRustListeners() {
 
     // Listen for existing message updates
     await listen('message_update', (evt) => {
-        // Find the message we're updating
-        const cChat = getDMChat(evt.payload.chat_id);
+        // Find the message we're updating - check both DMs and groups
+        const cChat = getDMChat(evt.payload.chat_id) || getGroupChat(evt.payload.chat_id);
         if (!cChat) return;
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
@@ -1605,10 +1711,12 @@ async function setupRustListeners() {
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
 
-        // If this user has an open chat, then update the rendered message
+        // If this chat is open, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
             // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
             const domMsg = document.getElementById(evt.payload.old_id);
+            
+            // For DMs, get the profile; for groups, profile will be null
             const profile = getProfile(evt.payload.chat_id);
             domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
 
@@ -2341,8 +2449,8 @@ let strCurrentReplyReference = "";
  */
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
     // Check if this is a group chat
-    const isGroup = chat?.chat_type === 'Group';
-    
+    const isGroup = chat?.chat_type === 'MlsGroup';
+
     // If no profile is provided and it's not a group, try to get it from the chat ID
     if (!profile && chat && !isGroup) {
         profile = getProfile(chat.id);
@@ -2357,7 +2465,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.textContent = 'Notes';
             domChatContact.classList.remove('btn');
         } else if (isGroup) {
-            domChatContact.textContent = chat.metadata?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+            domChatContact.textContent = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
             domChatContact.classList.remove('btn');
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
@@ -2370,23 +2478,61 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.classList.add('btn');
         }
 
-        // Display either their Status or Typing Indicator (no typing for groups)
+        // Display either their Status or Typing Indicator
         if (fNotes) {
             domChatContactStatus.textContent = 'Encrypted Notes to Self';
-        } else if (isGroup) {
-            const memberCount = chat.metadata?.member_count;
-            if (typeof memberCount === 'number') {
-                const label = memberCount === 1 ? 'member' : 'members';
-                domChatContactStatus.textContent = `${memberCount} ${label}`;
-            } else {
-                // Avoid misleading "0 members" before first count refresh
-                domChatContactStatus.textContent = 'Members syncing...';
-            }
             domChatContactStatus.classList.remove('text-gradient');
-        } else {
-            const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
+        } else if (isGroup) {
+            // Check for typing indicators in groups
+            const activeTypers = chat.active_typers || [];
+            const fIsTyping = activeTypers.length > 0;
+            
             if (fIsTyping) {
-                domChatContactStatus.textContent = `${profile?.nickname || profile?.name || 'User'} is typing...`;
+                // Display typing indicator with Discord-style multi-user support
+                if (activeTypers.length === 1) {
+                    const typer = getProfile(activeTypers[0]);
+                    const name = typer?.nickname || typer?.name || 'Someone';
+                    domChatContactStatus.textContent = `${name} is typing...`;
+                } else if (activeTypers.length === 2) {
+                    const typer1 = getProfile(activeTypers[0]);
+                    const typer2 = getProfile(activeTypers[1]);
+                    const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                    const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                    domChatContactStatus.textContent = `${name1} and ${name2} are typing...`;
+                } else if (activeTypers.length === 3) {
+                    const typer1 = getProfile(activeTypers[0]);
+                    const typer2 = getProfile(activeTypers[1]);
+                    const typer3 = getProfile(activeTypers[2]);
+                    const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                    const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                    const name3 = typer3?.nickname || typer3?.name || 'Someone';
+                    domChatContactStatus.textContent = `${name1}, ${name2}, and ${name3} are typing...`;
+                } else {
+                    // 4+ people typing
+                    domChatContactStatus.textContent = `Several people are typing...`;
+                }
+                domChatContactStatus.classList.add('text-gradient');
+            } else {
+                const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+                if (typeof memberCount === 'number') {
+                    const label = memberCount === 1 ? 'member' : 'members';
+                    domChatContactStatus.textContent = `${memberCount} ${label}`;
+                } else {
+                    // Avoid misleading "0 members" before first count refresh
+                    domChatContactStatus.textContent = 'Members syncing...';
+                }
+                domChatContactStatus.classList.remove('text-gradient');
+            }
+        } else {
+            // Check for typing indicators in DMs (using chat.active_typers)
+            const activeTypers = chat.active_typers || [];
+            const fIsTyping = activeTypers.length > 0;
+            
+            if (fIsTyping) {
+                // For DMs, there should only be one typer (the other person)
+                const typer = getProfile(activeTypers[0]);
+                const name = typer?.nickname || typer?.name || 'User';
+                domChatContactStatus.textContent = `${name} is typing...`;
                 domChatContactStatus.classList.add('text-gradient');
             } else {
                 domChatContactStatus.textContent = profile?.status?.title || '';
@@ -2574,7 +2720,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         if (fNotes) {
             domChatContact.textContent = 'Notes';
         } else if (isGroup) {
-            domChatContact.textContent = chat?.metadata?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+            domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
         }
@@ -2637,14 +2783,14 @@ function renderMessage(msg, sender, editID = '') {
     divMessage.id = msg.id;
 
     // Add a subset of the sender's ID so we have context of WHO sent it, even in group contexts
-    // For group chats, sender can be null; fall back to msg.author_id
-    const otherId = sender?.id || msg.author_id || '';
+    // For group chats, use msg.npub; for DMs, use sender.id
+    const otherId = sender?.id || msg.npub || '';
     const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
     
     // Check if we're in a group chat
     const currentChat = arrChats.find(c => c.id === strOpenChat);
-    const isGroupChat = currentChat?.chat_type === 'Group';
+    const isGroupChat = currentChat?.chat_type === 'MlsGroup';
 
     // Render it appropriately depending on who sent it
     divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
@@ -2659,8 +2805,9 @@ function renderMessage(msg, sender, editID = '') {
         // Add an avatar if this is not OUR message
         if (!msg.mine) {
             let avatarEl = null;
-            // Resolve sender profile for group chats when not provided
-            const otherFullId = otherId || '';
+            // Resolve sender profile for group chats
+            // For group chats, use msg.npub; for DMs, use sender
+            const otherFullId = msg.npub || sender?.id || '';
             const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
             if (authorProfile?.avatar) {
                 const imgAvatar = document.createElement('img');
@@ -2790,8 +2937,9 @@ function renderMessage(msg, sender, editID = '') {
 
     // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
     if (msg.replied_to) {
-        // Try to find the referenced message in the current chat (guard for group chats with no sender profile)
-        const chat = sender ? getDMChat(sender.id) : null;
+        // Try to find the referenced message in the current chat
+        // For DMs, use sender profile; for groups, use the currently open chat
+        const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
         const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
         if (cMsg) {
             // Render the reply in a quote-like fashion
@@ -3193,7 +3341,8 @@ function renderMessage(msg, sender, editID = '') {
         } else if (!msg.preview_metadata) {
             // Grab the message's metadata (currently, only URLs can have extracted metadata)
             if (msg.content && msg.content.includes('https')) {
-                invoke("fetch_msg_metadata", { npub: sender.id, msgId: msg.id });
+                // Pass the chat ID so backend can find both DMs and group chats
+                invoke("fetch_msg_metadata", { chatId: strOpenChat, msgId: msg.id });
             }
         }
     }
@@ -3376,7 +3525,7 @@ function openChat(contact) {
 
     // Get the chat (could be DM or Group)
     const chat = arrChats.find(c => c.id === contact);
-    const isGroup = chat?.chat_type === 'Group';
+    const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
     if (isGroup) { refreshGroupMemberCount(contact); }
@@ -3396,37 +3545,22 @@ function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
-    // If it's a group, sync messages first
+    // If it's a group, load messages from unified storage (no sync needed - live subscription handles it)
     if (isGroup && chat) {
-        // Sync group messages in the background
-        invoke('sync_mls_groups_now', { groupId: contact }).then(async () => {
-            // Load the timeline
+        (async () => {
+            // Load messages using unified storage
             try {
-                const timeline = await invoke('get_mls_group_timeline', {
-                    groupId: contact,
-                    beforeTimestamp: null,
+                const messages = await invoke('get_chat_messages', {
+                    chatId: contact,
                     limit: 50
-                });
+                }) || [];
 
-                // Convert timeline to Message format
-                const mappedTimeline = timeline.map(msg => ({
-                    id: msg.inner_event_id,
-                    content: msg.content,
-                    replied_to: null,
-                    preview_metadata: null,
-                    attachments: [],
-                    reactions: [],
-                    at: msg.created_at * 1000,
-                    pending: false,
-                    failed: false,
-                    mine: msg.mine,
-                    // Include author for group rendering context
-                    author_id: msg.author_pubkey
-                }));
+                console.log(`Loaded ${messages.length} messages for group ${String(contact).substring(0, 8)}...`);
 
-                // Merge with existing messages instead of overwriting to avoid duplicate DOM inserts
+                // Messages are already in the correct format from unified storage!
+                // Merge with existing messages to avoid duplicates
                 const existingIds = new Set((chat.messages || []).map(m => m.id));
-                const newOnly = mappedTimeline.filter(m => !existingIds.has(m.id));
+                const newOnly = messages.filter(m => !existingIds.has(m.id));
 
                 // Append new messages and keep chronological order
                 chat.messages = (chat.messages || []).concat(newOnly);
@@ -3437,9 +3571,9 @@ function openChat(contact) {
                     updateChat(chat, newOnly, null, false);
                 }
             } catch (e) {
-                console.error('Failed to load group timeline:', e);
+                console.error('Failed to load group messages:', e);
             }
-        });
+        })();
     }
 
     // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
@@ -3862,15 +3996,15 @@ window.addEventListener("DOMContentLoaded", async () => {
             
             // Check if current chat is a group
             const chat = arrChats.find(c => c.id === strOpenChat);
-            if (chat?.chat_type === 'Group') {
-                // Ensure group state is ready before sending
+            if (chat?.chat_type === 'MlsGroup') {
+                // Send group message
                 const wrapperId = await invoke('send_mls_group_message', {
                     groupId: strOpenChat,
-                    text: messageText.trim()
+                    text: messageText.trim(),
+                    repliedTo: replyRef || null
                 });
-                
-                // Sync in background to get the message
-                invoke('sync_mls_groups_now', { groupId: strOpenChat });
+                // Message is already added optimistically by send_mls_group_message
+                // Live subscription will handle receiving it back from the relay
             } else {
                 // Send regular DM
                 await message(strOpenChat, messageText.trim(), replyRef, "");

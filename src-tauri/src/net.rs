@@ -20,6 +20,7 @@ pub struct NoOpProgressReporter;
 
 impl NoOpProgressReporter {
     /// Create a new NoOpProgressReporter
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {}
     }
