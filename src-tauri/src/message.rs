@@ -29,6 +29,8 @@ pub struct Message {
     pub pending: bool,
     pub failed: bool,
     pub mine: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npub: Option<String>, // Sender's npub (for group chats)
 }
 
 impl Default for Message {
@@ -44,6 +46,7 @@ impl Default for Message {
             pending: false,
             failed: false,
             mine: false,
+            npub: None,
         }
     }
 }
@@ -207,28 +210,76 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         pending: true,
         failed: false,
         mine: true,
+        npub: None, // Pending messages don't need npub (they're always mine)
     };
-    STATE.lock().await.add_message_to_participant(&receiver, msg.clone());
-
-    // Grab our pubkey
+    // Grab our pubkey first
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
-    // Convert the Bech32 String in to a PublicKey
-    let receiver_pubkey = PublicKey::from_bech32(receiver.clone().as_str()).unwrap();
+    // Detect if this is a group chat or DM
+    // First check if a chat already exists and use its type
+    // Otherwise, check if receiver is a valid bech32 npub (DM) or not (group)
+    let is_group_chat = {
+        let state = STATE.lock().await;
+        if let Some(chat) = state.get_chat(&receiver) {
+            // Chat exists, use its type
+            chat.is_mls_group()
+        } else {
+            // Chat doesn't exist, detect by receiver format
+            // If it's a valid npub (starts with "npub1"), it's a DM
+            // Otherwise it's a group_id
+            !receiver.starts_with("npub1")
+        }
+    };
+    
+    // Add message to appropriate chat type
+    {
+        let mut state = STATE.lock().await;
+        if is_group_chat {
+            // For groups, create or get the MLS group chat
+            state.create_or_get_mls_group_chat(&receiver, vec![]);
+            state.add_message_to_chat(&receiver, msg.clone());
+        } else {
+            // For DMs, use the existing participant-based method
+            state.add_message_to_participant(&receiver, msg.clone());
+        }
+    }
 
-    // Prepare the NIP-17 rumor
+    // For DMs, convert the Bech32 String to a PublicKey
+    // For groups, we'll handle it differently below
+    let receiver_pubkey = if !is_group_chat {
+        PublicKey::from_bech32(receiver.clone().as_str())
+            .map_err(|e| format!("Invalid npub: {}", e))?
+    } else {
+        // For groups, we don't need a receiver_pubkey for the rumor
+        // We'll use a placeholder that won't be used
+        my_public_key
+    };
+
+    // Prepare the rumor
     let handle = TAURI_APP.get().unwrap();
     let mut rumor = if file.is_none() {
-        // Send the text message to our frontend
-        handle.emit("message_new", serde_json::json!({
-            "message": &msg,
-            "chat_id": &receiver
-        })).unwrap();
+        // Send the text message to our frontend with appropriate event
+        if is_group_chat {
+            handle.emit("mls_message_new", serde_json::json!({
+                "group_id": &receiver,
+                "message": &msg
+            })).unwrap();
+        } else {
+            handle.emit("message_new", serde_json::json!({
+                "message": &msg,
+                "chat_id": &receiver
+            })).unwrap();
+        }
 
         // Text Message
-        EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
+        if !is_group_chat {
+            EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
+        } else {
+            // For MLS groups, create a basic rumor without p-tag
+            EventBuilder::new(Kind::from_u16(14), msg.content)
+        }
     } else {
         let attached_file = file.unwrap();
 
@@ -246,11 +297,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     for attachment in &message.attachments {
                         if attachment.id == file_hash && !attachment.url.is_empty() {
                             // Found a matching attachment with a valid URL
-                            // Use the first participant as the profile ID for compatibility
-                            if let Some(participant_id) = chat.participants.first() {
-                                found_attachment = Some((participant_id.clone(), attachment.clone()));
-                                break;
-                            }
+                            // For DMs, use first participant; for groups, use chat ID
+                            let chat_identifier = if let Some(participant_id) = chat.participants.first() {
+                                participant_id.clone()
+                            } else {
+                                // Group chat - use the chat ID itself
+                                chat.id.clone()
+                            };
+                            found_attachment = Some((chat_identifier, attachment.clone()));
+                            break;
                         }
                     }
                     if found_attachment.is_some() {
@@ -284,7 +339,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Retrieve the Pending Message
             let mut state = STATE.lock().await;
             let message = state.chats.iter_mut()
-                .find(|chat| chat.has_participant(&receiver))
+                .find(|chat| {
+                    // For DMs, check if receiver is a participant
+                    // For MLS groups, check if receiver matches the chat ID
+                    chat.id() == &receiver || chat.has_participant(&receiver)
+                })
                 .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_clone))
                 .unwrap();
 
@@ -331,11 +390,19 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 downloaded: true
             });
 
-            // Send the pending file upload to our frontend
-            handle.emit("message_new", serde_json::json!({
-                "message": &message,
-                "chat_id": &receiver
-            })).unwrap();
+            // Send the pending file upload to our frontend with appropriate event
+            // This provides immediate UI feedback for the sender
+            if is_group_chat {
+                handle.emit("mls_message_new", serde_json::json!({
+                    "group_id": &receiver,
+                    "message": &message
+                })).unwrap();
+            } else {
+                handle.emit("message_new", serde_json::json!({
+                    "message": &message,
+                    "chat_id": &receiver
+                })).unwrap();
+            }
         }
 
         // Format a Mime Type from the file extension
@@ -358,7 +425,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     let pending_id_for_update = Arc::clone(&pending_id);
                     let mut state = STATE.lock().await;
                     let message = state.chats.iter_mut()
-                        .find(|chat| chat.has_participant(&receiver))
+                        .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
                         .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_update))
                         .unwrap();
                     if let Some(attachment) = message.attachments.last_mut() {
@@ -367,10 +434,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 }
                 
                 // Create the attachment rumor with the existing URL
-                let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing_attachment.url)
+                let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing_attachment.url);
+                
+                // Only add p-tag for DMs, not for MLS groups
+                if !is_group_chat {
+                    attachment_rumor = attachment_rumor.tag(Tag::public_key(receiver_pubkey));
+                }
                 
                 // Append decryption keys and file metadata (using existing attachment's params)
-                    .tag(Tag::public_key(receiver_pubkey))
+                attachment_rumor = attachment_rumor
                     .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
                     .tag(Tag::custom(TagKind::custom("size"), [existing_attachment.size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
@@ -424,7 +496,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         let pending_id_for_url_update = Arc::clone(&pending_id);
                         let mut state = STATE.lock().await;
                         let message = state.chats.iter_mut()
-                            .find(|chat| chat.has_participant(&receiver))
+                            .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
                             .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_url_update))
                             .unwrap();
                         if let Some(attachment) = message.attachments.last_mut() {
@@ -433,10 +505,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     }
                     
                     // Create the attachment rumor
-                    let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string())
+                    let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
+                    
+                    // Only add p-tag for DMs, not for MLS groups
+                    if !is_group_chat {
+                        attachment_rumor = attachment_rumor.tag(Tag::public_key(receiver_pubkey));
+                    }
 
                     // Append decryption keys and file metadata
-                        .tag(Tag::public_key(receiver_pubkey))
+                    attachment_rumor = attachment_rumor
                         .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
                         .tag(Tag::custom(TagKind::custom("size"), [file_size.to_string()]))
                         .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
@@ -493,124 +570,164 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     let built_rumor = rumor.build(my_public_key);
     let rumor_id = built_rumor.id.unwrap();
 
-    // Send message to the real receiver with retry logic
-    let mut send_attempts = 0;
-    const MAX_ATTEMPTS: u32 = 12;
-    const RETRY_DELAY: u64 = 5; // 5 seconds
+    // Route to appropriate protocol handler
+    if is_group_chat {
+        // MLS Group Chat - send through MLS engine
+        match crate::mls::send_mls_message(&receiver, built_rumor.clone()).await {
+            Ok(_) => {
+                // Mark the message as a success
+                let pending_id_for_success = Arc::clone(&pending_id);
+                let mut state = STATE.lock().await;
+                let sent_msg = state.chats.iter_mut()
+                    .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
+                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_success))
+                    .unwrap();
+                sent_msg.id = rumor_id.to_hex();
+                sent_msg.pending = false;
 
-    let mut final_output = None;
+                // Update the frontend
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": pending_id_for_success.as_ref(),
+                    "message": &sent_msg,
+                    "chat_id": &receiver
+                })).unwrap();
 
-    while send_attempts < MAX_ATTEMPTS {
-        send_attempts += 1;
-        
-        match client
-            .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
-            .await
-        {
-            Ok(output) => {
-                // Check if at least one relay acknowledged the message
-                if !output.success.is_empty() {
-                    // Success! Message was acknowledged by at least one relay
-                    final_output = Some(output);
-                    break;
-                } else if output.failed.is_empty() {
-                    // No success but also no failures - this might be a temporary network issue
-                    // Continue retrying
-                } else {
-                    // We have failures but no successes
+                // Save the message to our DB
+                let handle = TAURI_APP.get().unwrap();
+                if let Some(chat) = state.get_chat(&receiver) {
+                    let _ = save_chat(handle.clone(), chat).await;
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                }
+                return Ok(true);
+            }
+            Err(e) => {
+                eprintln!("Failed to send MLS message: {:?}", e);
+                mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+                return Ok(false);
+            }
+        }
+    } else {
+        // DM - use NIP-17 giftwrap
+        // Send message to the real receiver with retry logic
+        let mut send_attempts = 0;
+        const MAX_ATTEMPTS: u32 = 12;
+        const RETRY_DELAY: u64 = 5; // 5 seconds
+
+        let mut final_output = None;
+
+        while send_attempts < MAX_ATTEMPTS {
+            send_attempts += 1;
+            
+            match client
+                .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
+                .await
+            {
+                Ok(output) => {
+                    // Check if at least one relay acknowledged the message
+                    if !output.success.is_empty() {
+                        // Success! Message was acknowledged by at least one relay
+                        final_output = Some(output);
+                        break;
+                    } else if output.failed.is_empty() {
+                        // No success but also no failures - this might be a temporary network issue
+                        // Continue retrying
+                    } else {
+                        // We have failures but no successes
+                        if send_attempts == MAX_ATTEMPTS {
+                            // Final attempt failed
+                            mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+                            return Ok(false);
+                        }
+                    }
+                    
+                    // If we're here and haven't reached max attempts, wait before retrying
+                    if send_attempts < MAX_ATTEMPTS {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
+                    }
+                }
+                Err(e) => {
+                    // Network or other error - log and retry if we haven't exceeded attempts
+                    eprintln!("Failed to send message (attempt {}/{}): {:?}", send_attempts, MAX_ATTEMPTS, e);
+                    
                     if send_attempts == MAX_ATTEMPTS {
                         // Final attempt failed
                         mark_message_failed(Arc::clone(&pending_id), &receiver).await;
                         return Ok(false);
                     }
-                }
-                
-                // If we're here and haven't reached max attempts, wait before retrying
-                if send_attempts < MAX_ATTEMPTS {
+                    
+                    // Wait before retrying
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
                 }
             }
-            Err(e) => {
-                // Network or other error - log and retry if we haven't exceeded attempts
-                eprintln!("Failed to send message (attempt {}/{}): {:?}", send_attempts, MAX_ATTEMPTS, e);
-                
-                if send_attempts == MAX_ATTEMPTS {
-                    // Final attempt failed
-                    mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                    return Ok(false);
+        }
+        
+        // If we get here without final_output, all attempts failed
+        if final_output.is_none() {
+            mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+            return Ok(false);
+        }
+
+        // Send message to our own public key, to allow for message recovering
+        match client
+            .gift_wrap(&my_public_key, built_rumor, [])
+            .await
+        {
+            Ok(_) => {
+                // Mark the message as a success
+                let pending_id_for_success = Arc::clone(&pending_id);
+                let mut state = STATE.lock().await;
+                let sent_msg = state.chats.iter_mut()
+                    .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
+                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_success))
+                    .unwrap();
+                sent_msg.id = rumor_id.to_hex();
+                sent_msg.pending = false;
+
+                // Update the frontend
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": pending_id_for_success.as_ref(),
+                    "message": &sent_msg,
+                    "chat_id": &receiver
+                })).unwrap();
+
+                // Save the message to our DB
+                let handle = TAURI_APP.get().unwrap();
+                if let Some(chat) = state.get_chat(&receiver) {
+                    let _ = save_chat(handle.clone(), chat).await;
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
                 }
-                
-                // Wait before retrying
-                tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
+                return Ok(true);
             }
-        }
-    }
-    
-    // If we get here without final_output, all attempts failed
-    if final_output.is_none() {
-        mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-        return Ok(false);
-    }
+            Err(_) => {
+                // This is an odd case; the message was sent to the receiver, but NOT ourselves
+                // We'll class it as sent, for now...
+                let pending_id_for_partial = Arc::clone(&pending_id);
+                let mut state = STATE.lock().await;
+                let sent_ish_msg = state.chats.iter_mut()
+                    .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
+                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_partial))
+                    .unwrap();
+                sent_ish_msg.id = rumor_id.to_hex();
+                sent_ish_msg.pending = false;
 
-    // Send message to our own public key, to allow for message recovering
-    match client
-        .gift_wrap(&my_public_key, built_rumor, [])
-        .await
-    {
-        Ok(_) => {
-            // Mark the message as a success
-            let pending_id_for_success = Arc::clone(&pending_id);
-            let mut state = STATE.lock().await;
-            let sent_msg = state.chats.iter_mut()
-                .find(|chat| chat.has_participant(&receiver))
-                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_success))
-                .unwrap();
-            sent_msg.id = rumor_id.to_hex();
-            sent_msg.pending = false;
+                // Update the frontend
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": pending_id_for_partial.as_ref(),
+                    "message": &sent_ish_msg,
+                    "chat_id": &receiver
+                })).unwrap();
 
-            // Update the frontend
-            handle.emit("message_update", serde_json::json!({
-                "old_id": pending_id_for_success.as_ref(),
-                "message": &sent_msg,
-                "chat_id": &receiver
-            })).unwrap();
-
-            // Save the message to our DB
-            let handle = TAURI_APP.get().unwrap();
-            if let Some(chat) = state.get_chat(&receiver) {
-                let _ = save_chat(handle.clone(), chat).await;
-                let all_messages = chat.messages.clone();
-                let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                // Save the message to our DB
+                let handle = TAURI_APP.get().unwrap();
+                if let Some(chat) = state.get_chat(&receiver) {
+                    let _ = save_chat(handle.clone(), chat).await;
+                    let all_messages = chat.messages.clone();
+                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                }
+                return Ok(true);
             }
-            return Ok(true);
-        }
-        Err(_) => {
-            // This is an odd case; the message was sent to the receiver, but NOT ourselves
-            // We'll class it as sent, for now...
-            let pending_id_for_partial = Arc::clone(&pending_id);
-            let mut state = STATE.lock().await;
-            let sent_ish_msg = state.chats.iter_mut()
-                .find(|chat| chat.has_participant(&receiver))
-                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_partial))
-                .unwrap();
-            sent_ish_msg.id = rumor_id.to_hex();
-            sent_ish_msg.pending = false;
-
-            // Update the frontend
-            handle.emit("message_update", serde_json::json!({
-                "old_id": pending_id_for_partial.as_ref(),
-                "message": &sent_ish_msg,
-                "chat_id": &receiver
-            })).unwrap();
-
-            // Save the message to our DB
-            let handle = TAURI_APP.get().unwrap();
-            if let Some(chat) = state.get_chat(&receiver) {
-                let _ = save_chat(handle.clone(), chat).await;
-                let all_messages = chat.messages.clone();
-                let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
-            }
-            return Ok(true);
         }
     }
 }
@@ -825,12 +942,12 @@ pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
+pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     // Find the message we're extracting metadata from
     let text = {
         let mut state = STATE.lock().await;
         let message = state.chats.iter_mut()
-            .find(|chat| chat.has_participant(&npub))
+            .find(|chat| chat.id == chat_id)
             .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
             .unwrap();
         message.content.clone()
@@ -847,7 +964,7 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
     for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
         match net::fetch_site_metadata(&url).await {
             Ok(metadata) => {
-                let has_content = metadata.og_title.is_some() 
+                let has_content = metadata.og_title.is_some()
                     || metadata.og_description.is_some()
                     || metadata.og_image.is_some()
                     || metadata.title.is_some()
@@ -858,7 +975,7 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
                     // Re-fetch the message and add our metadata
                     let mut state = STATE.lock().await;
                     let msg = state.chats.iter_mut()
-                        .find(|chat| chat.has_participant(&npub))
+                        .find(|chat| chat.id == chat_id)
                         .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
                         .unwrap();
                     msg.preview_metadata = Some(metadata);
@@ -868,11 +985,11 @@ pub async fn fetch_msg_metadata(npub: String, msg_id: String) -> bool {
                     handle.emit("message_update", serde_json::json!({
                         "old_id": &msg_id,
                         "message": &msg,
-                        "chat_id": &npub
+                        "chat_id": &chat_id
                     })).unwrap();
 
                     // Save the new Metadata to the DB
-                    if let Some(chat) = state.get_chat(&npub) {
+                    if let Some(chat) = state.get_chat(&chat_id) {
                         let all_messages = chat.messages.clone();
                         let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
                     }

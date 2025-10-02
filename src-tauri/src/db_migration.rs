@@ -168,6 +168,7 @@ pub async fn save_chat_messages<R: Runtime>(
             at: message.at,
             mine: message.mine,
             contact: String::new(), // Not used for chat messages
+            npub: message.npub.clone(),
         };
         
         // Serialize to JSON
