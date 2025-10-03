@@ -2284,18 +2284,19 @@ async fn handle_event_old(event: Event, is_new: bool) -> bool {
 }*/
 
 /*
-MLS live subscriptions overview:
+MLS live subscriptions overview (using Marmot/MDK):
 - GiftWrap subscription (Kind::GiftWrap):
   • Carries DMs/files and also MLS Welcomes. Welcomes are detected after unwrap in handle_event()
-    when rumor.kind == Kind::MlsWelcome. We immediately persist via the MLS engine on a blocking
+    when rumor.kind == Kind::MlsWelcome. We immediately persist via the MDK engine on a blocking
     thread (spawn_blocking) and emit "mls_invite_received" so the frontend can refresh
     list_pending_mls_welcomes without a manual sync.
 
 - MLS Group Messages subscription (Kind::MlsGroupMessage):
   • Subscribed live in parallel to GiftWraps. We extract the wire group id from the 'h' tag and
     check membership using encrypted metadata (mls_groups). If a message is for a group we belong to,
-    we process it via the MLS engine on a blocking thread, then persist to "mls_messages_{group_id}"
+    we process it via the MDK engine on a blocking thread, then persist to "mls_messages_{group_id}"
     and "mls_timeline_{group_id}" and emit "mls_message_new" for immediate UI updates.
+  • For non-members: We attempt to process as a Welcome message (for invites from MDK-compatible clients).
 
 - Deduplication:
   • Real-time path uses the same keys as sync (inner_event_id, wrapper_event_id). We only insert if
@@ -2303,7 +2304,7 @@ MLS live subscriptions overview:
     This prevents duplicates when subsequent explicit sync covers the same events.
 
 - Send-boundary:
-  • All nostr-mls engine interactions occur inside tokio::task::spawn_blocking. We avoid awaits
+  • All MDK engine interactions occur inside tokio::task::spawn_blocking. We avoid awaits
     while holding the engine to respect non-Send constraints required by Tauri command futures.
 
 - Privacy & logging:
@@ -2382,6 +2383,7 @@ async fn notifs() -> Result<bool, String> {
                             }
                         } else { false };
 
+                        // Not a member - ignore this group message
                         if !is_member {
                             return Ok(false);
                         }
@@ -4101,28 +4103,29 @@ async fn sync_mls_welcomes_now() -> Result<u32, String> {
         TRUSTED_RELAY
     );
 
-    // Filter GiftWraps "to me"
+    // Filter GiftWraps "to me" (Kind 1059) - standard format for MLS Welcomes
     let filter = Filter::new()
         .pubkey(my_public_key)
         .kind(Kind::GiftWrap)
-        .limit(2000);
+        .limit(1000);
 
     let events = match client
         .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(15))
         .await
     {
         Ok(evts) => {
-            println!("[MLS][welcomes] fetched wrappers: {}", evts.len());
+            println!("[MLS][welcomes] fetched {} GiftWrap events", evts.len());
             evts
         }
         Err(e) => {
-            eprintln!("[MLS][welcomes] fetch error: {}", e);
+            eprintln!("[MLS][welcomes] fetch failed: {}", e);
             return Err(e.to_string());
         }
     };
 
     if events.is_empty() {
         println!("[MLS][welcomes] no GiftWraps found for npub={}", my_npub);
+        return Ok(0);
     }
 
     // Ingest welcomes using non-Send MLS engine on blocking thread
