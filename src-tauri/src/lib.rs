@@ -2445,7 +2445,7 @@ async fn notifs() -> Result<bool, String> {
                                                 match process_rumor(rumor_event, rumor_context).await {
                                                     Ok(result) => {
                                                         match result {
-                                                            RumorProcessingResult::TextMessage(message) => {
+                                                            RumorProcessingResult::TextMessage(message) | RumorProcessingResult::FileAttachment(message) => {
                                                                 // Add to unified storage
                                                                 let was_added = {
                                                                     let mut state = crate::STATE.lock().await;
@@ -2458,11 +2458,50 @@ async fn notifs() -> Result<bool, String> {
                                                                     None
                                                                 }
                                                             }
-                                                            _ => None,
+                                                            RumorProcessingResult::Reaction(reaction) => {
+                                                                // Handle reactions in real-time
+                                                                let was_added = {
+                                                                    let mut state = crate::STATE.lock().await;
+                                                                    if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
+                                                                        msg.add_reaction(reaction.clone(), Some(chat_id))
+                                                                    } else {
+                                                                        false
+                                                                    }
+                                                                };
+                                                                
+                                                                if was_added {
+                                                                    println!("[MLS][live] Reaction added: {}", reaction.reference_id);
+                                                                }
+                                                                None // Don't emit as message
+                                                            }
+                                                            RumorProcessingResult::TypingIndicator { profile_id, until } => {
+                                                                // Handle typing indicators in real-time
+                                                                let active_typers = {
+                                                                    let mut state = crate::STATE.lock().await;
+                                                                    if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
+                                                                        chat.update_typing_participant(profile_id.clone(), until);
+                                                                        chat.get_active_typers()
+                                                                    } else {
+                                                                        Vec::new()
+                                                                    }
+                                                                };
+                                                                
+                                                                // Emit typing update event
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let _ = handle.emit("typing-update", serde_json::json!({
+                                                                        "chat_id": group_id_for_persist,
+                                                                        "active_typers": active_typers
+                                                                    }));
+                                                                }
+                                                                
+                                                                println!("[MLS][live] Typing indicator processed for group: {}", group_id_for_persist);
+                                                                None // Don't emit as message
+                                                            }
+                                                            RumorProcessingResult::Ignored => None,
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("[MLS] Failed to process rumor: {}", e);
+                                                        eprintln!("[MLS][live] Failed to process rumor: {}", e);
                                                         None
                                                     }
                                                 }
@@ -2798,8 +2837,13 @@ async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<Strin
         let mut found_attachment = None;
         
         for chat in &state.chats {
-            // Check if this chat involves the specified profile
-            if chat.has_participant(&npub) {
+            // Check if this is the target chat (works for both DMs and group chats)
+            let is_target_chat = match &chat.chat_type {
+                ChatType::MlsGroup => chat.id == npub,
+                ChatType::DirectMessage => chat.has_participant(&npub),
+            };
+            
+            if is_target_chat {
                 // Look for the message in this chat
                 if let Some(message) = chat.messages.iter().find(|m| m.id == msg_id) {
                     // Get the first attachment
@@ -2834,7 +2878,13 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
         // Find the message and attachment in chats
         let mut found_attachment = None;
         for chat in &mut state.chats {
-            if chat.has_participant(&npub) {
+            // For group chats, npub is the group_id; for DMs, it's a participant npub
+            let is_target_chat = match &chat.chat_type {
+                ChatType::MlsGroup => chat.id == npub,
+                ChatType::DirectMessage => chat.has_participant(&npub),
+            };
+            
+            if is_target_chat {
                 if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
                     if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
                         // Check that we're not already downloading
@@ -2875,7 +2925,12 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
             
             // Find and update the attachment status
             for chat in &mut state.chats {
-                if chat.has_participant(&npub) {
+                let is_target_chat = match &chat.chat_type {
+                    ChatType::MlsGroup => chat.id == npub,
+                    ChatType::DirectMessage => chat.has_participant(&npub),
+                };
+                
+                if is_target_chat {
                     if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
                         if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
                             attachment.downloading = false;
@@ -2909,7 +2964,12 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
             
             // Find and update the attachment status
             for chat in &mut state.chats {
-                if chat.has_participant(&npub) {
+                let is_target_chat = match &chat.chat_type {
+                    ChatType::MlsGroup => chat.id == npub,
+                    ChatType::DirectMessage => chat.has_participant(&npub),
+                };
+                
+                if is_target_chat {
                     if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
                         if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
                             attachment.downloading = false;
@@ -2944,7 +3004,12 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                 
                 // Find and update the attachment
                 for chat in &mut state.chats {
-                    if chat.has_participant(&npub) {
+                    let is_target_chat = match &chat.chat_type {
+                        ChatType::MlsGroup => chat.id == npub,
+                        ChatType::DirectMessage => chat.has_participant(&npub),
+                    };
+                    
+                    if is_target_chat {
                         if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
                             if let Some(attachment_index) = message.attachments.iter().position(|a| a.id == attachment_id) {
                                 let attachment = &mut message.attachments[attachment_index];
@@ -4937,6 +5002,7 @@ pub fn run() {
             message::voice_message,
             message::file_message,
             message::react,
+            message::react_to_message,
             message::fetch_msg_metadata,
             fetch_messages,
             warmup_nip96_servers,

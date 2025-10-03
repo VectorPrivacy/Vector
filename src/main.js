@@ -284,8 +284,8 @@ emojiSearch.onkeydown = async (e) => {
                 const divMessage = document.getElementById(cMsg.id);
                 divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
 
-                // Send the Reaction to the network
-                invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
+                // Send the Reaction to the network (protocol-agnostic)
+                invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
             // Add it to the message input
@@ -344,8 +344,8 @@ picker.addEventListener('click', (e) => {
                 const divMessage = document.getElementById(cMsg.id);
                 divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
 
-                // Send the Reaction to the network
-                invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
+                // Send the Reaction to the network (protocol-agnostic)
+                invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
             // Add it to the message input
@@ -514,6 +514,15 @@ function getDMChat(npub) {
  */
 function getGroupChat(groupId) {
     return arrChats.find(c => c.chat_type === 'MlsGroup' && c.id === groupId);
+}
+
+/**
+ * Get a chat by ID (works for both DMs and Group Chats)
+ * @param {string} id - The chat ID (npub for DM, group_id for MlsGroup)
+ * @returns {Chat|undefined} - The chat if it exists
+ */
+function getChat(id) {
+    return arrChats.find(c => c.id === id);
 }
 
 /**
@@ -1329,6 +1338,13 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
+    // Listen for MLS invite received events (real-time)
+    await listen('mls_invite_received', async (evt) => {
+        console.log('MLS invite received in real-time, refreshing invites list');
+        // Reload invites list to show the new invite
+        await loadMLSInvites();
+    });
+
     // Listen for MLS welcome accepted events
     await listen('mls_welcome_accepted', async (evt) => {
         console.log('MLS welcome accepted, refreshing groups and invites');
@@ -1477,8 +1493,8 @@ async function setupRustListeners() {
 
     // Listen for Attachment Download Results
     await listen('attachment_download_result', async (evt) => {
-        // Update the in-memory attachment
-        let cChat = getDMChat(evt.payload.profile_id);
+        // Update the in-memory attachment (works for both DMs and Group Chats)
+        let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
         
         let cMsg = cChat.messages.find(m => m.id === evt.payload.msg_id);
@@ -1702,8 +1718,8 @@ async function setupRustListeners() {
 
     // Listen for existing message updates
     await listen('message_update', (evt) => {
-        // Find the message we're updating - check both DMs and groups
-        const cChat = getDMChat(evt.payload.chat_id) || getGroupChat(evt.payload.chat_id);
+        // Find the message we're updating - works for both DMs and groups
+        const cChat = getChat(evt.payload.chat_id);
         if (!cChat) return;
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
@@ -2951,13 +2967,16 @@ function renderMessage(msg, sender, editID = '') {
             const spanName = document.createElement('span');
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
 
-            // Name
-            const cSenderProfile = !cMsg.mine ? sender : getProfile(strPubkey);
+            // Name - for group chats, use cMsg.npub; for DMs, use sender
+            const cSenderProfile = !cMsg.mine
+                ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
+                : getProfile(strPubkey);
             if (cSenderProfile?.nickname || cSenderProfile?.name) {
                 spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
                 twemojify(spanName);
             } else {
-                spanName.textContent = cSenderProfile?.id?.substring(0, 10) + '…' || 'Unknown';
+                const fallbackId = cMsg.npub || cSenderProfile?.id || '';
+                spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
             }
 
             // Replied-to content (Text or Attachment)
@@ -3132,7 +3151,9 @@ function renderMessage(msg, sender, editID = '') {
             // For images, show blurhash preview while downloading (only for formats that support blurhash)
             if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                 // Generate blurhash preview for downloading image
-                invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
+                // For group chats, use chat ID; for DMs, use sender.id
+                const blurhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                invoke('generate_blurhash_preview', { npub: blurhashNpub2, msgId: msg.id })
                     .then(base64Image => {
                         const imgPreview = document.createElement('img');
                         imgPreview.style.width = `100%`;
@@ -3185,7 +3206,9 @@ function renderMessage(msg, sender, editID = '') {
                 // For images, show blurhash preview with download button (unless auto-downloading)
                 if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                     // Generate blurhash preview for undownloaded image
-                    invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
+                    // For group chats, use chat ID; for DMs, use sender.id
+                    const blurhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('generate_blurhash_preview', { npub: blurhashNpub, msgId: msg.id })
                         .then(base64Image => {
                             const imgPreview = document.createElement('img');
                             imgPreview.style.width = `100%`;
@@ -3211,7 +3234,9 @@ function renderMessage(msg, sender, editID = '') {
                                 const iDownload = document.createElement('i');
                                 iDownload.id = cAttachment.id;
                                 iDownload.toggleAttribute('download', true);
-                                iDownload.setAttribute('npub', sender.id);
+                                // For group chats, use chat ID; for DMs, use sender.id
+                                const downloadNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                                iDownload.setAttribute('npub', downloadNpub2);
                                 iDownload.setAttribute('msg', msg.id);
                                 iDownload.classList.add('btn');
                                 iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
@@ -3251,7 +3276,9 @@ function renderMessage(msg, sender, editID = '') {
                                 const iDownload = document.createElement('i');
                                 iDownload.id = cAttachment.id;
                                 iDownload.toggleAttribute('download', true);
-                                iDownload.setAttribute('npub', sender.id);
+                                // For group chats, use chat ID; for DMs, use sender.id
+                                const downloadNpub3 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                                iDownload.setAttribute('npub', downloadNpub3);
                                 iDownload.setAttribute('msg', msg.id);
                                 iDownload.classList.add('btn');
                                 iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
@@ -3276,7 +3303,9 @@ function renderMessage(msg, sender, editID = '') {
                     const iDownload = document.createElement('i');
                     iDownload.id = cAttachment.id;
                     iDownload.toggleAttribute('download', true);
-                    iDownload.setAttribute('npub', sender.id);
+                    // For group chats, use chat ID; for DMs, use sender.id
+                    const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    iDownload.setAttribute('npub', downloadNpub);
                     iDownload.setAttribute('msg', msg.id);
                     iDownload.classList.add('btn');
                     iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
@@ -3295,7 +3324,9 @@ function renderMessage(msg, sender, editID = '') {
                         pMessage.appendChild(iDownloading);
                     }
                     
-                    invoke('download_attachment', { npub: sender.id, msgId: msg.id, attachmentId: cAttachment.id });
+                    // For group chats, use chat ID; for DMs, use sender.id
+                    const downloadNpub4 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('download_attachment', { npub: downloadNpub4, msgId: msg.id, attachmentId: cAttachment.id });
                 }
             }
     }

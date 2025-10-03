@@ -941,6 +941,70 @@ pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<
     }
 }
 
+/// Protocol-agnostic reaction function that works for both DMs and Group Chats
+#[tauri::command]
+pub async fn react_to_message(reference_id: String, chat_id: String, emoji: String) -> Result<bool, String> {
+    use crate::chat::ChatType;
+    
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    
+    // Determine chat type
+    let state = STATE.lock().await;
+    let chat = state.chats.iter().find(|c| c.id == chat_id)
+        .ok_or_else(|| "Chat not found".to_string())?;
+    let chat_type = chat.chat_type.clone();
+    drop(state);
+    
+    match chat_type {
+        ChatType::DirectMessage => {
+            // For DMs, use the existing DM reaction logic
+            react(reference_id, chat_id, emoji).await.map_err(|_| "DM reaction failed".to_string())
+        }
+        ChatType::MlsGroup => {
+            // For group chats, send reaction through MLS
+            let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
+            
+            // Build reaction rumor manually (simpler than using the builder for group chats)
+            let rumor = EventBuilder::new(Kind::Reaction, &emoji)
+                .tag(Tag::event(reference_event))
+                .build(my_public_key);
+            let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
+            
+            // Send through MLS
+            crate::mls::send_mls_message(&chat_id, rumor).await?;
+            
+            // Add reaction to local state
+            let reaction = Reaction {
+                id: rumor_id,
+                reference_id: reference_id.clone(),
+                author_id: my_public_key.to_hex(),
+                emoji,
+            };
+            
+            let mut state = STATE.lock().await;
+            if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+                if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == reference_id) {
+                    let was_added = msg.add_reaction(reaction, Some(&chat_id));
+                    
+                    if was_added {
+                        // Save to database
+                        if let Some(handle) = TAURI_APP.get() {
+                            let all_messages = chat.messages.clone();
+                            let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                        }
+                    }
+                    
+                    return Ok(was_added);
+                }
+            }
+            
+            Ok(false)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     // Find the message we're extracting metadata from
