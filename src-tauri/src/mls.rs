@@ -48,9 +48,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use nostr_mls::prelude::*;
-use nostr_mls_memory_storage::NostrMlsMemoryStorage;
-use nostr_mls_sqlite_storage::NostrMlsSqliteStorage;
+use mdk_core::prelude::*;
+use mdk_sqlite_storage::MdkSqliteStorage;
 use std::sync::Arc;
 use tauri::{AppHandle, Runtime, Manager, Emitter};
 use tauri::path::BaseDirectory;
@@ -135,8 +134,8 @@ struct EventCursor {
 /// - Process incoming MLS events from nostr relays
 /// - Manage encrypted group metadata and message storage
 pub struct MlsService {
-    /// Persistent MLS engine when initialized (SQLite-backed via nostr-mls-sqlite-storage)
-    engine: Option<Arc<NostrMls<NostrMlsSqliteStorage>>>,
+    /// Persistent MLS engine when initialized (SQLite-backed via mdk-sqlite-storage)
+    engine: Option<Arc<MDK<MdkSqliteStorage>>>,
     _initialized: bool,
 }
 
@@ -168,18 +167,18 @@ impl MlsService {
         }
 
         // Initialize persistent storage and engine
-        let storage = NostrMlsSqliteStorage::new(&db_path)
+        let storage = MdkSqliteStorage::new(&db_path)
             .map_err(|e| MlsError::StorageError(format!("init sqlite storage: {}", e)))?;
-        let mls = NostrMls::new(storage);
+        let mdk = MDK::new(storage);
 
         Ok(Self {
-            engine: Some(Arc::new(mls)),
+            engine: Some(Arc::new(mdk)),
             _initialized: true,
         })
     }
 
     /// Get a clone of the persistent MLS engine (Arc)
-    pub fn engine(&self) -> Result<Arc<NostrMls<NostrMlsSqliteStorage>>, MlsError> {
+    pub fn engine(&self) -> Result<Arc<MDK<MdkSqliteStorage>>, MlsError> {
         self.engine.clone().ok_or(MlsError::NotInitialized)
     }
 
@@ -281,9 +280,11 @@ impl MlsService {
         let group_config = NostrGroupConfigData::new(
             name.to_string(),
             description,
-            None,
-            None,
+            None, // image_hash
+            None, // image_key
+            None, // image_nonce
             vec![relay_url],
+            vec![my_pubkey], // admins - moved from create_group call
         );
 
         // Resolve member KeyPackage events before engine usage (awaits allowed here)
@@ -380,12 +381,11 @@ impl MlsService {
                 .create_group(
                     &my_pubkey,
                     member_kp_events,              // invited devices' keypackage events
-                    vec![my_pubkey],               // creator as admin
-                    group_config,
+                    group_config,                  // admins now in config
                 )
                 .map_err(|e| MlsError::NostrMlsError(format!("create_group: {}", e)))?;
 
-            // GroupId has as_slice() method for getting bytes (engine-local id).
+            // GroupId is already a GroupId type in MDK (no conversion needed)
             let gid_bytes = create_out.group.mls_group_id.as_slice();
             let engine_gid_hex = hex::encode(gid_bytes);
 
@@ -399,8 +399,7 @@ impl MlsService {
                         vec!["true"],
                     ))
                     .build(*&my_pubkey);
-                let gid = GroupId::from_slice(gid_bytes);
-                if let Ok(wrapper) = engine.create_message(&gid, dummy_rumor) {
+                if let Ok(wrapper) = engine.create_message(&create_out.group.mls_group_id, dummy_rumor) {
                     if let Some(h_tag) = wrapper
                         .tags
                         .find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)))
@@ -1603,8 +1602,8 @@ impl MlsService {
             );
 
             // Two independent in-memory MLS engines (no disk I/O)
-            let kim_mls = NostrMls::new(NostrMlsMemoryStorage::default());
-            let saul_mls = NostrMls::new(NostrMlsMemoryStorage::default());
+            let kim_mls = MDK::new(MdkSqliteStorage::new(":memory:").map_err(|e| MlsError::StorageError(e.to_string()))?);
+            let saul_mls = MDK::new(MdkSqliteStorage::new(":memory:").map_err(|e| MlsError::StorageError(e.to_string()))?);
 
             // RelayUrl (nostr-mls type)
             let relay_url = RelayUrl::parse(relay)
@@ -1643,9 +1642,11 @@ impl MlsService {
             let group_config = NostrGroupConfigData::new(
                 name,
                 description,
-                None,
-                None,
+                None, // image_hash
+                None, // image_key
+                None, // image_nonce
                 vec![relay_url.clone()],
+                vec![kim_keys.public_key()], // admins - moved from create_group call
             );
     
             // IMPORTANT: Non-empty member_key_package_events (Saul). The creator (Kim) must not be in member_key_package_events.
@@ -1653,8 +1654,7 @@ impl MlsService {
                 .create_group(
                     &kim_keys.public_key(),
                     vec![saul_kp_event.clone()],      // Saul invited via his KeyPackage
-                    vec![kim_keys.public_key()],      // Only Kim as admin for this smoke test
-                    group_config,
+                    group_config,                     // admins now in config
                 )
                 .map_err(|e| MlsError::NostrMlsError(format!("create_group (kim): {}", e)))?;
     
@@ -1683,7 +1683,7 @@ impl MlsService {
             println!("[MLS Smoke Test] Saul joined the group locally");
 
             // 3) Kim sends an MLS application message and publishes the wrapper to the relay
-            let group_id = GroupId::from_slice(kim_group.mls_group_id.as_slice());
+            let group_id = &kim_group.mls_group_id; // Already a GroupId in MDK
             println!("[MLS Smoke Test] Kim sending application message...");
             let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "Vector-MLS-Test: hello")
                 .tag(Tag::custom(
