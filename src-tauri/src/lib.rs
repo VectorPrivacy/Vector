@@ -2418,7 +2418,7 @@ async fn notifs() -> Result<bool, String> {
                                 Ok(res) => {
                                     // Use unified storage via process_rumor
                                     match res {
-                                        nostr_mls::prelude::MessageProcessingResult::ApplicationMessage(msg) => {
+                                        mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => {
                                             // Convert to RumorEvent for protocol-agnostic processing
                                             let rumor_event = crate::rumor::RumorEvent {
                                                 id: msg.id,
@@ -3722,7 +3722,7 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
     let (kp_encoded, kp_tags) = {
         let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
         let engine = mls_service.engine().map_err(|e| e.to_string())?;
-        let relay_url = nostr_mls::prelude::RelayUrl::parse(TRUSTED_RELAY).map_err(|e| e.to_string())?;
+        let relay_url = nostr_sdk::RelayUrl::parse(TRUSTED_RELAY).map_err(|e| e.to_string())?;
         engine
             .create_key_package_for_event(&my_pubkey, [relay_url])
             .map_err(|e| e.to_string())?
@@ -4264,7 +4264,7 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                     nostr_group_id: hex::encode(w.nostr_group_id),
                     group_name: w.group_name.clone(),
                     group_description: Some(w.group_description.clone()),
-                    group_image_url: w.group_image_url.clone(),
+                    group_image_url: None, // MDK uses group_image_hash/key/nonce instead of URL
                     group_admin_pubkeys: w.group_admin_pubkeys.iter().map(|pk| pk.to_hex()).collect(),
                     group_relays: w.group_relays.iter().map(|r| r.to_string()).collect(),
                     welcomer: w.welcomer.to_hex(),
@@ -4532,7 +4532,7 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
                         };
 
                         // Needed to decode engine group ids
-                        use nostr_mls::prelude::GroupId;
+                        use mdk_core::prelude::GroupId;
 
                         // Build enriched infos with member_count computed from engine (fallback to 0 on any failure)
                         let infos = arr
@@ -4651,7 +4651,7 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
             let engine = mls.engine().map_err(|e| e.to_string())?;
 
             // Try to resolve members via engine API
-            use nostr_mls::prelude::GroupId;
+            use mdk_core::prelude::GroupId;
             use nostr_sdk::prelude::PublicKey;
 
             // Decode engine id to GroupId; fallback to using wire id bytes if needed

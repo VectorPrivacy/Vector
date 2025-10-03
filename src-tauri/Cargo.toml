@@ -23,10 +23,10 @@ tauri-build = { version = "2.2.0", features = [] }
 
 [dependencies]
 #tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-nostr-sdk = { git = "https://github.com/rust-nostr/nostr", tag = "v0.43.0", package = "nostr-sdk", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
-nostr-mls = { git = "https://github.com/rust-nostr/nostr", tag = "v0.43.0", package = "nostr-mls" }
-nostr-mls-memory-storage = { git = "https://github.com/rust-nostr/nostr", tag = "v0.43.0", package = "nostr-mls-memory-storage" }
-nostr-mls-sqlite-storage = { git = "https://github.com/rust-nostr/nostr", tag = "v0.43.0", package = "nostr-mls-sqlite-storage" }
+nostr-sdk = { version = "0.43", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
+mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
+mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
 bip39 = { version = "2.1.0", features = ["rand"] }
 tokio = { version = "1.45.1", features = ["sync"] }
 futures-util = "0.3.31"
