@@ -3779,31 +3779,36 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
                 filter,
                 std::time::Duration::from_secs(5)
             ).await {
-                Ok(events) if !events.is_empty() => {
-                    // Found event on relay, now verify it matches our local KeyPackage
-                    let relay_event = &events[0];
-                    
-                    // Generate our current local KeyPackage to compare
-                    let (local_kp_encoded, _) = {
-                        let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-                        let engine = mls_service.engine().map_err(|e| e.to_string())?;
-                        let relay_url = nostr_sdk::RelayUrl::parse(TRUSTED_RELAY).map_err(|e| e.to_string())?;
-                        engine
-                            .create_key_package_for_event(&my_pubkey, [relay_url])
-                            .map_err(|e| e.to_string())?
-                    };
-                    
-                    // Compare the content
-                    if relay_event.content == local_kp_encoded {
-                        println!("[MLS][KeyPackage] Verified on relay and matches local, using cached");
-                        return Ok(serde_json::json!({
-                            "device_id": device_id,
-                            "owner_pubkey": owner_pubkey_b32,
-                            "keypackage_ref": ref_id,
-                            "cached": true
-                        }));
+                Ok(events) => {
+                    // Check if we got any events
+                    if let Some(relay_event) = events.iter().next() {
+                        // Found event on relay, now verify it matches our local KeyPackage
+                        
+                        // Generate our current local KeyPackage to compare
+                        let (local_kp_encoded, _) = {
+                            let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+                            let engine = mls_service.engine().map_err(|e| e.to_string())?;
+                            let relay_url = nostr_sdk::RelayUrl::parse(TRUSTED_RELAY).map_err(|e| e.to_string())?;
+                            engine
+                                .create_key_package_for_event(&my_pubkey, [relay_url])
+                                .map_err(|e| e.to_string())?
+                        };
+                        
+                        // Compare the content
+                        if relay_event.content == local_kp_encoded {
+                            println!("[MLS][KeyPackage] Verified on relay and matches local, using cached");
+                            return Ok(serde_json::json!({
+                                "device_id": device_id,
+                                "owner_pubkey": owner_pubkey_b32,
+                                "keypackage_ref": ref_id,
+                                "cached": true
+                            }));
+                        } else {
+                            println!("[MLS][KeyPackage] Found on relay but content mismatch, creating new one");
+                            // Fall through to create new KeyPackage
+                        }
                     } else {
-                        println!("[MLS][KeyPackage] Found on relay but content mismatch, creating new one");
+                        println!("[MLS][KeyPackage] Not found on relay, creating new one");
                         // Fall through to create new KeyPackage
                     }
                 }
