@@ -596,6 +596,30 @@ domSettingsLogout.onclick = async (evt) => {
     await invoke('logout');
 };
 
+// Listen for Deep Rescan clicks
+const domSettingsDeepRescan = document.getElementById('deep-rescan-btn');
+domSettingsDeepRescan.onclick = async (evt) => {
+    try {
+        // Prompt for confirmation first
+        const fConfirm = await popupConfirm('Deep Rescan', 'This will forcefully sync your message history backwards in two-day sections until 30 days of no events are found. This may take some time. Continue?', false, '', 'vector_warning.svg');
+        if (!fConfirm) return;
+
+        // Check if already scanning (only after user confirms)
+        const isScanning = await invoke('is_scanning');
+        if (isScanning) {
+            await popupConfirm('Already Scanning!', 'Please wait for the current scan to finish before starting a deep rescan.', true, '', 'vector_warning.svg');
+            return;
+        }
+
+        // Start the deep rescan
+        await invoke('deep_rescan');
+        await popupConfirm('Deep Rescan Started', 'The deep rescan has been initiated. You can continue using the app while it runs in the background.', true, '', 'vector-check.svg');
+    } catch (error) {
+        console.error('Deep rescan failed:', error);
+        await popupConfirm('Deep Rescan Failed', error.toString(), true, '', 'vector_warning.svg');
+    }
+};
+
 // Listen for Export Account clicks
 domSettingsExport.onclick = async (evt) => {
     try {
