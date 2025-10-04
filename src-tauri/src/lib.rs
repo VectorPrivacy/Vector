@@ -2546,8 +2546,8 @@ async fn notifs() -> Result<bool, String> {
                                                                 // Emit typing update event
                                                                 if let Some(handle) = TAURI_APP.get() {
                                                                     let _ = handle.emit("typing-update", serde_json::json!({
-                                                                        "chat_id": group_id_for_persist,
-                                                                        "active_typers": active_typers
+                                                                        "conversation_id": group_id_for_persist,
+                                                                        "typers": active_typers
                                                                     }));
                                                                 }
                                                                 
