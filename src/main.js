@@ -822,17 +822,17 @@ function renderMLSInvites() {
                 invite.name ||
                 (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
 
-            const welcomerHex =
-                invite.welcomer_pubkey ||
-                invite.welcomer ||
-                invite.inviter_pubkey ||
-                invite.inviter ||
-                invite.author_pubkey ||
-                '';
+            // Backend returns 'welcomer' as npub string
+            const welcomerNpub = invite.welcomer || '';
 
-            const welcomerShort = welcomerHex
-                ? `${String(welcomerHex).substring(0, 8)}...`
-                : 'Unknown';
+            // Get display name from profile (nickname > name > npub prefix)
+            let welcomerDisplay = 'Unknown';
+            if (welcomerNpub) {
+                const welcomerProfile = getProfile(welcomerNpub);
+                welcomerDisplay = welcomerProfile?.nickname ||
+                                 welcomerProfile?.name ||
+                                 welcomerNpub.substring(0, 16) + '...';
+            }
 
             const memberCount =
                 (invite.member_count ??

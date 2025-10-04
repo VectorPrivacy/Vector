@@ -4403,9 +4403,11 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                     group_name: w.group_name.clone(),
                     group_description: Some(w.group_description.clone()),
                     group_image_url: None, // MDK uses group_image_hash/key/nonce instead of URL
-                    group_admin_pubkeys: w.group_admin_pubkeys.iter().map(|pk| pk.to_hex()).collect(),
+                    group_admin_pubkeys: w.group_admin_pubkeys.iter()
+                        .filter_map(|pk| pk.to_bech32().ok())
+                        .collect(),
                     group_relays: w.group_relays.iter().map(|r| r.to_string()).collect(),
-                    welcomer: w.welcomer.to_hex(),
+                    welcomer: w.welcomer.to_bech32().map_err(|e| e.to_string())?,
                     member_count: w.member_count,
                 });
             }
