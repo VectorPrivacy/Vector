@@ -1104,9 +1104,27 @@ function renderChat(chat) {
                 pChatPreview.textContent = `Sending...`;
             } else if (!cLastMsg.content && cLastMsg.attachments?.length) {
                 // No text content but has attachments; display as an attachment
-                pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+                let senderPrefix = '';
+                if (cLastMsg.mine) {
+                    senderPrefix = 'You: ';
+                } else if (cLastMsg.npub) {
+                    // Get sender's display name (nickname > name > npub prefix)
+                    const senderProfile = getProfile(cLastMsg.npub);
+                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+                    senderPrefix = `${senderName}: `;
+                }
+                pChatPreview.textContent = senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
             } else {
-                pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+                let senderPrefix = '';
+                if (cLastMsg.mine) {
+                    senderPrefix = 'You: ';
+                } else if (cLastMsg.npub) {
+                    // Get sender's display name (nickname > name > npub prefix)
+                    const senderProfile = getProfile(cLastMsg.npub);
+                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+                    senderPrefix = `${senderName}: `;
+                }
+                pChatPreview.textContent = senderPrefix + cLastMsg.content;
                 twemojify(pChatPreview);
             }
         }
@@ -2050,7 +2068,7 @@ function renderProfileTab(cProfile) {
         }
         domProfileAvatar.src = cProfile.avatar;
     } else {
-        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name);
+        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 175);
         domProfileAvatar.replaceWith(newAvatar);
         domProfileAvatar = newAvatar;
     }

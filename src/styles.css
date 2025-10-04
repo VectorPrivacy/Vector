@@ -558,13 +558,11 @@ body {
   margin-right: unset;
 }
 
-.placeholder-avatar p {
-  top: 25px;
+.placeholder-avatar span {
   margin: 0;
-  position: relative;
-  line-height: 0;
-  font-size: 20px;
-  font-size: large !important;
+  line-height: 1;
+  font-size: 16px;
+  font-weight: 600;
   color: rgba(255, 255, 255, 0.75);
 }
 
@@ -656,6 +654,9 @@ body {
 
 .placeholder-avatar {
   border-radius: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .avatar-status-icon {
