@@ -100,7 +100,7 @@ const domPopupInput = document.getElementById('popupInput');
 const picker = document.querySelector('.emoji-picker');
 /** @type {HTMLInputElement} */
 const emojiSearch = document.getElementById('emoji-search-input');
-
+const emojiSearchIcon = document.querySelector('.emoji-search-icon');
 /**
  * The current reaction reference - i.e: a message being reacted to.
  * 
@@ -246,6 +246,7 @@ emojiSearch.addEventListener('input', (e) => {
     const search = e.target.value.toLowerCase();
     
     if (search) {
+         if (emojiSearchIcon) emojiSearchIcon.style.opacity = '0';
         // Hide all sections and show search results
         document.querySelectorAll('.emoji-section').forEach(section => {
             section.style.display = 'none';
@@ -279,6 +280,7 @@ emojiSearch.addEventListener('input', (e) => {
         
         twemojify(resultsGrid);
     } else {
+         if (emojiSearchIcon) emojiSearchIcon.style.opacity = '1';
         // Show all sections when search is cleared
         document.querySelectorAll('.emoji-section').forEach(section => {
             section.style.display = 'block';
