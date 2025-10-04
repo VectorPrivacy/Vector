@@ -1083,31 +1083,39 @@ body {
 }
 
 .emoji-picker {
-  display: none;
-  position: absolute;
-  z-index: 1000;
-  padding: 10px;
+  position: fixed;
+  bottom: 65px; /* Position above the chat input (55px) + 10px margin */
+  left: 50%;
+  transform: translateX(-50%) translateY(100%);
+  background: rgba(10, 10, 10, 0.95);
+  border: 1px solid var(--icon-color-primary);
+  border-radius: 12px;
+  padding: 0;
+  z-index: 2000;
   width: 90%;
   max-width: 400px;
   height: auto;
-  left: 50%;
-  transform: translateX(-50%);
-  border-radius: 8px;
-  border-style: solid;
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+  pointer-events: none;
+  opacity: 0;
   flex-direction: column;
   overflow: hidden;
+  display: flex;
+}
+
+.emoji-picker.visible {
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+  opacity: 1;
 }
 
 .emoji-picker-message-type {
-  border-bottom: none;
-  border-right: none;
-  border-radius: 0;
-  border-top-left-radius: 8px;
-  right: auto;
-  left: 50%;
-  transform: translateX(-50%);
+  /* Keep all borders visible for message type */
+  border: 1px solid var(--icon-color-primary);
+  border-radius: 12px;
 }
 
 .emoji-picker-content {
@@ -1116,10 +1124,11 @@ body {
   overflow: hidden;
   position: relative;
   height: calc(100% - 50px);
+  background-color: transparent;
 }
 
 .emoji-sidebar {
-  width: 40px; 
+  width: 50px; 
   padding: 8px 0;
   display: flex;
   flex-direction: column;
@@ -1128,7 +1137,8 @@ body {
   left: 0;
   top: 0;
   bottom: 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: #202020; 
+  border-top: 4px solid var(--icon-color-primary);
 }
 
 .emoji-category-btn {
@@ -1166,10 +1176,13 @@ body {
 .emoji-main {
   flex: 1;
   padding: 8px;
-  margin-left: 40px; 
+  margin-left: 50px; 
   height: 300px;
   overflow-y: auto; 
-  overflow-x: hidden; 
+  overflow-x: hidden;
+  background-color: #0a0a0a;
+  border-top-right-radius: 12px;
+  border-bottom-right-radius: 12px;
 }
 
 .emoji-section {
@@ -1236,23 +1249,25 @@ body {
 }
 
 .emoji-search-container {
-  padding: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 10px;
+  background-color: #0a0a0a;
+  border-top-right-radius: 12px;
 }
 
 .emoji-search-container input {
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-radius: 8px;
-  background-color: rgba(1, 1, 1, 0.5);
+  background-color: #202020; 
   border: none;
+  color: #fff;
+  font-size: 16px;
 }
 
 .emoji-picker input {
   width: -webkit-fill-available;
-  height: 12px;
-  margin-bottom: 12px;
-  background-color: rgba(1, 1, 1, 0.5);
+  height: 14px;
+  background-color: #202020; 
 }
 
 .emoji-picker span {

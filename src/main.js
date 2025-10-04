@@ -121,7 +121,7 @@ function openEmojiPanel(e) {
     // Open or Close the panel depending on it's state
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
-    if (fClickedInputOrReaction && picker.style.display !== `block`) {
+    if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
         // Load emoji sections
         loadEmojiSections();
 
@@ -129,20 +129,20 @@ function openEmojiPanel(e) {
         /** @type {DOMRect} */
         const rect = (isDefaultPanel ? domChatContact : e.target).getBoundingClientRect();
 
-        // Display the picker
-        picker.style.display = `block`;
-        picker.style.height = 'auto';
-        picker.style.overflow = 'hidden';
+        // Display the picker - use class instead of inline style
+        picker.classList.add('visible');
 
         // Compute its position based on the element calling it
         const pickerRect = picker.getBoundingClientRect();
         if (isDefaultPanel) {
             // Center the picker above the input
-            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height - 5}px`;
             picker.classList.add('emoji-picker-message-type');
-            picker.style.left = '50%';
-            picker.style.right = 'auto';
-            picker.style.transform = 'translateX(-50%)';
+            
+            // Clear any positioning styles from reaction mode
+            picker.style.top = '';
+            picker.style.left = '';
+            picker.style.right = '';
+            picker.style.transform = '';
             
             // Change the emoji button to a wink while the panel is open
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
@@ -194,9 +194,9 @@ function openEmojiPanel(e) {
         // Focus on the emoji search box for easy searching
         emojiSearch.focus();
     } else {
-        // Hide and reset the UI
+        // Hide and reset the UI - use class instead of inline style
         emojiSearch.value = '';
-        picker.style.display = ``;
+        picker.classList.remove('visible');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
@@ -341,8 +341,8 @@ picker.addEventListener('click', (e) => {
                 domChatMessageInput.value += cEmoji.emoji;
             }
             
-            // Close the picker
-            picker.style.display = ``;
+            // Close the picker - use class instead of inline style
+            picker.classList.remove('visible');
             domChatMessageInput.focus();
         }
     }
@@ -399,9 +399,9 @@ emojiSearch.onkeydown = async (e) => {
             domChatMessageInput.value += cEmoji.emoji;
         }
 
-        // Reset the UI state
+        // Reset the UI state - use class instead of inline style
         emojiSearch.value = '';
-        picker.style.display = ``;
+        picker.classList.remove('visible');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
@@ -410,9 +410,9 @@ emojiSearch.onkeydown = async (e) => {
         // Bring the focus back to the chat
         domChatMessageInput.focus();
     } else if (e.code === 'Escape') {
-        // Close the dialog
+        // Close the dialog - use class instead of inline style
         emojiSearch.value = '';
-        picker.style.display = ``;
+        picker.classList.remove('visible');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
