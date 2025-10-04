@@ -1358,6 +1358,61 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     .expect("Failed to convert sender's public key to bech32")
             };
 
+            // Special handling for MLS Welcomes (not processed by rumor processor)
+            if rumor.kind == Kind::MlsWelcome {
+                // Convert rumor Event -> UnsignedEvent
+                let unsigned_opt = serde_json::to_string(&rumor)
+                    .ok()
+                    .and_then(|s| nostr_sdk::UnsignedEvent::from_json(s.as_bytes()).ok());
+
+                if let Some(unsigned) = unsigned_opt {
+                    // Outer giftwrap id is our wrapper id for dedup/logs
+                    let wrapper_id = event.id;
+                    let app_handle = TAURI_APP.get().cloned();
+
+                    // Use blocking thread for non-Send MLS engine
+                    let processed = tokio::task::spawn_blocking(move || {
+                        if app_handle.is_none() {
+                            return false;
+                        }
+                        let handle = app_handle.unwrap();
+                        let svc = MlsService::new_persistent(&handle);
+                        if let Ok(mls) = svc {
+                            if let Ok(engine) = mls.engine() {
+                                match engine.process_welcome(&wrapper_id, &unsigned) {
+                                    Ok(_) => {
+                                        println!("[MLS][live][welcome] processed wrapper_id={}", wrapper_id);
+                                        return true;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[MLS][live][welcome] process_welcome failed wrapper_id={} err={}", wrapper_id, e);
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                        false
+                    })
+                    .await
+                    .unwrap_or(false);
+
+                    if processed {
+                        // Notify UI so invites list can refresh via list_pending_mls_welcomes()
+                        if let Some(app) = TAURI_APP.get() {
+                            let _ = app.emit("mls_invite_received", serde_json::json!({
+                                "wrapper_event_id": wrapper_id.to_hex()
+                            }));
+                        }
+                        return true;
+                    } else {
+                        return false;
+                    }
+                } else {
+                    eprintln!("[MLS][live][welcome] failed to convert rumor to UnsignedEvent");
+                    return false;
+                }
+            }
+
             // Convert rumor to RumorEvent for protocol-agnostic processing
             let rumor_event = RumorEvent {
                 id: rumor.id.unwrap(),
@@ -3693,30 +3748,70 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
     let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
     let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
-    // Load existing keypackage index (plaintext array) and early-return if present (no await)
-    {
+    // Load existing keypackage index and verify it exists on relay before returning cached
+    let cached_kp_ref: Option<String> = {
         let store = db::get_store(&handle);
         let index: Vec<serde_json::Value> = match store.get("mls_keypackage_index") {
             Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
             None => Vec::new(),
         };
 
-        if let Some(existing) = index.iter().find(|entry| {
+        index.iter().find(|entry| {
             entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
                 && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-        }) {
-            let keypackage_ref = existing
-                .get("keypackage_ref")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
+        })
+        .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    };
 
-            return Ok(serde_json::json!({
-                "device_id": device_id,
-                "owner_pubkey": owner_pubkey_b32,
-                "keypackage_ref": keypackage_ref,
-                "cached": true
-            }));
+    // If we have a cached reference, verify it exists on the relay
+    if let Some(ref_id) = cached_kp_ref {
+        println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
+        
+        // Try to fetch the event from the relay to verify it exists
+        if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
+            let filter = Filter::new()
+                .id(event_id)
+                .kind(Kind::MlsKeyPackage)
+                .limit(1);
+            
+            match client.fetch_events_from(
+                vec![TRUSTED_RELAY],
+                filter,
+                std::time::Duration::from_secs(5)
+            ).await {
+                Ok(events) if !events.is_empty() => {
+                    // Found event on relay, now verify it matches our local KeyPackage
+                    let relay_event = &events[0];
+                    
+                    // Generate our current local KeyPackage to compare
+                    let (local_kp_encoded, _) = {
+                        let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+                        let engine = mls_service.engine().map_err(|e| e.to_string())?;
+                        let relay_url = nostr_sdk::RelayUrl::parse(TRUSTED_RELAY).map_err(|e| e.to_string())?;
+                        engine
+                            .create_key_package_for_event(&my_pubkey, [relay_url])
+                            .map_err(|e| e.to_string())?
+                    };
+                    
+                    // Compare the content
+                    if relay_event.content == local_kp_encoded {
+                        println!("[MLS][KeyPackage] Verified on relay and matches local, using cached");
+                        return Ok(serde_json::json!({
+                            "device_id": device_id,
+                            "owner_pubkey": owner_pubkey_b32,
+                            "keypackage_ref": ref_id,
+                            "cached": true
+                        }));
+                    } else {
+                        println!("[MLS][KeyPackage] Found on relay but content mismatch, creating new one");
+                        // Fall through to create new KeyPackage
+                    }
+                }
+                _ => {
+                    println!("[MLS][KeyPackage] Not found on relay, creating new one");
+                    // Fall through to create new KeyPackage
+                }
+            }
         }
     }
 
@@ -4107,7 +4202,7 @@ async fn sync_mls_welcomes_now() -> Result<u32, String> {
     let filter = Filter::new()
         .pubkey(my_public_key)
         .kind(Kind::GiftWrap)
-        .limit(1000);
+        .limit(2000);
 
     let events = match client
         .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(15))
