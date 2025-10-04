@@ -88,6 +88,11 @@ struct PendingInviteAcceptance {
 
 static PENDING_INVITE: OnceCell<PendingInviteAcceptance> = OnceCell::new();
 
+// Track which MLS welcomes we've already sent notifications for (by wrapper_event_id)
+lazy_static! {
+    static ref NOTIFIED_WELCOMES: Mutex<std::collections::HashSet<String>> = Mutex::new(std::collections::HashSet::new());
+}
+
 
 
 
@@ -1358,6 +1363,61 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     .expect("Failed to convert sender's public key to bech32")
             };
 
+            // Special handling for MLS Welcomes (not processed by rumor processor)
+            if rumor.kind == Kind::MlsWelcome {
+                // Convert rumor Event -> UnsignedEvent
+                let unsigned_opt = serde_json::to_string(&rumor)
+                    .ok()
+                    .and_then(|s| nostr_sdk::UnsignedEvent::from_json(s.as_bytes()).ok());
+
+                if let Some(unsigned) = unsigned_opt {
+                    // Outer giftwrap id is our wrapper id for dedup/logs
+                    let wrapper_id = event.id;
+                    let app_handle = TAURI_APP.get().cloned();
+
+                    // Use blocking thread for non-Send MLS engine
+                    let processed = tokio::task::spawn_blocking(move || {
+                        if app_handle.is_none() {
+                            return false;
+                        }
+                        let handle = app_handle.unwrap();
+                        let svc = MlsService::new_persistent(&handle);
+                        if let Ok(mls) = svc {
+                            if let Ok(engine) = mls.engine() {
+                                match engine.process_welcome(&wrapper_id, &unsigned) {
+                                    Ok(_) => {
+                                        println!("[MLS][live][welcome] processed wrapper_id={}", wrapper_id);
+                                        return true;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[MLS][live][welcome] process_welcome failed wrapper_id={} err={}", wrapper_id, e);
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                        false
+                    })
+                    .await
+                    .unwrap_or(false);
+
+                    if processed {
+                        // Notify UI so invites list can refresh via list_pending_mls_welcomes()
+                        if let Some(app) = TAURI_APP.get() {
+                            let _ = app.emit("mls_invite_received", serde_json::json!({
+                                "wrapper_event_id": wrapper_id.to_hex()
+                            }));
+                        }
+                        return true;
+                    } else {
+                        return false;
+                    }
+                } else {
+                    eprintln!("[MLS][live][welcome] failed to convert rumor to UnsignedEvent");
+                    return false;
+                }
+            }
+
             // Convert rumor to RumorEvent for protocol-agnostic processing
             let rumor_event = RumorEvent {
                 id: rumor.id.unwrap(),
@@ -1452,9 +1512,10 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
             }
         };
             
-        // Send notification outside of state lock
+        // Send notification outside of state lock using new generic system
         if let Some((display_name, content)) = display_info {
-            show_notification(display_name, content);
+            let notification = NotificationData::direct_message(display_name, content);
+            show_notification_generic(notification);
         }
     }
 
@@ -1526,17 +1587,37 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
             }
         };
         
-        // Send notification outside of state lock
+        // Send notification outside of state lock using new generic system
         if let Some((display_name, file_extension)) = display_info {
-            show_notification(display_name, "Sent a ".to_string() + &get_file_type_description(&file_extension));
+            let file_description = "Sent a ".to_string() + &get_file_type_description(&file_extension);
+            let notification = NotificationData::direct_message(display_name, file_description);
+            show_notification_generic(notification);
         }
     }
 
-    // Add the message to the state and handle database save in one operation to avoid multiple locks
-    let was_msg_added_to_state = {
+    // Add the message to the state and clear typing indicator for sender
+    let (was_msg_added_to_state, active_typers) = {
         let mut state = STATE.lock().await;
-        state.add_message_to_participant(contact, msg.clone())
+        let added = state.add_message_to_participant(contact, msg.clone());
+        
+        // Clear typing indicator for the sender (they just sent a message)
+        let typers = if let Some(chat) = state.get_chat_mut(contact) {
+            chat.update_typing_participant(contact.to_string(), 0); // 0 = clear immediately
+            chat.get_active_typers()
+        } else {
+            Vec::new()
+        };
+        
+        (added, typers)
     };
+    
+    // Emit typing update to clear the indicator on frontend
+    if let Some(handle) = TAURI_APP.get() {
+        let _ = handle.emit("typing-update", serde_json::json!({
+            "conversation_id": contact,
+            "typers": active_typers
+        }));
+    }
 
     // If accepted in-state: commit to the DB and emit to the frontend
     if was_msg_added_to_state {
@@ -2447,14 +2528,187 @@ async fn notifs() -> Result<bool, String> {
                                                 match process_rumor(rumor_event, rumor_context).await {
                                                     Ok(result) => {
                                                         match result {
-                                                            RumorProcessingResult::TextMessage(message) | RumorProcessingResult::FileAttachment(message) => {
-                                                                // Add to unified storage
-                                                                let was_added = {
+                                                            RumorProcessingResult::TextMessage(message) => {
+                                                                // Clear typing indicator for this sender (they just sent a message)
+                                                                let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
+                                                                
+                                                                let (was_added, active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    state.add_message_to_chat(&group_id_for_persist, message.clone())
+                                                                    
+                                                                    // Add message to chat
+                                                                    let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
+                                                                    
+                                                                    // Check if we should send notification (not muted, not mine)
+                                                                    let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
+                                                                        !chat.muted && !message.mine
+                                                                    } else {
+                                                                        false
+                                                                    };
+                                                                    
+                                                                    // Clear typing indicator for sender
+                                                                    let typers = if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
+                                                                        chat.update_typing_participant(sender_npub.clone(), 0); // 0 = clear immediately
+                                                                        chat.get_active_typers()
+                                                                    } else {
+                                                                        Vec::new()
+                                                                    };
+                                                                    
+                                                                    (added, typers, notify)
                                                                 };
                                                                 
+                                                                // Send OS notification for new group messages
+                                                                if was_added && should_notify {
+                                                                    // Get sender name and group name for notification
+                                                                    let (sender_name, group_name) = {
+                                                                        let state = crate::STATE.lock().await;
+                                                                        
+                                                                        let sender = if let Some(profile) = state.get_profile(&sender_npub) {
+                                                                            if !profile.nickname.is_empty() {
+                                                                                profile.nickname.clone()
+                                                                            } else if !profile.name.is_empty() {
+                                                                                profile.name.clone()
+                                                                            } else {
+                                                                                "Someone".to_string()
+                                                                            }
+                                                                        } else {
+                                                                            "Someone".to_string()
+                                                                        };
+                                                                        
+                                                                        let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
+                                                                            chat.metadata.get_name().unwrap_or("Group Chat").to_string()
+                                                                        } else {
+                                                                            "Group Chat".to_string()
+                                                                        };
+                                                                        
+                                                                        (sender, group)
+                                                                    };
+                                                                    
+                                                                    // Create notification for text message
+                                                                    let notification = NotificationData::group_message(sender_name, group_name, message.content.clone());
+                                                                    show_notification_generic(notification);
+                                                                }
+                                                                
+                                                                // Emit typing update to clear the indicator on frontend
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let _ = handle.emit("typing-update", serde_json::json!({
+                                                                        "conversation_id": group_id_for_persist,
+                                                                        "typers": active_typers
+                                                                    }));
+                                                                }
+                                                                
+                                                                // Save to database if message was added
                                                                 if was_added {
+                                                                    if let Some(handle) = TAURI_APP.get() {
+                                                                        // Get chat and save it
+                                                                        let chat_to_save = {
+                                                                            let state = crate::STATE.lock().await;
+                                                                            state.get_chat(&group_id_for_persist).cloned()
+                                                                        };
+                                                                        
+                                                                        if let Some(chat) = chat_to_save {
+                                                                            use crate::db_migration::{save_chat, save_chat_messages};
+                                                                            let _ = save_chat(handle.clone(), &chat).await;
+                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &chat.messages).await;
+                                                                        }
+                                                                    }
+                                                                    Some(message)
+                                                                } else {
+                                                                    None
+                                                                }
+                                                            }
+                                                            RumorProcessingResult::FileAttachment(message) => {
+                                                                // Clear typing indicator for this sender (they just sent a message)
+                                                                let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
+                                                                let is_file = true;
+                                                                
+                                                                let (was_added, active_typers, should_notify) = {
+                                                                    let mut state = crate::STATE.lock().await;
+                                                                    
+                                                                    // Add message to chat
+                                                                    let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
+                                                                    
+                                                                    // Check if we should send notification (not muted, not mine)
+                                                                    let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
+                                                                        !chat.muted && !message.mine
+                                                                    } else {
+                                                                        false
+                                                                    };
+                                                                    
+                                                                    // Clear typing indicator for sender
+                                                                    let typers = if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
+                                                                        chat.update_typing_participant(sender_npub.clone(), 0); // 0 = clear immediately
+                                                                        chat.get_active_typers()
+                                                                    } else {
+                                                                        Vec::new()
+                                                                    };
+                                                                    
+                                                                    (added, typers, notify)
+                                                                };
+                                                                
+                                                                // Send OS notification for new group messages
+                                                                if was_added && should_notify {
+                                                                    // Get sender name and group name for notification
+                                                                    let (sender_name, group_name) = {
+                                                                        let state = crate::STATE.lock().await;
+                                                                        
+                                                                        let sender = if let Some(profile) = state.get_profile(&sender_npub) {
+                                                                            if !profile.nickname.is_empty() {
+                                                                                profile.nickname.clone()
+                                                                            } else if !profile.name.is_empty() {
+                                                                                profile.name.clone()
+                                                                            } else {
+                                                                                "Someone".to_string()
+                                                                            }
+                                                                        } else {
+                                                                            "Someone".to_string()
+                                                                        };
+                                                                        
+                                                                        let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
+                                                                            chat.metadata.get_name().unwrap_or("Group Chat").to_string()
+                                                                        } else {
+                                                                            "Group Chat".to_string()
+                                                                        };
+                                                                        
+                                                                        (sender, group)
+                                                                    };
+                                                                    
+                                                                    // Create appropriate notification (both text and files use group_message)
+                                                                    let content = if is_file {
+                                                                        let extension = message.attachments.first()
+                                                                            .map(|att| att.extension.clone())
+                                                                            .unwrap_or_else(|| String::from("file"));
+                                                                        "Sent a ".to_string() + &get_file_type_description(&extension)
+                                                                    } else {
+                                                                        message.content.clone()
+                                                                    };
+                                                                    let notification = NotificationData::group_message(sender_name, group_name, content);
+                                                                    
+                                                                    show_notification_generic(notification);
+                                                                }
+                                                                
+                                                                // Emit typing update to clear the indicator on frontend
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let _ = handle.emit("typing-update", serde_json::json!({
+                                                                        "conversation_id": group_id_for_persist,
+                                                                        "typers": active_typers
+                                                                    }));
+                                                                }
+                                                                
+                                                                // Save to database if message was added
+                                                                if was_added {
+                                                                    if let Some(handle) = TAURI_APP.get() {
+                                                                        // Get chat and save it
+                                                                        let chat_to_save = {
+                                                                            let state = crate::STATE.lock().await;
+                                                                            state.get_chat(&group_id_for_persist).cloned()
+                                                                        };
+                                                                        
+                                                                        if let Some(chat) = chat_to_save {
+                                                                            use crate::db_migration::{save_chat, save_chat_messages};
+                                                                            let _ = save_chat(handle.clone(), &chat).await;
+                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &chat.messages).await;
+                                                                        }
+                                                                    }
                                                                     Some(message)
                                                                 } else {
                                                                     None
@@ -2491,8 +2745,8 @@ async fn notifs() -> Result<bool, String> {
                                                                 // Emit typing update event
                                                                 if let Some(handle) = TAURI_APP.get() {
                                                                     let _ = handle.emit("typing-update", serde_json::json!({
-                                                                        "chat_id": group_id_for_persist,
-                                                                        "active_typers": active_typers
+                                                                        "conversation_id": group_id_for_persist,
+                                                                        "typers": active_typers
                                                                     }));
                                                                 }
                                                                 
@@ -2748,11 +3002,67 @@ async fn monitor_relay_connections() -> Result<bool, String> {
     Ok(true)
 }
 
-#[tauri::command]
-fn show_notification(title: String, content: String) {
+/// Notification type enum for different kinds of notifications
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NotificationType {
+    DirectMessage,
+    GroupMessage,
+    GroupInvite,
+}
+
+/// Generic notification data structure
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct NotificationData {
+    notification_type: NotificationType,
+    title: String,
+    body: String,
+    /// Optional group name for group-related notifications
+    group_name: Option<String>,
+    /// Optional sender name
+    sender_name: Option<String>,
+}
+
+impl NotificationData {
+    /// Create a DM notification (works for both text and file attachments)
+    fn direct_message(sender_name: String, content: String) -> Self {
+        Self {
+            notification_type: NotificationType::DirectMessage,
+            title: sender_name.clone(),
+            body: content,
+            group_name: None,
+            sender_name: Some(sender_name),
+        }
+    }
+
+    /// Create a group message notification (works for both text and file attachments)
+    fn group_message(sender_name: String, group_name: String, content: String) -> Self {
+        Self {
+            notification_type: NotificationType::GroupMessage,
+            title: format!("{} - {}", sender_name, group_name),
+            body: content,
+            group_name: Some(group_name),
+            sender_name: Some(sender_name),
+        }
+    }
+
+    /// Create a group invite notification
+    fn group_invite(group_name: String, inviter_name: String) -> Self {
+        Self {
+            notification_type: NotificationType::GroupInvite,
+            title: format!("Group Invite: {}", group_name),
+            body: format!("Invited by {}", inviter_name),
+            group_name: Some(group_name),
+            sender_name: Some(inviter_name),
+        }
+    }
+}
+
+/// Show an OS notification with generic notification data
+fn show_notification_generic(data: NotificationData) {
     let handle = TAURI_APP.get().unwrap();
+    
     // Only send notifications if the app is not focused
-    // TODO: generalise this assumption - it's only used for Message Notifications at the moment
     if !handle
         .webview_windows()
         .iter()
@@ -2764,15 +3074,21 @@ fn show_notification(title: String, content: String) {
     {
         #[cfg(target_os = "android")]
         {
+            // Determine summary based on notification type
+            let summary = match data.notification_type {
+                NotificationType::DirectMessage => "Private Message",
+                NotificationType::GroupMessage => "Group Message",
+                NotificationType::GroupInvite => "Group Invite",
+            };
+            
             handle
                 .notification()
                 .builder()
-                .title(title)
-                .body(&content)
-                .large_body(&content)
-                // Android-specific notification extensions
+                .title(&data.title)
+                .body(&data.body)
+                .large_body(&data.body)
                 .icon("ic_notification")
-                .summary("Private Message")
+                .summary(summary)
                 .large_icon("ic_large_icon")
                 .show()
                 .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
@@ -2783,13 +3099,26 @@ fn show_notification(title: String, content: String) {
             handle
                 .notification()
                 .builder()
-                .title(title)
-                .body(&content)
-                .large_body(&content)
+                .title(&data.title)
+                .body(&data.body)
+                .large_body(&data.body)
                 .show()
                 .unwrap_or_else(|e| eprintln!("Failed to send notification: {}", e));
         }
     }
+}
+
+/// Legacy notification function for backwards compatibility
+#[tauri::command]
+fn show_notification(title: String, content: String) {
+    let data = NotificationData {
+        notification_type: NotificationType::DirectMessage,
+        title,
+        body: content,
+        group_name: None,
+        sender_name: None,
+    };
+    show_notification_generic(data);
 }
 
 /// Decrypts and saves an attachment to disk
@@ -3693,30 +4022,57 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
     let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
     let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
-    // Load existing keypackage index (plaintext array) and early-return if present (no await)
-    {
+    // Load existing keypackage index and verify it exists on relay before returning cached
+    let cached_kp_ref: Option<String> = {
         let store = db::get_store(&handle);
         let index: Vec<serde_json::Value> = match store.get("mls_keypackage_index") {
             Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
             None => Vec::new(),
         };
 
-        if let Some(existing) = index.iter().find(|entry| {
+        index.iter().find(|entry| {
             entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
                 && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-        }) {
-            let keypackage_ref = existing
-                .get("keypackage_ref")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
+        })
+        .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    };
 
-            return Ok(serde_json::json!({
-                "device_id": device_id,
-                "owner_pubkey": owner_pubkey_b32,
-                "keypackage_ref": keypackage_ref,
-                "cached": true
-            }));
+    // If we have a cached reference, verify it exists on the relay
+    if let Some(ref_id) = cached_kp_ref {
+        println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
+        
+        // Try to fetch the event from the relay to verify it exists
+        if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
+            let filter = Filter::new()
+                .id(event_id)
+                .kind(Kind::MlsKeyPackage)
+                .limit(1);
+            
+            match client.fetch_events_from(
+                vec![TRUSTED_RELAY],
+                filter,
+                std::time::Duration::from_secs(5)
+            ).await {
+                Ok(events) => {
+                    // Check if we got any events - if so, the cached KeyPackage exists on relay
+                    if events.iter().next().is_some() {
+                        println!("[MLS][KeyPackage] Verified on relay, using cached");
+                        return Ok(serde_json::json!({
+                            "device_id": device_id,
+                            "owner_pubkey": owner_pubkey_b32,
+                            "keypackage_ref": ref_id,
+                            "cached": true
+                        }));
+                    } else {
+                        println!("[MLS][KeyPackage] Not found on relay, creating new one");
+                        // Fall through to create new KeyPackage
+                    }
+                }
+                _ => {
+                    println!("[MLS][KeyPackage] Not found on relay, creating new one");
+                    // Fall through to create new KeyPackage
+                }
+            }
         }
     }
 
@@ -4084,146 +4440,6 @@ async fn sync_mls_groups_now(
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-    /// Scan trusted relay for GiftWraps addressed to us, unwrap and ingest MLS Welcomes
-#[tauri::command]
-async fn sync_mls_welcomes_now() -> Result<u32, String> {
-    use nostr_sdk::prelude::*;
-
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-
-    // Resolve my pubkey for filter
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
-    let my_npub = my_public_key.to_bech32().unwrap_or_default();
-
-    println!(
-        "[MLS][welcomes] begin sync for npub={}, relay={}",
-        my_npub,
-        TRUSTED_RELAY
-    );
-
-    // Filter GiftWraps "to me" (Kind 1059) - standard format for MLS Welcomes
-    let filter = Filter::new()
-        .pubkey(my_public_key)
-        .kind(Kind::GiftWrap)
-        .limit(1000);
-
-    let events = match client
-        .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(15))
-        .await
-    {
-        Ok(evts) => {
-            println!("[MLS][welcomes] fetched {} GiftWrap events", evts.len());
-            evts
-        }
-        Err(e) => {
-            eprintln!("[MLS][welcomes] fetch failed: {}", e);
-            return Err(e.to_string());
-        }
-    };
-
-    if events.is_empty() {
-        println!("[MLS][welcomes] no GiftWraps found for npub={}", my_npub);
-        return Ok(0);
-    }
-
-    // Ingest welcomes using non-Send MLS engine on blocking thread
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            println!("[MLS][welcomes] unwrap phase starting ({} wrappers)...", events.len());
-
-            // Phase 1: unwrap all GiftWraps (async) BEFORE acquiring engine to avoid awaits with engine in scope
-            let mut unwrapped: Vec<(nostr_sdk::EventId, nostr_sdk::UnsignedEvent)> = Vec::new();
-            let mut unwrap_failures: u32 = 0;
-
-            for wrapper in events {
-                let wid = wrapper.id;
-                // Log receipt before unwrap for direct grepping
-                let author_b32 = wrapper.pubkey.to_bech32().unwrap_or_default();
-                println!("[MLS][welcomes][recv] wrapper_id={}, author={}", wid, author_b32);
-                match client.unwrap_gift_wrap(&wrapper).await {
-                    Ok(u) => {
-                        // Convert rumor Event -> UnsignedEvent via JSON round-trip
-                        match serde_json::to_string(&u.rumor)
-                            .ok()
-                            .and_then(|s| nostr_sdk::UnsignedEvent::from_json(s.as_bytes()).ok())
-                        {
-                            Some(unsigned) => {
-                                println!("[MLS][welcomes] unwrapped wrapper_id={}", wid);
-                                unwrapped.push((wid, unsigned));
-                            }
-                            None => {
-                                unwrap_failures = unwrap_failures.saturating_add(1);
-                                eprintln!(
-                                    "[MLS][welcomes] failed to convert rumor to UnsignedEvent for wrapper_id={}",
-                                    wid
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        unwrap_failures = unwrap_failures.saturating_add(1);
-                        eprintln!("[MLS][welcomes] unwrap_gift_wrap failed wrapper_id={} err={}", wid, e);
-                    }
-                }
-            }
-
-            println!(
-                "[MLS][welcomes] unwrap phase complete: successes={}, failures={}",
-                unwrapped.len(),
-                unwrap_failures
-            );
-
-            // Phase 2: create engine and process welcomes (no awaits while engine is in scope)
-            let mls = match MlsService::new_persistent(&handle) {
-                Ok(s) => {
-                    println!("[MLS][welcomes] persistent engine opened");
-                    s
-                }
-                Err(e) => {
-                    eprintln!("[MLS][welcomes] failed to init persistent engine: {}", e);
-                    return Err(e.to_string());
-                }
-            };
-            let engine = match mls.engine() {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("[MLS][welcomes] failed to get engine: {}", e);
-                    return Err(e.to_string());
-                }
-            };
-
-            let mut ingested: u32 = 0;
-            for (wrapper_id, unsigned) in unwrapped.iter() {
-                match engine.process_welcome(wrapper_id, unsigned) {
-                    Ok(_welcome) => {
-                        ingested = ingested.saturating_add(1);
-                        println!(
-                            "[MLS][welcomes] processed welcome wrapper_id={}",
-                            wrapper_id
-                        );
-                    }
-                    Err(e) => {
-                        // Not a welcome or invalid; continue
-                        eprintln!(
-                            "[MLS][welcomes] process_welcome failed wrapper_id={} err={}",
-                            wrapper_id,
-                            e
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            println!("[MLS][welcomes] done: ingested={}", ingested);
-            Ok::<u32, String>(ingested)
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
 
 /// Simplified representation of a pending MLS Welcome for UI
 #[derive(serde::Serialize)]
@@ -4250,7 +4466,7 @@ struct SimpleWelcome {
 #[tauri::command]
 async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
     // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
+    let welcomes: Vec<SimpleWelcome> = tokio::task::spawn_blocking(move || {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
@@ -4268,18 +4484,57 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                     group_name: w.group_name.clone(),
                     group_description: Some(w.group_description.clone()),
                     group_image_url: None, // MDK uses group_image_hash/key/nonce instead of URL
-                    group_admin_pubkeys: w.group_admin_pubkeys.iter().map(|pk| pk.to_hex()).collect(),
+                    group_admin_pubkeys: w.group_admin_pubkeys.iter()
+                        .filter_map(|pk| pk.to_bech32().ok())
+                        .collect(),
                     group_relays: w.group_relays.iter().map(|r| r.to_string()).collect(),
-                    welcomer: w.welcomer.to_hex(),
+                    welcomer: w.welcomer.to_bech32().map_err(|e| e.to_string())?,
                     member_count: w.member_count,
                 });
             }
 
-            Ok(out)
+            Ok::<Vec<SimpleWelcome>, String>(out)
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+    
+    // Send notifications for new welcomes (outside blocking task)
+    // Only notify for welcomes we haven't notified about before
+    {
+        let mut notified = NOTIFIED_WELCOMES.lock().await;
+        
+        for welcome in &welcomes {
+            // Skip if we've already notified about this welcome
+            if notified.contains(&welcome.wrapper_event_id) {
+                continue;
+            }
+            
+            // Get inviter's display name
+            let inviter_name = {
+                let state = STATE.lock().await;
+                if let Some(profile) = state.get_profile(&welcome.welcomer) {
+                    if !profile.nickname.is_empty() {
+                        profile.nickname.clone()
+                    } else if !profile.name.is_empty() {
+                        profile.name.clone()
+                    } else {
+                        "Someone".to_string()
+                    }
+                } else {
+                    "Someone".to_string()
+                }
+            };
+            
+            let notification = NotificationData::group_invite(welcome.group_name.clone(), inviter_name);
+            show_notification_generic(notification);
+            
+            // Mark this welcome as notified
+            notified.insert(welcome.wrapper_event_id.clone());
+        }
+    }
+    
+    Ok(welcomes)
 }
 
 /// Accept an MLS welcome by its welcome (rumor) event id hex
@@ -4293,7 +4548,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
             
             // Get welcome details and accept it (engine work in no-await scope)
-            let (nostr_group_id, engine_group_id, group_name, welcomer_hex) = {
+            let (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex) = {
                 let engine = mls.engine().map_err(|e| e.to_string())?;
                 
                 let id = nostr_sdk::EventId::from_hex(&welcome_event_id_hex).map_err(|e| e.to_string())?;
@@ -4304,6 +4559,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 let nostr_group_id_bytes = welcome.nostr_group_id.clone();
                 let group_name = welcome.group_name.clone();
                 let welcomer_hex = welcome.welcomer.to_hex();
+                let wrapper_id_hex = welcome.wrapper_event_id.to_hex();
                 
                 // Accept the welcome - this updates engine state internally
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
@@ -4349,7 +4605,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 println!("[MLS]   - engine_group_id: {}", engine_group_id);
                 println!("[MLS]   - group_name: {}", group_name);
                 
-                (nostr_group_id, engine_group_id, group_name, welcomer_hex)
+                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_id_hex)
             }; // engine dropped here
             
             // Now persist the group metadata (awaitable section)
@@ -4402,6 +4658,12 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
             }
 
+            // Remove this welcome from the notified set since it's been accepted
+            {
+                let mut notified = NOTIFIED_WELCOMES.lock().await;
+                notified.remove(&wrapper_event_id_hex);
+            }
+            
             // Emit event so the UI can refresh welcome lists and group lists
             if let Some(app) = TAURI_APP.get() {
                 let _ = app.emit("mls_welcome_accepted", serde_json::json!({
@@ -5046,7 +5308,6 @@ pub fn run() {
             list_mls_groups,
             list_mls_groups_detailed,
             // MLS welcome/invite commands
-            sync_mls_welcomes_now,
             list_pending_mls_welcomes,
             accept_mls_welcome,
             // MLS advanced helpers
