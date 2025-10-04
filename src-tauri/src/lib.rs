@@ -1587,11 +1587,29 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
         }
     }
 
-    // Add the message to the state and handle database save in one operation to avoid multiple locks
-    let was_msg_added_to_state = {
+    // Add the message to the state and clear typing indicator for sender
+    let (was_msg_added_to_state, active_typers) = {
         let mut state = STATE.lock().await;
-        state.add_message_to_participant(contact, msg.clone())
+        let added = state.add_message_to_participant(contact, msg.clone());
+        
+        // Clear typing indicator for the sender (they just sent a message)
+        let typers = if let Some(chat) = state.get_chat_mut(contact) {
+            chat.update_typing_participant(contact.to_string(), 0); // 0 = clear immediately
+            chat.get_active_typers()
+        } else {
+            Vec::new()
+        };
+        
+        (added, typers)
     };
+    
+    // Emit typing update to clear the indicator on frontend
+    if let Some(handle) = TAURI_APP.get() {
+        let _ = handle.emit("typing-update", serde_json::json!({
+            "conversation_id": contact,
+            "typers": active_typers
+        }));
+    }
 
     // If accepted in-state: commit to the DB and emit to the frontend
     if was_msg_added_to_state {
@@ -2503,13 +2521,48 @@ async fn notifs() -> Result<bool, String> {
                                                     Ok(result) => {
                                                         match result {
                                                             RumorProcessingResult::TextMessage(message) | RumorProcessingResult::FileAttachment(message) => {
-                                                                // Add to unified storage
-                                                                let was_added = {
+                                                                // Clear typing indicator for this sender (they just sent a message)
+                                                                let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
+                                                                let (was_added, active_typers) = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    state.add_message_to_chat(&group_id_for_persist, message.clone())
+                                                                    
+                                                                    // Add message to chat
+                                                                    let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
+                                                                    
+                                                                    // Clear typing indicator for sender
+                                                                    let typers = if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
+                                                                        chat.update_typing_participant(sender_npub, 0); // 0 = clear immediately
+                                                                        chat.get_active_typers()
+                                                                    } else {
+                                                                        Vec::new()
+                                                                    };
+                                                                    
+                                                                    (added, typers)
                                                                 };
                                                                 
+                                                                // Emit typing update to clear the indicator on frontend
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let _ = handle.emit("typing-update", serde_json::json!({
+                                                                        "conversation_id": group_id_for_persist,
+                                                                        "typers": active_typers
+                                                                    }));
+                                                                }
+                                                                
+                                                                // Save to database if message was added
                                                                 if was_added {
+                                                                    if let Some(handle) = TAURI_APP.get() {
+                                                                        // Get chat and save it
+                                                                        let chat_to_save = {
+                                                                            let state = crate::STATE.lock().await;
+                                                                            state.get_chat(&group_id_for_persist).cloned()
+                                                                        };
+                                                                        
+                                                                        if let Some(chat) = chat_to_save {
+                                                                            use crate::db_migration::{save_chat, save_chat_messages};
+                                                                            let _ = save_chat(handle.clone(), &chat).await;
+                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &chat.messages).await;
+                                                                        }
+                                                                    }
                                                                     Some(message)
                                                                 } else {
                                                                     None
