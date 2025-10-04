@@ -244,32 +244,6 @@ impl ChatMetadata {
     }
 }
 
-// Database structures for persistence
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SlimChat {
-    pub id: String,
-    pub chat_type: ChatType,
-    pub participants: Vec<String>,
-    pub last_read: String,
-    pub created_at: u64,
-    pub metadata: ChatMetadata,
-    pub muted: bool,
-}
-
-impl From<&Chat> for SlimChat {
-    fn from(chat: &Chat) -> Self {
-        SlimChat {
-            id: chat.id.clone(),
-            chat_type: chat.chat_type.clone(),
-            participants: chat.participants.clone(),
-            last_read: chat.last_read.clone(),
-            created_at: chat.created_at,
-            metadata: chat.metadata.clone(),
-            muted: chat.muted,
-        }
-    }
-}
-
 //// Marks a specific message as read for a chat.
 /// Behavior:
 ///  - If message_id is Some(id): set chat.last_read = id.
