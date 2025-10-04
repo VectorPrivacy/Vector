@@ -734,13 +734,8 @@ async function refreshGroupMemberCount(groupId) {
             chat.participants = members.slice();
         }
         if (strOpenChat === groupId) {
-            const count = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-            if (typeof count === 'number') {
-                domChatContactStatus.textContent = `${count} ${count === 1 ? 'member' : 'members'}`;
-            } else {
-                domChatContactStatus.textContent = 'Members syncing...';
-            }
-            domChatContactStatus.classList.remove('text-gradient');
+            // Update the chat header subtext (respects typing indicators)
+            updateChatHeaderSubtext(chat);
         }
     } catch (e) {
         console.warn('Failed to refresh group member count for', groupId, e);
@@ -748,18 +743,15 @@ async function refreshGroupMemberCount(groupId) {
 }
 
 /**
- * Sync MLS welcomes/invites from the relay
+ * Load MLS welcomes/invites (no manual sync needed - handled by fetch_messages)
  */
 async function syncMLSWelcomes() {
     try {
-        // First sync from relay
-        const count = await invoke('sync_mls_welcomes_now');
-        console.log('Synced MLS welcomes:', count);
-        
-        // Then load the pending welcomes
+        // Welcomes are already synced via fetch_messages() -> handle_event()
+        // Just load the pending welcomes from the engine
         await loadMLSInvites();
     } catch (e) {
-        console.error('Failed to sync MLS welcomes:', e);
+        console.error('Failed to load MLS welcomes:', e);
     }
 }
 
@@ -845,7 +837,7 @@ function renderMLSInvites() {
 
             // Inviter info
             const pInfo = document.createElement('p');
-            pInfo.textContent = `Invited by ${welcomerShort} • ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+            pInfo.textContent = `Invited by ${welcomerDisplay} • ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
             divInvite.appendChild(pInfo);
 
             // Action buttons
@@ -921,6 +913,80 @@ async function fetchProfiles() {
     // Poll for changes in profiles
     for (const profile of arrProfiles) {
         await invoke("load_profile", { npub: profile.id });
+    }
+}
+
+/**
+ * Update the chat header subtext (status/typing indicator) for the currently open chat
+ * @param {Object} chat - The chat object
+ */
+function updateChatHeaderSubtext(chat) {
+    if (!chat) return;
+    
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const fNotes = chat.id === strPubkey;
+    
+    if (fNotes) {
+        domChatContactStatus.textContent = 'Encrypted Notes to Self';
+        domChatContactStatus.classList.remove('text-gradient');
+    } else if (isGroup) {
+        // Check for typing indicators in groups
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        
+        if (fIsTyping) {
+            // Display typing indicator with Discord-style multi-user support
+            if (activeTypers.length === 1) {
+                const typer = getProfile(activeTypers[0]);
+                const name = typer?.nickname || typer?.name || 'Someone';
+                domChatContactStatus.textContent = `${name} is typing...`;
+            } else if (activeTypers.length === 2) {
+                const typer1 = getProfile(activeTypers[0]);
+                const typer2 = getProfile(activeTypers[1]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                domChatContactStatus.textContent = `${name1} and ${name2} are typing...`;
+            } else if (activeTypers.length === 3) {
+                const typer1 = getProfile(activeTypers[0]);
+                const typer2 = getProfile(activeTypers[1]);
+                const typer3 = getProfile(activeTypers[2]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                const name3 = typer3?.nickname || typer3?.name || 'Someone';
+                domChatContactStatus.textContent = `${name1}, ${name2}, and ${name3} are typing...`;
+            } else {
+                // 4+ people typing
+                domChatContactStatus.textContent = `Several people are typing...`;
+            }
+            domChatContactStatus.classList.add('text-gradient');
+        } else {
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            if (typeof memberCount === 'number') {
+                const label = memberCount === 1 ? 'member' : 'members';
+                domChatContactStatus.textContent = `${memberCount} ${label}`;
+            } else {
+                // Avoid misleading "0 members" before first count refresh
+                domChatContactStatus.textContent = 'Members syncing...';
+            }
+            domChatContactStatus.classList.remove('text-gradient');
+        }
+    } else {
+        // Check for typing indicators in DMs (using chat.active_typers)
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        
+        if (fIsTyping) {
+            // For DMs, there should only be one typer (the other person)
+            const typer = getProfile(activeTypers[0]);
+            const name = typer?.nickname || typer?.name || 'User';
+            domChatContactStatus.textContent = `${name} is typing...`;
+            domChatContactStatus.classList.add('text-gradient');
+        } else {
+            const profile = getProfile(chat.id);
+            domChatContactStatus.textContent = profile?.status?.title || '';
+            domChatContactStatus.classList.remove('text-gradient');
+            twemojify(domChatContactStatus);
+        }
     }
 }
 
@@ -1648,10 +1714,10 @@ async function setupRustListeners() {
             console.log('[TYPING] 💾 Updated chat.active_typers:', { chat_id: chat.id.substring(0, 16), active_typers: chat.active_typers });
         }
         
-        // If this chat is currently open, update the display
+        // If this chat is currently open, update the chat header subtext
         if (strOpenChat === conversation_id) {
-            if (isGroup) console.log('[TYPING] 🔄 Refreshing open chat display');
-            openChat(conversation_id);
+            if (isGroup) console.log('[TYPING] 🔄 Updating chat header subtext');
+            updateChatHeaderSubtext(chat);
         }
         
         // Update the chat list preview
@@ -2513,67 +2579,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         }
 
         // Display either their Status or Typing Indicator
-        if (fNotes) {
-            domChatContactStatus.textContent = 'Encrypted Notes to Self';
-            domChatContactStatus.classList.remove('text-gradient');
-        } else if (isGroup) {
-            // Check for typing indicators in groups
-            const activeTypers = chat.active_typers || [];
-            const fIsTyping = activeTypers.length > 0;
-            
-            if (fIsTyping) {
-                // Display typing indicator with Discord-style multi-user support
-                if (activeTypers.length === 1) {
-                    const typer = getProfile(activeTypers[0]);
-                    const name = typer?.nickname || typer?.name || 'Someone';
-                    domChatContactStatus.textContent = `${name} is typing...`;
-                } else if (activeTypers.length === 2) {
-                    const typer1 = getProfile(activeTypers[0]);
-                    const typer2 = getProfile(activeTypers[1]);
-                    const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                    const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                    domChatContactStatus.textContent = `${name1} and ${name2} are typing...`;
-                } else if (activeTypers.length === 3) {
-                    const typer1 = getProfile(activeTypers[0]);
-                    const typer2 = getProfile(activeTypers[1]);
-                    const typer3 = getProfile(activeTypers[2]);
-                    const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                    const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                    const name3 = typer3?.nickname || typer3?.name || 'Someone';
-                    domChatContactStatus.textContent = `${name1}, ${name2}, and ${name3} are typing...`;
-                } else {
-                    // 4+ people typing
-                    domChatContactStatus.textContent = `Several people are typing...`;
-                }
-                domChatContactStatus.classList.add('text-gradient');
-            } else {
-                const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-                if (typeof memberCount === 'number') {
-                    const label = memberCount === 1 ? 'member' : 'members';
-                    domChatContactStatus.textContent = `${memberCount} ${label}`;
-                } else {
-                    // Avoid misleading "0 members" before first count refresh
-                    domChatContactStatus.textContent = 'Members syncing...';
-                }
-                domChatContactStatus.classList.remove('text-gradient');
-            }
-        } else {
-            // Check for typing indicators in DMs (using chat.active_typers)
-            const activeTypers = chat.active_typers || [];
-            const fIsTyping = activeTypers.length > 0;
-            
-            if (fIsTyping) {
-                // For DMs, there should only be one typer (the other person)
-                const typer = getProfile(activeTypers[0]);
-                const name = typer?.nickname || typer?.name || 'User';
-                domChatContactStatus.textContent = `${name} is typing...`;
-                domChatContactStatus.classList.add('text-gradient');
-            } else {
-                domChatContactStatus.textContent = profile?.status?.title || '';
-                domChatContactStatus.classList.remove('text-gradient');
-                twemojify(domChatContactStatus);
-            }
-        }
+        updateChatHeaderSubtext(chat);
 
         // Adjust our Contact Name class to manage space according to Status visibility
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
@@ -3618,6 +3624,8 @@ function openChat(contact) {
                 // Insert only the new messages into the open chat
                 if (newOnly.length) {
                     updateChat(chat, newOnly, null, false);
+                    // Preserve typing indicator after async message load
+                    updateChatHeaderSubtext(chat);
                 }
             } catch (e) {
                 console.error('Failed to load group messages:', e);
