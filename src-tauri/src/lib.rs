@@ -100,6 +100,7 @@ lazy_static! {
 enum SyncMode {
     ForwardSync,   // Initial sync from most recent message going backward
     BackwardSync,  // Syncing historically old messages
+    DeepRescan,    // Deep rescan mode - continues until 30 days of no events
     Finished       // Sync complete
 }
 
@@ -666,6 +667,22 @@ async fn fetch_messages<R: Runtime>(
                 Timestamp::from_secs(new_window_start),
                 Timestamp::from_secs(new_window_end)
             )
+        } else if state.sync_mode == SyncMode::DeepRescan {
+            // Deep rescan mode - scan backwards in 2-day increments until 30 days of no events
+            let window_start = state.sync_window_start;
+
+            // Move window backward in time in 2-day increments
+            let new_window_end = window_start;
+            let new_window_start = window_start - (60 * 60 * 24 * 2); // Always 2 days
+
+            // Update state with new window
+            state.sync_window_start = new_window_start;
+            state.sync_window_end = new_window_end;
+
+            (
+                Timestamp::from_secs(new_window_start),
+                Timestamp::from_secs(new_window_end)
+            )
         } else {
             // Sync finished or in unknown state
             // Return dummy values, won't be used as we'll end sync
@@ -715,7 +732,8 @@ async fn fetch_messages<R: Runtime>(
             .unwrap()
     };
 
-    // Process events without holding any locks
+    // Count total events fetched (for DeepRescan) and new messages added (for other modes)
+    let total_events_count = events.len() as u16;
     let mut new_messages_count: u16 = 0;
     for event in events.into_iter() {
         // Count the amount of accepted (new) events
@@ -732,8 +750,15 @@ async fn fetch_messages<R: Runtime>(
         // Increment total iterations counter
         state.sync_total_iterations += 1;
 
-        // Update state based on if messages were found
-        if new_messages_count > 0 {
+        // For DeepRescan, use total events count; for other modes, use new messages count
+        let events_found = if state.sync_mode == SyncMode::DeepRescan {
+            total_events_count
+        } else {
+            new_messages_count
+        };
+
+        // Update state based on if events were found
+        if events_found > 0 {
             state.sync_empty_iterations = 0;
         } else {
             state.sync_empty_iterations += 1;
@@ -788,6 +813,17 @@ async fn fetch_messages<R: Runtime>(
 
             if enough_empty_iterations {
                 // We've completed backward sync
+                state.sync_mode = SyncMode::Finished;
+                continue_sync = false;
+            }
+        } else if state.sync_mode == SyncMode::DeepRescan {
+            // For deep rescan, continue until:
+            // No messages found for 15 consecutive iterations (30 days of no events)
+            // Each iteration is 2 days, so 15 iterations = 30 days
+            let enough_empty_iterations = state.sync_empty_iterations >= 15;
+
+            if enough_empty_iterations {
+                // We've completed deep rescan
                 state.sync_mode = SyncMode::Finished;
                 continue_sync = false;
             }
@@ -2901,6 +2937,45 @@ async fn stop_recording() -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
+async fn deep_rescan<R: Runtime>(handle: AppHandle<R>) -> Result<bool, String> {
+    // Check if a scan is already in progress
+    {
+        let state = STATE.lock().await;
+        if state.is_syncing {
+            return Err("Already Scanning! Please wait for the current scan to finish.".to_string());
+        }
+    }
+
+    // Start a deep rescan by forcing DeepRescan mode
+    {
+        let mut state = STATE.lock().await;
+        let now = Timestamp::now();
+        
+        // Set up for deep rescan starting from now
+        state.is_syncing = true;
+        state.sync_mode = SyncMode::DeepRescan;
+        state.sync_empty_iterations = 0;
+        state.sync_total_iterations = 0;
+        
+        // Start with a 2-day window from now
+        let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+        state.sync_window_start = two_days_ago;
+        state.sync_window_end = now.as_u64();
+    }
+
+    // Trigger the first fetch
+    fetch_messages(handle, false, None).await;
+    
+    Ok(true)
+}
+
+#[tauri::command]
+async fn is_scanning() -> bool {
+    let state = STATE.lock().await;
+    state.is_syncing
+}
+
+#[tauri::command]
 async fn logout<R: Runtime>(handle: AppHandle<R>) {
     // Lock the state to ensure nothing is added to the DB before restart
     let _guard = STATE.lock().await;
@@ -4581,6 +4656,8 @@ pub fn run() {
             message::react_to_message,
             message::fetch_msg_metadata,
             fetch_messages,
+            deep_rescan,
+            is_scanning,
             warmup_nip96_servers,
             get_chat_messages,
             generate_blurhash_preview,
