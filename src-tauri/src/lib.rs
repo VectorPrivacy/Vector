@@ -394,6 +394,11 @@ async fn fetch_messages<R: Runtime>(
             handle_event(event, false).await;
         }
         
+        // Also sync MLS group messages after single-relay reconnection
+        if let Err(e) = sync_mls_groups_now(None).await {
+            eprintln!("[Single-Relay Sync] Failed to sync MLS groups: {}", e);
+        }
+        
         return; // Exit early for single-relay syncs
     }
 
@@ -2241,7 +2246,7 @@ async fn monitor_relay_connections() -> Result<bool, String> {
                             let handle_inner = handle_clone.clone();
                             let url_string = relay_url.to_string();
                             tokio::spawn(async move {
-                                // Call fetch_messages with the specific relay URL
+                                // fetch_messages handles both DM and MLS group syncing for single-relay reconnections
                                 fetch_messages(handle_inner, false, Some(url_string)).await;
                             });
                         }
