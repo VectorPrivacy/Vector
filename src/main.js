@@ -239,6 +239,14 @@ function loadEmojiSections() {
     twemojify(recentsGrid);
     twemojify(favoritesGrid);
     twemojify(allGrid);
+    
+    document.querySelectorAll('.emoji-section-header').forEach(header => {
+        header.addEventListener('click', (e) => {
+            e.stopPropagation(); // Prevent closing the picker
+            const section = header.parentElement;
+            section.classList.toggle('collapsed');
+        });
+    });
 }
 
 // Update the emoji search event listener

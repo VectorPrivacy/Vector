@@ -1207,7 +1207,8 @@ body {
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 2px; 
+  justify-content: flex-start;
+  width: 100%;
 }
 
 .emoji-section-header .section-icon {
@@ -1220,7 +1221,6 @@ body {
   mask-size: contain;
   mask-repeat: no-repeat;
   mask-position: center;
-  vertical-align: baseline;
   margin-top: 8px;
 }
 
@@ -1246,8 +1246,7 @@ body {
   mask-repeat: no-repeat;
   mask-position: center;
   margin-left: 2px;
-  vertical-align: baseline;
-  margin-top: 8px;
+  margin-top: 9px;
 }
 
 .emoji-section.collapsed .emoji-section-header .icon-chevron-down {
