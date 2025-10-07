@@ -268,13 +268,13 @@ select:disabled {
   font-weight: 600;
 }
 
-#check-updates-btn {
+.accept-btn {
   background: rgba(177, 136, 226, 0.1);
   border: 1px solid rgba(177, 136, 226, 0.3);
   color: #b188e2;
 }
 
-#check-updates-btn:hover:not(:disabled) {
+.accept-btn:hover:not(:disabled) {
   background: rgba(177, 136, 226, 0.2);
   border-color: rgba(177, 136, 226, 0.5);
 }

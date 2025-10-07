@@ -12,6 +12,10 @@ pub struct Chat {
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
+    /// Typing participants for group chats (npub -> expires_at timestamp)
+    /// Memory-only, never persisted to disk
+    #[serde(skip)]
+    pub typing_participants: HashMap<String, u64>,
 }
 
 impl Chat {
@@ -28,12 +32,18 @@ impl Chat {
                 .as_secs(),
             metadata: ChatMetadata::new(),
             muted: false,
+            typing_participants: HashMap::new(),
         }
     }
 
     /// Create a new DM chat with another user
     pub fn new_dm(their_npub: String) -> Self {
         Self::new(their_npub.clone(), ChatType::DirectMessage, vec![their_npub])
+    }
+
+    /// Create a new MLS group chat
+    pub fn new_mls_group(group_id: String, participants: Vec<String>) -> Self {
+        Self::new(group_id, ChatType::MlsGroup, participants)
     }
 
     /// Get the last message timestamp
@@ -116,7 +126,7 @@ impl Chat {
                     .find(|&p| p != my_npub)
                     .cloned()
             }
-            // For other chat types, return None
+            ChatType::MlsGroup => None, // Groups don't have a single "other" participant
         }
     }
 
@@ -125,9 +135,43 @@ impl Chat {
         matches!(self.chat_type, ChatType::DirectMessage) && self.participants.contains(&npub.to_string())
     }
 
+    /// Check if this is an MLS group
+    pub fn is_mls_group(&self) -> bool {
+        matches!(self.chat_type, ChatType::MlsGroup)
+    }
+
     /// Check if user is a participant in this chat
     pub fn has_participant(&self, npub: &str) -> bool {
         self.participants.contains(&npub.to_string())
+    }
+
+    /// Get active typers (non-expired) for group chats
+    /// Returns a list of npubs that are currently typing
+    pub fn get_active_typers(&self) -> Vec<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        self.typing_participants
+            .iter()
+            .filter(|(_, &expires_at)| expires_at > now)
+            .map(|(npub, _)| npub.clone())
+            .collect()
+    }
+
+    /// Update typing state for a participant in a group chat
+    /// Automatically cleans up expired entries
+    pub fn update_typing_participant(&mut self, npub: String, expires_at: u64) {
+        // Add or update the typing participant
+        self.typing_participants.insert(npub, expires_at);
+        
+        // Clean up expired entries
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.typing_participants.retain(|_, &mut exp| exp > now);
     }
 
     // Getter methods for private fields
@@ -163,6 +207,7 @@ impl Chat {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ChatType {
     DirectMessage,
+    MlsGroup,
     // Future types can be added here
 }
 
@@ -177,31 +222,25 @@ impl ChatMetadata {
             custom_fields: HashMap::new(),
         }
     }
-}
 
-// Database structures for persistence
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SlimChat {
-    pub id: String,
-    pub chat_type: ChatType,
-    pub participants: Vec<String>,
-    pub last_read: String,
-    pub created_at: u64,
-    pub metadata: ChatMetadata,
-    pub muted: bool,
-}
+    /// Set the group name in custom_fields
+    pub fn set_name(&mut self, name: String) {
+        self.custom_fields.insert("name".to_string(), name);
+    }
 
-impl From<&Chat> for SlimChat {
-    fn from(chat: &Chat) -> Self {
-        SlimChat {
-            id: chat.id.clone(),
-            chat_type: chat.chat_type.clone(),
-            participants: chat.participants.clone(),
-            last_read: chat.last_read.clone(),
-            created_at: chat.created_at,
-            metadata: chat.metadata.clone(),
-            muted: chat.muted,
-        }
+    /// Get the group name from custom_fields
+    pub fn get_name(&self) -> Option<&str> {
+        self.custom_fields.get("name").map(|s| s.as_str())
+    }
+
+    /// Set the member count in custom_fields
+    pub fn set_member_count(&mut self, count: usize) {
+        self.custom_fields.insert("member_count".to_string(), count.to_string());
+    }
+
+    /// Get the member count from custom_fields
+    pub fn get_member_count(&self) -> Option<usize> {
+        self.custom_fields.get("member_count").and_then(|s| s.parse().ok())
     }
 }
 

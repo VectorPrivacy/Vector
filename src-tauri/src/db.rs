@@ -23,7 +23,7 @@ pub struct VectorDB {
 const DB_PATH: &str = "vector.json";
 
 /// Latest database version
-pub const LATEST_DB_VERSION: u64 = 2;
+pub const LATEST_DB_VERSION: u64 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -191,6 +191,8 @@ pub struct SlimMessage {
     pub at: u64,
     pub mine: bool,
     pub contact: String,  // Reference to which contact/profile this message belongs to
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub npub: Option<String>,  // Sender's npub (for group chats)
 }
 
 impl From<(&Message, String)> for SlimMessage {
@@ -205,6 +207,7 @@ impl From<(&Message, String)> for SlimMessage {
             at: msg.at,
             mine: msg.mine,
             contact: contact_id.clone(),
+            npub: msg.npub.clone(),
         }
     }
 }
@@ -223,6 +226,7 @@ impl SlimMessage {
             pending: false, // Default values
             failed: false,  // Default values
             mine: self.mine,
+            npub: self.npub.clone(),
         }
     }
     
@@ -535,6 +539,29 @@ pub async fn run_migrations<R: Runtime>(handle: AppHandle<R>) -> Result<(), Stri
         set_db_version(handle.clone(), 2).await
             .map_err(|e| format!("Failed to set database version to 2: {}", e))?;
         println!("Database version successfully updated to 2.");
+    }
+    
+    // Run migration to version 3 (MLS group chats)
+    if current_version < 3 {
+        println!("Starting migration to version 3 (MLS group chats)...");
+        
+        // Check if MLS migration is needed
+        if db_migration::is_mls_migration_needed(&handle).await.unwrap_or(true) {
+            println!("MLS migration is needed. Initializing MLS collections...");
+            
+            // Run the MLS migration
+            db_migration::migrate_to_v3_mls_group_chats(handle.clone()).await
+                .map_err(|e| format!("Failed to migrate to version 3 (MLS): {}", e))?;
+            
+            println!("MLS migration to version 3 completed successfully.");
+        } else {
+            println!("MLS migration to version 3 is not needed according to is_mls_migration_needed().");
+            
+            // Still update the version if somehow we're at version 2 but MLS check says not needed
+            set_db_version(handle.clone(), 3).await
+                .map_err(|e| format!("Failed to set database version to 3: {}", e))?;
+            println!("Database version updated to 3.");
+        }
     }
     
     println!("Database migrations completed successfully.");
