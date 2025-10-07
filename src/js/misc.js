@@ -4,11 +4,11 @@
  * @param {string} username - A username to display initials from
  * @param {number} limitSizeTo - An optional pixel width/height to lock the avatar to
  */
-function pubkeyToAvatar(npub, username, limitSizeTo = 0) {
+function pubkeyToAvatar(npub, username, limitSizeTo = null) {
     // Otherwise, display their Gradient Avatar
     const divAvatar = document.createElement('div');
     divAvatar.classList.add('placeholder-avatar');
-    if (limitSizeTo > 0) {
+    if (limitSizeTo) {
         divAvatar.style.minHeight = limitSizeTo + 'px';
         divAvatar.style.minWidth = limitSizeTo + 'px';
         divAvatar.style.maxHeight = limitSizeTo + 'px';
@@ -26,9 +26,21 @@ function pubkeyToAvatar(npub, username, limitSizeTo = 0) {
 
     // If a username is given, extract Initials or First Letter to be added on-top
     if (username) {
-        const pInitials = document.createElement('p');
-        pInitials.textContent = getNameInitials(username) || username[0].toUpperCase();
-        divAvatar.appendChild(pInitials);
+        const spanInitials = document.createElement('span');
+        const initials = getNameInitials(username) || username[0].toUpperCase();
+        spanInitials.textContent = initials;
+        
+        // Scale font size based on avatar size and number of characters
+        if (limitSizeTo) {
+            // For 35px avatars (chat UI): use smaller font
+            // For 50px avatars (chat list): use larger font
+            // Scale down further for 3-character initials
+            const baseFontSize = limitSizeTo * 0.4; // 40% of avatar size
+            const scaleFactor = initials.length === 3 ? 0.85 : 1; // Reduce by 15% for 3 chars
+            spanInitials.style.fontSize = `${baseFontSize * scaleFactor}px`;
+        }
+        
+        divAvatar.appendChild(spanInitials);
     }
 
     return divAvatar;

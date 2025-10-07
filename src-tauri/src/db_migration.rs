@@ -168,6 +168,7 @@ pub async fn save_chat_messages<R: Runtime>(
             at: message.at,
             mine: message.mine,
             contact: String::new(), // Not used for chat messages
+            npub: message.npub.clone(),
         };
         
         // Serialize to JSON
@@ -303,6 +304,96 @@ pub async fn is_migration_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<bo
         },
         Ok(None) => {
             // No version set - this is a new account or very old account needing migration
+            Ok(true)
+        },
+        Err(e) => Err(format!("Failed to get database version: {}", e))
+    }
+}
+
+// ================ MLS GROUP CHATS MIGRATION (Version 3) ================
+// This migration adds support for MLS (Message Layer Security) group chats
+// by initializing the required top-level JSON collections.
+//
+// Migration is forward-only for the MVP - no rollback support.
+// ========================================================================
+
+/// Migration to version 3: Initialize MLS group chat collections
+///
+/// This migration creates the foundational data structures for MLS group messaging:
+/// - mls_groups: Encrypted array storing group metadata
+/// - mls_keypackage_index: Plaintext index for key package management
+/// - mls_event_cursors: Plaintext cursors for event deduplication
+///
+/// Note: This is a forward-only migration. Rollback is intentionally unsupported for MVP.
+pub async fn migrate_to_v3_mls_group_chats<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
+    println!("Starting MLS group chats migration (v3)...");
+    
+    let store = get_store(&handle);
+    
+    // Initialize mls_groups collection
+    // This stores group metadata encrypted at rest (consistent with profiles/chats pattern)
+    // Each group object will contain: group_id, creator_pubkey, name, avatar_ref,
+    // created_at, updated_at. The entire array is encrypted as a single unit.
+    if store.get("mls_groups").is_none() {
+        println!("Initializing mls_groups collection...");
+        let empty_groups = vec![] as Vec<serde_json::Value>;
+        let json = serde_json::to_string(&empty_groups)
+            .map_err(|e| format!("Failed to serialize empty mls_groups: {}", e))?;
+        
+        // Encrypt the empty array (following the same pattern as profiles/chats)
+        let encrypted = internal_encrypt(json, None).await;
+        store.set("mls_groups".to_string(), serde_json::json!(encrypted));
+        println!("Created encrypted mls_groups collection");
+    } else {
+        println!("mls_groups already exists, skipping initialization");
+    }
+    
+    // Initialize mls_keypackage_index collection
+    // This stores key package references in plaintext (not sensitive per MLS spec)
+    // Used for efficient lookup and deduplication of key packages
+    // Each entry will contain: owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at
+    if store.get("mls_keypackage_index").is_none() {
+        println!("Initializing mls_keypackage_index collection...");
+        let empty_index = vec![] as Vec<serde_json::Value>;
+        store.set("mls_keypackage_index".to_string(), serde_json::json!(empty_index));
+        println!("Created plaintext mls_keypackage_index collection");
+    } else {
+        println!("mls_keypackage_index already exists, skipping initialization");
+    }
+    
+    // Initialize mls_event_cursors collection
+    // This stores sync cursors in plaintext for efficiency
+    // Maps group_id -> { last_seen_event_id, last_seen_at }
+    // Used for event deduplication and efficient sync operations
+    if store.get("mls_event_cursors").is_none() {
+        println!("Initializing mls_event_cursors collection...");
+        let empty_cursors = HashMap::<String, serde_json::Value>::new();
+        store.set("mls_event_cursors".to_string(), serde_json::json!(empty_cursors));
+        println!("Created plaintext mls_event_cursors collection");
+    } else {
+        println!("mls_event_cursors already exists, skipping initialization");
+    }
+    
+    // Save the store to persist all changes
+    store.save().map_err(|e| format!("Failed to save store after MLS migration: {}", e))?;
+    
+    // Update the database version to 3
+    crate::db::set_db_version(handle.clone(), 3).await
+        .map_err(|e| format!("Failed to set database version to 3: {}", e))?;
+    
+    println!("MLS group chats migration (v3) completed successfully");
+    Ok(())
+}
+
+/// Check if MLS migration (v3) is needed
+pub async fn is_mls_migration_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, String> {
+    match crate::db::get_db_version(handle.clone()) {
+        Ok(Some(version)) => {
+            // MLS migration is needed if version is less than 3
+            Ok(version < 3)
+        },
+        Ok(None) => {
+            // No version set - very old account, needs all migrations
             Ok(true)
         },
         Err(e) => Err(format!("Failed to get database version: {}", e))
