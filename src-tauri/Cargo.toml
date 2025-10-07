@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.1.8"
+version = "0.2.0"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -22,7 +22,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.2.0", features = [] }
 
 [dependencies]
-nostr-sdk = { version = "0.43.0", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+#tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+nostr-sdk = { version = "0.43", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
+mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
+mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
 bip39 = { version = "2.1.0", features = ["rand"] }
 tokio = { version = "1.45.1", features = ["sync"] }
 futures-util = "0.3.31"

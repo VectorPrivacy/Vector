@@ -333,12 +333,30 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     const audPreview = document.createElement('audio');
     audPreview.crossOrigin = 'anonymous';
     audPreview.preload = 'metadata';
-    audPreview.src = assetUrl;
     audPreview.style.display = 'none';
-    audPreview.addEventListener('loadedmetadata', () => {
+    
+    // Handle metadata loaded event
+    const onMetadataLoaded = () => {
         updateDuration();
         softChatScroll();
-    });
+    };
+    audPreview.addEventListener('loadedmetadata', onMetadataLoaded);
+    
+    // Platform-specific audio creation
+    if (platformFeatures.os === 'android') {
+        // Android uses blob method with size limit
+        createAndroidAudio(assetUrl, cAttachment, (result) => {
+            if (result.blobUrl) {
+                audPreview.src = result.blobUrl;
+            } else if (result.errorElement) {
+                // Replace the entire audio container with the error element
+                audioContainer.replaceWith(result.errorElement);
+            }
+        });
+    } else {
+        // Standard audio element for other platforms
+        audPreview.src = assetUrl;
+    }
 
     // Create custom audio player
     const customPlayer = document.createElement('div');

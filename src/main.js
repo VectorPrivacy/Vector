@@ -80,6 +80,15 @@ const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
+// Create Group UI refs
+const domCreateGroup = document.getElementById('create-group');
+const domCreateGroupBackBtn = document.getElementById('create-group-back-text-btn');
+const domCreateGroupName = document.getElementById('create-group-name');
+const domCreateGroupFilter = document.getElementById('create-group-filter');
+const domCreateGroupList = document.getElementById('create-group-list');
+const domCreateGroupCreateBtn = document.getElementById('create-group-create-btn');
+const domCreateGroupCancelBtn = document.getElementById('create-group-cancel-btn');
+const domCreateGroupStatus = document.getElementById('create-group-status');
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
@@ -401,8 +410,8 @@ emojiSearch.onkeydown = async (e) => {
                 const divMessage = document.getElementById(cMsg.id);
                 divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
 
-                // Send the Reaction to the network
-                invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
+                // Send the Reaction to the network (protocol-agnostic)
+                invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
             // Add to message input
@@ -450,6 +459,41 @@ picker.addEventListener('contextmenu', (e) => {
                     e.target.style.transform = '';
                     e.target.style.backgroundColor = '';
                 }, 500);
+            }
+        }
+    }
+});
+
+// Emoji selection
+picker.addEventListener('click', (e) => {
+    if (e.target.tagName === 'IMG') {
+        // Register the click in the emoji-dex
+        const cEmoji = arrEmojis.find(a => a.emoji === e.target.alt);
+        cEmoji.used++;
+
+        // If this is a Reaction - let's send it!
+        if (strCurrentReactionReference) {
+            // Grab the referred message to find it's chat pubkey
+            for (const cChat of arrChats) {
+                const cMsg = cChat.messages.find(a => a.id === strCurrentReactionReference);
+                if (!cMsg) continue;
+
+                // Found the message!
+                const strReceiverPubkey = cChat.id;
+
+                // Add a 'decoy' reaction for good UX (no waiting for the network to register the reaction)
+                const spanReaction = document.createElement('span');
+                spanReaction.classList.add('reaction');
+                spanReaction.textContent = `${cEmoji.emoji} 1`;
+                twemojify(spanReaction);
+
+                // Replace the Reaction button
+                // DOM Tree: msg-(them/me) -> msg-extras -> add-reaction
+                const divMessage = document.getElementById(cMsg.id);
+                divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
+
+                // Send the Reaction to the network (protocol-agnostic)
+                invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         }
     }
@@ -542,6 +586,30 @@ picker.addEventListener('contextmenu', (e) => {
  */
 
 /**
+ * Represents an MLS group invite.
+ * @typedef {Object} MLSWelcome
+ * @property {string} id - Unique identifier for the welcome/invite.
+ * @property {string} group_id - The MLS group ID.
+ * @property {string} group_name - Name of the group.
+ * @property {string} welcomer_pubkey - Pubkey of the person who invited.
+ * @property {number} member_count - Number of members in the group.
+ * @property {string} [image] - Optional group avatar image.
+ * @property {string} [description] - Optional group description.
+ */
+
+/**
+ * Represents an MLS message record.
+ * @typedef {Object} MLSMessageRecord
+ * @property {string} inner_event_id - The inner event ID for deduplication.
+ * @property {string} wrapper_event_id - The wrapper event ID.
+ * @property {string} author_pubkey - The sender's pubkey.
+ * @property {string} content - The message content.
+ * @property {number} created_at - Timestamp in seconds.
+ * @property {Array<Array<string>>} tags - Nostr tags.
+ * @property {boolean} mine - Whether this message was sent by the current user.
+ */
+
+/**
  * A cache of all profiles (without messages)
  * @type {Profile[]}
  */
@@ -552,6 +620,12 @@ let arrProfiles = [];
  * @type {Chat[]}
  */
 let arrChats = [];
+
+/**
+ * A cache of MLS group invites
+ * @type {MLSWelcome[]}
+ */
+let arrMLSInvites = [];
 
 /**
  * The current open chat (by npub)
@@ -568,26 +642,54 @@ function getDMChat(npub) {
 }
 
 /**
- * Get or create a DM chat for a user
- * @param {string} npub - The user's npub
+ * Get a group chat by ID
+ * @param {string} groupId - The group's ID
+ * @returns {Chat|undefined} - The chat if it exists
+ */
+function getGroupChat(groupId) {
+    return arrChats.find(c => c.chat_type === 'MlsGroup' && c.id === groupId);
+}
+
+/**
+ * Get a chat by ID (works for both DMs and Group Chats)
+ * @param {string} id - The chat ID (npub for DM, group_id for MlsGroup)
+ * @returns {Chat|undefined} - The chat if it exists
+ */
+function getChat(id) {
+    return arrChats.find(c => c.id === id);
+}
+
+/**
+ * Get or create a chat (DM or MLS Group)
+ * @param {string} id - The chat ID (npub for DM, group_id for MlsGroup)
+ * @param {string} chatType - 'DirectMessage' or 'MlsGroup'
  * @returns {Chat} - The chat (existing or newly created)
  */
-function getOrCreateDMChat(npub) {
-    let chat = getDMChat(npub);
+function getOrCreateChat(id, chatType = 'DirectMessage') {
+    let chat = chatType === 'MlsGroup' ? getGroupChat(id) : getDMChat(id);
     if (!chat) {
         chat = {
-            id: npub,
-            chat_type: 'DirectMessage',
-            participants: [npub],
+            id: id,
+            chat_type: chatType,
+            participants: chatType === 'MlsGroup' ? [] : [id],
             messages: [],
             last_read: '',
             created_at: Math.floor(Date.now() / 1000),
-            metadata: {},
+            metadata: chatType === 'MlsGroup' ? { group_id: id } : {},
             muted: false
         };
         arrChats.push(chat);
     }
     return chat;
+}
+
+/**
+ * Get or create a DM chat for a user
+ * @param {string} npub - The user's npub
+ * @returns {Chat} - The chat (existing or newly created)
+ */
+function getOrCreateDMChat(npub) {
+    return getOrCreateChat(npub, 'DirectMessage');
 }
 
 /**
@@ -622,17 +724,320 @@ async function init() {
         setAsyncInterval(fetchProfiles, 45000);
     });
 
-    // Run a very slow loop to update dynamic elements, like "last message time" and "typing status".
+    // Load MLS groups and sync welcomes on init
+    loadMLSGroups();
+    syncMLSWelcomes();
+
+    // Run a very slow loop to update dynamic elements, like "last message time"
     setInterval(() => {
-        // If the chatlist is open: re-render to update timestamps and typing statuses
+        // If the chatlist is open: re-render to update timestamps
         if (domChats.style.display !== 'none') renderChatlist();
 
-        // If the chat is open; run a 'soft' render to update typing status
+        // If the chat is open; run a 'soft' render
         if (strOpenChat) {
-            const chat = getDMChat(strOpenChat);
+            const chat = arrChats.find(c => c.id === strOpenChat);
             if (chat) updateChat(chat, []);
         }
     }, 30000);
+
+    // Run a faster loop to clear expired typing indicators (every 5 seconds)
+    setInterval(() => {
+        // Check all chats for expired typing indicators
+        const now = Date.now() / 1000;
+        arrChats.forEach(chat => {
+            if (chat.active_typers && chat.active_typers.length > 0) {
+                // Clear the array if we haven't received an update in 35 seconds
+                // (30s expiry + 5s grace period for network delays)
+                if (!chat.last_typing_update || now - chat.last_typing_update > 35) {
+                    // Only log for groups
+                    if (chat.chat_type === 'MlsGroup') {
+                        console.log('[TYPING] ⏰ Clearing expired typing indicators for group:', chat.id.substring(0, 16));
+                    }
+                    chat.active_typers = [];
+                    
+                    // If this is the open chat, refresh the display
+                    if (strOpenChat === chat.id) {
+                        openChat(chat.id);
+                    }
+                    
+                    // Refresh chat list
+                    if (domChats.style.display !== 'none') {
+                        renderChatlist();
+                    }
+                }
+            }
+        });
+    }, 5000);
+}
+
+/**
+ * Load MLS groups and integrate them into the chat list
+ */
+async function loadMLSGroups() {
+    try {
+        const detailed = await invoke('list_mls_groups_detailed');
+        const groupsToRefresh = new Set();
+
+        console.log('MLS groups loaded (detailed):', Array.isArray(detailed) ? detailed.length : 0);
+        if (!Array.isArray(detailed)) {
+            throw new Error('Backend did not return detailed MLS groups array');
+        }
+
+        for (const info of detailed) {
+            const groupId = info.group_id || info.groupId || info.id;
+            if (!groupId) continue;
+            groupsToRefresh.add(groupId);
+
+            const chat = getOrCreateChat(groupId, 'MlsGroup');
+
+            // Populate metadata for UI rendering and send path
+            chat.metadata = chat.metadata || {};
+            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+            
+            // Store in custom_fields (backend format)
+            const groupName = info.name || chat.metadata.custom_fields.name || `Group ${String(groupId).substring(0, 8)}...`;
+            chat.metadata.custom_fields.name = groupName;
+            chat.metadata.custom_fields.engine_group_id = info.engine_group_id || info.engineGroupId || chat.metadata.custom_fields.engine_group_id || '';
+            chat.metadata.custom_fields.avatar_ref = info.avatar_ref || info.avatarRef || chat.metadata.custom_fields.avatar_ref || null;
+            chat.metadata.custom_fields.created_at = String(info.created_at || info.createdAt || chat.metadata.custom_fields.created_at || 0);
+            chat.metadata.custom_fields.updated_at = String(info.updated_at || info.updatedAt || chat.metadata.custom_fields.updated_at || 0);
+            
+            // Preserve member count from detailed API to avoid showing "0 members" before refresh
+            const memberCount = (typeof info.member_count === 'number')
+                ? info.member_count
+                : (typeof info.memberCount === 'number' ? info.memberCount : (chat.metadata.custom_fields.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null));
+            if (typeof memberCount === 'number') {
+                chat.metadata.custom_fields.member_count = String(memberCount);
+            }
+
+            // Load initial messages if not already in memory
+            if ((chat.messages || []).length === 0) {
+                try {
+                    // Use unified chat message storage (same as DMs)
+                    const messages = await invoke('get_chat_messages', {
+                        chatId: groupId,
+                        limit: 50
+                    }) || [];
+
+                    console.log(`Loaded ${messages.length} messages for group ${String(groupId).substring(0, 8)}...`);
+
+                    // Messages are already in the correct format from unified storage!
+                    chat.messages = messages;
+                } catch (e) {
+                    console.error(`Failed to load messages for group ${groupId}:`, e);
+                    chat.messages = [];
+                }
+            }
+        }
+
+        // After loading groups, refresh their member counts
+        await Promise.all(Array.from(groupsToRefresh).map(gid => refreshGroupMemberCount(gid)));
+        
+        // Sort chats to ensure groups appear properly
+        arrChats.sort((a, b) => {
+            // Groups without messages go to the bottom
+            const aLastMsg = a.messages[a.messages.length - 1];
+            const bLastMsg = b.messages[b.messages.length - 1];
+
+            if (!aLastMsg && !bLastMsg) return 0;
+            if (!aLastMsg) return 1;
+            if (!bLastMsg) return -1;
+
+            return bLastMsg.at - aLastMsg.at;
+        });
+
+        // Re-render the chat list
+        renderChatlist();
+    } catch (e) {
+        console.error('Failed to load MLS groups (detailed):', e);
+    }
+}
+
+/**
+ * Refresh and cache the member count for a given MLS group.
+ * Also updates open chat header and re-renders chat list.
+ */
+async function refreshGroupMemberCount(groupId) {
+    try {
+        const members = await invoke('get_mls_group_members', { groupId });
+        const chat = getOrCreateChat(groupId, 'MlsGroup');
+        if (Array.isArray(members)) {
+            chat.metadata = chat.metadata || {};
+            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+            chat.metadata.custom_fields.member_count = String(members.length);
+            chat.participants = members.slice();
+        }
+        if (strOpenChat === groupId) {
+            // Update the chat header subtext (respects typing indicators)
+            updateChatHeaderSubtext(chat);
+        }
+    } catch (e) {
+        console.warn('Failed to refresh group member count for', groupId, e);
+    }
+}
+
+/**
+ * Load MLS welcomes/invites (no manual sync needed - handled by fetch_messages)
+ */
+async function syncMLSWelcomes() {
+    try {
+        // Welcomes are already synced via fetch_messages() -> handle_event()
+        // Just load the pending welcomes from the engine
+        await loadMLSInvites();
+    } catch (e) {
+        console.error('Failed to load MLS welcomes:', e);
+    }
+}
+
+/**
+ * Load pending MLS invites and render them
+ */
+async function loadMLSInvites() {
+    try {
+        const raw = await invoke('list_pending_mls_welcomes');
+        // Normalize shape: backend should return an array; support {welcomes} or {items} fallback
+        const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
+        arrMLSInvites = (welcomes || []).filter(Boolean);
+
+        console.log('Pending MLS invites:', arrMLSInvites.length);
+
+        // Render the invites UI
+        renderMLSInvites();
+    } catch (e) {
+        console.error('Failed to load MLS invites:', e);
+        // Ensure the section hides on error
+        const invitesSection = document.getElementById('mls-invites-section');
+        if (invitesSection) invitesSection.style.display = 'none';
+        // Recompute layout after invites section visibility change
+        adjustSize();
+    }
+}
+
+/**
+ * Render MLS invites in the chat tab
+ */
+function renderMLSInvites() {
+    const invitesSection = document.getElementById('mls-invites-section');
+    const invitesContainer = document.getElementById('mls-invites-container');
+    if (!invitesSection || !invitesContainer) return;
+
+    // Clear existing content
+    invitesContainer.innerHTML = '';
+
+    // Hide section if no invites
+    const count = Array.isArray(arrMLSInvites) ? arrMLSInvites.length : 0;
+    if (!count) {
+        invitesSection.style.display = 'none';
+        // Recompute layout since invites section visibility changed
+        adjustSize();
+        return;
+    }
+
+    // Show section if there are invites
+    invitesSection.style.display = '';
+
+    // Render each invite safely (avoid exceptions on missing fields)
+    for (const invite of arrMLSInvites) {
+        try {
+            const divInvite = document.createElement('div');
+            divInvite.classList.add('mls-invite-item');
+
+            const groupId = invite.group_id || invite.id || '';
+            const groupName =
+                invite.group_name ||
+                invite.name ||
+                (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
+
+            // Backend returns 'welcomer' as npub string
+            const welcomerNpub = invite.welcomer || '';
+
+            // Get display name from profile (nickname > name > npub prefix)
+            let welcomerDisplay = 'Unknown';
+            if (welcomerNpub) {
+                const welcomerProfile = getProfile(welcomerNpub);
+                welcomerDisplay = welcomerProfile?.nickname ||
+                                 welcomerProfile?.name ||
+                                 welcomerNpub.substring(0, 16) + '...';
+            }
+
+            const memberCount =
+                (invite.member_count ??
+                    (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
+
+            // Group name
+            const h4Name = document.createElement('h4');
+            h4Name.textContent = groupName;
+            divInvite.appendChild(h4Name);
+
+            // Inviter info
+            const pInfo = document.createElement('p');
+            pInfo.textContent = `Invited by ${welcomerDisplay} • ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+            divInvite.appendChild(pInfo);
+
+            // Action buttons
+            const divActions = document.createElement('div');
+            divActions.classList.add('invite-actions');
+
+            const btnAccept = document.createElement('button');
+            btnAccept.classList.add('btn', 'btn-bounce', 'accept-btn');
+            btnAccept.textContent = 'Accept';
+            btnAccept.onclick = () => acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
+
+            const btnDecline = document.createElement('button');
+            btnDecline.classList.add('btn', 'btn-bounce', 'logout-btn');
+            btnDecline.textContent = 'Decline';
+            btnDecline.onclick = () => declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
+
+            divActions.appendChild(btnAccept);
+            divActions.appendChild(btnDecline);
+            divInvite.appendChild(divActions);
+
+            invitesContainer.appendChild(divInvite);
+        } catch (err) {
+            console.warn('Failed to render MLS invite', invite, err);
+        }
+    }
+
+    // After rendering invites, recompute layout to avoid oversized chat list
+    adjustSize();
+}
+
+/**
+ * Accept an MLS group invite
+ * @param {string} welcomeEventId - The welcome event ID
+ */
+async function acceptMLSInvite(welcomeEventId) {
+    try {
+        console.log('Accepting MLS invite:', welcomeEventId);
+        const success = await invoke('accept_mls_welcome', {
+            welcomeEventIdHex: welcomeEventId
+        });
+        
+        if (success) {
+            // Reload invites and groups
+            await loadMLSInvites();
+            await loadMLSGroups();
+
+            // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+            adjustSize();
+        }
+    } catch (e) {
+        console.error('Failed to accept invite:', e);
+        popupConfirm('Error', 'Failed to join group: ' + e, true, '', 'vector_warning.svg');
+    }
+}
+
+/**
+ * Decline an MLS invite (UI-only hide; backend filtering handles persistence)
+ * @param {string} welcomeEventId - The welcome event ID
+ */
+function declineMLSInvite(welcomeEventId) {
+    // Remove from UI; next backend fetch will exclude if server persisted dismissal
+    arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
+    renderMLSInvites();
+
+    // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
+    adjustSize();
 }
 
 /**
@@ -642,6 +1047,80 @@ async function fetchProfiles() {
     // Poll for changes in profiles
     for (const profile of arrProfiles) {
         await invoke("load_profile", { npub: profile.id });
+    }
+}
+
+/**
+ * Update the chat header subtext (status/typing indicator) for the currently open chat
+ * @param {Object} chat - The chat object
+ */
+function updateChatHeaderSubtext(chat) {
+    if (!chat) return;
+    
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const fNotes = chat.id === strPubkey;
+    
+    if (fNotes) {
+        domChatContactStatus.textContent = 'Encrypted Notes to Self';
+        domChatContactStatus.classList.remove('text-gradient');
+    } else if (isGroup) {
+        // Check for typing indicators in groups
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        
+        if (fIsTyping) {
+            // Display typing indicator with Discord-style multi-user support
+            if (activeTypers.length === 1) {
+                const typer = getProfile(activeTypers[0]);
+                const name = typer?.nickname || typer?.name || 'Someone';
+                domChatContactStatus.textContent = `${name} is typing...`;
+            } else if (activeTypers.length === 2) {
+                const typer1 = getProfile(activeTypers[0]);
+                const typer2 = getProfile(activeTypers[1]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                domChatContactStatus.textContent = `${name1} and ${name2} are typing...`;
+            } else if (activeTypers.length === 3) {
+                const typer1 = getProfile(activeTypers[0]);
+                const typer2 = getProfile(activeTypers[1]);
+                const typer3 = getProfile(activeTypers[2]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                const name3 = typer3?.nickname || typer3?.name || 'Someone';
+                domChatContactStatus.textContent = `${name1}, ${name2}, and ${name3} are typing...`;
+            } else {
+                // 4+ people typing
+                domChatContactStatus.textContent = `Several people are typing...`;
+            }
+            domChatContactStatus.classList.add('text-gradient');
+        } else {
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            if (typeof memberCount === 'number') {
+                const label = memberCount === 1 ? 'member' : 'members';
+                domChatContactStatus.textContent = `${memberCount} ${label}`;
+            } else {
+                // Avoid misleading "0 members" before first count refresh
+                domChatContactStatus.textContent = 'Members syncing...';
+            }
+            domChatContactStatus.classList.remove('text-gradient');
+        }
+    } else {
+        // Check for typing indicators in DMs (using chat.active_typers)
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        
+        if (fIsTyping) {
+            // For DMs, there should only be one typer (the other person)
+            const typer = getProfile(activeTypers[0]);
+            const name = typer?.nickname || typer?.name || 'User';
+            domChatContactStatus.textContent = `${name} is typing...`;
+            domChatContactStatus.classList.add('text-gradient');
+        } else {
+            const profile = getProfile(chat.id);
+            domChatContactStatus.textContent = profile?.status?.title || '';
+            domChatContactStatus.classList.remove('text-gradient');
+            twemojify(domChatContactStatus);
+        }
     }
 }
 
@@ -658,7 +1137,9 @@ function renderChatlist() {
     // If the order of the chatlist changes (i.e: new message), prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
     for (const chat of arrChats) {
-        if (chat.messages.length === 0) continue;
+        // For groups, we show them even if they have no messages yet
+        // For DMs, we only show them if they have messages
+        if (chat.chat_type !== 'MlsGroup' && chat.messages.length === 0) continue;
 
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
@@ -700,10 +1181,10 @@ function renderChatlist() {
  * @param {Chat} chat - The profile we're rendering
  */
 function renderChat(chat) {
-    // Grab the profile (if this is a 1-to-1 chat)
-    const profile = chat.participants.length === 1 ? getProfile(chat.id) : null;
-    if (!profile) console.log(chat);
-
+    // For groups, we don't have a profile, for DMs we do
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+    
     // Collect the Unread Message count for 'Unread' emphasis and badging
     // Ensure muted chats OR muted profiles do not show unread glow
     const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
@@ -722,13 +1203,26 @@ function renderChat(chat) {
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = `relative`;
     divAvatarContainer.style.zIndex = `-1`;
-    if (profile?.avatar) {
+    
+    if (isGroup) {
+        // For groups, show a group icon or placeholder
+        const groupIcon = document.createElement('div');
+        groupIcon.style.width = '50px';
+        groupIcon.style.height = '50px';
+        groupIcon.style.borderRadius = '50%';
+        groupIcon.style.backgroundColor = '#444';
+        groupIcon.style.display = 'flex';
+        groupIcon.style.alignItems = 'center';
+        groupIcon.style.justifyContent = 'center';
+        groupIcon.innerHTML = '<span class="icon icon-chats" style="color: #fff;"></span>';
+        divAvatarContainer.appendChild(groupIcon);
+    } else if (profile?.avatar) {
         const imgAvatar = document.createElement('img');
         imgAvatar.src = profile?.avatar;
         divAvatarContainer.appendChild(imgAvatar);
     } else {
         // Otherwise, generate a Gradient Avatar
-        divAvatarContainer.appendChild(pubkeyToAvatar(profile.id, profile?.nickname || profile?.name, 50));
+        divAvatarContainer.appendChild(pubkeyToAvatar(profile?.id || chat.id, profile?.nickname || profile?.name, 50));
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -759,10 +1253,15 @@ function renderChat(chat) {
     
     divContact.appendChild(divAvatarContainer);
 
-    // Add the name (or, if missing metadata, their npub instead) to the chat preview
+    // Add the name to the chat preview
     const h4ContactName = document.createElement('h4');
-    h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
-    if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+    if (isGroup) {
+        // For groups, extract name from metadata or use a default
+        h4ContactName.textContent = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`;
+    } else {
+        h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
+        if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+    }
     h4ContactName.classList.add('cutoff')
     divPreviewContainer.appendChild(h4ContactName);
 
@@ -770,21 +1269,87 @@ function renderChat(chat) {
     const cLastMsg = chat.messages[chat.messages.length - 1];
     const pChatPreview = document.createElement('p');
     pChatPreview.classList.add('cutoff');
-    const fIsTyping = chat?.typing_until ? chat.typing_until > Date.now() / 1000 : false;
-    pChatPreview.classList.toggle('text-gradient', fIsTyping);
-    if (fIsTyping) {
-        // Typing; display the glowy indicator!
-        pChatPreview.textContent = `Typing...`;
-    } else if (!cLastMsg.content && !cLastMsg.pending) {
-        // Not typing, and no text; display as an attachment
-        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
-    } else if (cLastMsg.pending) {
-        // A message is pending: thus, we're still sending one
-        pChatPreview.textContent = `Sending...`;
+    
+    if (isGroup) {
+        // Check for typing indicators in groups
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        pChatPreview.classList.toggle('text-gradient', fIsTyping);
+        
+        if (fIsTyping) {
+            // Display typing indicator with Discord-style multi-user support
+            if (activeTypers.length === 1) {
+                const typer = getProfile(activeTypers[0]);
+                const name = typer?.nickname || typer?.name || 'Someone';
+                pChatPreview.textContent = `${name} is typing...`;
+            } else if (activeTypers.length === 2) {
+                const typer1 = getProfile(activeTypers[0]);
+                const typer2 = getProfile(activeTypers[1]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                const name2 = typer2?.nickname || typer2?.name || 'Someone';
+                pChatPreview.textContent = `${name1} and ${name2} are typing...`;
+            } else {
+                // 3+ people typing
+                const typer1 = getProfile(activeTypers[0]);
+                const name1 = typer1?.nickname || typer1?.name || 'Someone';
+                pChatPreview.textContent = `${name1} and ${activeTypers.length - 1} others are typing...`;
+            }
+        } else {
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            if (!cLastMsg) {
+                pChatPreview.textContent = (memberCount != null)
+                    ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`
+                    : 'No messages yet';
+            } else if (cLastMsg.pending) {
+                pChatPreview.textContent = `Sending...`;
+            } else if (!cLastMsg.content && cLastMsg.attachments?.length) {
+                // No text content but has attachments; display as an attachment
+                let senderPrefix = '';
+                if (cLastMsg.mine) {
+                    senderPrefix = 'You: ';
+                } else if (cLastMsg.npub) {
+                    // Get sender's display name (nickname > name > npub prefix)
+                    const senderProfile = getProfile(cLastMsg.npub);
+                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+                    senderPrefix = `${senderName}: `;
+                }
+                pChatPreview.textContent = senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+            } else {
+                let senderPrefix = '';
+                if (cLastMsg.mine) {
+                    senderPrefix = 'You: ';
+                } else if (cLastMsg.npub) {
+                    // Get sender's display name (nickname > name > npub prefix)
+                    const senderProfile = getProfile(cLastMsg.npub);
+                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+                    senderPrefix = `${senderName}: `;
+                }
+                pChatPreview.textContent = senderPrefix + cLastMsg.content;
+                twemojify(pChatPreview);
+            }
+        }
     } else {
-        // Not typing; display their last message
-        pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
-        twemojify(pChatPreview);
+        // Check for typing indicators in DMs (using chat.active_typers)
+        const activeTypers = chat.active_typers || [];
+        const fIsTyping = activeTypers.length > 0;
+        pChatPreview.classList.toggle('text-gradient', fIsTyping);
+        
+        if (fIsTyping) {
+            // Typing; display the glowy indicator!
+            pChatPreview.textContent = `Typing...`;
+        } else if (!cLastMsg) {
+            pChatPreview.textContent = 'Start a conversation';
+        } else if (!cLastMsg.content && cLastMsg.attachments?.length && !cLastMsg.pending) {
+            // Not typing, and no text; display as an attachment
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+        } else if (cLastMsg.pending) {
+            // A message is pending: thus, we're still sending one
+            pChatPreview.textContent = `Sending...`;
+        } else {
+            // Not typing; display their last message
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
+            twemojify(pChatPreview);
+        }
     }
     divPreviewContainer.appendChild(pChatPreview);
 
@@ -796,8 +1361,10 @@ function renderChat(chat) {
     // Display the "last message" time
     const pTimeAgo = document.createElement('p');
     pTimeAgo.classList.add('chatlist-contact-timestamp');
-    pTimeAgo.textContent = timeAgo(cLastMsg.at);
-    if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
+    if (cLastMsg) {
+        pTimeAgo.textContent = timeAgo(cLastMsg.at);
+        if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
+    }
     // Apply 'Unread' final styling
     if (nUnread) pTimeAgo.style.color = '#59fcb3';
     divContact.appendChild(pTimeAgo);
@@ -879,14 +1446,14 @@ async function message(pubkey, content, replied_to) {
 }
 
 /**
- * Send a file via NIP-96 server to a Nostr user
- * @param {string} pubkey - The user's pubkey
+ * Send a file via NIP-96 server to a Nostr user or group
+ * @param {string} pubkey - The user's pubkey or group_id
  * @param {string?} replied_to - The reference of the message, if any
  * @param {string} filepath - The absolute file path
  */
 async function sendFile(pubkey, replied_to, filepath) {
     try {
-        // Send the attachment file
+        // Use the protocol-agnostic file_message command for both DMs and MLS groups
         await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
     } catch (e) {
         // Notify of an attachment send failure
@@ -913,6 +1480,141 @@ async function warmupUploadServers() {
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
+    // Listen for MLS message events
+    await listen('mls_message_new', async (evt) => {
+        const { group_id, message } = evt.payload;
+        console.log('MLS message received for group:', group_id, 'pending:', message?.pending, 'attachments:', message?.attachments?.length);
+        
+        // Validate message has required fields
+        if (!message || !message.id || !message.at) {
+            console.warn('Invalid message received (missing id or timestamp):', message);
+            return;
+        }
+        
+        // Find or create the group chat
+        const chat = getOrCreateChat(group_id, 'MlsGroup');
+        
+        // Message is now a full Message object from unified storage!
+        // It already has the correct format with attachments, reactions, etc.
+        const newMessage = {
+            id: message.id,
+            content: message.content,
+            replied_to: message.replied_to || null,
+            preview_metadata: message.preview_metadata || null,
+            attachments: message.attachments || [],
+            reactions: message.reactions || [],
+            at: message.at, // Already in milliseconds
+            pending: message.pending || false,
+            failed: message.failed || false,
+            mine: message.mine,
+            npub: message.npub || null // Sender's npub for group chats
+        };
+        
+        // Check for duplicates
+        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
+        if (existingMsg) {
+            console.log('Duplicate message detected (already in memory):', newMessage.id);
+            return;
+        }
+        
+        // Clear typing indicator for the sender when they send a message
+        if (!newMessage.mine && chat.active_typers && message.sender_npub) {
+            // Remove the sender from active typers
+            chat.active_typers = chat.active_typers.filter(npub => npub !== message.sender_npub);
+            console.log('[TYPING] 💬 Cleared typing indicator after group message from:', message.sender_npub.substring(0, 16));
+            
+            // If this is the open chat, refresh the display
+            if (strOpenChat === group_id) {
+                openChat(group_id);
+            }
+        }
+        
+        // Add message to chat
+        chat.messages.push(newMessage);
+        
+        // Sort messages by time
+        chat.messages.sort((a, b) => a.at - b.at);
+        
+        // If this group has the open chat, update it
+        if (strOpenChat === group_id) {
+            console.log('Updating open group chat with new message, pending:', newMessage.pending);
+            updateChat(chat, [newMessage]);
+        } else {
+            console.log('Group chat not open, message added to background chat');
+        }
+        
+        // Resort chat list order by last message time so groups bubble to the top
+        arrChats.sort((a, b) => {
+            const aLast = a.messages[a.messages.length - 1];
+            const bLast = b.messages[b.messages.length - 1];
+            if (!aLast) return 1;
+            if (!bLast) return -1;
+            return bLast.at - aLast.at;
+        });
+        
+        // Re-render chat list
+        renderChatlist();
+    });
+
+    // Listen for MLS invite received events (real-time)
+    await listen('mls_invite_received', async (evt) => {
+        console.log('MLS invite received in real-time, refreshing invites list');
+        // Reload invites list to show the new invite
+        await loadMLSInvites();
+    });
+
+    // Listen for MLS welcome accepted events
+    await listen('mls_welcome_accepted', async (evt) => {
+        console.log('MLS welcome accepted, refreshing groups and invites');
+        // Reload invites and groups
+        await loadMLSInvites();
+        await loadMLSGroups();
+    });
+
+    // Listen for MLS initial sync completion after joining a group
+    await listen('mls_group_initial_sync', async (evt) => {
+        try {
+            const { group_id, processed, new: newCount } = evt.payload || {};
+            console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
+
+            // Ensure the group chat exists even if there are no messages yet
+            const chat = getOrCreateChat(group_id, 'MlsGroup');
+            await refreshGroupMemberCount(group_id);
+
+            // If there are no messages loaded yet, fetch a small recent slice so we can render previews/order
+            if (!chat.messages || chat.messages.length === 0) {
+                try {
+                    // Use unified chat message storage (same as DMs)
+                    const messages = await invoke('get_chat_messages', {
+                        chatId: group_id,
+                        limit: 50
+                    }) || [];
+
+                    // Messages are already in the correct format from unified storage!
+                    chat.messages = messages;
+                } catch (e) {
+                    console.warn('Failed to load initial group messages after sync:', group_id, e);
+                    // Keep chat with zero messages; UI will show "No messages yet"
+                    chat.messages = [];
+                }
+            }
+
+            // Resort chat list order by last message time to reflect any loaded timeline
+            arrChats.sort((a, b) => {
+                const aLast = a.messages[a.messages.length - 1];
+                const bLast = b.messages[b.messages.length - 1];
+                if (!aLast) return 1;
+                if (!bLast) return -1;
+                return bLast.at - aLast.at;
+            });
+
+            // Re-render the chat list so empty groups show with "No messages yet" preview
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_initial_sync:', e);
+        }
+    });
+
     // Listen for Synchronisation Finish updates
     await listen('sync_finished', async (_) => {
         // Display that we finished syncing
@@ -1009,8 +1711,8 @@ async function setupRustListeners() {
 
     // Listen for Attachment Download Results
     await listen('attachment_download_result', async (evt) => {
-        // Update the in-memory attachment
-        let cChat = getDMChat(evt.payload.profile_id);
+        // Update the in-memory attachment (works for both DMs and Group Chats)
+        let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
         
         let cMsg = cChat.messages.find(m => m.id === evt.payload.msg_id);
@@ -1124,7 +1826,40 @@ async function setupRustListeners() {
         }
     });
 
-    // Listen for incoming messages
+    // Listen for typing indicator updates (both DMs and Groups)
+    await listen('typing-update', (evt) => {
+        const { conversation_id, typers } = evt.payload;
+        
+        // Find the chat (could be DM or group)
+        const chat = arrChats.find(c => c.id === conversation_id);
+        if (!chat) return;
+        
+        // Only log for groups
+        const isGroup = chat.chat_type === 'MlsGroup';
+        if (isGroup) {
+            console.log('[TYPING] 📥 Frontend received typing-update:', { conversation_id: conversation_id.substring(0, 16), typers });
+        }
+        
+        // Store the typers array and update timestamp
+        chat.active_typers = typers || [];
+        chat.last_typing_update = Date.now() / 1000;
+        
+        if (isGroup) {
+            console.log('[TYPING] 💾 Updated chat.active_typers:', { chat_id: chat.id.substring(0, 16), active_typers: chat.active_typers });
+        }
+        
+        // If this chat is currently open, update the chat header subtext
+        if (strOpenChat === conversation_id) {
+            if (isGroup) console.log('[TYPING] 🔄 Updating chat header subtext');
+            updateChatHeaderSubtext(chat);
+        }
+        
+        // Update the chat list preview
+        if (isGroup) console.log('[TYPING] 🔄 Refreshing chat list');
+        renderChatlist();
+    });
+
+    // Listen for incoming DM messages
     await listen('message_new', (evt) => {
         // Get the chat for this message (chat_id is the npub for DMs)
         let chat = getOrCreateDMChat(evt.payload.chat_id);
@@ -1136,10 +1871,16 @@ async function setupRustListeners() {
         const existingMsg = chat.messages.find(m => m.id === newMessage.id);
         if (existingMsg) return;
 
-        // Reset typing status for the sender's profile
-        const profile = getProfile(evt.payload.chat_id);
-        if (profile && !newMessage.mine) {
-            profile.typing_until = 0;
+        // Clear typing indicator for the sender when they send a message
+        if (!newMessage.mine && chat.active_typers) {
+            // Remove the sender from active typers
+            const senderNpub = evt.payload.chat_id;
+            chat.active_typers = chat.active_typers.filter(npub => npub !== senderNpub);
+            
+            // If this is the open chat, refresh the display
+            if (strOpenChat === evt.payload.chat_id) {
+                openChat(evt.payload.chat_id);
+            }
         }
 
         // Find the correct position to insert the message based on timestamp
@@ -1195,8 +1936,8 @@ async function setupRustListeners() {
 
     // Listen for existing message updates
     await listen('message_update', (evt) => {
-        // Find the message we're updating
-        const cChat = getDMChat(evt.payload.chat_id);
+        // Find the message we're updating - works for both DMs and groups
+        const cChat = getChat(evt.payload.chat_id);
         if (!cChat) return;
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
@@ -1204,10 +1945,12 @@ async function setupRustListeners() {
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
 
-        // If this user has an open chat, then update the rendered message
+        // If this chat is open, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
             // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
             const domMsg = document.getElementById(evt.payload.old_id);
+            
+            // For DMs, get the profile; for groups, profile will be null
             const profile = getProfile(evt.payload.chat_id);
             domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
 
@@ -1395,6 +2138,8 @@ async function login() {
                 btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
                 domChatList.before(btnStartChat);
                 adjustSize();
+                // After login UI finishes and "Start a New Chat" button exists, add "Create Group" launcher
+                ensureCreateGroupButton();
 
                 // Setup a subscription for new websocket messages
                 invoke("notifs");
@@ -1523,7 +2268,7 @@ function renderProfileTab(cProfile) {
         }
         domProfileAvatar.src = cProfile.avatar;
     } else {
-        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name);
+        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 175);
         domProfileAvatar.replaceWith(newAvatar);
         domProfileAvatar = newAvatar;
     }
@@ -1937,8 +2682,11 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
-    // If no profile is provided, try to get it from the chat ID
-    if (!profile && chat) {
+    // Check if this is a group chat
+    const isGroup = chat?.chat_type === 'MlsGroup';
+
+    // If no profile is provided and it's not a group, try to get it from the chat ID
+    if (!profile && chat && !isGroup) {
         profile = getProfile(chat.id);
     }
     
@@ -1946,9 +2694,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     const fNotes = strOpenChat === strPubkey;
 
     if (chat?.messages.length || arrMessages.length) {
-        // Prefer displaying their name, otherwise, npub
+        // Prefer displaying their name, otherwise, npub/group name
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+            domChatContact.classList.remove('btn');
+        } else if (isGroup) {
+            domChatContact.textContent = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
             domChatContact.classList.remove('btn');
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
@@ -1962,19 +2713,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         }
 
         // Display either their Status or Typing Indicator
-        if (fNotes) {
-            domChatContactStatus.textContent = 'Encrypted Notes to Self';
-        } else {
-            const fIsTyping = profile?.typing_until ? profile.typing_until > Date.now() / 1000 : false;
-            if (fIsTyping) {
-                domChatContactStatus.textContent = `${profile?.nickname || profile?.name || 'User'} is typing...`;
-                domChatContactStatus.classList.add('text-gradient');
-            } else {
-                domChatContactStatus.textContent = profile?.status?.title || '';
-                domChatContactStatus.classList.remove('text-gradient');
-                twemojify(domChatContactStatus);
-            }
-        }
+        updateChatHeaderSubtext(chat);
 
         // Adjust our Contact Name class to manage space according to Status visibility
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
@@ -1984,7 +2723,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Auto-mark messages as read when chat is opened AND window is focused
         if (chat?.messages?.length) {
             // Check window focus before auto-marking
-            const isWindowFocused = await getCurrentWindow().isFocused();
+            const isWindowFocused = (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios')
+                ? await getCurrentWindow().isFocused()
+                : true;
             
             if (isWindowFocused) {
                 // Find the latest message from the other person (not from current user)
@@ -2010,8 +2751,13 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
-        // Process each message for insertion
+        /* Dedup guard: skip any message already present in the DOM by ID */
+         // Process each message for insertion
         for (const msg of arrMessages) {
+            // Guard against duplicate insertions if the DOM already contains this message ID
+            if (document.getElementById(msg.id)) {
+                continue;
+            }
             // Quick check for empty chat - simple append
             if (domChatMessages.children.length === 0) {
                 domChatMessages.appendChild(renderMessage(msg, profile));
@@ -2147,6 +2893,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+        } else if (isGroup) {
+            domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
         }
@@ -2209,8 +2957,14 @@ function renderMessage(msg, sender, editID = '') {
     divMessage.id = msg.id;
 
     // Add a subset of the sender's ID so we have context of WHO sent it, even in group contexts
-    const strShortSenderID = (msg.mine ? strPubkey : sender.id).substring(0, 8);
+    // For group chats, use msg.npub; for DMs, use sender.id
+    const otherId = sender?.id || msg.npub || '';
+    const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
+    
+    // Check if we're in a group chat
+    const currentChat = arrChats.find(c => c.id === strOpenChat);
+    const isGroupChat = currentChat?.chat_type === 'MlsGroup';
 
     // Render it appropriately depending on who sent it
     divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
@@ -2223,15 +2977,70 @@ function renderMessage(msg, sender, editID = '') {
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
     if (!domPrevMsg || domPrevMsg.getAttribute('sender') != strShortSenderID) {
         // Add an avatar if this is not OUR message
-        if (!msg.mine && sender?.avatar) {
-            const imgAvatar = document.createElement('img');
-            imgAvatar.classList.add('avatar', 'btn');
-            imgAvatar.onclick = () => {
-                closeChat();
-                openProfile(sender);
-            };
-            imgAvatar.src = sender.avatar;
-            divMessage.appendChild(imgAvatar);
+        if (!msg.mine) {
+            let avatarEl = null;
+            // Resolve sender profile for group chats
+            // For group chats, use msg.npub; for DMs, use sender
+            const otherFullId = msg.npub || sender?.id || '';
+            const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
+            if (authorProfile?.avatar) {
+                const imgAvatar = document.createElement('img');
+                imgAvatar.classList.add('avatar', 'btn');
+                imgAvatar.onclick = () => {
+                    closeChat();
+                    openProfile(authorProfile);
+                };
+                imgAvatar.src = authorProfile.avatar;
+                avatarEl = imgAvatar;
+            } else {
+                // Provide a deterministic placeholder when no avatar URL is available
+                const displayName = authorProfile?.nickname || authorProfile?.name || '';
+                const placeholder = pubkeyToAvatar(otherFullId, displayName, 35);
+                // Ensure visual sizing and interactivity match real avatars
+                placeholder.classList.add('avatar', 'btn');
+                // Only wire profile click if we have an identifiable user
+                if (otherFullId) {
+                    placeholder.onclick = () => {
+                        const prof = getProfile(otherFullId) || authorProfile;
+                        closeChat();
+                        openProfile(prof || { id: otherFullId });
+                    };
+                }
+                avatarEl = placeholder;
+            }
+            
+            // Create a container for avatar and username
+            if (avatarEl) {
+                const avatarContainer = document.createElement('div');
+                avatarContainer.style.position = 'relative';
+                avatarContainer.style.marginRight = '10px';
+                
+                // Only add username label in group chats
+                if (isGroupChat) {
+                    const usernameLabel = document.createElement('span');
+                    usernameLabel.classList.add('msg-username-label', 'btn');
+                    const displayName = authorProfile?.nickname || authorProfile?.name || '';
+                    usernameLabel.textContent = displayName || otherFullId.substring(0, 8);
+                    if (displayName) twemojify(usernameLabel);
+                    
+                    // Make username clickable to open profile
+                    if (otherFullId) {
+                        usernameLabel.onclick = () => {
+                            const prof = getProfile(otherFullId) || authorProfile;
+                            closeChat();
+                            openProfile(prof || { id: otherFullId });
+                        };
+                    }
+                    
+                    avatarContainer.appendChild(usernameLabel);
+                }
+                
+                avatarContainer.appendChild(avatarEl);
+                
+                // Remove the margin from the avatar since container handles it
+                avatarEl.style.marginRight = '0';
+                divMessage.appendChild(avatarContainer);
+            }
         }
 
         // If there is a message before them, and it isn't theirs, apply additional edits
@@ -2267,15 +3076,16 @@ function renderMessage(msg, sender, editID = '') {
                 }
             }
 
-            // Add some additional margin to separate the senders visually
-            divMessage.style.marginTop = `15px`;
+            // Add some additional margin to separate the senders visually (extra space for username in groups)
+            divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
         }
         
         // Check if this is a singular message (no next message from same sender)
         // This check happens after the message is rendered (at the end of the function)
     } else {
         // Add additional margin to simulate avatar space
-        if (!msg.mine && sender?.avatar) {
+        // We always reserve space for non-mine messages since we render an avatar or placeholder for the first in a streak
+        if (!msg.mine) {
             pMessage.style.marginLeft = `45px`;
         }
 
@@ -2302,7 +3112,8 @@ function renderMessage(msg, sender, editID = '') {
     // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
     if (msg.replied_to) {
         // Try to find the referenced message in the current chat
-        const chat = getDMChat(sender.id);
+        // For DMs, use sender profile; for groups, use the currently open chat
+        const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
         const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
         if (cMsg) {
             // Render the reply in a quote-like fashion
@@ -2314,13 +3125,16 @@ function renderMessage(msg, sender, editID = '') {
             const spanName = document.createElement('span');
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
 
-            // Name
-            const cSenderProfile = !cMsg.mine ? sender : getProfile(strPubkey);
+            // Name - for group chats, use cMsg.npub; for DMs, use sender
+            const cSenderProfile = !cMsg.mine
+                ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
+                : getProfile(strPubkey);
             if (cSenderProfile?.nickname || cSenderProfile?.name) {
                 spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
                 twemojify(spanName);
             } else {
-                spanName.textContent = cSenderProfile?.id?.substring(0, 10) + '…' || 'Unknown';
+                const fallbackId = cMsg.npub || cSenderProfile?.id || '';
+                spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
             }
 
             // Replied-to content (Text or Attachment)
@@ -2495,7 +3309,9 @@ function renderMessage(msg, sender, editID = '') {
             // For images, show blurhash preview while downloading (only for formats that support blurhash)
             if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                 // Generate blurhash preview for downloading image
-                invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
+                // For group chats, use chat ID; for DMs, use sender.id
+                const blurhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                invoke('generate_blurhash_preview', { npub: blurhashNpub2, msgId: msg.id })
                     .then(base64Image => {
                         const imgPreview = document.createElement('img');
                         imgPreview.style.width = `100%`;
@@ -2548,7 +3364,9 @@ function renderMessage(msg, sender, editID = '') {
                 // For images, show blurhash preview with download button (unless auto-downloading)
                 if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
                     // Generate blurhash preview for undownloaded image
-                    invoke('generate_blurhash_preview', { npub: sender.id, msgId: msg.id })
+                    // For group chats, use chat ID; for DMs, use sender.id
+                    const blurhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('generate_blurhash_preview', { npub: blurhashNpub, msgId: msg.id })
                         .then(base64Image => {
                             const imgPreview = document.createElement('img');
                             imgPreview.style.width = `100%`;
@@ -2574,7 +3392,9 @@ function renderMessage(msg, sender, editID = '') {
                                 const iDownload = document.createElement('i');
                                 iDownload.id = cAttachment.id;
                                 iDownload.toggleAttribute('download', true);
-                                iDownload.setAttribute('npub', sender.id);
+                                // For group chats, use chat ID; for DMs, use sender.id
+                                const downloadNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                                iDownload.setAttribute('npub', downloadNpub2);
                                 iDownload.setAttribute('msg', msg.id);
                                 iDownload.classList.add('btn');
                                 iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
@@ -2614,7 +3434,9 @@ function renderMessage(msg, sender, editID = '') {
                                 const iDownload = document.createElement('i');
                                 iDownload.id = cAttachment.id;
                                 iDownload.toggleAttribute('download', true);
-                                iDownload.setAttribute('npub', sender.id);
+                                // For group chats, use chat ID; for DMs, use sender.id
+                                const downloadNpub3 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                                iDownload.setAttribute('npub', downloadNpub3);
                                 iDownload.setAttribute('msg', msg.id);
                                 iDownload.classList.add('btn');
                                 iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
@@ -2639,7 +3461,9 @@ function renderMessage(msg, sender, editID = '') {
                     const iDownload = document.createElement('i');
                     iDownload.id = cAttachment.id;
                     iDownload.toggleAttribute('download', true);
-                    iDownload.setAttribute('npub', sender.id);
+                    // For group chats, use chat ID; for DMs, use sender.id
+                    const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    iDownload.setAttribute('npub', downloadNpub);
                     iDownload.setAttribute('msg', msg.id);
                     iDownload.classList.add('btn');
                     iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
@@ -2658,7 +3482,9 @@ function renderMessage(msg, sender, editID = '') {
                         pMessage.appendChild(iDownloading);
                     }
                     
-                    invoke('download_attachment', { npub: sender.id, msgId: msg.id, attachmentId: cAttachment.id });
+                    // For group chats, use chat ID; for DMs, use sender.id
+                    const downloadNpub4 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('download_attachment', { npub: downloadNpub4, msgId: msg.id, attachmentId: cAttachment.id });
                 }
             }
     }
@@ -2704,7 +3530,8 @@ function renderMessage(msg, sender, editID = '') {
         } else if (!msg.preview_metadata) {
             // Grab the message's metadata (currently, only URLs can have extracted metadata)
             if (msg.content && msg.content.includes('https')) {
-                invoke("fetch_msg_metadata", { npub: sender.id, msgId: msg.id });
+                // Pass the chat ID so backend can find both DMs and group chats
+                invoke("fetch_msg_metadata", { chatId: strOpenChat, msgId: msg.id });
             }
         }
     }
@@ -2885,10 +3712,12 @@ function openChat(contact) {
     // Hide the Navbar
     domNavbar.style.display = `none`;
 
-    // Get the chat for this contact
-    const chat = getDMChat(contact);
-    const profile = getProfile(contact);
+    // Get the chat (could be DM or Group)
+    const chat = arrChats.find(c => c.id === contact);
+    const isGroup = chat?.chat_type === 'MlsGroup';
+    const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    if (isGroup) { refreshGroupMemberCount(contact); }
 
     // Clear any existing auto-scroll timer
     if (chatOpenAutoScrollTimer) {
@@ -2905,8 +3734,41 @@ function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
+    // If it's a group, load messages from unified storage (no sync needed - live subscription handles it)
+    if (isGroup && chat) {
+        (async () => {
+            // Load messages using unified storage
+            try {
+                const messages = await invoke('get_chat_messages', {
+                    chatId: contact,
+                    limit: 50
+                }) || [];
+
+                console.log(`Loaded ${messages.length} messages for group ${String(contact).substring(0, 8)}...`);
+
+                // Messages are already in the correct format from unified storage!
+                // Merge with existing messages to avoid duplicates
+                const existingIds = new Set((chat.messages || []).map(m => m.id));
+                const newOnly = messages.filter(m => !existingIds.has(m.id));
+
+                // Append new messages and keep chronological order
+                chat.messages = (chat.messages || []).concat(newOnly);
+                chat.messages.sort((a, b) => a.at - b.at);
+
+                // Insert only the new messages into the open chat
+                if (newOnly.length) {
+                    updateChat(chat, newOnly, null, false);
+                    // Preserve typing indicator after async message load
+                    updateChatHeaderSubtext(chat);
+                }
+            } catch (e) {
+                console.error('Failed to load group messages:', e);
+            }
+        })();
+    }
+
     // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
-    updateChat(chat, (chat?.messages || []).slice(-50), profile, true);
+    updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
 }
 
 /**
@@ -3013,7 +3875,7 @@ function openProfile(cProfile) {
     }
 }
 
-function openChatlist() {
+async function openChatlist() {
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
@@ -3027,6 +3889,9 @@ function openChatlist() {
         // Open the tab
         domChats.style.display = '';
     }
+    
+    // Load and display MLS invites in the Chat tab
+    await loadMLSInvites();
 }
 
 function openSettings() {
@@ -3096,6 +3961,8 @@ async function openInvites() {
         inviteCodeElement.textContent = 'Error loading code';
         console.error('Failed to get invite code:', error);
     }
+
+    // Note: MLS invites are now shown in the Chat tab, not here
 }
 
 /**
@@ -3317,9 +4184,27 @@ window.addEventListener("DOMContentLoaded", async () => {
         try {
             const replyRef = strCurrentReplyReference;
             cancelReply();
-            await message(strOpenChat, messageText.trim(), replyRef, "");
+            
+            // Check if current chat is a group
+            const chat = arrChats.find(c => c.id === strOpenChat);
+            if (chat?.chat_type === 'MlsGroup') {
+                // Send group message
+                const wrapperId = await invoke('send_mls_group_message', {
+                    groupId: strOpenChat,
+                    text: messageText.trim(),
+                    repliedTo: replyRef || null
+                });
+                // Message is already added optimistically by send_mls_group_message
+                // Live subscription will handle receiving it back from the relay
+            } else {
+                // Send regular DM
+                await message(strOpenChat, messageText.trim(), replyRef, "");
+            }
+            
             nLastTypingIndicator = 0;
-        } catch(_) {}
+        } catch(e) {
+            console.error('Failed to send message:', e);
+        }
     }
 
     // Desktop/iOS - traditional keydown approach
@@ -3356,27 +4241,25 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
 
     // Hook up our drag-n-drop listeners
-    await getCurrentWebview().onDragDropEvent(async (event) => {
-        // Only accept File Drops if a chat is open
-        if (strOpenChat) {
-            if (event.payload.type === 'over') {
-                // TODO: add hover effects
-            } else if (event.payload.type === 'drop') {
-                // Reset reply selection while passing a copy of the reference to the backend
-                const strReplyRef = strCurrentReplyReference;
-                cancelReply();
-                await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
-            } else {
-                // TODO: remove hover effects
-            }
-        }
-    });
-
-    // Hook up window focus-change events
-    await getCurrentWindow().onFocusChanged(async (event) => {
-        if (event.payload) {
-            // If we have a chat open, but Vector was prev. in the background; mark these messages as read
+    if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+        await getCurrentWebview().onDragDropEvent(async (event) => {
+            // Only accept File Drops if a chat is open
             if (strOpenChat) {
+                if (event.payload.type === 'over') {
+                    // TODO: add hover effects
+                } else if (event.payload.type === 'drop') {
+                    // Reset reply selection while passing a copy of the reference to the backend
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
+                } else {
+                    // TODO: remove hover effects
+                }
+            }
+        });
+
+        await getCurrentWindow().onFocusChanged(async (event) => {
+            if (event.payload && strOpenChat) {
                 const currentChat = getDMChat(strOpenChat);
                 if (currentChat && currentChat.messages.length > 0) {
                     // Find the last message from the contact (not from current user)
@@ -3387,18 +4270,13 @@ window.addEventListener("DOMContentLoaded", async () => {
                             break;
                         }
                     }
-                    
-                    // If we found a message, mark it as read on the chat
                     if (lastContactMsg) {
-                        const currentChat = getDMChat(strOpenChat);
-                        if (currentChat) {
-                            markAsRead(currentChat, lastContactMsg);
-                        }
+                        markAsRead(currentChat, lastContactMsg);
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     // Hook up our voice message recorder listener
     const recorder = new VoiceRecorder(domChatMessageInputVoice);
@@ -3538,8 +4416,10 @@ document.addEventListener('click', (e) => {
         return openUrl(e.target.getAttribute('pay-uri'));
     }
 
-    // If we're clicking a Contact, open the chat with the embedded npub (ID)
-    if (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact")) {
+    // If we're clicking a Contact in the main chat list (NOT inside the Create Group panel), open the chat
+    const cg = document.getElementById('create-group');
+    const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
+    if (!inCreateGroup && (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact"))) {
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
         return openChat(strID);
     }
@@ -3595,3 +4475,351 @@ function softChatScroll() {
 }
 
 window.onresize = adjustSize;
+
+// ===== Create Group: state and helpers =====
+/**
+ * Selected members (npubs) for the group being created.
+ * Keep this decoupled from arrChats.
+ */
+let arrSelectedGroupMembers = [];
+/**
+ * Tracks whether the user attempted to create the group.
+ * Used to only show inline validation after an explicit attempt.
+ */
+let fCreateGroupAttempt = false;
+
+/**
+ * Ensure the "Create Group" launcher button exists next to "Start New Chat".
+ * Safe to call multiple times.
+ */
+function ensureCreateGroupButton() {
+    if (document.getElementById('create-group-btn')) return;
+    if (!domChatList) return;
+    // Only render after login/init is complete: navbar visible, login form hidden, and anchor exists
+    if (!domNavbar || domNavbar.style.display === 'none') return;
+    if (typeof domLogin !== 'undefined' && domLogin && domLogin.style.display !== 'none') return;
+
+    const btnCreateGroup = document.createElement('button');
+    btnCreateGroup.id = 'create-group-btn';
+    btnCreateGroup.classList.add('new-chat-btn', 'btn', 'intro-anim');
+    btnCreateGroup.style.marginTop = '10px';
+    btnCreateGroup.innerHTML = '<span style="width: 100%">Create Group</span><span class="icon icon-chats"></span>';
+    btnCreateGroup.addEventListener('animationend', () => btnCreateGroup.classList.remove('intro-anim'), { once: true });
+    btnCreateGroup.onclick = openCreateGroup;
+
+    // Place below the existing "Start a New Chat" button if present, else place before chat list
+    const btnStartChat = document.getElementById('new-chat-btn');
+    if (btnStartChat && btnStartChat.parentElement) {
+        btnStartChat.insertAdjacentElement('afterend', btnCreateGroup);
+    } else {
+        domChatList.before(btnCreateGroup);
+    }
+
+    // Recompute layout
+    adjustSize();
+}
+
+/**
+ * Render the filterable, scrollable contact list with checkboxes.
+ * Reuses arrProfiles as the source of truth.
+ */
+function renderCreateGroupList(filterText = '') {
+    if (!domCreateGroupList) return;
+    domCreateGroupList.innerHTML = '';
+
+    const f = (filterText || '').trim().toLowerCase();
+
+    // Exclude our own profile from selection
+    const mine = arrProfiles.find(p => p.mine)?.id;
+
+    // Build a fragment for performance
+    const frag = document.createDocumentFragment();
+
+    for (const p of arrProfiles) {
+        if (!p || !p.id) continue;
+        if (p.id === mine) continue;
+
+        // Filter by nickname/name/npub
+        const name = p.nickname || p.name || '';
+        const hay = (name + ' ' + p.id).toLowerCase();
+        if (f && !hay.includes(f)) continue;
+
+        // Row container (reuse existing styling conventions)
+        const row = document.createElement('div');
+        row.classList.add('chatlist-contact');
+        row.id = `cg-${p.id}`;
+
+        // Avatar
+        const avatarContainer = document.createElement('div');
+        avatarContainer.style.position = 'relative';
+        avatarContainer.style.zIndex = '-1';
+        if (p.avatar) {
+            const img = document.createElement('img');
+            img.src = p.avatar;
+            avatarContainer.appendChild(img);
+        } else {
+            avatarContainer.appendChild(pubkeyToAvatar(p.id, name, 50));
+        }
+        row.appendChild(avatarContainer);
+
+        // Title and subtitle
+        const preview = document.createElement('div');
+        preview.classList.add('chatlist-contact-preview');
+
+        const title = document.createElement('h4');
+        title.classList.add('cutoff');
+        title.textContent = name || p.id;
+        if (name) twemojify(title);
+        preview.appendChild(title);
+
+        const subtitle = document.createElement('p');
+        subtitle.classList.add('cutoff');
+        subtitle.style.opacity = '0.7';
+        subtitle.textContent = p.id;
+        preview.appendChild(subtitle);
+        preview.style.zIndex = '-1';
+        row.appendChild(preview);
+
+        // Checkbox
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.style.marginLeft = 'auto';
+        chk.style.marginRight = 'auto';
+        chk.style.width = '18px';
+        chk.style.height = '18px';
+        chk.style.marginTop = 'auto';
+        chk.style.marginBottom = 'auto';
+        chk.checked = arrSelectedGroupMembers.includes(p.id);
+        chk.setAttribute('aria-label', `Select ${name || p.id}`);
+        chk.onchange = () => {
+            if (chk.checked) {
+                if (!arrSelectedGroupMembers.includes(p.id)) {
+                    arrSelectedGroupMembers.push(p.id);
+                }
+            } else {
+                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== p.id);
+            }
+            updateCreateGroupValidation(true);
+        };
+        row.appendChild(chk);
+
+        // Row click toggles checkbox for better UX (avoid toggling when clicking the checkbox itself)
+        // Important: stop propagation to avoid the global document click handler opening the DM chat.
+        row.onclick = null;
+        row.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.target === chk) return;
+            chk.click();
+        });
+        // Also stop propagation when the checkbox itself is clicked
+        chk.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+
+        frag.appendChild(row);
+    }
+
+    // If no matches
+    if (!frag.childElementCount) {
+        const empty = document.createElement('p');
+        empty.style.textAlign = 'center';
+        empty.style.opacity = '0.7';
+        empty.textContent = f ? 'No matches' : 'No contacts found';
+        domCreateGroupList.appendChild(empty);
+    } else {
+        domCreateGroupList.appendChild(frag);
+    }
+}
+
+/**
+ * Enable/disable Create button and show inline hint
+ */
+function updateCreateGroupValidation(showInline = false) {
+    if (!domCreateGroupCreateBtn) return;
+    const nameOk = !!domCreateGroupName?.value.trim();
+    const membersOk = arrSelectedGroupMembers.length > 0;
+
+    const enabled = nameOk && membersOk;
+
+    // Toggle both property and attribute to avoid any CSS/UA inconsistencies
+    domCreateGroupCreateBtn.disabled = !enabled;
+    if (enabled) {
+        domCreateGroupCreateBtn.removeAttribute('disabled');
+    } else {
+        domCreateGroupCreateBtn.setAttribute('disabled', '');
+    }
+
+    // Only show status after an explicit attempt, or when forced via parameter
+    const shouldShow = showInline || fCreateGroupAttempt;
+
+    if (domCreateGroupStatus) {
+        if (shouldShow && (!nameOk || !membersOk)) {
+            domCreateGroupStatus.style.display = '';
+            domCreateGroupStatus.textContent = !nameOk
+                ? 'Group name is required'
+                : 'Select at least one contact';
+        } else {
+            domCreateGroupStatus.style.display = 'none';
+            domCreateGroupStatus.textContent = '';
+        }
+    }
+}
+
+/**
+ * Open Create Group tab
+ */
+function openCreateGroup() {
+    // Show panel
+    domCreateGroup.style.display = '';
+    // Hide others
+    domChats.style.display = 'none';
+    domChat.style.display = 'none';
+    domNavbar.style.display = 'none';
+
+    // Reset state
+    arrSelectedGroupMembers = [];
+    fCreateGroupAttempt = false;
+    if (domCreateGroupName) domCreateGroupName.value = '';
+    if (domCreateGroupFilter) domCreateGroupFilter.value = '';
+    if (domCreateGroupStatus) {
+        domCreateGroupStatus.style.display = 'none';
+        domCreateGroupStatus.textContent = '';
+    }
+
+    // Render list
+    renderCreateGroupList('');
+    updateCreateGroupValidation(false);
+
+    // Focus name
+    domCreateGroupName?.focus();
+}
+
+/**
+ * Close Create Group tab and go back to Chat list
+ */
+async function closeCreateGroup() {
+    domCreateGroup.style.display = 'none';
+    fCreateGroupAttempt = false;
+
+    // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
+    domNavbar.style.display = '';
+
+    // Navigate back to chat list
+    await openChatlist();
+
+    // Adjust layout after UI visibility changes
+    adjustSize();
+}
+
+/**
+ * Wire up Create Group UI events
+ */
+/*
+Create Group UI wiring
+- Validation: Create button disabled until non-empty group name and at least one member selected. See updateCreateGroupValidation() for state sync.
+- Loading states:
+  • Button text toggles to 'Creating...' and disabled during IPC.
+  • Inline status text shows 'Preparing devices...' then 'Finalizing...' on success.
+- IPC flow:
+  • invoke('create_group_chat', { groupName, memberIds })
+    - Backend validates inputs and refreshes each member's device KeyPackage.
+    - If any member fails refresh/fetch, backend returns Err with a user-facing string. We surface that string directly via popupConfirm and status label.
+  • On success:
+    - loadMLSGroups() ensures immediate discoverability in chat list.
+    - openChat(newGroupId) navigates to the newly created group.
+- Error handling:
+  • popupConfirm('Group creation failed', errorString, ...) shows a clear toast/modal.
+  • domCreateGroupStatus also mirrors the exact error string for inline context.
+  • We do not partially create groups: any device refresh failure aborts.
+- Notes:
+  • Tauri expects camelCase params from JS for Rust snake_case args.
+  • Backend emits 'mls_group_initial_sync' on success; the chat list also refreshes via loadMLSGroups().
+*/
+(function wireCreateGroupUI() {
+    if (!domCreateGroup) return;
+
+    domCreateGroupBackBtn.onclick = closeCreateGroup;
+    domCreateGroupCancelBtn.onclick = closeCreateGroup;
+
+    domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
+    domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
+
+    domCreateGroupCreateBtn.onclick = async () => {
+        const groupName = (domCreateGroupName?.value || '').trim();
+        const memberIds = [...arrSelectedGroupMembers];
+
+        // Mark that the user attempted to create a group
+        fCreateGroupAttempt = true;
+
+        if (!groupName || memberIds.length === 0) {
+            updateCreateGroupValidation(true);
+            return;
+        }
+
+        // Loading state
+        const prevTxt = domCreateGroupCreateBtn.textContent;
+        domCreateGroupCreateBtn.textContent = 'Creating...';
+        domCreateGroupCreateBtn.disabled = true;
+
+        if (domCreateGroupStatus) {
+            domCreateGroupStatus.style.display = '';
+            domCreateGroupStatus.textContent = 'Preparing devices...';
+        }
+
+        try {
+            // Backend orchestration: refresh keypackages per member, create group, persist
+            // Note: Tauri expects camelCase arg keys for Rust snake_case params.
+            const newGroupId = await invoke('create_group_chat', {
+                groupName: groupName,
+                memberIds: memberIds
+            });
+
+            // On success: refresh groups, open the new group chat, and close panel
+            if (domCreateGroupStatus) {
+                domCreateGroupStatus.textContent = 'Finalizing...';
+            }
+
+            // Ensure groups list is current and visible in UI immediately
+            await loadMLSGroups();
+
+            // Navigate to the new group
+            openChat(newGroupId);
+
+            // Hide panel
+            domCreateGroup.style.display = 'none';
+        } catch (e) {
+            const raw = (e || '').toString();
+            // Map backend "no device keypackages" errors to a friendlier UX message
+            let friendly = raw;
+            let isHtml = false;
+            try {
+                const m = raw.match(/no device keypackag(?:e|es) found for (\S+)/i);
+                if (m && m[1]) {
+                    const npub = m[1];
+                    const prof = arrProfiles.find(p => p.id === npub);
+                    const display = prof?.nickname || prof?.name || 'This user';
+                    friendly = `${display} is using an older Vector version!<br>Please ask them to upgrade before inviting them to a Group Chat.`;
+                    isHtml = true;
+                }
+            } catch (_) {}
+            popupConfirm('Group creation failed', friendly, true, '', 'vector_warning.svg');
+            if (domCreateGroupStatus) {
+                domCreateGroupStatus.style.display = '';
+                if (isHtml) domCreateGroupStatus.innerHTML = friendly;
+                else domCreateGroupStatus.textContent = friendly;
+            }
+        } finally {
+            domCreateGroupCreateBtn.textContent = prevTxt || 'Create';
+            updateCreateGroupValidation();
+        }
+    };
+
+    // Ensure launch button appears once init completes
+    // Safe to attach extra listener; main code also listens to this event
+    listen('init_finished', () => {
+        ensureCreateGroupButton();
+    });
+})();
+
+
