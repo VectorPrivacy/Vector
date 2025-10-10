@@ -53,6 +53,8 @@ const domAccount = document.getElementById('account');
 const domSyncStatusContainer = document.getElementById('sync-status-container');
 const domSyncStatus = document.getElementById('sync-status');
 const domChatList = document.getElementById('chat-list');
+const domChatNewDM = document.getElementById('new-chat-btn');
+const domChatNewGroup = document.getElementById('create-group-btn');
 const domNavbar = document.getElementById('navbar');
 const domInvites = document.getElementById('invites');
 const domInvitesBtn = document.getElementById('invites-btn');
@@ -1995,19 +1997,19 @@ async function login() {
                 renderChatlist();
                 domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
 
-                // Append and fade-in a "Start New Chat" button (only if it doesn't already exist)
-                if (!document.getElementById('new-chat-btn')) {
-                    const btnStartChat = document.createElement('button');
-                    btnStartChat.id = `new-chat-btn`;
-                    btnStartChat.classList.add('new-chat-btn', 'btn', 'intro-anim');
-                    btnStartChat.innerHTML = '<span style="width: 100%">Start a New Chat</span><span class="icon icon-new-msg"></span>';
-                    btnStartChat.onclick = openNewChat;
-                    btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
-                    domChatList.before(btnStartChat);
-                    adjustSize();
+                // Show and animate the New Chat buttons
+                if (domChatNewDM) {
+                    domChatNewDM.style.display = '';
+                    domChatNewDM.classList.add('intro-anim');
+                    domChatNewDM.onclick = openNewChat;
+                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
                 }
-                // After login UI finishes and "Start a New Chat" button exists, add "Create Group" launcher
-                ensureCreateGroupButton();
+                if (domChatNewGroup) {
+                    domChatNewGroup.style.display = '';
+                    domChatNewGroup.classList.add('intro-anim');
+                    domChatNewGroup.onclick = openCreateGroup;
+                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
+                }
 
                 // Setup a subscription for new websocket messages
                 invoke("notifs");
@@ -3655,7 +3657,7 @@ function openNewChat() {
 /**
  * Closes the current chat, taking the user back to the chat list
  */
-function closeChat() {
+async function closeChat() {
     // Clear any auto-scroll timer
     if (chatOpenAutoScrollTimer) {
         clearTimeout(chatOpenAutoScrollTimer);
@@ -3697,7 +3699,6 @@ function closeChat() {
 
     // Reset the chat UI
     domProfile.style.display = 'none';
-    domChats.style.display = '';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
@@ -3711,6 +3712,9 @@ function closeChat() {
     strCurrentReactionReference = "";
     strCurrentReplyReference = "";
     cancelReply();
+
+    // Navigate back to chat list with animation
+    await openChatlist();
 
     // Update the Chat List
     renderChatlist();
@@ -4304,7 +4308,7 @@ document.addEventListener('click', (e) => {
 function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
     // Note: no idea why the `- 50px` is needed below, magic numbers, I guess.
-    const nNewChatBtnHeight = document.getElementById('new-chat-btn')?.getBoundingClientRect().height || 0;
+    const nNewChatBtnHeight = domChatNewDM?.getBoundingClientRect().height || 0;
     const nNavbarHeight = domNavbar.getBoundingClientRect().height;
     domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
 
@@ -4350,36 +4354,6 @@ let arrSelectedGroupMembers = [];
  */
 let fCreateGroupAttempt = false;
 
-/**
- * Ensure the "Create Group" launcher button exists next to "Start New Chat".
- * Safe to call multiple times.
- */
-function ensureCreateGroupButton() {
-    if (document.getElementById('create-group-btn')) return;
-    if (!domChatList) return;
-    // Only render after login/init is complete: navbar visible, login form hidden, and anchor exists
-    if (!domNavbar || domNavbar.style.display === 'none') return;
-    if (typeof domLogin !== 'undefined' && domLogin && domLogin.style.display !== 'none') return;
-
-    const btnCreateGroup = document.createElement('button');
-    btnCreateGroup.id = 'create-group-btn';
-    btnCreateGroup.classList.add('new-chat-btn', 'btn', 'intro-anim');
-    btnCreateGroup.style.marginTop = '10px';
-    btnCreateGroup.innerHTML = '<span style="width: 100%">Create Group</span><span class="icon icon-chats"></span>';
-    btnCreateGroup.addEventListener('animationend', () => btnCreateGroup.classList.remove('intro-anim'), { once: true });
-    btnCreateGroup.onclick = openCreateGroup;
-
-    // Place below the existing "Start a New Chat" button if present, else place before chat list
-    const btnStartChat = document.getElementById('new-chat-btn');
-    if (btnStartChat && btnStartChat.parentElement) {
-        btnStartChat.insertAdjacentElement('afterend', btnCreateGroup);
-    } else {
-        domChatList.before(btnCreateGroup);
-    }
-
-    // Recompute layout
-    adjustSize();
-}
 
 /**
  * Render the filterable, scrollable contact list with checkboxes.
