@@ -1995,15 +1995,17 @@ async function login() {
                 renderChatlist();
                 domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
 
-                // Append and fade-in a "Start New Chat" button
-                const btnStartChat = document.createElement('button');
-                btnStartChat.id = `new-chat-btn`;
-                btnStartChat.classList.add('new-chat-btn', 'btn', 'intro-anim');
-                btnStartChat.innerHTML = '<span style="width: 100%">Start a New Chat</span><span class="icon icon-new-msg"></span>';
-                btnStartChat.onclick = openNewChat;
-                btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
-                domChatList.before(btnStartChat);
-                adjustSize();
+                // Append and fade-in a "Start New Chat" button (only if it doesn't already exist)
+                if (!document.getElementById('new-chat-btn')) {
+                    const btnStartChat = document.createElement('button');
+                    btnStartChat.id = `new-chat-btn`;
+                    btnStartChat.classList.add('new-chat-btn', 'btn', 'intro-anim');
+                    btnStartChat.innerHTML = '<span style="width: 100%">Start a New Chat</span><span class="icon icon-new-msg"></span>';
+                    btnStartChat.onclick = openNewChat;
+                    btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
+                    domChatList.before(btnStartChat);
+                    adjustSize();
+                }
                 // After login UI finishes and "Start a New Chat" button exists, add "Create Group" launcher
                 ensureCreateGroupButton();
 
@@ -4674,12 +4676,6 @@ Create Group UI wiring
             updateCreateGroupValidation();
         }
     };
-
-    // Ensure launch button appears once init completes
-    // Safe to attach extra listener; main code also listens to this event
-    listen('init_finished', () => {
-        ensureCreateGroupButton();
-    });
 })();
 
 
