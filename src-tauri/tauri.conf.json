@@ -11,8 +11,8 @@
     "windows": [
       {
         "title": "Vector",
-        "minWidth": 375,
-        "width": 375,
+        "minWidth": 380,
+        "width": 380,
         "minHeight": 550,
         "height": 650,
         "resizable": true,
