@@ -3943,11 +3943,11 @@ window.addEventListener("DOMContentLoaded", async () => {
             const { public: pubKey, private: privKey } = await invoke("create_account");
             strPubkey = pubKey;
             
-            // Connect to Nostr network early for invite validation
+            // Connect to Nostr network
             await invoke("connect");
             
-            // Open the Invite Flow for new accounts
-            openInviteFlow(privKey);
+            // Skip invite flow - go directly to encryption
+            openEncryptionFlow(privKey, false);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -3966,14 +3966,8 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Connect to Nostr
             await invoke("connect");
 
-            // Check if user has an existing account (has encrypted private key)
-            if (await hasKey()) {
-                // Existing user - skip invite flow
-                openEncryptionFlow(privKey);
-            } else {
-                // New user logging in - show invite flow
-                openInviteFlow(privKey);
-            }
+            // Skip invite flow - go directly to encryption
+            openEncryptionFlow(privKey);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
