@@ -13,7 +13,7 @@
         "title": "Vector",
         "minWidth": 380,
         "width": 380,
-        "minHeight": 550,
+        "minHeight": 575,
         "height": 650,
         "resizable": true,
         "backgroundThrottling": "throttle"
