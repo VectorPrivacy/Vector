@@ -1,5 +1,4 @@
 const { invoke, convertFileSrc } = window.__TAURI__.core;
-const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
