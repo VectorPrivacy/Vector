@@ -894,8 +894,8 @@ function linkifyUrls(element) {
           continue;
         }
         
-        // Clean tracking parameters for privacy
-        const cleanUrl = cleanTrackingFromUrl(url);
+        // Clean tracking parameters for privacy (if enabled)
+        const cleanUrl = fStripTrackingEnabled ? cleanTrackingFromUrl(url) : url;
         
         // Add text before the URL
         if (matchIndex > lastIndex) {

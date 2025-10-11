@@ -96,6 +96,8 @@ const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
 const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-auto-translate-info');
 const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
+const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
+const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
@@ -3370,8 +3372,8 @@ function renderMessage(msg, sender, editID = '') {
         pMessage.appendChild(renderCryptoAddress(cAddress));
     }
 
-    // Append Metadata Previews (i.e: OpenGraph data from URLs, etc)
-    if (!msg.pending && !msg.failed) {
+    // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled) {
         if (msg.preview_metadata?.og_image) {
             // Setup the Preview container
             const divPrevContainer = document.createElement('div');
@@ -4047,17 +4049,19 @@ window.addEventListener("DOMContentLoaded", async () => {
     async function sendMessage(messageText) {
         if (!messageText || !messageText.trim()) return;
 
-        // Clean tracking parameters from any URLs in the message for privacy
+        // Clean tracking parameters from any URLs in the message for privacy (if enabled)
         let cleanedText = messageText.trim();
-        const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
-        cleanedText = cleanedText.replace(urlPattern, (match) => {
-            try {
-                return cleanTrackingFromUrl(match);
-            } catch (e) {
-                // If cleaning fails, return original URL
-                return match;
-            }
-        });
+        if (fStripTrackingEnabled) {
+            const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+            cleanedText = cleanedText.replace(urlPattern, (match) => {
+                try {
+                    return cleanTrackingFromUrl(match);
+                } catch (e) {
+                    // If cleaning fails, return original URL
+                    return match;
+                }
+            });
+        }
 
         // Clear input and show sending state
         domChatMessageInput.value = '';
@@ -4218,6 +4222,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     
     window.voiceSettings.initVoiceSettings();
 
+    // Initialize settings
+    await initSettings();
+
     // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
     // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events
     domSettingsWhisperModelInfo.onclick = (e) => {
@@ -4232,6 +4239,16 @@ window.addEventListener("DOMContentLoaded", async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
+    };
+    domSettingsPrivacyWebPreviewsInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Web Previews', 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address if you do not use a VPN.', true);
+    };
+    domSettingsPrivacyStripTrackingInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.', true);
     };
 
         // Add npub copy functionality for chat-new section

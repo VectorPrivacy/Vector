@@ -649,3 +649,32 @@ domSettingsExport.onclick = async (evt) => {
         await popupConfirm('Export Failed', error.toString(), true, '', 'vector_warning.svg');
     }
 };
+
+// Privacy Settings - Simple global variables
+let fWebPreviewsEnabled = true;
+let fStripTrackingEnabled = true;
+
+/**
+ * Initialize settings on app start
+ */
+async function initSettings() {
+    // Load privacy settings from DB (default to true)
+    fWebPreviewsEnabled = await loadWebPreviews();
+    fStripTrackingEnabled = await loadStripTracking();
+
+    // Set initial toggle states
+    const webPreviewsToggle = document.getElementById('privacy-web-previews-toggle');
+    const stripTrackingToggle = document.getElementById('privacy-strip-tracking-toggle');
+    
+    webPreviewsToggle.checked = fWebPreviewsEnabled;
+    webPreviewsToggle.addEventListener('change', async (e) => {
+        fWebPreviewsEnabled = e.target.checked;
+        await saveWebPreviews(e.target.checked);
+    });
+    
+    stripTrackingToggle.checked = fStripTrackingEnabled;
+    stripTrackingToggle.addEventListener('change', async (e) => {
+        fStripTrackingEnabled = e.target.checked;
+        await saveStripTracking(e.target.checked);
+    });
+}

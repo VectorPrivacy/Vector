@@ -68,6 +68,38 @@ async function saveWhisperAutoTranscribe(bool) {
 }
 
 /**
+ * Load the user's Web Previews setting
+ * @returns {Promise<boolean>}
+ */
+async function loadWebPreviews() {
+    return (await invoke('get_web_previews') ?? true);
+}
+
+/**
+ * Set the user's Web Previews setting
+ * @param {boolean} bool - `true` to enable, `false` to disable
+ */
+async function saveWebPreviews(bool) {
+    return await invoke('set_web_previews', { to: bool });
+}
+
+/**
+ * Load the user's Strip Tracking setting
+ * @returns {Promise<boolean>}
+ */
+async function loadStripTracking() {
+    return (await invoke('get_strip_tracking') ?? true);
+}
+
+/**
+ * Set the user's Strip Tracking setting
+ * @param {boolean} bool - `true` to enable, `false` to disable
+ */
+async function saveStripTracking(bool) {
+    return await invoke('set_strip_tracking', { to: bool });
+}
+
+/**
  * `true` if a local encrypted key exists, `false` otherwise.
  * @returns {Promise<boolean>}
  */
