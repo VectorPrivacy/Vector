@@ -100,6 +100,22 @@ async function saveStripTracking(bool) {
 }
 
 /**
+ * Load the user's Send Typing Indicators setting
+ * @returns {Promise<boolean>}
+ */
+async function loadSendTypingIndicators() {
+    return (await invoke('get_send_typing_indicators') ?? true);
+}
+
+/**
+ * Set the user's Send Typing Indicators setting
+ * @param {boolean} bool - `true` to enable, `false` to disable
+ */
+async function saveSendTypingIndicators(bool) {
+    return await invoke('set_send_typing_indicators', { to: bool });
+}
+
+/**
  * `true` if a local encrypted key exists, `false` otherwise.
  * @returns {Promise<boolean>}
  */

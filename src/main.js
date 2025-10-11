@@ -4119,8 +4119,8 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Hook up an 'input' listener on the Message Box for typing indicators
     domChatMessageInput.oninput = async () => {
-        // Send a Typing Indicator only when content actually changes
-        if (nLastTypingIndicator + 30000 < Date.now()) {
+        // Send a Typing Indicator only when content actually changes and setting is enabled
+        if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
             nLastTypingIndicator = Date.now();
             await invoke("start_typing", { receiver: strOpenChat });
         }
@@ -4249,6 +4249,11 @@ window.addEventListener("DOMContentLoaded", async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.', true);
+    };
+    domSettingsPrivacySendTypingInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
     };
 
         // Add npub copy functionality for chat-new section
