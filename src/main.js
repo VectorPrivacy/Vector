@@ -3060,7 +3060,11 @@ function renderMessage(msg, sender, editID = '') {
     } else {
         // Render their text content (using our custom Markdown renderer)
         // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
+        // NOTE: parseMarkdown internally protects URLs from being mangled by markdown formatting
         spanMessage.innerHTML = parseMarkdown(msg.content.trim());
+        
+        // Make URLs clickable (after markdown parsing, before twemojify)
+        linkifyUrls(spanMessage);
     }
 
     // Twemojify!
@@ -4043,6 +4047,18 @@ window.addEventListener("DOMContentLoaded", async () => {
     async function sendMessage(messageText) {
         if (!messageText || !messageText.trim()) return;
 
+        // Clean tracking parameters from any URLs in the message for privacy
+        let cleanedText = messageText.trim();
+        const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+        cleanedText = cleanedText.replace(urlPattern, (match) => {
+            try {
+                return cleanTrackingFromUrl(match);
+            } catch (e) {
+                // If cleaning fails, return original URL
+                return match;
+            }
+        });
+
         // Clear input and show sending state
         domChatMessageInput.value = '';
         domChatMessageInput.setAttribute('placeholder', 'Sending...');
@@ -4054,17 +4070,17 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Check if current chat is a group
             const chat = arrChats.find(c => c.id === strOpenChat);
             if (chat?.chat_type === 'MlsGroup') {
-                // Send group message
+                // Send group message with cleaned text
                 const wrapperId = await invoke('send_mls_group_message', {
                     groupId: strOpenChat,
-                    text: messageText.trim(),
+                    text: cleanedText,
                     repliedTo: replyRef || null
                 });
                 // Message is already added optimistically by send_mls_group_message
                 // Live subscription will handle receiving it back from the relay
             } else {
-                // Send regular DM
-                await message(strOpenChat, messageText.trim(), replyRef, "");
+                // Send regular DM with cleaned text
+                await message(strOpenChat, cleanedText, replyRef, "");
             }
             
             nLastTypingIndicator = 0;
