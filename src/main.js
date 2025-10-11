@@ -5,11 +5,6 @@ const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
-// Display the current version
-getVersion().then(v => {
-    // TODO: re-add this somewhere, settings?
-});
-
 const domTheme = document.getElementById('theme');
 
 const domLoginStart = document.getElementById('login-start');
