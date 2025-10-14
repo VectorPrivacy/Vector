@@ -120,8 +120,8 @@ let strCurrentReactionReference = "";
 /**
  * Opens the Emoji Input Panel
  * 
- * If a DOM element is passed, the panel will be rendered 'floating' near the element.
- * If none is specified, it opens in the default location near the Message Input.
+ * The panel always appears in a fixed position at the bottom, regardless of whether
+ * it's opened from the message input or a reaction button.
  * @param {MouseEvent?} e - An associated click event
  */
 function openEmojiPanel(e) {
@@ -134,63 +134,21 @@ function openEmojiPanel(e) {
         // Load emoji sections
         loadEmojiSections();
 
-        // Setup the picker UI
-        /** @type {DOMRect} */
-        const rect = (isDefaultPanel ? domChatContact : e.target).getBoundingClientRect();
-
         // Display the picker - use class instead of inline style
         picker.classList.add('visible');
 
-        // Compute its position based on the element calling it
-        const pickerRect = picker.getBoundingClientRect();
+        // Always use the same fixed position (bottom-up) for both message input and reactions
+        picker.classList.add('emoji-picker-message-type');
+        
+        // Clear any positioning styles to ensure CSS fixed positioning takes effect
+        picker.style.top = '';
+        picker.style.left = '';
+        picker.style.right = '';
+        picker.style.transform = '';
+        
+        // Change the emoji button to a wink while the panel is open (only for message input)
         if (isDefaultPanel) {
-            // Center the picker above the input
-            picker.classList.add('emoji-picker-message-type');
-            
-            // Clear any positioning styles from reaction mode
-            picker.style.top = '';
-            picker.style.left = '';
-            picker.style.right = '';
-            picker.style.transform = '';
-            
-            // Change the emoji button to a wink while the panel is open
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
-        } else {
-            picker.classList.remove('emoji-picker-message-type');
-            const fLargeMessage = rect.y < rect.height;
-            
-            // Calculate the vertical position of the picker
-            const yAxisTarget = fLargeMessage ? rect.y : rect.y - rect.height;
-            const yAxisCorrection = fLargeMessage ? 0 : pickerRect.height / 2;
-            
-            // Calculate if the picker would overflow the bottom of the app window
-            const pickerBottomPos = yAxisTarget + yAxisCorrection + pickerRect.height;
-            const appBottomBoundary = document.body.clientHeight;
-            const willOverflowBottom = pickerBottomPos > appBottomBoundary;
-            
-            // Set vertical position - if it will overflow the bottom, position it above the target
-            if (willOverflowBottom) {
-                picker.style.top = `${rect.y - pickerRect.height}px`;
-            } else {
-                picker.style.top = `${yAxisTarget + yAxisCorrection}px`;
-            }
-            
-            // Calculate horizontal position
-            // Try to position it next to the element that triggered it
-            const xPos = rect.x + rect.width;
-            const willOverflowRight = xPos + pickerRect.width > document.body.clientWidth;
-            
-            // If it would overflow the right side, align to right edge
-            if (willOverflowRight) {
-                picker.style.right = `10px`;
-                picker.style.left = `auto`;
-                picker.style.transform = 'none';
-            } else {
-                // Position it next to the triggering element
-                picker.style.left = `${xPos}px`;
-                picker.style.right = `auto`;
-                picker.style.transform = 'none';
-            }
         }
 
         // If this is a Reaction, let's cache the Reference ID

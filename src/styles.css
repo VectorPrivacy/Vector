@@ -1123,7 +1123,7 @@ body {
   z-index: 2000;
   width: 90%;
   max-width: 400px;
-  height: auto;
+  height: 350px; 
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
