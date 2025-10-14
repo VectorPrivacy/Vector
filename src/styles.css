@@ -135,6 +135,10 @@
   mask-image: url("./icons/volume-max.svg");
 }
 
+.icon-vector-send {
+  mask-image: url("./icons/vector-symbol.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -1091,11 +1095,25 @@ body {
   padding-left: 0;
 }
 
+/* Vector Send Button - white by default, stays visible when active */
+#chat-input-send .icon {
+  background-color: white;
+  transition: background 0.3s ease;
+  transform: rotate(-90deg);
+  width: 40px !important;
+  height: 40px !important;
+}
+
+#chat-input-send.active .icon {
+  background-color: #59fcb3; 
+  opacity: 1; 
+}
+
 .emoji-button {
   font-size: 30px;
   padding: 0;
-  padding-left: 12px;
-  padding-right: 10px;
+  padding-left: 8px; /* Reduced padding */
+  padding-right: 8px; /* Reduced padding */
   background-color: transparent;
 }
 
