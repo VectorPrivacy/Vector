@@ -1,14 +1,8 @@
 const { invoke, convertFileSrc } = window.__TAURI__.core;
-const { getVersion } = window.__TAURI__.app;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
-
-// Display the current version
-getVersion().then(v => {
-    // TODO: re-add this somewhere, settings?
-});
 
 const domTheme = document.getElementById('theme');
 
@@ -53,6 +47,8 @@ const domAccount = document.getElementById('account');
 const domSyncStatusContainer = document.getElementById('sync-status-container');
 const domSyncStatus = document.getElementById('sync-status');
 const domChatList = document.getElementById('chat-list');
+const domChatNewDM = document.getElementById('new-chat-btn');
+const domChatNewGroup = document.getElementById('create-group-btn');
 const domNavbar = document.getElementById('navbar');
 const domInvites = document.getElementById('invites');
 const domInvitesBtn = document.getElementById('invites-btn');
@@ -94,6 +90,9 @@ const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
 const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-auto-translate-info');
 const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
+const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
+const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
+const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
@@ -2103,17 +2102,19 @@ async function login() {
                 renderChatlist();
                 domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
 
-                // Append and fade-in a "Start New Chat" button
-                const btnStartChat = document.createElement('button');
-                btnStartChat.id = `new-chat-btn`;
-                btnStartChat.classList.add('new-chat-btn', 'btn', 'intro-anim');
-                btnStartChat.innerHTML = '<span style="width: 100%">Start a New Chat</span><span class="icon icon-new-msg"></span>';
-                btnStartChat.onclick = openNewChat;
-                btnStartChat.addEventListener('animationend', () => btnStartChat.classList.remove('intro-anim'), { once: true });
-                domChatList.before(btnStartChat);
-                adjustSize();
-                // After login UI finishes and "Start a New Chat" button exists, add "Create Group" launcher
-                ensureCreateGroupButton();
+                // Show and animate the New Chat buttons
+                if (domChatNewDM) {
+                    domChatNewDM.style.display = '';
+                    domChatNewDM.classList.add('intro-anim');
+                    domChatNewDM.onclick = openNewChat;
+                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
+                }
+                if (domChatNewGroup) {
+                    domChatNewGroup.style.display = '';
+                    domChatNewGroup.classList.add('intro-anim');
+                    domChatNewGroup.onclick = openCreateGroup;
+                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
+                }
 
                 // Setup a subscription for new websocket messages
                 invoke("notifs");
@@ -3164,7 +3165,11 @@ function renderMessage(msg, sender, editID = '') {
     } else {
         // Render their text content (using our custom Markdown renderer)
         // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
+        // NOTE: parseMarkdown internally protects URLs from being mangled by markdown formatting
         spanMessage.innerHTML = parseMarkdown(msg.content.trim());
+        
+        // Make URLs clickable (after markdown parsing, before twemojify)
+        linkifyUrls(spanMessage);
     }
 
     // Twemojify!
@@ -3470,8 +3475,8 @@ function renderMessage(msg, sender, editID = '') {
         pMessage.appendChild(renderCryptoAddress(cAddress));
     }
 
-    // Append Metadata Previews (i.e: OpenGraph data from URLs, etc)
-    if (!msg.pending && !msg.failed) {
+    // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled) {
         if (msg.preview_metadata?.og_image) {
             // Setup the Preview container
             const divPrevContainer = document.createElement('div');
@@ -3761,7 +3766,7 @@ function openNewChat() {
 /**
  * Closes the current chat, taking the user back to the chat list
  */
-function closeChat() {
+async function closeChat() {
     // Clear any auto-scroll timer
     if (chatOpenAutoScrollTimer) {
         clearTimeout(chatOpenAutoScrollTimer);
@@ -3803,7 +3808,6 @@ function closeChat() {
 
     // Reset the chat UI
     domProfile.style.display = 'none';
-    domChats.style.display = '';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
@@ -3817,6 +3821,9 @@ function closeChat() {
     strCurrentReactionReference = "";
     strCurrentReplyReference = "";
     cancelReply();
+
+    // Navigate back to chat list with animation
+    await openChatlist();
 
     // Update the Chat List
     renderChatlist();
@@ -4051,11 +4058,11 @@ window.addEventListener("DOMContentLoaded", async () => {
             const { public: pubKey, private: privKey } = await invoke("create_account");
             strPubkey = pubKey;
             
-            // Connect to Nostr network early for invite validation
+            // Connect to Nostr network
             await invoke("connect");
             
-            // Open the Invite Flow for new accounts
-            openInviteFlow(privKey);
+            // Skip invite flow - go directly to encryption
+            openEncryptionFlow(privKey, false);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -4074,14 +4081,8 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Connect to Nostr
             await invoke("connect");
 
-            // Check if user has an existing account (has encrypted private key)
-            if (await hasKey()) {
-                // Existing user - skip invite flow
-                openEncryptionFlow(privKey);
-            } else {
-                // New user logging in - show invite flow
-                openInviteFlow(privKey);
-            }
+            // Skip invite flow - go directly to encryption
+            openEncryptionFlow(privKey);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -4151,6 +4152,20 @@ window.addEventListener("DOMContentLoaded", async () => {
     async function sendMessage(messageText) {
         if (!messageText || !messageText.trim()) return;
 
+        // Clean tracking parameters from any URLs in the message for privacy (if enabled)
+        let cleanedText = messageText.trim();
+        if (fStripTrackingEnabled) {
+            const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+            cleanedText = cleanedText.replace(urlPattern, (match) => {
+                try {
+                    return cleanTrackingFromUrl(match);
+                } catch (e) {
+                    // If cleaning fails, return original URL
+                    return match;
+                }
+            });
+        }
+
         // Clear input and show sending state
         domChatMessageInput.value = '';
         domChatMessageInput.setAttribute('placeholder', 'Sending...');
@@ -4162,17 +4177,17 @@ window.addEventListener("DOMContentLoaded", async () => {
             // Check if current chat is a group
             const chat = arrChats.find(c => c.id === strOpenChat);
             if (chat?.chat_type === 'MlsGroup') {
-                // Send group message
+                // Send group message with cleaned text
                 const wrapperId = await invoke('send_mls_group_message', {
                     groupId: strOpenChat,
-                    text: messageText.trim(),
+                    text: cleanedText,
                     repliedTo: replyRef || null
                 });
                 // Message is already added optimistically by send_mls_group_message
                 // Live subscription will handle receiving it back from the relay
             } else {
-                // Send regular DM
-                await message(strOpenChat, messageText.trim(), replyRef, "");
+                // Send regular DM with cleaned text
+                await message(strOpenChat, cleanedText, replyRef, "");
             }
             
             nLastTypingIndicator = 0;
@@ -4207,8 +4222,8 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Hook up an 'input' listener on the Message Box for typing indicators
     domChatMessageInput.oninput = async () => {
-        // Send a Typing Indicator only when content actually changes
-        if (nLastTypingIndicator + 30000 < Date.now()) {
+        // Send a Typing Indicator only when content actually changes and setting is enabled
+        if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
             nLastTypingIndicator = Date.now();
             await invoke("start_typing", { receiver: strOpenChat });
         }
@@ -4310,6 +4325,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     
     window.voiceSettings.initVoiceSettings();
 
+    // Initialize settings
+    await initSettings();
+
     // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
     // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events
     domSettingsWhisperModelInfo.onclick = (e) => {
@@ -4324,6 +4342,21 @@ window.addEventListener("DOMContentLoaded", async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
+    };
+    domSettingsPrivacyWebPreviewsInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Web Previews', 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address if you do not use a VPN.', true);
+    };
+    domSettingsPrivacyStripTrackingInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.', true);
+    };
+    domSettingsPrivacySendTypingInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
     };
 
         // Add npub copy functionality for chat-new section
@@ -4416,7 +4449,7 @@ document.addEventListener('click', (e) => {
 function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
     // Note: no idea why the `- 50px` is needed below, magic numbers, I guess.
-    const nNewChatBtnHeight = document.getElementById('new-chat-btn')?.getBoundingClientRect().height || 0;
+    const nNewChatBtnHeight = domChatNewDM?.getBoundingClientRect().height || 0;
     const nNavbarHeight = domNavbar.getBoundingClientRect().height;
     domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
 
@@ -4462,36 +4495,6 @@ let arrSelectedGroupMembers = [];
  */
 let fCreateGroupAttempt = false;
 
-/**
- * Ensure the "Create Group" launcher button exists next to "Start New Chat".
- * Safe to call multiple times.
- */
-function ensureCreateGroupButton() {
-    if (document.getElementById('create-group-btn')) return;
-    if (!domChatList) return;
-    // Only render after login/init is complete: navbar visible, login form hidden, and anchor exists
-    if (!domNavbar || domNavbar.style.display === 'none') return;
-    if (typeof domLogin !== 'undefined' && domLogin && domLogin.style.display !== 'none') return;
-
-    const btnCreateGroup = document.createElement('button');
-    btnCreateGroup.id = 'create-group-btn';
-    btnCreateGroup.classList.add('new-chat-btn', 'btn', 'intro-anim');
-    btnCreateGroup.style.marginTop = '10px';
-    btnCreateGroup.innerHTML = '<span style="width: 100%">Create Group</span><span class="icon icon-chats"></span>';
-    btnCreateGroup.addEventListener('animationend', () => btnCreateGroup.classList.remove('intro-anim'), { once: true });
-    btnCreateGroup.onclick = openCreateGroup;
-
-    // Place below the existing "Start a New Chat" button if present, else place before chat list
-    const btnStartChat = document.getElementById('new-chat-btn');
-    if (btnStartChat && btnStartChat.parentElement) {
-        btnStartChat.insertAdjacentElement('afterend', btnCreateGroup);
-    } else {
-        domChatList.before(btnCreateGroup);
-    }
-
-    // Recompute layout
-    adjustSize();
-}
 
 /**
  * Render the filterable, scrollable contact list with checkboxes.
@@ -4788,12 +4791,6 @@ Create Group UI wiring
             updateCreateGroupValidation();
         }
     };
-
-    // Ensure launch button appears once init completes
-    // Safe to attach extra listener; main code also listens to this event
-    listen('init_finished', () => {
-        ensureCreateGroupButton();
-    });
 })();
 
 

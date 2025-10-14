@@ -687,10 +687,258 @@ function buildXIntentUrl(inviteCode, hashtags = ['Vector', 'Privacy'], via = 'Ve
 
 /**
  * Pauses execution for a specified amount of time.
- * 
+ *
  * @param {number} ms - The number of milliseconds to sleep
  * @returns {Promise<void>} A promise that resolves after the specified delay
  */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Removes tracking and marketing parameters from URLs for privacy.
+ * Supports major platforms: YouTube, Amazon, Facebook, Twitter/X, Google, etc.
+ *
+ * @param {string} urlString - The URL to clean
+ * @returns {string} The cleaned URL without tracking parameters
+ */
+function cleanTrackingFromUrl(urlString) {
+  try {
+    const url = new URL(urlString);
+    const hostname = url.hostname.toLowerCase();
+    
+    // Common tracking parameters across all sites
+    const commonTrackingParams = [
+      // Google Analytics & Marketing
+      'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+      'utm_id', 'utm_source_platform', 'utm_creative_format', 'utm_marketing_tactic',
+      
+      // Facebook/Meta
+      'fbclid', 'fb_action_ids', 'fb_action_types', 'fb_ref', 'fb_source',
+      
+      // Google Click Identifier
+      'gclid', 'gclsrc', 'dclid',
+      
+      // Microsoft/Bing
+      'msclkid',
+      
+      // Twitter/X
+      'twclid', 's', 't',
+      
+      // TikTok
+      'tt_medium', 'tt_content',
+      
+      // Mailchimp
+      'mc_cid', 'mc_eid',
+      
+      // HubSpot
+      '_hsenc', '_hsmi', '__hssc', '__hstc', '__hsfp', 'hsCtaTracking',
+      
+      // Marketo
+      'mkt_tok',
+      
+      // Adobe
+      'sc_cid',
+      
+      // Generic tracking
+      'ref', 'referrer', 'source', 'campaign', 'medium'
+    ];
+    
+    // YouTube-specific tracking
+    if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
+      const youtubeTrackingParams = [
+        'feature', 'si', 'app', 'kw', 'annotation_id', 'src_vid',
+        'ab_channel', 'start_radio', 'rv'
+      ];
+      youtubeTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
+    // Amazon-specific tracking
+    else if (hostname.includes('amazon.')) {
+      // Amazon URLs: keep only the essential product ID path
+      // Format: /product-name/dp/PRODUCT_ID or /dp/PRODUCT_ID
+      const pathMatch = url.pathname.match(/\/dp\/([A-Z0-9]+)/i);
+      if (pathMatch) {
+        // Reconstruct clean Amazon URL with just the product ID
+        url.search = ''; // Remove all query parameters
+        // Keep the path up to and including the product ID
+        const dpIndex = url.pathname.indexOf('/dp/');
+        if (dpIndex !== -1) {
+          url.pathname = url.pathname.substring(0, dpIndex + 14); // /dp/ + 10 char ID
+        }
+      }
+      // If no product ID found, just remove tracking params
+      const amazonTrackingParams = [
+        'crid', 'dib', 'dib_tag', 'keywords', 'qid', 'sprefix', 'sr',
+        'ie', 'psc', 'pd_rd_i', 'pd_rd_r', 'pd_rd_w', 'pd_rd_wg',
+        'pf_rd_i', 'pf_rd_m', 'pf_rd_p', 'pf_rd_r', 'pf_rd_s', 'pf_rd_t',
+        'ref', 'ref_', 'tag', 'linkCode', 'creative', 'creativeASIN',
+        'ascsubtag', 'asc_campaign', 'asc_refurl', 'asc_source'
+      ];
+      amazonTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
+    // Twitter/X-specific
+    else if (hostname.includes('twitter.com') || hostname.includes('x.com')) {
+      const twitterTrackingParams = ['s', 't', 'ref_src', 'ref_url', 'src'];
+      twitterTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
+    // Facebook-specific
+    else if (hostname.includes('facebook.com') || hostname.includes('fb.com')) {
+      const facebookTrackingParams = [
+        'fbclid', 'fb_action_ids', 'fb_action_types', 'fb_ref', 'fb_source',
+        'action_object_map', 'action_type_map', 'action_ref_map'
+      ];
+      facebookTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
+    // Instagram-specific
+    else if (hostname.includes('instagram.com')) {
+      const instagramTrackingParams = ['igshid', 'igsh'];
+      instagramTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
+    // LinkedIn-specific
+    else if (hostname.includes('linkedin.com')) {
+      const linkedinTrackingParams = ['trk', 'trkInfo', 'lipi', 'licu', 'originalSubdomain'];
+      linkedinTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
+    // Remove common tracking parameters from all URLs
+    commonTrackingParams.forEach(param => url.searchParams.delete(param));
+    
+    return url.toString();
+  } catch (e) {
+    // If URL parsing fails, return original
+    return urlString;
+  }
+}
+
+/**
+ * Detects URLs in text and makes them clickable links.
+ * This function converts plain text URLs into clickable anchor tags.
+ * SECURITY: Only processes text nodes, validates URLs, and uses textContent for safety.
+ * PRIVACY: Strips tracking parameters from URLs before linking.
+ *
+ * @param {HTMLElement} element - The DOM element containing text to linkify
+ */
+function linkifyUrls(element) {
+  // Strict URL regex pattern that matches http(s) URLs
+  // Matches URLs starting with http:// or https:// and continuing until whitespace or end
+  // Stops at whitespace, quotes, or angle brackets (common URL delimiters)
+  const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+  
+  // Process all text nodes within the element
+  const walker = document.createTreeWalker(
+    element,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode: function(node) {
+        // Only accept text nodes that are NOT inside:
+        // - anchor tags (already linked)
+        // - code blocks (should remain literal)
+        // - pre tags (should remain literal)
+        let parent = node.parentElement;
+        while (parent && parent !== element) {
+          const tagName = parent.tagName;
+          if (tagName === 'A' || tagName === 'CODE' || tagName === 'PRE') {
+            return NodeFilter.FILTER_REJECT;
+          }
+          parent = parent.parentElement;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    },
+    false
+  );
+  
+  const textNodes = [];
+  let node;
+  
+  // Collect all text nodes first (to avoid modifying while iterating)
+  while (node = walker.nextNode()) {
+    textNodes.push(node);
+  }
+  
+  // Process each text node
+  textNodes.forEach(textNode => {
+    const text = textNode.textContent;
+    
+    // Check if the text contains any URLs
+    if (!urlPattern.test(text)) return;
+    
+    // Reset regex lastIndex
+    urlPattern.lastIndex = 0;
+    
+    // Create a temporary container
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    
+    let match;
+    while ((match = urlPattern.exec(text)) !== null) {
+      const originalUrl = match[0];
+      const matchIndex = match.index;
+      
+      // Additional validation: ensure URL has valid structure
+      try {
+        // Trim trailing punctuation that's likely not part of the URL
+        // (common in prose: "Check out https://example.com.")
+        let url = originalUrl.replace(/[.,;:!?]+$/, '');
+        
+        // This will throw if URL is malformed
+        const urlObj = new URL(url);
+        
+        // Only allow http and https protocols (security)
+        if (urlObj.protocol !== 'http:' && urlObj.protocol !== 'https:') {
+          continue;
+        }
+        
+        // Clean tracking parameters for privacy (if enabled)
+        const cleanUrl = fStripTrackingEnabled ? cleanTrackingFromUrl(url) : url;
+        
+        // Add text before the URL
+        if (matchIndex > lastIndex) {
+          fragment.appendChild(
+            document.createTextNode(text.substring(lastIndex, matchIndex))
+          );
+        }
+        
+        // Create clickable link using textContent (not innerHTML) for safety
+        const link = document.createElement('a');
+        link.href = cleanUrl; // Use cleaned URL
+        link.textContent = cleanUrl; // Display cleaned URL
+        link.classList.add('linkified-url');
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        
+        // Additional security: prevent javascript: and data: URLs
+        // (belt and suspenders approach)
+        if (link.protocol === 'http:' || link.protocol === 'https:') {
+          fragment.appendChild(link);
+        } else {
+          // If somehow a bad URL got through, just add it as text
+          fragment.appendChild(document.createTextNode(url));
+        }
+        
+        // Use original URL length for tracking position (before cleaning/trimming)
+        lastIndex = matchIndex + originalUrl.length;
+      } catch (e) {
+        // Invalid URL, skip it and continue
+        continue;
+      }
+    }
+    
+    // Add remaining text after the last URL
+    if (lastIndex < text.length) {
+      fragment.appendChild(
+        document.createTextNode(text.substring(lastIndex))
+      );
+    }
+    
+    // Only replace if we actually created links
+    if (fragment.childNodes.length > 0) {
+      textNode.parentNode.replaceChild(fragment, textNode);
+    }
+  });
 }

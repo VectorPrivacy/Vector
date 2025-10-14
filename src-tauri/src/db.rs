@@ -421,6 +421,54 @@ pub fn get_invite_code<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String
 }
 
 #[command]
+pub fn get_web_previews<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
+    let store = get_store(&handle);
+    match store.get("web_previews") {
+        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub fn set_web_previews<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("web_previews".to_string(), serde_json::json!(to));
+    Ok(())
+}
+
+#[command]
+pub fn get_strip_tracking<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
+    let store = get_store(&handle);
+    match store.get("strip_tracking") {
+        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub fn set_strip_tracking<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("strip_tracking".to_string(), serde_json::json!(to));
+    Ok(())
+}
+
+#[command]
+pub fn get_send_typing_indicators<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
+    let store = get_store(&handle);
+    match store.get("send_typing_indicators") {
+        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
+        _ => Ok(None),
+    }
+}
+
+#[command]
+pub fn set_send_typing_indicators<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
+    let store = get_store(&handle);
+    store.set("send_typing_indicators".to_string(), serde_json::json!(to));
+    Ok(())
+}
+
+#[command]
 pub fn remove_setting<R: Runtime>(handle: AppHandle<R>, key: String) -> Result<bool, String> {
     let store = get_store(&handle);
     let deleted = store.delete(&key);

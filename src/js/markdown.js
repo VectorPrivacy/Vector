@@ -121,9 +121,32 @@ function internalParseMarkdown(md, prevLinks) {
 
 /**
  * A wrapper for Snarkdown that uses a little sanitisation trick to prevent users doing awful shit
+ * Also protects URLs from being mangled by markdown formatting (especially underscores)
  */
 function parseMarkdown(md, prevLinks) {
-    return internalParseMarkdown(sanitizeHTML(md), prevLinks);
+    const sanitized = sanitizeHTML(md);
+    
+    // Protect URLs from markdown processing by temporarily replacing them
+    const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+    const urls = [];
+    let urlIndex = 0;
+    
+    // Extract URLs and replace with unique tokens that won't trigger markdown
+    const protected = sanitized.replace(urlPattern, (url) => {
+        urls.push(url);
+        // Use a token format that markdown won't process: ＜URL0＞ (fullwidth brackets)
+        return `＜URL${urlIndex++}＞`;
+    });
+    
+    // Parse markdown with protected URLs
+    let result = internalParseMarkdown(protected, prevLinks);
+    
+    // Restore URLs
+    urls.forEach((url, index) => {
+        result = result.replace(`＜URL${index}＞`, url);
+    });
+    
+    return result;
 }
 
 /** Sanitise text by initalising it as Plaintext within a div, then extract that plaintext */
