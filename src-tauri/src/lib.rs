@@ -4335,6 +4335,8 @@ pub fn run() {
             db::set_web_previews,
             db::get_strip_tracking,
             db::set_strip_tracking,
+            db::get_send_typing_indicators,
+            db::set_send_typing_indicators,
             db::remove_setting,
             profile::load_profile,
             profile::update_profile,

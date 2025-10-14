@@ -92,6 +92,7 @@ const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-aut
 const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
+const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
