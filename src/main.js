@@ -131,6 +131,9 @@ function openEmojiPanel(e) {
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
+        // Reset the emoji picker state first
+        resetEmojiPicker();
+        
         // Load emoji sections
         loadEmojiSections();
 
@@ -216,6 +219,23 @@ function loadEmojiSections() {
     });
 }
 
+// Function to reset emoji picker state
+function resetEmojiPicker() {
+    // Clear search input
+    emojiSearch.value = '';
+    
+    // Show all sections
+    document.querySelectorAll('.emoji-section').forEach(section => {
+        section.style.display = 'block';
+    });
+    
+    // Remove search results container
+    const existingResults = document.getElementById('emoji-search-results-container');
+    if (existingResults) {
+        existingResults.remove();
+    }
+}
+
 // Update the emoji search event listener
 emojiSearch.addEventListener('input', (e) => {
     const search = e.target.value.toLowerCase();
@@ -246,7 +266,12 @@ emojiSearch.addEventListener('input', (e) => {
         const resultsGrid = document.getElementById('emoji-search-results');
         resultsGrid.innerHTML = '';
         
-        results.slice(0, 48).forEach(emoji => {
+        // STRICT FILTERING: Only show emojis that contain the search term in their name
+        const filteredResults = results.filter(emoji => 
+            emoji.name.toLowerCase().includes(search)
+        );
+        
+        filteredResults.slice(0, 48).forEach(emoji => {
             const span = document.createElement('span');
             span.textContent = emoji.emoji;
             span.title = emoji.name;
@@ -255,16 +280,7 @@ emojiSearch.addEventListener('input', (e) => {
         
         twemojify(resultsGrid);
     } else {
-         if (emojiSearchIcon) emojiSearchIcon.style.opacity = '1';
-        // Show all sections when search is cleared
-        document.querySelectorAll('.emoji-section').forEach(section => {
-            section.style.display = 'block';
-        });
-        
-        const existingResults = document.getElementById('emoji-search-results-container');
-        if (existingResults) {
-            existingResults.remove();
-        }
+        resetEmojiPicker();
     }
 });
 
