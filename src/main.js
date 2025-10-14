@@ -4705,7 +4705,6 @@ function createContextMenu() {
     const actions = [
         { icon: 'edit', label: 'Edit Message', action: 'edit' },
         { icon: 'reply', label: 'Reply', action: 'reply' },
-        { icon: 'forward', label: 'Forward', action: 'forward' },
         { icon: 'copy-text', label: 'Copy Text', action: 'copy' },
         { icon: 'pin', label: 'Pin Message', action: 'pin' },
         { icon: 'delete', label: 'Delete Message', action: 'delete', className: 'delete-action' }
@@ -4774,11 +4773,6 @@ function handleContextAction(action, messageElement) {
             // Use existing reply functionality
             const replyEvent = { target: messageElement };
             selectReplyingMessage(replyEvent);
-            break;
-            
-        case 'forward':
-            // TODO: Implement forward functionality
-            popupConfirm('Forward Message', 'Forward functionality coming soon!', true, '', 'vector_warning.svg');
             break;
             
         case 'copy':
