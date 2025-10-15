@@ -4100,26 +4100,12 @@ async function sendMessage(messageText) {
     }
 }
 
-    // Desktop/iOS - traditional keydown approach
-    domChatMessageInput.addEventListener('keydown', async (evt) => {
-        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
-            evt.preventDefault();
-            await sendMessage(domChatMessageInput.value);
-        }
-    });
-
-    // Android-specific - detect newline in input
-    if (platformFeatures.os === 'android') {
-        domChatMessageInput.addEventListener('input', async (evt) => {
-            const value = domChatMessageInput.value;
-
-            // Check if input contains a newline character
-            if (value.includes('\n')) {
-                // Extract the message BEFORE clearing (remove the newline)
-                const messageText = value.replace(/\n/g, '');
-
-                // Send the message with the extracted text
-                await sendMessage(messageText);
+    // Desktop/iOS - traditional keydown approach (not for Android)
+    if (platformFeatures.os !== 'android') {
+        domChatMessageInput.addEventListener('keydown', async (evt) => {
+            if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
+                evt.preventDefault();
+                await sendMessage(domChatMessageInput.value);
             }
         });
     }
