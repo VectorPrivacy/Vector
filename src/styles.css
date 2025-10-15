@@ -1182,9 +1182,6 @@ body {
   flex-direction: column;
   overflow: hidden;
   display: flex;
-  /* Fix for mobile cropping */
-  box-sizing: border-box;
-  max-width: 95vw; /* Prevent overflow on very narrow screens */
 }
 
 .emoji-picker.visible {
@@ -1261,6 +1258,7 @@ body {
   margin-top: -10px;
   flex: 1;
   padding: 8px;
+  padding-right: 5px;
   margin-left: 50px; 
   height: 300px;
   overflow-y: auto; 
@@ -1268,6 +1266,7 @@ body {
   background-color: #0a0a0a;
   border-top-right-radius: 12px;
   border-bottom-right-radius: 12px;
+  box-sizing: border-box;
 }
 
 .emoji-section {
@@ -1338,7 +1337,7 @@ body {
   display: grid;
   grid-template-columns: repeat(6, 1fr); 
   gap: 4px;
-   margin-top: -12px;
+  margin-top: -12px;
 }
 
 .emoji-grid span {
