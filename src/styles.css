@@ -1133,6 +1133,9 @@ body {
   flex-direction: column;
   overflow: hidden;
   display: flex;
+  /* Fix for mobile cropping */
+  box-sizing: border-box;
+  max-width: 95vw; /* Prevent overflow on very narrow screens */
 }
 
 .emoji-picker.visible {
@@ -1320,7 +1323,16 @@ body {
   width: 10px !important;
   height: 10px !important;
   background-color: rgba(255, 255, 255, 0.5);
+  mask-image: url("./icons/search.svg");
+  -webkit-mask-image: url("./icons/search.svg");
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
   pointer-events: none;
+  z-index: 1;
   transition: opacity 0.2s ease;
   margin-right: 18px;
 }
@@ -1333,6 +1345,16 @@ body {
   border: none;
   color: #fff;
   font-size: 16px;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+}
+
+.emoji-search-container input::-webkit-search-decoration,
+.emoji-search-container input::-webkit-search-cancel-button,
+.emoji-search-container input::-webkit-search-results-button,
+.emoji-search-container input::-webkit-search-results-decoration {
+  display: none;
 }
 
 .emoji-picker input {
