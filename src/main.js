@@ -71,6 +71,18 @@ const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMessageInputSend = document.getElementById('chat-input-send');
 
+const domChatMenuBtn = document.getElementById('chat-menu-btn');
+const domChatMenuPopup = document.getElementById('chat-menu-popup');
+const domChatMenuSelfDestruct = document.getElementById('chat-menu-self-destruct');
+const domChatMenuWallpaper = document.getElementById('chat-menu-wallpaper');
+const domChatMenuNickname = document.getElementById('chat-menu-nickname');
+const domChatMenuShare = document.getElementById('chat-menu-share');
+const domChatMenuGift = document.getElementById('chat-menu-gift');
+const domChatMenuBlock = document.getElementById('chat-menu-block');
+const domChatMenuMute = document.getElementById('chat-menu-mute');
+const domChatMenuRemove = document.getElementById('chat-menu-remove');
+const domChatMenuReport = document.getElementById('chat-menu-report');
+
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
 const domShareNpub = document.getElementById('share-npub');
@@ -109,7 +121,6 @@ const domPopupInput = document.getElementById('popupInput');
 const picker = document.querySelector('.emoji-picker');
 /** @type {HTMLInputElement} */
 const emojiSearch = document.getElementById('emoji-search-input');
-const emojiResults = document.getElementById('emoji-results');
 
 /**
  * The current reaction reference - i.e: a message being reacted to.
@@ -132,21 +143,8 @@ function openEmojiPanel(e) {
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && picker.style.display !== `block`) {
-        // Render our most used emojis by default
-        let nDisplayedEmojis = 0;
-        emojiResults.innerHTML = ``;
-        for (const cEmoji of getMostUsedEmojis()) {
-            // Only display 8
-            if (nDisplayedEmojis >= 8) break;
-            // Push it in to the results
-            const spanEmoji = document.createElement('span');
-            spanEmoji.textContent = cEmoji.emoji;
-            emojiResults.appendChild(spanEmoji);
-            nDisplayedEmojis++;
-        }
-
-        // Twemojify!
-        twemojify(emojiResults);
+        // Load emoji sections
+        loadEmojiSections();
 
         // Setup the picker UI
         /** @type {DOMRect} */
@@ -154,16 +152,20 @@ function openEmojiPanel(e) {
 
         // Display the picker
         picker.style.display = `block`;
+        picker.style.height = 'auto';
+        picker.style.overflow = 'hidden';
 
         // Compute its position based on the element calling it
         const pickerRect = picker.getBoundingClientRect();
         if (isDefaultPanel) {
-            // Note: No idea why the 5px extra height is needed, but this prevents the picker from overlapping too much with the chat box
-            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height - 5}px`
+            // Center the picker above the input
+            picker.style.top = `${document.body.clientHeight - pickerRect.height - rect.height - 5}px`;
             picker.classList.add('emoji-picker-message-type');
-            // Set it to the right side always for the default panel
-            picker.style.right = `0px`;
-            // Change the emoji button to a wink while the panel is open (removed on close)
+            picker.style.left = '50%';
+            picker.style.right = 'auto';
+            picker.style.transform = 'translateX(-50%)';
+            
+            // Change the emoji button to a wink while the panel is open
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
         } else {
             picker.classList.remove('emoji-picker-message-type');
@@ -192,18 +194,19 @@ function openEmojiPanel(e) {
             
             // If it would overflow the right side, align to right edge
             if (willOverflowRight) {
-                picker.style.right = `0px`;
-                picker.style.left = ``;
+                picker.style.right = `10px`;
+                picker.style.left = `auto`;
+                picker.style.transform = 'none';
             } else {
                 // Position it next to the triggering element
                 picker.style.left = `${xPos}px`;
-                picker.style.right = ``;
+                picker.style.right = `auto`;
+                picker.style.transform = 'none';
             }
         }
 
         // If this is a Reaction, let's cache the Reference ID
         if (strReaction) {
-            // Message IDs are stored on the parent of the React button
             strCurrentReactionReference = strReaction;
         } else {
             strCurrentReactionReference = '';
@@ -222,35 +225,147 @@ function openEmojiPanel(e) {
     }
 }
 
-// Listen for emoji searches
+function loadEmojiSections() {
+    // Load recent emojis
+    const recentsGrid = document.getElementById('emoji-recents-grid');
+    recentsGrid.innerHTML = '';
+    getMostUsedEmojis().slice(0, 24).forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        recentsGrid.appendChild(span);
+    });
+    
+    // Load favorite emojis
+    const favoritesGrid = document.getElementById('emoji-favorites-grid');
+    favoritesGrid.innerHTML = '';
+    arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        favoritesGrid.appendChild(span);
+    });
+    
+    // Load all emojis
+    const allGrid = document.getElementById('emoji-all-grid');
+    allGrid.innerHTML = '';
+    arrEmojis.forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        allGrid.appendChild(span);
+    });
+    
+    // Twemojify all emojis
+    twemojify(recentsGrid);
+    twemojify(favoritesGrid);
+    twemojify(allGrid);
+}
+
+// Update the emoji search event listener
 emojiSearch.addEventListener('input', (e) => {
-    // Search for the requested emojis and render them, if it's empty, just use our favorites
-    let nDisplayedEmojis = 0;
-    emojiResults.innerHTML = ``;
-    for (const cEmoji of emojiSearch.value ? searchEmojis(emojiSearch.value) : getMostUsedEmojis()) {
-        // Only display 8
-        if (nDisplayedEmojis >= 8) break;
-        // Push it in to the results
-        const spanEmoji = document.createElement('span');
-        spanEmoji.textContent = cEmoji.emoji;
-        // In searches; the first emoji gets a special tag denoting 'Enter' key selection
-        if (emojiSearch.value) {
-            if (nDisplayedEmojis === 0) {
-                spanEmoji.style.opacity = 1;
-            } else {
-                spanEmoji.style.opacity = 0.75;
-            }
+    const search = e.target.value.toLowerCase();
+    
+    if (search) {
+        // Hide all sections and show search results
+        document.querySelectorAll('.emoji-section').forEach(section => {
+            section.style.display = 'none';
+        });
+        
+        const results = searchEmojis(search);
+        const resultsContainer = document.createElement('div');
+        resultsContainer.className = 'emoji-section';
+        resultsContainer.innerHTML = `
+            <div class="emoji-section-header">Search Results</div>
+            <div class="emoji-grid" id="emoji-search-results"></div>
+        `;
+        
+        const existingResults = document.getElementById('emoji-search-results-container');
+        if (existingResults) {
+            existingResults.remove();
         }
-        emojiResults.appendChild(spanEmoji);
-        nDisplayedEmojis++;
+        
+        resultsContainer.id = 'emoji-search-results-container';
+        document.querySelector('.emoji-main').prepend(resultsContainer);
+        
+        const resultsGrid = document.getElementById('emoji-search-results');
+        resultsGrid.innerHTML = '';
+        
+        results.slice(0, 48).forEach(emoji => {
+            const span = document.createElement('span');
+            span.textContent = emoji.emoji;
+            span.title = emoji.name;
+            resultsGrid.appendChild(span);
+        });
+        
+        twemojify(resultsGrid);
+    } else {
+        // Show all sections when search is cleared
+        document.querySelectorAll('.emoji-section').forEach(section => {
+            section.style.display = 'block';
+        });
+        
+        const existingResults = document.getElementById('emoji-search-results-container');
+        if (existingResults) {
+            existingResults.remove();
+        }
     }
+});
 
-    // Twemojify!
-    twemojify(emojiResults);
+// Update the category button click handler
+document.querySelectorAll('.emoji-category-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation(); // Prevent closing the picker
+        const category = btn.dataset.category;
+        
+        // Update active state
+        document.querySelectorAll('.emoji-category-btn').forEach(b => {
+            b.classList.toggle('active', b === btn);
+        });
+        
+        // Scroll to the selected section
+        const section = document.getElementById(`emoji-${category}`);
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+});
 
-    // If there's none, sad!
-    if (nDisplayedEmojis === 0) {
-        emojiResults.textContent = `No emojis found`;
+// Emoji selection handler
+picker.addEventListener('click', (e) => {
+    if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
+        const emoji = e.target.getAttribute('title');
+        const cEmoji = arrEmojis.find(e => e.name === emoji);
+        
+        if (cEmoji) {
+            // Register usage
+            cEmoji.used++;
+            addToRecentEmojis(cEmoji);
+            
+            // Handle the emoji selection
+            if (strCurrentReactionReference) {
+                // Reaction handling 
+                for (const cChat of arrChats) {
+                    const cMsg = cChat.messages.find(a => a.id === strCurrentReactionReference);
+                    if (!cMsg) continue;
+
+                    const strReceiverPubkey = cChat.id;
+                    const spanReaction = document.createElement('span');
+                    spanReaction.classList.add('reaction');
+                    spanReaction.textContent = `${cEmoji.emoji} 1`;
+                    twemojify(spanReaction);
+
+                    const divMessage = document.getElementById(cMsg.id);
+                    divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
+                    invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
+                }
+            } else {
+                // Add to message input
+                domChatMessageInput.value += cEmoji.emoji;
+            }
+            
+            // Close the picker
+            picker.style.display = ``;
+            domChatMessageInput.focus();
+        }
     }
 });
 
@@ -259,11 +374,24 @@ emojiSearch.onkeydown = async (e) => {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter')) {
         e.preventDefault();
 
-        // Register the selection in the emoji-dex
-        const cEmoji = arrEmojis.find(a => a.emoji === emojiResults.firstElementChild.firstElementChild.alt);
-        cEmoji.used++;
+        // Find the first emoji in search results or recent emojis
+        let emojiElement;
+        if (emojiSearch.value) {
+            emojiElement = document.querySelector('#emoji-search-results span:first-child');
+        } else {
+            emojiElement = document.querySelector('#emoji-recents-grid span:first-child');
+        }
 
-        // If this is a Reaction - let's send it!
+        if (!emojiElement) return;
+
+        // Register the selection in the emoji-dex
+        const cEmoji = arrEmojis.find(a => a.name === emojiElement.getAttribute('title'));
+        if (!cEmoji) return;
+        
+        cEmoji.used++;
+        addToRecentEmojis(cEmoji);
+
+        // If this is a Reaction - use the original reaction handling
         if (strCurrentReactionReference) {
             // Grab the referred message to find it's chat pubkey
             for (const cChat of arrChats) {
@@ -288,7 +416,7 @@ emojiSearch.onkeydown = async (e) => {
                 invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
-            // Add it to the message input
+            // Add to message input
             domChatMessageInput.value += cEmoji.emoji;
         }
 
@@ -315,6 +443,28 @@ emojiSearch.onkeydown = async (e) => {
         domChatMessageInput.focus();
     }
 };
+
+// Add contextmenu event for right-click to favorite
+picker.addEventListener('contextmenu', (e) => {
+    if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
+        e.preventDefault();
+        const emoji = e.target.textContent;
+        const emojiData = arrEmojis.find(e => e.emoji === emoji);
+        
+        if (emojiData) {
+            const added = toggleFavoriteEmoji(emojiData);
+            if (added) {
+                // Visual feedback for adding to favorites
+                e.target.style.transform = 'scale(1.3)';
+                e.target.style.backgroundColor = 'rgba(255, 215, 0, 0.3)';
+                setTimeout(() => {
+                    e.target.style.transform = '';
+                    e.target.style.backgroundColor = '';
+                }, 500);
+            }
+        }
+    }
+});
 
 // Emoji selection
 picker.addEventListener('click', (e) => {
@@ -347,21 +497,7 @@ picker.addEventListener('click', (e) => {
                 // Send the Reaction to the network (protocol-agnostic)
                 invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
-        } else {
-            // Add it to the message input
-            domChatMessageInput.value += cEmoji.emoji;
         }
-
-        // Reset the UI state
-        emojiSearch.value = '';
-        picker.classList.remove('active');
-        strCurrentReactionReference = '';
-
-        // Change the emoji button to the regular face
-        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
-
-        // Bring the focus back to the chat
-        domChatMessageInput.focus();
     }
 });
 
@@ -1858,6 +1994,180 @@ async function setupRustListeners() {
         }
     });
 }
+
+// Toggle chat menu popup
+domChatMenuBtn.onclick = (e) => {
+    e.stopPropagation();
+    const isVisible = domChatMenuPopup.style.display === 'block';
+    domChatMenuPopup.style.display = isVisible ? 'none' : 'block';
+    
+    // Update mute button state based on current chat
+    if (!isVisible && strOpenChat) {
+        updateMuteButtonUI(strOpenChat);
+    }
+};
+
+// Close menu when clicking outside
+document.addEventListener('click', (e) => {
+    if (domChatMenuPopup.style.display === 'block' && 
+        !domChatMenuPopup.contains(e.target) && 
+        e.target !== domChatMenuBtn && 
+        !domChatMenuBtn.contains(e.target)) {
+        domChatMenuPopup.style.display = 'none';
+    }
+});
+
+// Self-Destructing Messages
+domChatMenuSelfDestruct.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    popupConfirm(
+        'Self-Destructing Messages',
+        'This feature allows messages to automatically delete after a set time period.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Change Wallpaper
+domChatMenuWallpaper.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Change Wallpaper',
+        'Select a new wallpaper for this chat.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Change Nickname
+domChatMenuNickname.onclick = async () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
+    if (nick === false) return;
+    
+    if (nick.length >= 30) {
+        return popupConfirm(
+            'Woah woah!',
+            'A ' + nick.length + '-character nickname seems excessive!',
+            true,
+            '',
+            'vector_warning.svg'
+        );
+    }
+    
+    await invoke('set_nickname', { npub: profile.id, nickname: nick });
+};
+
+// Share a Profile
+domChatMenuShare.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Share Profile',
+        'Share this profile with others.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Send a Gift
+domChatMenuGift.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    popupConfirm(
+        'Send a Gift',
+        'Send digital gifts to your contact.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Block
+domChatMenuBlock.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Block User',
+        'Blocking will prevent this user from contacting you.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Helper function to update mute button UI based on profile state
+function updateMuteButtonUI(npub) {
+    const profile = getProfile(npub);
+    if (!profile) return;
+    
+    const isMuted = profile.muted || false;
+    const muteIcon = domChatMenuMute.querySelector('.icon');
+    const muteText = domChatMenuMute.querySelector('span:last-child');
+    
+    if (isMuted) {
+        muteIcon.classList.remove('icon-volume-max');
+        muteIcon.classList.add('icon-volume-mute');
+        muteText.textContent = 'Unmute';
+        domChatMenuMute.classList.add('muted');
+    } else {
+        muteIcon.classList.remove('icon-volume-mute');
+        muteIcon.classList.add('icon-volume-max');
+        muteText.textContent = 'Mute';
+        domChatMenuMute.classList.remove('muted');
+    }
+}
+
+// Mute/Unmute 
+domChatMenuMute.onclick = async () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    await invoke('toggle_muted', { npub: profile.id });
+};
+
+// Remove
+domChatMenuRemove.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Remove Chat',
+        'This will delete all messages from this conversation. This action cannot be undone.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
+
+// Report
+domChatMenuReport.onclick = () => {
+    domChatMenuPopup.style.display = 'none';
+    const profile = getProfile(strOpenChat);
+    if (!profile) return;
+    
+    popupConfirm(
+        'Report User',
+        'Report this user for violating community guidelines.',
+        true,
+        '',
+        'vector_warning.svg'
+    );
+};
 
 /**
  * A flag that indicates when Vector is still in it's initiation sequence
@@ -4036,7 +4346,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatMessageInputCancel.onclick = cancelReply;
 
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
-    createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 })
+    createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 });
+
+    // Hook up the Context Menu system
+    initContextMenu();
 
     // Hook up an in-chat File Upload listener
     domChatMessageInputFile.onclick = async () => {
@@ -4441,6 +4754,312 @@ function softChatScroll() {
 
 window.onresize = adjustSize;
 
+// Message Context Menu Implementation
+
+let contextMenu = null;
+let contextMenuTarget = null;
+let longPressTimer = null;
+const LONG_PRESS_DURATION = 500; // milliseconds
+
+/**
+ * Creates the context menu element
+ */
+function createContextMenu() {
+    if (contextMenu) return contextMenu;
+    
+    const menu = document.createElement('div');
+    menu.className = 'msg-context-menu';
+    menu.id = 'msg-context-menu';
+    
+    // Quick emoji reactions row
+    const emojiRow = document.createElement('div');
+    emojiRow.className = 'msg-context-emoji-row';
+    
+    // Get 5 most used emojis
+    const topEmojis = getMostUsedEmojis().slice(0, 5);
+    
+    topEmojis.forEach(emojiData => {
+        const btn = document.createElement('button');
+        btn.className = 'msg-context-emoji-btn btn';
+        btn.innerHTML = emojiData.emoji;
+        btn.dataset.emoji = emojiData.emoji;
+        btn.dataset.emojiName = emojiData.name;
+        twemojify(btn);
+        emojiRow.appendChild(btn);
+    });
+    
+    // Add "more emojis" button
+    const moreBtn = document.createElement('button');
+    moreBtn.className = 'msg-context-emoji-btn btn';
+    moreBtn.innerHTML = '<span class="icon icon-smile-face"></span>';
+    moreBtn.dataset.action = 'more-emojis';
+    emojiRow.appendChild(moreBtn);
+    
+    menu.appendChild(emojiRow);
+    
+    // Actions
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'msg-context-actions';
+    
+    const actions = [
+        { icon: 'edit', label: 'Edit Message', action: 'edit' },
+        { icon: 'reply', label: 'Reply', action: 'reply' },
+        { icon: 'copy-text', label: 'Copy Text', action: 'copy' },
+        { icon: 'pin', label: 'Pin Message', action: 'pin' },
+        { icon: 'delete', label: 'Delete Message', action: 'delete', className: 'delete-action' }
+    ];
+    
+    actions.forEach(actionData => {
+        const actionBtn = document.createElement('div');
+        actionBtn.className = `msg-context-action btn ${actionData.className || ''}`;
+        actionBtn.dataset.action = actionData.action;
+        actionBtn.innerHTML = `
+            <span class="icon icon-${actionData.icon}"></span>
+            <span>${actionData.label}</span>
+        `;
+        actionsDiv.appendChild(actionBtn);
+    });
+    
+    menu.appendChild(actionsDiv);
+    document.body.appendChild(menu);
+    
+    contextMenu = menu;
+    return menu;
+}
+
+/**
+ * Shows the context menu for a message
+ */
+function showContextMenu(messageElement) {
+    const menu = createContextMenu();
+    contextMenuTarget = messageElement;
+    
+    // Add active state to message
+    messageElement.classList.add('context-active');
+    
+    // Show the menu (it slides up from bottom via CSS)
+    menu.classList.add('visible');
+}
+
+/**
+ * Hides the context menu
+ */
+function hideContextMenu() {
+    if (!contextMenu) return;
+    
+    contextMenu.classList.remove('visible');
+    
+    // Remove active state from message
+    if (contextMenuTarget) {
+        contextMenuTarget.classList.remove('context-active');
+        contextMenuTarget = null;
+    }
+}
+
+/**
+ * Handles context menu action clicks
+ */
+function handleContextAction(action, messageElement) {
+    const messageId = messageElement.id;
+    
+    switch (action) {
+        case 'edit':
+            // TODO: Implement edit functionality
+            popupConfirm('Edit Message', 'Edit functionality coming soon!', true, '', 'vector_warning.svg');
+            break;
+            
+        case 'reply':
+            // Use existing reply functionality
+            const replyEvent = { target: messageElement };
+            selectReplyingMessage(replyEvent);
+            break;
+            
+        case 'copy':
+            // Copy message text to clipboard
+            const messageText = messageElement.querySelector('p')?.textContent;
+            if (messageText) {
+                navigator.clipboard.writeText(messageText).then(() => {
+                    // Could show a brief "Copied!" toast here
+                });
+            }
+            break;
+            
+        case 'pin':
+            // TODO: Implement pin functionality
+            popupConfirm('Pin Message', 'Are you sure you want to pin this message?', true, '', 'vector_warning.svg');
+            break;
+            
+        case 'delete':
+            // TODO: Implement delete functionality
+            popupConfirm('Delete Message', 'Are you sure you want to delete this message?', false, '', 'vector_warning.svg')
+                .then(confirmed => {
+                    if (confirmed) {
+                        // Call delete function
+                    }
+                });
+            break;
+            
+        case 'more-emojis':
+            // Set the reaction reference
+            strCurrentReactionReference = messageId;
+            
+            // Create the proper DOM structure that openEmojiPanel expects
+            // It looks for: target.classList.contains('add-reaction') and then gets parentElement.parentElement.id
+            const msgExtras = document.createElement('div');
+            msgExtras.className = 'msg-extras';
+            
+            const addReactionBtn = document.createElement('span');
+            addReactionBtn.classList.add('add-reaction');
+            msgExtras.appendChild(addReactionBtn);
+            
+            const msgContainer = document.createElement('div');
+            msgContainer.id = messageId;
+            msgContainer.appendChild(msgExtras);
+            
+            // Create a proper mouse event
+            const fakeEvent = new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            });
+            
+            // Override the target to be our add-reaction button
+            Object.defineProperty(fakeEvent, 'target', {
+                value: addReactionBtn,
+                enumerable: true
+            });
+            
+            // Hide context menu first
+            hideContextMenu();
+            
+            // Open the emoji panel
+            openEmojiPanel(fakeEvent);
+            return; // Return early since we already hid the menu
+            
+        default:
+            // Handle emoji reactions
+            if (action.startsWith('emoji:')) {
+                const emoji = action.substring(6);
+                handleEmojiReaction(messageId, emoji);
+            }
+    }
+    
+    hideContextMenu();
+}
+
+/**
+ * Handles emoji reaction selection
+ */
+function handleEmojiReaction(messageId, emoji) {
+    const cEmoji = arrEmojis.find(e => e.emoji === emoji);
+    if (!cEmoji) return;
+    
+    // Register usage
+    cEmoji.used++;
+    addToRecentEmojis(cEmoji);
+    
+    // Find the message in chats
+    for (const cChat of arrChats) {
+        const cMsg = cChat.messages.find(a => a.id === messageId);
+        if (!cMsg) continue;
+        
+        const strReceiverPubkey = cChat.id;
+        const spanReaction = document.createElement('span');
+        spanReaction.classList.add('reaction');
+        spanReaction.textContent = `${cEmoji.emoji} 1`;
+        twemojify(spanReaction);
+        
+        const divMessage = document.getElementById(cMsg.id);
+        const existingReaction = divMessage.querySelector('.msg-extras span');
+        if (existingReaction) {
+            existingReaction.replaceWith(spanReaction);
+        }
+        
+        invoke('react', { 
+            referenceId: messageId, 
+            npub: strReceiverPubkey, 
+            emoji: cEmoji.emoji 
+        });
+        
+        break;
+    }
+}
+
+/**
+ * Initialize context menu event listeners
+ */
+function initContextMenu() {
+    // Touch events for long-press
+    document.addEventListener('touchstart', (e) => {
+        const messageElement = e.target.closest('.msg-me, .msg-them');
+        if (!messageElement) return;
+        
+        longPressTimer = setTimeout(() => {
+            showContextMenu(messageElement);
+            // Prevent default to avoid text selection
+            e.preventDefault();
+        }, LONG_PRESS_DURATION);
+    }, { passive: false });
+    
+    document.addEventListener('touchend', () => {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    });
+    
+    document.addEventListener('touchmove', () => {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    });
+    
+    // Right-click for desktop
+    document.addEventListener('contextmenu', (e) => {
+        const messageElement = e.target.closest('.msg-me, .msg-them');
+        if (!messageElement) return;
+        
+        e.preventDefault();
+        showContextMenu(messageElement);
+    });
+    
+    // Click outside to close
+    document.addEventListener('click', (e) => {
+        if (!contextMenu || !contextMenu.classList.contains('visible')) return;
+        
+        if (!contextMenu.contains(e.target) && !e.target.closest('.emoji-picker')) {
+            hideContextMenu();
+        }
+    });
+    
+    // Handle context menu clicks
+    document.addEventListener('click', (e) => {
+        if (!contextMenu) return;
+        
+        // Emoji button click
+        const emojiBtn = e.target.closest('.msg-context-emoji-btn');
+        if (emojiBtn && contextMenuTarget) {
+            e.stopPropagation(); // Prevent click from bubbling
+            
+            if (emojiBtn.dataset.action === 'more-emojis') {
+                handleContextAction('more-emojis', contextMenuTarget);
+            } else if (emojiBtn.dataset.emoji) {
+                handleEmojiReaction(contextMenuTarget.id, emojiBtn.dataset.emoji);
+                hideContextMenu();
+            }
+            return;
+        }
+        
+        // Action button click
+        const actionBtn = e.target.closest('.msg-context-action');
+        if (actionBtn && contextMenuTarget) {
+            e.stopPropagation(); // Prevent click from bubbling
+            handleContextAction(actionBtn.dataset.action, contextMenuTarget);
+        }
+    });
+}
+
 // ===== Create Group: state and helpers =====
 /**
  * Selected members (npubs) for the group being created.
@@ -4748,5 +5367,3 @@ Create Group UI wiring
         }
     };
 })();
-
-
