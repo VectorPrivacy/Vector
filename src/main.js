@@ -1067,7 +1067,6 @@ function renderChat(chat) {
     // The avatar, if one exists
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = `relative`;
-    divAvatarContainer.style.zIndex = `-1`;
     
     if (isGroup) {
         // For groups, show a group icon or placeholder
@@ -1219,8 +1218,6 @@ function renderChat(chat) {
     divPreviewContainer.appendChild(pChatPreview);
 
     // Add the Chat Preview to the contact UI
-    // Note: as a hacky trick to make `divContact` receive all clicks, we set the z-index lower on it's children
-    divPreviewContainer.style.zIndex = `-1`; // Note: used to prevent the button from appearing in front of the `Popup` UI
     divContact.appendChild(divPreviewContainer);
 
     // Display the "last message" time
@@ -1228,7 +1225,6 @@ function renderChat(chat) {
     pTimeAgo.classList.add('chatlist-contact-timestamp');
     if (cLastMsg) {
         pTimeAgo.textContent = timeAgo(cLastMsg.at);
-        if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
     }
     // Apply 'Unread' final styling
     if (nUnread) pTimeAgo.style.color = '#59fcb3';
@@ -4421,7 +4417,6 @@ function renderCreateGroupList(filterText = '') {
         // Avatar
         const avatarContainer = document.createElement('div');
         avatarContainer.style.position = 'relative';
-        avatarContainer.style.zIndex = '-1';
         if (p.avatar) {
             const img = document.createElement('img');
             img.src = p.avatar;
@@ -4446,7 +4441,6 @@ function renderCreateGroupList(filterText = '') {
         subtitle.style.opacity = '0.7';
         subtitle.textContent = p.id;
         preview.appendChild(subtitle);
-        preview.style.zIndex = '-1';
         row.appendChild(preview);
 
         // Checkbox

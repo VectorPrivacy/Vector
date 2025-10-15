@@ -603,6 +603,7 @@ body {
 
 .chatlist-contact {
   display: flex;
+  background-color: #0A0A0A;
   border-style: solid;
   border-radius: 30px;
   border-width: 1px;
@@ -610,7 +611,7 @@ body {
   justify-content: left;
   height: 50px;
   padding: 5px;
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
 
 .chatlist-contact p {
