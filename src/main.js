@@ -2838,7 +2838,17 @@ function renderMessage(msg, sender, editID = '') {
     // Prepare our message container - including avatars and contextual bubble rendering
     const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling : domChatMessages.lastElementChild;
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
-    if (!domPrevMsg || domPrevMsg.getAttribute('sender') != strShortSenderID) {
+    
+    // Find the last actual message (skip timestamps and other non-message elements)
+    let lastActualMessage = domPrevMsg;
+    while (lastActualMessage && !lastActualMessage.getAttribute('sender')) {
+        lastActualMessage = lastActualMessage.previousElementSibling;
+    }
+    
+    // Check if this is truly a new streak (different sender from last actual message)
+    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID;
+    
+    if (isNewStreak) {
         // Add an avatar if this is not OUR message
         if (!msg.mine) {
             let avatarEl = null;
@@ -2906,33 +2916,41 @@ function renderMessage(msg, sender, editID = '') {
             }
         }
 
-        // If there is a message before them, and it isn't theirs, apply additional edits
-        if (domPrevMsg && fIsMsg) {
-            // Check if the previous message was from the contact (!mine) 
-            const prevSenderID = domPrevMsg.getAttribute('sender');
+        // If there is an actual message before this one (not just any element), apply additional edits
+        if (lastActualMessage) {
+            // Check if the previous message was from the contact (!mine)
+            const prevSenderID = lastActualMessage.getAttribute('sender');
             const wasPrevMsgFromContact = prevSenderID !== strPubkey.substring(0, 8);
             
             // Only curve the previous message's bottom-left border if it was from the user (mine)
             // If it was from the contact, we need to check if it should have a rounded corner (last in streak)
             if (!wasPrevMsgFromContact) {
-                const pMsg = domPrevMsg.querySelector('p');
+                const pMsg = lastActualMessage.querySelector('p');
                 if (pMsg) {
                     pMsg.style.borderBottomLeftRadius = `15px`;
                 }
             } else {
                 // The previous message was from the contact - check if it needs rounding as last in streak
                 // Look back to see if it had previous messages from same sender
-                const prevPrevMsg = domPrevMsg.previousElementSibling;
+                let prevPrevMsg = lastActualMessage.previousElementSibling;
+                // Skip non-messages
+                while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
+                    prevPrevMsg = prevPrevMsg.previousElementSibling;
+                }
                 const hadPreviousFromSameSender = prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
                 
                 // Look forward to see if there are more messages from same sender after this one
                 // (which would make this a middle message, not the last)
-                const prevNextMsg = domPrevMsg.nextElementSibling;
+                let prevNextMsg = lastActualMessage.nextElementSibling;
+                // Skip non-messages
+                while (prevNextMsg && !prevNextMsg.getAttribute('sender')) {
+                    prevNextMsg = prevNextMsg.nextElementSibling;
+                }
                 const hasNextFromSameSender = prevNextMsg && prevNextMsg.getAttribute('sender') === prevSenderID;
                 
                 // Only round if it had previous messages AND no next messages from same sender (making it the last)
                 if (hadPreviousFromSameSender && !hasNextFromSameSender) {
-                    const pMsg = domPrevMsg.querySelector('p');
+                    const pMsg = lastActualMessage.querySelector('p');
                     if (pMsg && !pMsg.classList.contains('no-background')) {
                         pMsg.style.borderBottomLeftRadius = `15px`;
                     }
@@ -2941,6 +2959,11 @@ function renderMessage(msg, sender, editID = '') {
 
             // Add some additional margin to separate the senders visually (extra space for username in groups)
             divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
+        }
+        
+        // For group chats, add margin-top to the <p> element for the first message in a streak
+        if (isGroupChat) {
+            pMessage.style.marginTop = `25px`;
         }
         
         // Check if this is a singular message (no next message from same sender)
@@ -3434,6 +3457,12 @@ function renderMessage(msg, sender, editID = '') {
     divExtras.classList.add('msg-extras');
     if (msg.mine) divExtras.style.marginRight = `5px`;
     else divExtras.style.marginLeft = `5px`;
+    
+    // Apply the same top margin to divExtras if this is the first message in a streak (group chats only)
+    if (isNewStreak && isGroupChat) {
+        // Match the pMessage top margin for proper alignment with username labels
+        divExtras.style.marginTop = `25px`;
+    }
 
     // These can ONLY be shown on fully sent messages (inherently does not apply to received msgs)
     if (!msg.pending && !msg.failed) {
