@@ -261,8 +261,11 @@ emojiSearch.addEventListener('input', (e) => {
         const results = searchEmojis(search);
         const resultsContainer = document.createElement('div');
         resultsContainer.className = 'emoji-section';
+        resultsContainer.id = 'emoji-search-results-container';
         resultsContainer.innerHTML = `
-            <div class="emoji-section-header">Search Results</div>
+            <div class="emoji-section-header">
+                <span class="header-text">Search Results</span>
+            </div>
             <div class="emoji-grid" id="emoji-search-results"></div>
         `;
         
@@ -271,7 +274,6 @@ emojiSearch.addEventListener('input', (e) => {
             existingResults.remove();
         }
         
-        resultsContainer.id = 'emoji-search-results-container';
         document.querySelector('.emoji-main').prepend(resultsContainer);
         
         const resultsGrid = document.getElementById('emoji-search-results');
