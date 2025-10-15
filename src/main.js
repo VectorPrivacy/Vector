@@ -69,6 +69,7 @@ const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
+const domChatMessageInputSend = document.getElementById('chat-input-send');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
@@ -1193,7 +1194,6 @@ function renderChat(chat) {
     // The avatar, if one exists
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = `relative`;
-    divAvatarContainer.style.zIndex = `-1`;
     
     if (isGroup) {
         // For groups, show a group icon or placeholder
@@ -1345,8 +1345,6 @@ function renderChat(chat) {
     divPreviewContainer.appendChild(pChatPreview);
 
     // Add the Chat Preview to the contact UI
-    // Note: as a hacky trick to make `divContact` receive all clicks, we set the z-index lower on it's children
-    divPreviewContainer.style.zIndex = `-1`; // Note: used to prevent the button from appearing in front of the `Popup` UI
     divContact.appendChild(divPreviewContainer);
 
     // Display the "last message" time
@@ -1354,7 +1352,6 @@ function renderChat(chat) {
     pTimeAgo.classList.add('chatlist-contact-timestamp');
     if (cLastMsg) {
         pTimeAgo.textContent = timeAgo(cLastMsg.at);
-        if (pTimeAgo.textContent !== 'Now') pTimeAgo.textContent += ` ago`;
     }
     // Apply 'Unread' final styling
     if (nUnread) pTimeAgo.style.color = '#59fcb3';
@@ -2968,7 +2965,17 @@ function renderMessage(msg, sender, editID = '') {
     // Prepare our message container - including avatars and contextual bubble rendering
     const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling : domChatMessages.lastElementChild;
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
-    if (!domPrevMsg || domPrevMsg.getAttribute('sender') != strShortSenderID) {
+    
+    // Find the last actual message (skip timestamps and other non-message elements)
+    let lastActualMessage = domPrevMsg;
+    while (lastActualMessage && !lastActualMessage.getAttribute('sender')) {
+        lastActualMessage = lastActualMessage.previousElementSibling;
+    }
+    
+    // Check if this is truly a new streak (different sender from last actual message)
+    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID;
+    
+    if (isNewStreak) {
         // Add an avatar if this is not OUR message
         if (!msg.mine) {
             let avatarEl = null;
@@ -3036,33 +3043,41 @@ function renderMessage(msg, sender, editID = '') {
             }
         }
 
-        // If there is a message before them, and it isn't theirs, apply additional edits
-        if (domPrevMsg && fIsMsg) {
-            // Check if the previous message was from the contact (!mine) 
-            const prevSenderID = domPrevMsg.getAttribute('sender');
+        // If there is an actual message before this one (not just any element), apply additional edits
+        if (lastActualMessage) {
+            // Check if the previous message was from the contact (!mine)
+            const prevSenderID = lastActualMessage.getAttribute('sender');
             const wasPrevMsgFromContact = prevSenderID !== strPubkey.substring(0, 8);
             
             // Only curve the previous message's bottom-left border if it was from the user (mine)
             // If it was from the contact, we need to check if it should have a rounded corner (last in streak)
             if (!wasPrevMsgFromContact) {
-                const pMsg = domPrevMsg.querySelector('p');
+                const pMsg = lastActualMessage.querySelector('p');
                 if (pMsg) {
                     pMsg.style.borderBottomLeftRadius = `15px`;
                 }
             } else {
                 // The previous message was from the contact - check if it needs rounding as last in streak
                 // Look back to see if it had previous messages from same sender
-                const prevPrevMsg = domPrevMsg.previousElementSibling;
+                let prevPrevMsg = lastActualMessage.previousElementSibling;
+                // Skip non-messages
+                while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
+                    prevPrevMsg = prevPrevMsg.previousElementSibling;
+                }
                 const hadPreviousFromSameSender = prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
                 
                 // Look forward to see if there are more messages from same sender after this one
                 // (which would make this a middle message, not the last)
-                const prevNextMsg = domPrevMsg.nextElementSibling;
+                let prevNextMsg = lastActualMessage.nextElementSibling;
+                // Skip non-messages
+                while (prevNextMsg && !prevNextMsg.getAttribute('sender')) {
+                    prevNextMsg = prevNextMsg.nextElementSibling;
+                }
                 const hasNextFromSameSender = prevNextMsg && prevNextMsg.getAttribute('sender') === prevSenderID;
                 
                 // Only round if it had previous messages AND no next messages from same sender (making it the last)
                 if (hadPreviousFromSameSender && !hasNextFromSameSender) {
-                    const pMsg = domPrevMsg.querySelector('p');
+                    const pMsg = lastActualMessage.querySelector('p');
                     if (pMsg && !pMsg.classList.contains('no-background')) {
                         pMsg.style.borderBottomLeftRadius = `15px`;
                     }
@@ -3071,6 +3086,11 @@ function renderMessage(msg, sender, editID = '') {
 
             // Add some additional margin to separate the senders visually (extra space for username in groups)
             divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
+        }
+        
+        // For group chats, add margin-top to the <p> element for the first message in a streak
+        if (isGroupChat) {
+            pMessage.style.marginTop = `25px`;
         }
         
         // Check if this is a singular message (no next message from same sender)
@@ -3564,6 +3584,12 @@ function renderMessage(msg, sender, editID = '') {
     divExtras.classList.add('msg-extras');
     if (msg.mine) divExtras.style.marginRight = `5px`;
     else divExtras.style.marginLeft = `5px`;
+    
+    // Apply the same top margin to divExtras if this is the first message in a streak (group chats only)
+    if (isNewStreak && isGroupChat) {
+        // Match the pMessage top margin for proper alignment with username labels
+        divExtras.style.marginTop = `25px`;
+    }
 
     // These can ONLY be shown on fully sent messages (inherently does not apply to received msgs)
     if (!msg.pending && !msg.failed) {
@@ -3691,6 +3717,18 @@ function cancelReply() {
 
     // Remove the reply ID
     strCurrentReplyReference = '';
+
+    // Reset send button state based on current input
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    if (hasText) {
+        domChatMessageInputSend.classList.add('active');
+        domChatMessageInputSend.style.display = '';
+        domChatMessageInputVoice.style.display = 'none';
+    } else {
+        domChatMessageInputSend.classList.remove('active');
+        domChatMessageInputSend.style.display = 'none';
+        domChatMessageInputVoice.style.display = '';
+    }
 }
 
 /**
@@ -4166,84 +4204,112 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
-    // Unified message sending function
-    async function sendMessage(messageText) {
-        if (!messageText || !messageText.trim()) return;
+// Unified message sending function
+async function sendMessage(messageText) {
+    if (!messageText || !messageText.trim()) return;
 
-        // Clean tracking parameters from any URLs in the message for privacy (if enabled)
-        let cleanedText = messageText.trim();
-        if (fStripTrackingEnabled) {
-            const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
-            cleanedText = cleanedText.replace(urlPattern, (match) => {
-                try {
-                    return cleanTrackingFromUrl(match);
-                } catch (e) {
-                    // If cleaning fails, return original URL
-                    return match;
-                }
-            });
-        }
-
-        // Clear input and show sending state
-        domChatMessageInput.value = '';
-        domChatMessageInput.setAttribute('placeholder', 'Sending...');
-
-        try {
-            const replyRef = strCurrentReplyReference;
-            cancelReply();
-            
-            // Check if current chat is a group
-            const chat = arrChats.find(c => c.id === strOpenChat);
-            if (chat?.chat_type === 'MlsGroup') {
-                // Send group message with cleaned text
-                const wrapperId = await invoke('send_mls_group_message', {
-                    groupId: strOpenChat,
-                    text: cleanedText,
-                    repliedTo: replyRef || null
-                });
-                // Message is already added optimistically by send_mls_group_message
-                // Live subscription will handle receiving it back from the relay
-            } else {
-                // Send regular DM with cleaned text
-                await message(strOpenChat, cleanedText, replyRef, "");
+    // Clean tracking parameters from any URLs in the message for privacy (if enabled)
+    let cleanedText = messageText.trim();
+    if (fStripTrackingEnabled) {
+        const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+        cleanedText = cleanedText.replace(urlPattern, (match) => {
+            try {
+                return cleanTrackingFromUrl(match);
+            } catch (e) {
+                // If cleaning fails, return original URL
+                return match;
             }
-            
-            nLastTypingIndicator = 0;
-        } catch(e) {
-            console.error('Failed to send message:', e);
-        }
+        });
     }
 
-    // Desktop/iOS - traditional keydown approach
-    domChatMessageInput.addEventListener('keydown', async (evt) => {
-        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
-            evt.preventDefault();
-            await sendMessage(domChatMessageInput.value);
+    // Clear input and show sending state
+    domChatMessageInput.value = '';
+    domChatMessageInput.setAttribute('placeholder', 'Sending...');
+
+    try {
+        const replyRef = strCurrentReplyReference;
+        cancelReply();
+        
+        // Check if current chat is a group
+        const chat = arrChats.find(c => c.id === strOpenChat);
+        if (chat?.chat_type === 'MlsGroup') {
+            // Send group message with cleaned text
+            const wrapperId = await invoke('send_mls_group_message', {
+                groupId: strOpenChat,
+                text: cleanedText,
+                repliedTo: replyRef || null
+            });
+            // Message is already added optimistically by send_mls_group_message
+            // Live subscription will handle receiving it back from the relay
+        } else {
+            // Send regular DM with cleaned text
+            await message(strOpenChat, cleanedText, replyRef, "");
         }
-    });
+        
+        nLastTypingIndicator = 0;
+    } catch(e) {
+        console.error('Failed to send message:', e);
+    }
+}
 
-    // Android-specific - detect newline in input
-    if (platformFeatures.os === 'android') {
-        domChatMessageInput.addEventListener('input', async (evt) => {
-            const value = domChatMessageInput.value;
-
-            // Check if input contains a newline character
-            if (value.includes('\n')) {
-                // Extract the message BEFORE clearing (remove the newline)
-                const messageText = value.replace(/\n/g, '');
-
-                // Send the message with the extracted text
-                await sendMessage(messageText);
+    // Desktop/iOS - traditional keydown approach (not for Android)
+    if (platformFeatures.os !== 'android') {
+        domChatMessageInput.addEventListener('keydown', async (evt) => {
+            if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
+                evt.preventDefault();
+                await sendMessage(domChatMessageInput.value);
             }
         });
     }
 
     // Hook up an 'input' listener on the Message Box for typing indicators
-    domChatMessageInput.oninput = async () => {
-        // Send a Typing Indicator only when content actually changes and setting is enabled
-        if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
-            nLastTypingIndicator = Date.now();
-            await invoke("start_typing", { receiver: strOpenChat });
+domChatMessageInput.oninput = async () => {
+    // Toggle send button active state based on text content
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    if (hasText) {
+        // Swap: Hide mic, show send button with animation
+        if (domChatMessageInputVoice.style.display !== 'none') {
+            domChatMessageInputVoice.classList.add('button-swap-out');
+            domChatMessageInputVoice.addEventListener('animationend', () => {
+                domChatMessageInputVoice.style.display = 'none';
+                domChatMessageInputVoice.classList.remove('button-swap-out');
+                domChatMessageInputSend.style.display = '';
+                domChatMessageInputSend.classList.add('button-swap-in');
+                domChatMessageInputSend.addEventListener('animationend', () => {
+                    domChatMessageInputSend.classList.remove('button-swap-in');
+                }, { once: true });
+            }, { once: true });
+        }
+        domChatMessageInputSend.classList.add('active');
+    } else {
+        // Swap: Hide send, show mic button with animation
+        if (domChatMessageInputSend.style.display !== 'none') {
+            domChatMessageInputSend.classList.add('button-swap-out');
+            domChatMessageInputSend.classList.remove('active');
+            domChatMessageInputSend.addEventListener('animationend', () => {
+                domChatMessageInputSend.style.display = 'none';
+                domChatMessageInputSend.classList.remove('button-swap-out');
+                domChatMessageInputVoice.style.display = '';
+                domChatMessageInputVoice.classList.add('button-swap-in');
+                domChatMessageInputVoice.addEventListener('animationend', () => {
+                    domChatMessageInputVoice.classList.remove('button-swap-in');
+                }, { once: true });
+            }, { once: true });
+        }
+    }
+
+    // Send a Typing Indicator only when content actually changes and setting is enabled
+    if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
+        nLastTypingIndicator = Date.now();
+        await invoke("start_typing", { receiver: strOpenChat });
+    }
+};
+
+    // Hook up the send button click handler
+    domChatMessageInputSend.onclick = async () => {
+        const messageText = domChatMessageInput.value;
+        if (messageText && messageText.trim()) {
+            await sendMessage(messageText);
         }
     };
 
@@ -4547,7 +4613,6 @@ function renderCreateGroupList(filterText = '') {
         // Avatar
         const avatarContainer = document.createElement('div');
         avatarContainer.style.position = 'relative';
-        avatarContainer.style.zIndex = '-1';
         if (p.avatar) {
             const img = document.createElement('img');
             img.src = p.avatar;
@@ -4572,7 +4637,6 @@ function renderCreateGroupList(filterText = '') {
         subtitle.style.opacity = '0.7';
         subtitle.textContent = p.id;
         preview.appendChild(subtitle);
-        preview.style.zIndex = '-1';
         row.appendChild(preview);
 
         // Checkbox
