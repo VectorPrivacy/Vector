@@ -3,7 +3,7 @@ use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
 use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder, WebviewUrl};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
@@ -28,7 +28,7 @@ mod net;
 mod upload;
 
 mod util;
-use util::{get_file_type_description, calculate_file_hash, is_nonce_filename, migrate_nonce_file_to_hash};
+use util::{get_file_type_description, calculate_file_hash};
 
 #[cfg(target_os = "android")]
 mod android {
@@ -77,8 +77,6 @@ static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
 static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
 pub(crate) static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
 pub(crate) static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
-// TODO: REMOVE AFTER SEVERAL UPDATES - This static is only needed for the one-time migration from nonce-based to hash-based storage
-static PENDING_MIGRATION: OnceCell<std::collections::HashMap<String, (String, String)>> = OnceCell::new();
 
 #[derive(Clone)]
 struct PendingInviteAcceptance {
@@ -520,76 +518,16 @@ async fn fetch_messages<R: Runtime>(
                 }
             }
 
-            // Check if we have pending migrations to apply to the database
-            let has_pending_migrations = PENDING_MIGRATION.get().map(|m| !m.is_empty()).unwrap_or(false);
+            // Check if filesystem integrity check is needed
+            let needs_integrity_check = state.chats.iter().any(|chat|
+                chat.messages.iter().any(|msg|
+                    msg.attachments.iter().any(|att| att.downloaded)
+                )
+            );
             
-            if has_pending_migrations {
-                let migration_map = PENDING_MIGRATION.get().unwrap();
-                
-                // Emit migration start event to frontend
-                handle.emit("progress_operation", serde_json::json!({
-                    "type": "start",
-                    "message": "Migrating DB"
-                })).unwrap();
-                
-                // Drop state during expensive migration operations
-                drop(state);
-                
-                // Apply the database migrations synchronously
-                match update_database_attachment_paths(&handle, migration_map).await {
-                    Ok(_) => {
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to update database attachment paths: {}", e);
-                        // Emit error event
-                        handle.emit("progress_operation", serde_json::json!({
-                            "type": "error",
-                            "message": format!("Migration error: {}", e.to_string())
-                        })).unwrap();
-                    }
-                }
-                
-                // Re-acquire state and reload messages to ensure correct paths
-                state = STATE.lock().await;
-                
-                // Reload messages from database with updated paths
-                let slim_chats_result = db_migration::get_all_chats(&handle).await;
-                if let Ok(slim_chats) = slim_chats_result {
-                    // Convert slim chats to full chats and load their messages
-                    for slim_chat in slim_chats {
-                        let mut chat = slim_chat.to_chat();
-                        
-                        // Load messages for this chat
-                        let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
-                        if let Ok(messages) = messages_result {
-                            // Add all messages to the chat
-                            for message in messages {
-                                chat.internal_add_message(message);
-                            }
-                        } else {
-                            eprintln!("Failed to load messages for chat {}: {:?}", chat.id(), messages_result);
-                        }
-                        
-                        // Ensure profiles exist for all chat participants
-                        for participant in chat.participants() {
-                            if state.get_profile(participant).is_none() {
-                                // Create a basic profile for the participant
-                                let mut profile = Profile::new();
-                                profile.id = participant.clone();
-                                profile.mine = false; // It's not our profile
-                                state.profiles.push(profile);
-                            }
-                        }
-    
-                        // Add chat to state
-                        state.chats.push(chat);
-                    }
-
-                    // Sort the chats by their last received message
-                    state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
-                } else {
-                    eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
-                }
+            if needs_integrity_check {
+                // Check integrity without dropping state
+                check_attachment_filesystem_integrity(&handle, &mut state).await;
                 
                 // Send the state to our frontend to signal finalised init with a full state
                 handle.emit("init_finished", serde_json::json!({
@@ -597,29 +535,11 @@ async fn fetch_messages<R: Runtime>(
                     "chats": &state.chats
                 })).unwrap();
             } else {
-                // Check if filesystem integrity check is needed
-                let needs_integrity_check = state.chats.iter().any(|chat| 
-                    chat.messages.iter().any(|msg| 
-                        msg.attachments.iter().any(|att| att.downloaded)
-                    )
-                );
-                
-                if needs_integrity_check {
-                    // Check integrity without dropping state
-                    check_attachment_filesystem_integrity(&handle, &mut state).await;
-                    
-                    // Send the state to our frontend to signal finalised init with a full state
-                    handle.emit("init_finished", serde_json::json!({
-                        "profiles": &state.profiles,
-                        "chats": &state.chats
-                    })).unwrap();
-                } else {
-                    // No integrity check needed, send init immediately
-                    handle.emit("init_finished", serde_json::json!({
-                        "profiles": &state.profiles,
-                        "chats": &state.chats
-                    })).unwrap();
-                }
+                // No integrity check needed, send init immediately
+                handle.emit("init_finished", serde_json::json!({
+                    "profiles": &state.profiles,
+                    "chats": &state.chats
+                })).unwrap();
             }
 
             // ALWAYS begin with an initial sync of at least the last 2 days
@@ -969,57 +889,6 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
     }
 }
 
-/// Updates database attachment paths after login when encryption key is available
-/// Returns the number of attachments that were updated
-async fn update_database_attachment_paths<R: Runtime>(
-    handle: &AppHandle<R>,
-    migration_map: &std::collections::HashMap<String, (String, String)>
-) -> Result<u32, Box<dyn std::error::Error>> {
-    // Get all chats from database
-    let slim_chats = db_migration::get_all_chats(handle).await?;
-    let mut updated_count = 0;
-    
-    // Process each chat and its messages
-    for slim_chat in slim_chats {
-        let chat_id = slim_chat.id.clone();
-        let mut messages = db_migration::get_chat_messages(handle, &chat_id).await.unwrap_or_default();
-        let mut chat_updated = false;
-        
-        // Update attachment paths in messages
-        for message in &mut messages {
-            let mut updated = false;
-            
-            // Check each attachment
-            for attachment in &mut message.attachments {
-                // Check if this attachment needs migration based on nonce
-                if let Some((old_path, new_path)) = migration_map.get(&attachment.nonce) {
-                    // Update the path if it matches the old path or contains the nonce
-                    if attachment.path == *old_path || attachment.path.contains(&attachment.nonce) {
-                        attachment.path = new_path.clone();
-                        attachment.downloaded = true;
-                        updated = true;
-                        updated_count += 1;
-                    }
-                }
-            }
-            
-            if updated {
-                chat_updated = true;
-            }
-        }
-        
-        // Save the messages back if any were updated
-        if chat_updated {
-            let all_messages = messages;
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
-                eprintln!("Failed to save updated messages in attachment migration: {}", e);
-            }
-        }
-    }
-    
-    Ok(updated_count)
-}
-
 /// Migrates Unix timestamps (in seconds) to millisecond timestamps
 /// Returns the number of messages that were updated
 async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
@@ -1063,111 +932,6 @@ async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
     
     Ok(updated_count as u32)
 }
-
-// TODO: REMOVE AFTER SEVERAL UPDATES - This migration code is only needed for users upgrading from nonce-based to hash-based storage
-/// Migrates nonce-based attachment files to hash-based files at startup
-/// Returns a map of nonce->new_path for database updates after login
-async fn migrate_nonce_files_to_hash<R: Runtime>(handle: &AppHandle<R>) -> Result<std::collections::HashMap<String, (String, String)>, Box<dyn std::error::Error>> {
-    // Choose the appropriate base directory based on platform
-    let base_directory = if cfg!(target_os = "ios") {
-        tauri::path::BaseDirectory::Document
-    } else {
-        tauri::path::BaseDirectory::Download
-    };
-
-    // Resolve the directory path using the determined base directory
-    let dir = handle.path().resolve("vector", base_directory)?;
-    
-    // Check if the directory exists
-    // TODO: note that, if we allow Vector to utilise non-default paths per-attachment (i.e: do not copy files to the Vector dir during upload, but use the original path), then this assumption must be changed.
-    if !dir.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-
-    // Track migrated files for database updates
-    let mut migration_map: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-    
-    // Read all files in the directory
-    let mut total_files = 0;
-    let mut migrated_files = 0;
-    
-    // First pass: count nonce-based files
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        if let Some(filename) = entry.path().file_name() {
-            if is_nonce_filename(&filename.to_string_lossy()) {
-                total_files += 1;
-            }
-        }
-    }
-
-    // If there are files to migrate, show progress
-    if total_files > 0 {
-        // Emit initial migration status
-        handle.emit("migration_start", serde_json::json!({
-            "total": total_files,
-            "current": 0,
-            "status": "Starting file migration..."
-        })).unwrap();
-    }
-    
-    // Second pass: migrate files
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        
-        // Skip if it's not a file
-        if !path.is_file() {
-            continue;
-        }
-        
-        // Get the filename
-        if let Some(filename) = path.file_name() {
-            let filename_str = filename.to_string_lossy();
-            
-            // Check if this is a nonce-based filename
-            if is_nonce_filename(&filename_str) {
-                // Extract nonce from filename (format: {nonce}.{extension})
-                if let Some(nonce) = filename_str.split('.').next() {
-                    // Migrate the file
-                    match migrate_nonce_file_to_hash(&path) {
-                        Ok(new_filename) => {
-                            migrated_files += 1;
-                            
-                            // Update progress
-                            handle.emit("migration_progress", serde_json::json!({
-                                "total": total_files,
-                                "current": migrated_files,
-                                "status": format!("Migrated file {} of {}", migrated_files, total_files)
-                            })).unwrap();
-                            
-                            // Store the old and new paths for database update
-                            let old_path = path.to_string_lossy().to_string();
-                            let new_path = dir.join(&new_filename).to_string_lossy().to_string();
-                            migration_map.insert(nonce.to_string(), (old_path, new_path));
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to migrate {}: {}", filename_str, e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Emit completion for file migration
-    if total_files > 0 {
-        handle.emit("migration_complete", serde_json::json!({
-            "total": total_files,
-            "migrated": migrated_files,
-            "status": "File migration complete!"
-        })).unwrap();
-    }
-    
-    Ok(migration_map)
-}
-
-
 
 /// Pre-fetch the configs from our preferred NIP-96 servers to speed up uploads
 #[tauri::command]
@@ -4519,84 +4283,6 @@ pub fn run() {
             
             let handle = app.app_handle().clone();
 
-            // Check if we need to migrate files
-            // Note: this is restricted to Desktop only, since Vector Mobile didn't even exist before the Migration was done
-            // Note: this entire block can be removed once sufficient versions have passed.
-            #[cfg(not(any(target_os = "ios", target_os = "android")))]
-            {
-                let needs_migration = tauri::async_runtime::block_on(async {
-                    // Choose the appropriate base directory based on platform
-                    let base_directory = if cfg!(target_os = "ios") {
-                        tauri::path::BaseDirectory::Document
-                    } else {
-                        tauri::path::BaseDirectory::Download
-                    };
-
-                    // Resolve the directory path using the determined base directory
-                    if let Ok(dir) = handle.path().resolve("vector", base_directory) {
-                        if dir.exists() {
-                            // Count nonce-based files
-                            if let Ok(entries) = std::fs::read_dir(&dir) {
-                                for entry in entries {
-                                    if let Ok(entry) = entry {
-                                        if let Some(filename) = entry.path().file_name() {
-                                            if is_nonce_filename(&filename.to_string_lossy()) {
-                                                return true; // Found at least one file to migrate
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    false
-                });
-
-                // If we need to migrate, create migration window first
-                if needs_migration {
-                    // Hide the main window initially
-                    if let Some(main_window) = app.get_webview_window("main") {
-                        let _ = main_window.hide();
-                    }
-
-                    // Create migration window
-                    let _ = WebviewWindowBuilder::new(
-                        app,
-                        "migration",
-                        WebviewUrl::App("migration.html".into())
-                    )
-                    .title("Vector - File Migration")
-                    .inner_size(500.0, 300.0)
-                    .resizable(false)
-                    .center()
-                    .build()
-                    .expect("Failed to create migration window");
-
-                    // Clone handle for the migration task
-                    let handle_clone = handle.clone();
-                    let main_window = app.get_webview_window("main").unwrap();
-                    
-                    // Run migration in a separate task
-                    tauri::async_runtime::spawn(async move {
-                        match migrate_nonce_files_to_hash(&handle_clone).await {
-                            Ok(migration_map) => {
-                                // Store the migration map for database update after login
-                                if !migration_map.is_empty() {
-                                    let _ = PENDING_MIGRATION.set(migration_map);
-                                }
-                            }
-                            Err(e) => eprintln!("Failed to migrate attachment files: {}", e),
-                        }
-                        
-                        // After migration, show main window and close migration window
-                        let _ = main_window.show();
-                        if let Some(mig_win) = handle_clone.get_webview_window("migration") {
-                            let _ = mig_win.close();
-                        }
-                    });
-                }
-            }
-
             // Setup a graceful shutdown for our Nostr subscriptions
             let window = app.get_webview_window("main").unwrap();
             window.on_window_event(move |event| {
@@ -4645,6 +4331,12 @@ pub fn run() {
             db::set_pkey,
             db::get_seed,
             db::set_seed,
+            db::get_web_previews,
+            db::set_web_previews,
+            db::get_strip_tracking,
+            db::set_strip_tracking,
+            db::get_send_typing_indicators,
+            db::set_send_typing_indicators,
             db::remove_setting,
             profile::load_profile,
             profile::update_profile,

@@ -23,11 +23,11 @@
 }
 
 .chatlist-contact {
-  border-color: rgba(152, 255, 214, 0.15);
+  border-color: transparent;
 }
 
 .chatlist-contact:hover {
-  border-color: rgba(152, 255, 214, 0.5);
+  border-color: rgba(152, 255, 214, 0.25);
 }
 
 .chat {

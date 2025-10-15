@@ -143,6 +143,18 @@
           </div>
         </div>
         
+        <!-- New Chat Buttons -->
+        <div style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
+          <button id="new-chat-btn" class="new-chat-btn btn" style="width: 50%; margin-right: 5px; display: none;">
+            <span class="icon icon-new-msg"></span>
+            <span style="width: 100%">New Chat</span>
+          </button>
+          <button id="create-group-btn" class="new-chat-btn btn" style="width: 50%; margin-left: 5px; margin-right: 10px; display: none;">
+            <span class="icon icon-chat-circle"></span>
+            <span style="width: 100%">Group Chat</span>
+          </button>
+        </div>
+        
         <div id="chat-list">
           
         </div>
@@ -215,7 +227,9 @@
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
             <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>
             <button id="chat-input-voice"><span class="icon icon-mic-on"></span></button>
+            <button id="chat-input-send" style="display: none;"><span class="icon icon-send"></span></button>
           </div>
+        </div>
         </div>
         <div id="voice-progress-container" class="voice-progress-container" style="display: none;">
           <div class="voice-progress-bar">
@@ -344,6 +358,36 @@
         </div>
       </div>
 
+        <!-- Privacy Settings Section -->
+        <div id="settings-privacy" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Privacy</h2>
+          
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="privacy-web-previews-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Display Web Previews</span>
+              <input type="checkbox" id="privacy-web-previews-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+          
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="privacy-strip-tracking-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Strip tracking markers from links</span>
+              <input type="checkbox" id="privacy-strip-tracking-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+          
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="privacy-send-typing-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Send typing indicators</span>
+              <input type="checkbox" id="privacy-send-typing-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+        </div>
+
         <!-- Network Settings Section -->
         <div id="settings-network" class="settings-section">
           <hr class="divider settings-divider">
@@ -438,7 +482,7 @@
           <p class="navbar-text">Settings</p>
           <span id="settings-update-dot" class="update-notification-dot" style="display: none;"></span>
         </div>
-        <div id="invites-btn" class="btn navbar-btn navbar-btn-inactive">
+        <div id="invites-btn" class="btn navbar-btn navbar-btn-inactive" style="display: none;">
           <span class="icon icon-gift navbar-icon"></span>
           <p class="navbar-text">Invites</p>
         </div>
