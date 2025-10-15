@@ -69,6 +69,7 @@ const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
+const domChatMessageInputSend = document.getElementById('chat-input-send');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
@@ -3590,6 +3591,18 @@ function cancelReply() {
 
     // Remove the reply ID
     strCurrentReplyReference = '';
+
+    // Reset send button state based on current input
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    if (hasText) {
+        domChatMessageInputSend.classList.add('active');
+        domChatMessageInputSend.style.display = '';
+        domChatMessageInputVoice.style.display = 'none';
+    } else {
+        domChatMessageInputSend.classList.remove('active');
+        domChatMessageInputSend.style.display = 'none';
+        domChatMessageInputVoice.style.display = '';
+    }
 }
 
 /**
@@ -4065,84 +4078,112 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
-    // Unified message sending function
-    async function sendMessage(messageText) {
-        if (!messageText || !messageText.trim()) return;
+// Unified message sending function
+async function sendMessage(messageText) {
+    if (!messageText || !messageText.trim()) return;
 
-        // Clean tracking parameters from any URLs in the message for privacy (if enabled)
-        let cleanedText = messageText.trim();
-        if (fStripTrackingEnabled) {
-            const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
-            cleanedText = cleanedText.replace(urlPattern, (match) => {
-                try {
-                    return cleanTrackingFromUrl(match);
-                } catch (e) {
-                    // If cleaning fails, return original URL
-                    return match;
-                }
-            });
-        }
-
-        // Clear input and show sending state
-        domChatMessageInput.value = '';
-        domChatMessageInput.setAttribute('placeholder', 'Sending...');
-
-        try {
-            const replyRef = strCurrentReplyReference;
-            cancelReply();
-            
-            // Check if current chat is a group
-            const chat = arrChats.find(c => c.id === strOpenChat);
-            if (chat?.chat_type === 'MlsGroup') {
-                // Send group message with cleaned text
-                const wrapperId = await invoke('send_mls_group_message', {
-                    groupId: strOpenChat,
-                    text: cleanedText,
-                    repliedTo: replyRef || null
-                });
-                // Message is already added optimistically by send_mls_group_message
-                // Live subscription will handle receiving it back from the relay
-            } else {
-                // Send regular DM with cleaned text
-                await message(strOpenChat, cleanedText, replyRef, "");
+    // Clean tracking parameters from any URLs in the message for privacy (if enabled)
+    let cleanedText = messageText.trim();
+    if (fStripTrackingEnabled) {
+        const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+)/gi;
+        cleanedText = cleanedText.replace(urlPattern, (match) => {
+            try {
+                return cleanTrackingFromUrl(match);
+            } catch (e) {
+                // If cleaning fails, return original URL
+                return match;
             }
-            
-            nLastTypingIndicator = 0;
-        } catch(e) {
-            console.error('Failed to send message:', e);
-        }
+        });
     }
 
-    // Desktop/iOS - traditional keydown approach
-    domChatMessageInput.addEventListener('keydown', async (evt) => {
-        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
-            evt.preventDefault();
-            await sendMessage(domChatMessageInput.value);
+    // Clear input and show sending state
+    domChatMessageInput.value = '';
+    domChatMessageInput.setAttribute('placeholder', 'Sending...');
+
+    try {
+        const replyRef = strCurrentReplyReference;
+        cancelReply();
+        
+        // Check if current chat is a group
+        const chat = arrChats.find(c => c.id === strOpenChat);
+        if (chat?.chat_type === 'MlsGroup') {
+            // Send group message with cleaned text
+            const wrapperId = await invoke('send_mls_group_message', {
+                groupId: strOpenChat,
+                text: cleanedText,
+                repliedTo: replyRef || null
+            });
+            // Message is already added optimistically by send_mls_group_message
+            // Live subscription will handle receiving it back from the relay
+        } else {
+            // Send regular DM with cleaned text
+            await message(strOpenChat, cleanedText, replyRef, "");
         }
-    });
+        
+        nLastTypingIndicator = 0;
+    } catch(e) {
+        console.error('Failed to send message:', e);
+    }
+}
 
-    // Android-specific - detect newline in input
-    if (platformFeatures.os === 'android') {
-        domChatMessageInput.addEventListener('input', async (evt) => {
-            const value = domChatMessageInput.value;
-
-            // Check if input contains a newline character
-            if (value.includes('\n')) {
-                // Extract the message BEFORE clearing (remove the newline)
-                const messageText = value.replace(/\n/g, '');
-
-                // Send the message with the extracted text
-                await sendMessage(messageText);
+    // Desktop/iOS - traditional keydown approach (not for Android)
+    if (platformFeatures.os !== 'android') {
+        domChatMessageInput.addEventListener('keydown', async (evt) => {
+            if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
+                evt.preventDefault();
+                await sendMessage(domChatMessageInput.value);
             }
         });
     }
 
     // Hook up an 'input' listener on the Message Box for typing indicators
-    domChatMessageInput.oninput = async () => {
-        // Send a Typing Indicator only when content actually changes and setting is enabled
-        if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
-            nLastTypingIndicator = Date.now();
-            await invoke("start_typing", { receiver: strOpenChat });
+domChatMessageInput.oninput = async () => {
+    // Toggle send button active state based on text content
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    if (hasText) {
+        // Swap: Hide mic, show send button with animation
+        if (domChatMessageInputVoice.style.display !== 'none') {
+            domChatMessageInputVoice.classList.add('button-swap-out');
+            domChatMessageInputVoice.addEventListener('animationend', () => {
+                domChatMessageInputVoice.style.display = 'none';
+                domChatMessageInputVoice.classList.remove('button-swap-out');
+                domChatMessageInputSend.style.display = '';
+                domChatMessageInputSend.classList.add('button-swap-in');
+                domChatMessageInputSend.addEventListener('animationend', () => {
+                    domChatMessageInputSend.classList.remove('button-swap-in');
+                }, { once: true });
+            }, { once: true });
+        }
+        domChatMessageInputSend.classList.add('active');
+    } else {
+        // Swap: Hide send, show mic button with animation
+        if (domChatMessageInputSend.style.display !== 'none') {
+            domChatMessageInputSend.classList.add('button-swap-out');
+            domChatMessageInputSend.classList.remove('active');
+            domChatMessageInputSend.addEventListener('animationend', () => {
+                domChatMessageInputSend.style.display = 'none';
+                domChatMessageInputSend.classList.remove('button-swap-out');
+                domChatMessageInputVoice.style.display = '';
+                domChatMessageInputVoice.classList.add('button-swap-in');
+                domChatMessageInputVoice.addEventListener('animationend', () => {
+                    domChatMessageInputVoice.classList.remove('button-swap-in');
+                }, { once: true });
+            }, { once: true });
+        }
+    }
+
+    // Send a Typing Indicator only when content actually changes and setting is enabled
+    if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
+        nLastTypingIndicator = Date.now();
+        await invoke("start_typing", { receiver: strOpenChat });
+    }
+};
+
+    // Hook up the send button click handler
+    domChatMessageInputSend.onclick = async () => {
+        const messageText = domChatMessageInput.value;
+        if (messageText && messageText.trim()) {
+            await sendMessage(messageText);
         }
     };
 

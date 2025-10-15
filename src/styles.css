@@ -135,6 +135,10 @@
   mask-image: url("./icons/volume-max.svg");
 }
 
+.icon-send {
+  mask-image: url("./icons/send.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -1092,11 +1096,55 @@ body {
   padding-left: 0;
 }
 
+/* Vector Send Button - white by default, stays visible when active */
+#chat-input-send .icon {
+  background-color: white;
+  transition: background 0.3s ease;
+  width: 20px !important;
+  height: 20px !important;
+}
+
+#chat-input-send.active .icon {
+  background-color: #59fcb3;
+  opacity: 1;
+}
+
+/* Button swap animations for mic/send button transition */
+.button-swap-out {
+  animation: swapOut 0.15s ease-out forwards;
+}
+
+.button-swap-in {
+  animation: swapIn 0.2s ease-out forwards;
+}
+
+@keyframes swapOut {
+  0% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) rotate(-90deg);
+  }
+}
+
+@keyframes swapIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) rotate(90deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+
 .emoji-button {
   font-size: 30px;
   padding: 0;
-  padding-left: 12px;
-  padding-right: 10px;
+  padding-left: 8px; /* Reduced padding */
+  padding-right: 8px; /* Reduced padding */
   background-color: transparent;
 }
 

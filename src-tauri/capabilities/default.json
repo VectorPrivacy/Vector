@@ -3,8 +3,7 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": [
-    "main",
-    "migration"
+    "main"
   ],
   "permissions": [
     "core:default",
@@ -15,7 +14,6 @@
     "fs:default",
     "clipboard-manager:default",
     "clipboard-manager:allow-read-image",
-    "updater:default",
     "process:default"
   ]
 }
