@@ -135,8 +135,8 @@
   mask-image: url("./icons/volume-max.svg");
 }
 
-.icon-vector-send {
-  mask-image: url("./icons/vector-symbol.svg");
+.icon-send {
+  mask-image: url("./icons/send.svg");
 }
 
 :root {
@@ -1099,9 +1099,8 @@ body {
 #chat-input-send .icon {
   background-color: white;
   transition: background 0.3s ease;
-  transform: rotate(-90deg);
-  width: 40px !important;
-  height: 40px !important;
+  width: 20px !important;
+  height: 20px !important;
 }
 
 #chat-input-send.active .icon {

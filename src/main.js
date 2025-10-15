@@ -3570,8 +3570,10 @@ function cancelReply() {
     const hasText = domChatMessageInput.value.trim().length > 0;
     if (hasText) {
         domChatMessageInputSend.classList.add('active');
+        domChatMessageInputVoice.style.display = 'none';
     } else {
         domChatMessageInputSend.classList.remove('active');
+        domChatMessageInputVoice.style.display = '';
     }
 }
 
@@ -4048,9 +4050,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
-    // Unified message sending function
-    async function sendMessage(messageText) {
-        if (!messageText || !messageText.trim()) return;
+// Unified message sending function
+async function sendMessage(messageText) {
+    if (!messageText || !messageText.trim()) return;
 
     // Clean tracking parameters from any URLs in the message for privacy (if enabled)
     let cleanedText = messageText.trim();
@@ -4070,8 +4072,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     domChatMessageInput.value = '';
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
     
-    // Remove active state from send button since input is now empty
+    // Remove active state from send button and show mic button since input is now empty
     domChatMessageInputSend.classList.remove('active');
+    domChatMessageInputVoice.style.display = '';
 
     try {
         const replyRef = strCurrentReplyReference;
@@ -4124,21 +4127,25 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up an 'input' listener on the Message Box for typing indicators
-    domChatMessageInput.oninput = async () => {
-        // Toggle send button active state based on text content
-        const hasText = domChatMessageInput.value.trim().length > 0;
-        if (hasText) {
-            domChatMessageInputSend.classList.add('active');
-        } else {
-            domChatMessageInputSend.classList.remove('active');
-        }
+domChatMessageInput.oninput = async () => {
+    // Toggle send button active state based on text content
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    if (hasText) {
+        domChatMessageInputSend.classList.add('active');
+        // Hide mic button when user starts typing
+        domChatMessageInputVoice.style.display = 'none';
+    } else {
+        domChatMessageInputSend.classList.remove('active');
+        // Show mic button when input is empty
+        domChatMessageInputVoice.style.display = '';
+    }
 
-        // Send a Typing Indicator only when content actually changes and setting is enabled
-        if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
-            nLastTypingIndicator = Date.now();
-            await invoke("start_typing", { receiver: strOpenChat });
-        }
-    };
+    // Send a Typing Indicator only when content actually changes and setting is enabled
+    if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
+        nLastTypingIndicator = Date.now();
+        await invoke("start_typing", { receiver: strOpenChat });
+    }
+};
 
     // Hook up the send button click handler
     domChatMessageInputSend.onclick = async () => {
