@@ -235,6 +235,9 @@ function resetEmojiPicker() {
     // Clear search input
     emojiSearch.value = '';
     
+    // Restore search icon opacity
+    if (emojiSearchIcon) emojiSearchIcon.style.opacity = '';
+    
     // Show all sections
     document.querySelectorAll('.emoji-section').forEach(section => {
         section.style.display = 'block';
@@ -293,6 +296,7 @@ emojiSearch.addEventListener('input', (e) => {
         
         twemojify(resultsGrid);
     } else {
+        if (emojiSearchIcon) emojiSearchIcon.style.opacity = ''; // Restore opacity when cleared
         resetEmojiPicker();
     }
 });
