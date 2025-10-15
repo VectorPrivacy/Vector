@@ -209,6 +209,16 @@ function loadEmojiSections() {
     twemojify(favoritesGrid);
     twemojify(allGrid);
     
+    // Initialize collapsible sections after loading emojis
+    initCollapsibleSections();
+}
+
+// Track if we've already initialized to prevent duplicates
+let collapsiblesInitialized = false;
+
+function initCollapsibleSections() {
+    if (collapsiblesInitialized) return; // Prevent duplicate initialization
+    
     document.querySelectorAll('.emoji-section-header').forEach(header => {
         header.addEventListener('click', (e) => {
             e.stopPropagation(); // Prevent closing the picker
@@ -216,6 +226,8 @@ function loadEmojiSections() {
             section.classList.toggle('collapsed');
         });
     });
+    
+    collapsiblesInitialized = true;
 }
 
 // Function to reset emoji picker state
