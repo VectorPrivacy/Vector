@@ -3570,9 +3570,11 @@ function cancelReply() {
     const hasText = domChatMessageInput.value.trim().length > 0;
     if (hasText) {
         domChatMessageInputSend.classList.add('active');
+        domChatMessageInputSend.style.display = '';
         domChatMessageInputVoice.style.display = 'none';
     } else {
         domChatMessageInputSend.classList.remove('active');
+        domChatMessageInputSend.style.display = 'none';
         domChatMessageInputVoice.style.display = '';
     }
 }
@@ -4071,10 +4073,6 @@ async function sendMessage(messageText) {
     // Clear input and show sending state
     domChatMessageInput.value = '';
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
-    
-    // Remove active state from send button and show mic button since input is now empty
-    domChatMessageInputSend.classList.remove('active');
-    domChatMessageInputVoice.style.display = '';
 
     try {
         const replyRef = strCurrentReplyReference;
@@ -4131,13 +4129,35 @@ domChatMessageInput.oninput = async () => {
     // Toggle send button active state based on text content
     const hasText = domChatMessageInput.value.trim().length > 0;
     if (hasText) {
+        // Swap: Hide mic, show send button with animation
+        if (domChatMessageInputVoice.style.display !== 'none') {
+            domChatMessageInputVoice.classList.add('button-swap-out');
+            domChatMessageInputVoice.addEventListener('animationend', () => {
+                domChatMessageInputVoice.style.display = 'none';
+                domChatMessageInputVoice.classList.remove('button-swap-out');
+                domChatMessageInputSend.style.display = '';
+                domChatMessageInputSend.classList.add('button-swap-in');
+                domChatMessageInputSend.addEventListener('animationend', () => {
+                    domChatMessageInputSend.classList.remove('button-swap-in');
+                }, { once: true });
+            }, { once: true });
+        }
         domChatMessageInputSend.classList.add('active');
-        // Hide mic button when user starts typing
-        domChatMessageInputVoice.style.display = 'none';
     } else {
-        domChatMessageInputSend.classList.remove('active');
-        // Show mic button when input is empty
-        domChatMessageInputVoice.style.display = '';
+        // Swap: Hide send, show mic button with animation
+        if (domChatMessageInputSend.style.display !== 'none') {
+            domChatMessageInputSend.classList.add('button-swap-out');
+            domChatMessageInputSend.classList.remove('active');
+            domChatMessageInputSend.addEventListener('animationend', () => {
+                domChatMessageInputSend.style.display = 'none';
+                domChatMessageInputSend.classList.remove('button-swap-out');
+                domChatMessageInputVoice.style.display = '';
+                domChatMessageInputVoice.classList.add('button-swap-in');
+                domChatMessageInputVoice.addEventListener('animationend', () => {
+                    domChatMessageInputVoice.classList.remove('button-swap-in');
+                }, { once: true });
+            }, { once: true });
+        }
     }
 
     // Send a Typing Indicator only when content actually changes and setting is enabled

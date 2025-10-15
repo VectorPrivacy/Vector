@@ -1104,8 +1104,39 @@ body {
 }
 
 #chat-input-send.active .icon {
-  background-color: #59fcb3; 
-  opacity: 1; 
+  background-color: #59fcb3;
+  opacity: 1;
+}
+
+/* Button swap animations for mic/send button transition */
+.button-swap-out {
+  animation: swapOut 0.15s ease-out forwards;
+}
+
+.button-swap-in {
+  animation: swapIn 0.2s ease-out forwards;
+}
+
+@keyframes swapOut {
+  0% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) rotate(-90deg);
+  }
+}
+
+@keyframes swapIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) rotate(90deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
 }
 
 .emoji-button {
