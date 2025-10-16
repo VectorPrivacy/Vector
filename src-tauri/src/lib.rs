@@ -2837,6 +2837,7 @@ async fn export_keys() -> Result<serde_json::Value, String> {
 struct PlatformFeatures {
     transcription: bool,
     os: String,
+    is_mobile: bool,
     // Add more features here as needed
 }
 
@@ -2857,9 +2858,12 @@ async fn get_platform_features() -> PlatformFeatures {
         "unknown"
     };
 
+    let is_mobile = cfg!(target_os = "android") || cfg!(target_os = "ios");
+
     PlatformFeatures {
         transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
         os: os.to_string(),
+        is_mobile,
     }
 }
 
