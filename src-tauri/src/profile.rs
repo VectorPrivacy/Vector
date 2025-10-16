@@ -33,6 +33,7 @@ pub struct Profile {
     pub typing_until: u64,
     pub mine: bool,
     pub muted: bool,
+    pub bot: bool,
 }
 
 impl Default for Profile {
@@ -61,6 +62,7 @@ impl Profile {
             typing_until: 0,
             mine: false,
             muted: false,
+            bot: false,
         }
     }
 
@@ -138,6 +140,25 @@ impl Profile {
         if let Some(nip05) = meta.nip05 {
             if self.nip05 != nip05 {
                 self.nip05 = nip05;
+                changed = true;
+            }
+        }
+
+        // Bot (custom metadata field)
+        if let Some(custom) = meta.custom.get("bot") {
+            // Parse the bot value - it could be a boolean or a string "true"/"false"
+            let bot_value = match custom.as_bool() {
+                Some(b) => b,
+                None => {
+                    // Try parsing as string
+                    custom.as_str()
+                        .map(|s| s.to_lowercase() == "true")
+                        .unwrap_or(false)
+                }
+            };
+            
+            if self.bot != bot_value {
+                self.bot = bot_value;
                 changed = true;
             }
         }

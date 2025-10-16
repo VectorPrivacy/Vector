@@ -1252,6 +1252,20 @@ function renderChat(chat) {
     } else {
         h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+        
+        // Add bot icon if this is a bot profile
+        if (profile?.bot) {
+            const botIconContainer = document.createElement('span');
+            botIconContainer.className = 'icon icon-bot';
+            botIconContainer.style.width = '14px';
+            botIconContainer.style.height = '14px';
+            botIconContainer.style.marginLeft = '6px';
+            botIconContainer.style.display = 'inline-block';
+            botIconContainer.style.verticalAlign = 'initial';
+            botIconContainer.style.position = 'relative';
+            botIconContainer.style.backgroundColor = '#59fcb3';
+            h4ContactName.appendChild(botIconContainer);
+        }
     }
     h4ContactName.classList.add('cutoff')
     divPreviewContainer.appendChild(h4ContactName);

@@ -99,6 +99,10 @@
   mask-image: url("./icons/bookmark.svg");
 }
 
+.icon-bot {
+  mask-image: url("./icons/bot.svg");
+}
+
 .icon-chevron-down {
   mask-image: url("./icons/chevron-down.svg");
 }
