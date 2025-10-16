@@ -1335,9 +1335,16 @@ body {
 
 .emoji-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr); 
+  grid-template-columns: repeat(6, 1fr);
   gap: 4px;
   margin-top: -12px;
+}
+
+/* Mobile: 5 columns instead of 6 */
+@media (max-width: 380px) {
+  .emoji-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
 }
 
 .emoji-grid span {
