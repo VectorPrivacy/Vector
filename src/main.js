@@ -3249,6 +3249,10 @@ function renderMessage(msg, sender, editID = '') {
             // Render the attachment appropriately for it's type
             if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp'].includes(cAttachment.extension)) {
                 // Images
+                const imgContainer = document.createElement('div');
+                imgContainer.style.position = 'relative';
+                imgContainer.style.display = 'inline-block';
+                
                 const imgPreview = document.createElement('img');
                 // SVGs need a specific width to scale properly
                 if (cAttachment.extension === 'svg') {
@@ -3268,7 +3272,15 @@ function renderMessage(msg, sender, editID = '') {
                     // Also do soft scroll for normal layout adjustments
                     softChatScroll();
                 }, { once: true });
-                pMessage.appendChild(imgPreview);
+                
+                // Add file extension badge
+                const extBadge = document.createElement('span');
+                extBadge.className = 'file-ext-badge';
+                extBadge.textContent = cAttachment.extension.toUpperCase();
+                
+                imgContainer.appendChild(imgPreview);
+                imgContainer.appendChild(extBadge);
+                pMessage.appendChild(imgContainer);
                 } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);

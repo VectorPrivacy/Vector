@@ -848,6 +848,23 @@ body {
   font-weight: 100;
 }
 
+.file-ext-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 1px;
+  background-color: rgba(0, 0, 0, 0.25);
+  color: white;
+  padding: 0px 6px;
+  border-radius: 14px;
+  font-size: 10px;
+  font-weight: 400;
+  opacity: 1;
+  pointer-events: none;
+  user-select: none;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
 .msg-them .avatar {
   margin-top: 0;
   height: 35px;
