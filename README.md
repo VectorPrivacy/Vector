@@ -144,7 +144,13 @@ Currently, bare builds exclude:
 
 The bare build is perfect for users who prioritize security, privacy, and performance over additional features like Local AI and flashy utility features.
 
---- 
+---
+
+## Attributions
+
+Vector uses third-party assets and resources. For a complete list of attributions and licenses, please see our [Attributions](docs/attributions.md) document.
+
+---
 
 > [!WARNING]
 > Privacy is a basic human right.
