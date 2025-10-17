@@ -3044,3 +3044,117 @@ select:disabled:hover {
   -webkit-appearance: checkbox;
   appearance: checkbox;
 }
+
+/* Image Viewer Modal */
+.image-viewer-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.95);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.image-viewer-overlay.active {
+  opacity: 1;
+}
+
+.image-viewer-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.image-viewer-image {
+  max-width: 95vw;
+  max-height: 95vh;
+  object-fit: contain;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  -moz-user-drag: none;
+  user-drag: none;
+  pointer-events: auto;
+  transition: transform 0.1s ease-out;
+  transform-origin: center center;
+}
+
+.image-viewer-image.dragging {
+  cursor: grabbing;
+  transition: none;
+}
+
+.image-viewer-image.zoomed {
+  cursor: grab;
+}
+
+.image-viewer-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  background-color: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s ease;
+}
+
+.image-viewer-close:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.image-viewer-close::before,
+.image-viewer-close::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 2px;
+  background-color: white;
+}
+
+.image-viewer-close::before {
+  transform: rotate(45deg);
+}
+
+.image-viewer-close::after {
+  transform: rotate(-45deg);
+}
+
+.image-viewer-zoom-info {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 10001;
+}
+
+.image-viewer-zoom-info.visible {
+  opacity: 1;
+}

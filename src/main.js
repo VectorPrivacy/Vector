@@ -3273,6 +3273,9 @@ function renderMessage(msg, sender, editID = '') {
                     softChatScroll();
                 }, { once: true });
                 
+                // Attach image preview handler
+                attachImagePreview(imgPreview);
+                
                 // Add file extension badge
                 const extBadge = document.createElement('span');
                 extBadge.className = 'file-ext-badge';
@@ -4900,5 +4903,3 @@ Create Group UI wiring
         }
     };
 })();
-
-
