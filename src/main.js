@@ -58,6 +58,7 @@ const domSettingsBtn = document.getElementById('settings-btn');
 
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
+const domChatBackNotificationDot = document.getElementById('chat-back-notification-dot');
 const domChatContact = document.getElementById('chat-contact');
 const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessagesFade = document.getElementById('msg-top-fade');
@@ -1166,6 +1167,9 @@ function renderChatlist() {
         divFade.style.bottom = `65px`;
         domChatList.appendChild(divFade);
     }
+    
+    // Update the back button notification dot when chatlist changes
+    updateChatBackNotification();
 }
 
 /**
@@ -1416,6 +1420,45 @@ function countUnreadMessages(chat) {
     }
     
     return unreadCount;
+}
+
+/**
+ * Update the notification dot on the chat back button
+ * Shows the dot if there are unread messages in OTHER chats (not the currently open one)
+ */
+function updateChatBackNotification() {
+    if (!domChatBackNotificationDot) return;
+    
+    // Check if we're currently in a chat
+    if (!strOpenChat) {
+        domChatBackNotificationDot.style.display = 'none';
+        return;
+    }
+    
+    // Check if any OTHER chat has unread messages
+    const hasOtherUnreads = arrChats.some(chat => {
+        // Skip the currently open chat
+        if (chat.id === strOpenChat) return false;
+        
+        // Skip chats with no messages (same as chatlist rendering)
+        if (!chat.messages || chat.messages.length === 0) return false;
+        
+        // Skip our own profile (bookmarks/notes)
+        if (chat.id === strPubkey) return false;
+        
+        // Get profile for DM chats
+        const isGroup = chat.chat_type === 'MlsGroup';
+        const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+        
+        // Skip muted chats or muted profiles (same logic as chatlist rendering)
+        if (chat.muted || (profile && profile.muted)) return false;
+        
+        // Check if this chat has unread messages
+        return countUnreadMessages(chat) > 0;
+    });
+    
+    // Show or hide the notification dot
+    domChatBackNotificationDot.style.display = hasOtherUnreads ? '' : 'none';
 }
 
 /**
@@ -2920,6 +2963,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     }
 
     adjustSize();
+    
+    // Update the back button notification dot after chat updates
+    updateChatBackNotification();
 }
 
 /**
@@ -3833,6 +3879,9 @@ function openChat(contact) {
 
     // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
     updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
+    
+    // Update the back button notification dot
+    updateChatBackNotification();
 }
 
 /**
@@ -3898,6 +3947,9 @@ async function closeChat() {
     domChat.style.display = 'none';
     strOpenChat = "";
     nLastTypingIndicator = 0;
+    
+    // Hide the back button notification dot when closing chat
+    updateChatBackNotification();
 
     // Display the Navbar
     domNavbar.style.display = ``;

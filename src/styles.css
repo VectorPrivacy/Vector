@@ -2123,6 +2123,13 @@ select:disabled:hover {
   animation: pulse-notification 2s ease-in-out infinite;
 }
 
+/* Position notification dot on chat back button (bottom-right) */
+#chat-back-btn .update-notification-dot {
+  top: auto;
+  bottom: 10px;
+  right: 8px;
+}
+
 @keyframes pulse-notification {
   0% {
     transform: scale(1);
