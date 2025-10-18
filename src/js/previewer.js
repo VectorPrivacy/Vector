@@ -17,6 +17,7 @@ let isDragging = false;
 let startX = 0;
 let startY = 0;
 let lastTouchDistance = 0;
+let zoomInfoTimeout = null;
 
 /**
  * Create the image viewer overlay
@@ -337,9 +338,13 @@ function updateZoomInfo() {
     zoomInfo.textContent = `${percent}%`;
     zoomInfo.classList.add('visible');
     
-    // Hide after 1 second
-    setTimeout(() => {
+    // Clear any existing timeout to prevent flashing
+    if (zoomInfoTimeout) clearTimeout(zoomInfoTimeout);
+    
+    // Hide after 1 second of no zoom activity
+    zoomInfoTimeout = setTimeout(() => {
         zoomInfo.classList.remove('visible');
+        zoomInfoTimeout = null;
     }, 1000);
 }
 
