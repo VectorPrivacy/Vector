@@ -3093,7 +3093,7 @@ select:disabled:hover {
 }
 
 .image-viewer-image.dragging {
-  cursor: grabbing;
+  cursor: grabbing !important;
   transition: none;
 }
 
