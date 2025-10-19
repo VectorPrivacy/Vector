@@ -854,7 +854,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     };
 
     // Generate image metadata if the file is an image
-    if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+    if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif") {
         // Try to load and decode the image
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
             let rgba_img = img.to_rgba8();

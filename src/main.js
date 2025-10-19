@@ -3293,7 +3293,7 @@ function renderMessage(msg, sender, editID = '') {
             const assetUrl = convertFileSrc(cAttachment.path);
 
             // Render the attachment appropriately for it's type
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp'].includes(cAttachment.extension)) {
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif'].includes(cAttachment.extension)) {
                 // Images
                 const imgContainer = document.createElement('div');
                 imgContainer.style.position = 'relative';
@@ -3399,7 +3399,7 @@ function renderMessage(msg, sender, editID = '') {
             }
         } else if (cAttachment.downloading) {
             // For images, show blurhash preview while downloading (only for formats that support blurhash)
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif'].includes(cAttachment.extension)) {
                 // Generate blurhash preview for downloading image
                 // For group chats, use chat ID; for DMs, use sender.id
                 const blurhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
@@ -3454,7 +3454,7 @@ function renderMessage(msg, sender, editID = '') {
                 const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES;
 
                 // For images, show blurhash preview with download button (unless auto-downloading)
-                if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif'].includes(cAttachment.extension)) {
                     // Generate blurhash preview for undownloaded image
                     // For group chats, use chat ID; for DMs, use sender.id
                     const blurhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
@@ -3565,7 +3565,7 @@ function renderMessage(msg, sender, editID = '') {
                 // If the size is known and within auto-download range; immediately begin downloading
                 if (willAutoDownload) {
                     // For non-images (which don't have blurhash previews), create a placeholder for progress bar targeting
-                    if (!['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                    if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif'].includes(cAttachment.extension)) {
                         const iDownloading = document.createElement('i');
                         iDownloading.id = cAttachment.id;
                         iDownloading.textContent = `Starting download...`;
