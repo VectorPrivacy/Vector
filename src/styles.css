@@ -656,7 +656,7 @@ body {
 .chatlist-contact-timestamp {
   margin-left: auto;
   margin-right: auto;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.5);
   line-height: normal;
 }
 
@@ -693,21 +693,20 @@ body {
 }
 
 .chatlist-contact-preview h4 {
-  padding-left: 15px;
+  padding-left: 10px;
   padding-right: 15px;
   margin-top: auto;
-  margin-bottom: auto;
+  margin-bottom: -4px;
   text-align: left;
 }
 
 .chatlist-contact-preview p {
-  /* Opacity breaks the Popup by making the text bleed through it... WTF? */
-  /* opacity: 0.6;*/
   margin: 0;
-  margin-left: 15px;
+  margin-left: 10px;
   text-align: left;
   font-family: 'Rubik';
   font-weight: 100;
+  color: rgb(161, 161, 161);
 }
 
 .chats {
