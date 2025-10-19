@@ -1584,6 +1584,9 @@ async function setupRustListeners() {
         if (strOpenChat === group_id) {
             console.log('Updating open group chat with new message, pending:', newMessage.pending);
             updateChat(chat, [newMessage]);
+            // Increment rendered count since we're adding a new message
+            proceduralScrollState.renderedMessageCount++;
+            proceduralScrollState.totalMessageCount++;
         } else {
             console.log('Group chat not open, message added to background chat');
         }
@@ -1973,6 +1976,9 @@ async function setupRustListeners() {
         // If this user has the open chat, then update the chat too
         if (strOpenChat === evt.payload.chat_id) {
             updateChat(chat, [newMessage]);
+            // Increment rendered count since we're adding a new message
+            proceduralScrollState.renderedMessageCount++;
+            proceduralScrollState.totalMessageCount++;
         }
 
         // Render the Chat List
@@ -2811,10 +2817,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 continue;
             }
 
-            // Ensure there's no more than 50 existing messages at max
-            if (domChatMessages.childElementCount >= 50) {
-                domChatMessages.firstElementChild.remove();
-            }
+            // Messages are managed by the procedural scroll system
 
             // Direct comparison with newest and oldest messages (most common cases)
             // This avoids expensive DOM operations for the common cases
@@ -2866,7 +2869,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 const oldestMsg = chat.messages.find(m => m.id === oldestMsgElement.id);
                 if (oldestMsg && msg.at < oldestMsg.at) {
                     // It's the oldest message, prepend it
-                    const domMsg = renderMessage(msg, profile);
+                    // Pass oldestMsgElement as context so renderMessage knows what comes after
+                    const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
                     domChatMessages.insertBefore(domMsg, oldestMsgElement);
                     continue;
                 }
@@ -2905,7 +2909,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     }
 
                     // Insert between these two messages
-                    const domMsg = renderMessage(msg, profile);
+                    // Pass nextNode.element as context so renderMessage knows what comes after
+                    const domMsg = renderMessage(msg, profile, '', nextNode.element);
                     domChatMessages.insertBefore(domMsg, nextNode.element);
                     inserted = true;
                     break;
@@ -3000,8 +3005,9 @@ function insertTimestamp(timestamp, parent = null) {
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
  * @param {string?} editID - the ID of the message being edited, used for improved renderer context
+ * @param {HTMLElement?} contextElement - the DOM element to use for context (for prepending)
  */
-function renderMessage(msg, sender, editID = '') {
+function renderMessage(msg, sender, editID = '', contextElement = null) {
     // Construct the message container (the DOM ID is the HEX Nostr Event ID)
     const divMessage = document.createElement('div');
     divMessage.id = msg.id;
@@ -3023,7 +3029,9 @@ function renderMessage(msg, sender, editID = '') {
     const pMessage = document.createElement('p');
 
     // Prepare our message container - including avatars and contextual bubble rendering
-    const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling : domChatMessages.lastElementChild;
+    // If contextElement is provided (prepending), use it; otherwise use lastElementChild (appending)
+    const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling :
+                       (contextElement ? contextElement.previousElementSibling : domChatMessages.lastElementChild);
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
     
     // Find the last actual message (skip timestamps and other non-message elements)
@@ -3314,9 +3322,13 @@ function renderMessage(msg, sender, editID = '') {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
                         scrollToBottom(domChatMessages, false);
+                    } else if (proceduralScrollState.isLoadingOlderMessages) {
+                        // Correct scroll position for media loading during procedural scroll
+                        correctScrollForMediaLoad();
+                    } else {
+                        // Normal soft scroll for layout adjustments
+                        softChatScroll();
                     }
-                    // Also do soft scroll for normal layout adjustments
-                    softChatScroll();
                 }, { once: true });
                 
                 // Attach image preview handler
@@ -3342,9 +3354,13 @@ function renderMessage(msg, sender, editID = '') {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
                         scrollToBottom(domChatMessages, false);
+                    } else if (proceduralScrollState.isLoadingOlderMessages) {
+                        // Correct scroll position for media loading during procedural scroll
+                        correctScrollForMediaLoad();
+                    } else {
+                        // Normal soft scroll for layout adjustments
+                        softChatScroll();
                     }
-                    // Also do soft scroll for normal layout adjustments
-                    softChatScroll();
                 };
                 
                 // Platform-specific video creation
@@ -3411,8 +3427,14 @@ function renderMessage(msg, sender, editID = '') {
                         imgPreview.style.borderRadius = `8px`;
                         imgPreview.style.opacity = `0.7`;
                         imgPreview.src = base64Image;
-                        // Add soft scroll on blurhash load to prevent scrolling issues
-                        imgPreview.addEventListener('load', softChatScroll, { once: true });
+                        // Add scroll correction on blurhash load
+                        imgPreview.addEventListener('load', () => {
+                            if (proceduralScrollState.isLoadingOlderMessages) {
+                                correctScrollForMediaLoad();
+                            } else {
+                                softChatScroll();
+                            }
+                        }, { once: true });
                         
                         // Create container for relative positioning
                         const container = document.createElement('div');
@@ -3466,8 +3488,14 @@ function renderMessage(msg, sender, editID = '') {
                             imgPreview.style.borderRadius = `8px`;
                             imgPreview.style.opacity = willAutoDownload ? `0.8` : `0.6`;
                             imgPreview.src = base64Image;
-                            // Add soft scroll on blurhash load to prevent scrolling issues
-                            imgPreview.addEventListener('load', softChatScroll, { once: true });
+                            // Add scroll correction on blurhash load
+                            imgPreview.addEventListener('load', () => {
+                                if (proceduralScrollState.isLoadingOlderMessages) {
+                                    correctScrollForMediaLoad();
+                                } else {
+                                    softChatScroll();
+                                }
+                            }, { once: true });
                             
                             // Create container for relative positioning
                             const container = document.createElement('div');
@@ -3600,7 +3628,13 @@ function renderMessage(msg, sender, editID = '') {
             const imgFavicon = document.createElement('img');
             imgFavicon.classList.add('favicon');
             imgFavicon.src = msg.preview_metadata.favicon;
-            imgFavicon.addEventListener('load', softChatScroll, { once: true });
+            imgFavicon.addEventListener('load', () => {
+                if (proceduralScrollState.isLoadingOlderMessages) {
+                    correctScrollForMediaLoad();
+                } else {
+                    softChatScroll();
+                }
+            }, { once: true });
 
             // Add the title (prefixed with the Favicon)
             const spanPreviewTitle = document.createElement('span');
@@ -3614,7 +3648,13 @@ function renderMessage(msg, sender, editID = '') {
             imgPreview.classList.add('msg-preview-img');
             imgPreview.src = msg.preview_metadata.og_image;
             // Auto-scroll the chat to correct against container resizes
-            imgPreview.addEventListener('load', softChatScroll, { once: true });
+            imgPreview.addEventListener('load', () => {
+                if (proceduralScrollState.isLoadingOlderMessages) {
+                    correctScrollForMediaLoad();
+                } else {
+                    softChatScroll();
+                }
+            }, { once: true });
             divPrevContainer.appendChild(imgPreview);
 
             // Render the Preview
@@ -3808,7 +3848,7 @@ function cancelReply() {
 
 /**
  * Open a chat with a particular contact
- * @param {string} contact 
+ * @param {string} contact
  */
 function openChat(contact) {
     // Display the Chat UI
@@ -3877,8 +3917,16 @@ function openChat(contact) {
         })();
     }
 
-    // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
-    updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
+    // Initialize procedural scroll state
+    initProceduralScroll(chat);
+
+    // Render initial batch of messages (most recent ones)
+    const totalMessages = chat?.messages?.length || 0;
+    const initialMessages = totalMessages > 0
+        ? chat.messages.slice(-proceduralScrollState.renderedMessageCount)
+        : [];
+    
+    updateChat(chat, initialMessages, profile, true);
     
     // Update the back button notification dot
     updateChatBackNotification();
@@ -3947,6 +3995,9 @@ async function closeChat() {
     domChat.style.display = 'none';
     strOpenChat = "";
     nLastTypingIndicator = 0;
+    
+    // Reset procedural scroll state
+    resetProceduralScroll();
     
     // Hide the back button notification dot when closing chat
     updateChatBackNotification();
@@ -4230,6 +4281,16 @@ window.addEventListener("DOMContentLoaded", async () => {
         openChat(strPubkey);
     };
     domChatNewBackBtn.onclick = closeChat;
+    
+    // Add scroll event listener for procedural message loading
+    let scrollTimeout;
+    domChatMessages.addEventListener('scroll', () => {
+        // Debounce scroll events for performance
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+            handleProceduralScroll();
+        }, 100);
+    });
     domChatNewStartBtn.onclick = () => {
         openChat(domChatNewInput.value.trim());
         domChatNewInput.value = ``;
@@ -4564,14 +4625,22 @@ document.addEventListener('click', (e) => {
     if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')  || e.target.parentElement?.parentElement?.classList.contains('msg-reply')) {
         // Note: The `substring(2)` removes the `r-` prefix
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
-        const domMsg = document.getElementById(strID.substring(2));
-        centerInView(domMsg);
+        const targetMsgId = strID.substring(2);
+        const domMsg = document.getElementById(targetMsgId);
+        
+        if (domMsg) {
+            // Message is already rendered, just scroll to it
+            centerInView(domMsg);
 
-        // Run an animation to bring the user's eye to the message
-        const pContainer = domMsg.querySelector('p');
-        if (!pContainer.classList.contains('no-background')) {
-            domMsg.classList.add('highlight-animation');
-            setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+            // Run an animation to bring the user's eye to the message
+            const pContainer = domMsg.querySelector('p');
+            if (!pContainer.classList.contains('no-background')) {
+                domMsg.classList.add('highlight-animation');
+                setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+            }
+        } else {
+            // Message not rendered yet, load it and surrounding messages
+            loadAndScrollToMessage(targetMsgId);
         }
         return;
     }
