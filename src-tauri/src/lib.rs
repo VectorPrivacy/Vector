@@ -2507,7 +2507,6 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     let keys: Keys;
 
     // If we're already logged in (i.e: Developer Mode with frontend hot-loading), just return the existing keys.
-    // TODO: in the future, with event-based state changes, we need to make sure the state syncs correctly too!
     if let Some(client) = NOSTR_CLIENT.get() {
         let signer = client.signer().await.unwrap();
         let new_keys = Keys::parse(&import_key).unwrap();
