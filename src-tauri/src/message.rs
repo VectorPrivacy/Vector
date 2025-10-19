@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use ::image::{ImageBuffer, ImageEncoder, Rgba};
-use blurhash;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -791,14 +790,15 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     ).map_err(|e| e.to_string())?;
 
     // Generate image metadata with Blurhash and dimensions
-    let img_meta: Option<ImageMetadata> = match blurhash::encode(4, 3, img.width(), img.height(), &pixels) {
-        Ok(hash) => Some(ImageMetadata {
-            blurhash: hash,
-            width: img.width(),
-            height: img.height(),
-        }),
-        Err(_) => None
-    };
+    let img_meta: Option<ImageMetadata> = util::generate_blurhash_from_rgba(
+        img.as_raw(),
+        img.width(),
+        img.height()
+    ).map(|blurhash| ImageMetadata {
+        blurhash,
+        width: img.width(),
+        height: img.height(),
+    });
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
@@ -857,19 +857,16 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
         // Try to load and decode the image
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
-            // Convert to RGBA8 format for blurhash
             let rgba_img = img.to_rgba8();
-            let (width, height) = rgba_img.dimensions();
-            let pixels = rgba_img.as_raw();
-
-            // Generate Blurhash
-            if let Ok(hash) = blurhash::encode(4, 3, width, height, pixels) {
-                attachment_file.img_meta = Some(ImageMetadata {
-                    blurhash: hash,
-                    width,
-                    height,
-                });
-            }
+            attachment_file.img_meta = util::generate_blurhash_from_rgba(
+                rgba_img.as_raw(),
+                img.width(),
+                img.height()
+            ).map(|blurhash| ImageMetadata {
+                blurhash,
+                width: img.width(),
+                height: img.height(),
+            });
         }
     }
 
