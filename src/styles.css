@@ -704,6 +704,8 @@ body {
   margin-top: auto;
   margin-bottom: -4px;
   text-align: left;
+  color: rgba(255, 255, 255, 0.75);
+  transition: color 0.2s ease;
 }
 
 .chatlist-contact-preview p {
@@ -713,6 +715,19 @@ body {
   font-family: 'Rubik';
   font-weight: 100;
   color: rgb(161, 161, 161);
+  transition: color 0.2s ease;
+}
+
+.chatlist-contact:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.chatlist-contact:hover .chatlist-contact-preview h4 {
+  color: rgba(255, 255, 255, 1);
+}
+
+.chatlist-contact:hover .chatlist-contact-preview p {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .chats {
