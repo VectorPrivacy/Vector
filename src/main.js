@@ -1371,7 +1371,12 @@ function renderChat(chat) {
         pTimeAgo.textContent = timeAgo(cLastMsg.at);
     }
     // Apply 'Unread' final styling
-    if (nUnread) pTimeAgo.style.color = '#59fcb3';
+    if (nUnread) {
+        pTimeAgo.style.color = '#59fcb3';
+    } else {
+        // Add 'read' class for smaller font size when no unread messages
+        pTimeAgo.classList.add('read');
+    }
     divContact.appendChild(pTimeAgo);
 
     return divContact;
