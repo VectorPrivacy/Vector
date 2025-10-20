@@ -3197,3 +3197,23 @@ select:disabled:hover {
 .image-viewer-zoom-info.visible {
   opacity: 1;
 }
+
+.image-viewer-tip {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  z-index: 10001;
+}
+
+.image-viewer-tip.visible {
+  opacity: 1;
+}

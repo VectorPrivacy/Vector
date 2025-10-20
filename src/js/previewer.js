@@ -8,6 +8,7 @@ let viewerOverlay = null;
 let viewerImage = null;
 let viewerContainer = null;
 let zoomInfo = null;
+let zoomTip = null;
 
 // Zoom and pan state
 let scale = 1;
@@ -46,11 +47,17 @@ function createViewer() {
     zoomInfo.className = 'image-viewer-zoom-info';
     zoomInfo.textContent = '100%';
     
+    // Create zoom tip
+    zoomTip = document.createElement('div');
+    zoomTip.className = 'image-viewer-tip';
+    zoomTip.textContent = platformFeatures.is_mobile ? 'Pinch to zoom' : 'Scroll to zoom';
+    
     // Assemble
     viewerContainer.appendChild(viewerImage);
     viewerOverlay.appendChild(viewerContainer);
     viewerOverlay.appendChild(closeBtn);
     viewerOverlay.appendChild(zoomInfo);
+    viewerOverlay.appendChild(zoomTip);
     document.body.appendChild(viewerOverlay);
     
     // Event listeners
@@ -143,6 +150,14 @@ function openImageViewer(imageSrc) {
     
     // Update zoom info
     updateZoomInfo();
+    
+    // Show zoom tip briefly
+    setTimeout(() => {
+        zoomTip.classList.add('visible');
+        setTimeout(() => {
+            zoomTip.classList.remove('visible');
+        }, 2500);
+    }, 500);
 }
 
 /**
