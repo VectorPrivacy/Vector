@@ -2371,8 +2371,35 @@ select:disabled:hover {
   width: 45px;
 }
 
-.sync-status-container {
-  margin-bottom: 15px;
+.sync-line {
+  height: 2px;
+  width: 100%;
+  margin-top: -14px;
+  margin-bottom: 10px;
+  opacity: 1;
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sync-line.active {
+  transform: scaleX(1);
+  animation: pulse-sync 1.5s ease-in-out infinite 0.4s;
+}
+
+.sync-line.fade-out {
+  transform: scaleX(0);
+  animation: none;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes pulse-sync {
+  0%, 100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .chat-bookmarks-btn {

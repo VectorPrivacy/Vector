@@ -44,8 +44,7 @@ const domProfileId = document.getElementById('profile-id');
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
 const domAccount = document.getElementById('account');
-const domSyncStatusContainer = document.getElementById('sync-status-container');
-const domSyncStatus = document.getElementById('sync-status');
+const domSyncLine = document.getElementById('sync-line');
 const domChatList = document.getElementById('chat-list');
 const domChatNewDM = document.getElementById('new-chat-btn');
 const domChatNewGroup = document.getElementById('create-group-btn');
@@ -1665,15 +1664,15 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Finish updates
     await listen('sync_finished', async (_) => {
-        // Display that we finished syncing
-        domSyncStatus.textContent = 'Synchronised';
-
-        // Wait 1 second, then slide out and hide when done
-        await slideout(domSyncStatusContainer, { delay: 1000 });
-
-        // Reset the text and adjust the UI if necessary
-        domSyncStatus.textContent = '';
-        if (!strOpenChat) adjustSize();
+        // Fade out the sync line
+        domSyncLine.classList.remove('active');
+        domSyncLine.classList.add('fade-out');
+        
+        // Wait for fade animation to complete, then reset
+        setTimeout(() => {
+            domSyncLine.classList.remove('fade-out');
+            if (!strOpenChat) adjustSize();
+        }, 300);
     });
 
     // Listen for Synchronisation Slice updates
@@ -1684,12 +1683,12 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Progress updates
     await listen('sync_progress', (evt) => {
-        // Display the dates we're syncing between
-        const options = { month: 'short', day: 'numeric' };
-        const start = new Date(evt.payload.since * 1000).toLocaleDateString('en-US', options);
-        const end = new Date(evt.payload.until * 1000).toLocaleDateString('en-US', options);
-        if (!fInit) domSyncStatusContainer.style.display = ``;
-        domSyncStatus.textContent = `Syncing Messages between ${start} - ${end}`;
+        // Show and activate the sync line when syncing is in progress
+        // Only add 'active' if it's not already active to avoid restarting the animation
+        if (!fInit && !domSyncLine.classList.contains('active')) {
+            domSyncLine.classList.remove('fade-out');
+            domSyncLine.classList.add('active');
+        }
         if (!strOpenChat) adjustSize();
     });
 
@@ -2166,11 +2165,6 @@ async function login() {
                 domAccount.style.display = ``;
                 domAccount.classList.add('fadein-anim');
                 domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
-
-                // Display our Synchronisation Status
-                domSyncStatusContainer.classList.add('intro-anim');
-                domSyncStatusContainer.addEventListener('animationend', () => domSyncStatusContainer.classList.remove('intro-anim'), { once: true });
-                if (domSyncStatus.textContent) domSyncStatusContainer.style.display = ``;
 
                 // Finished boot!
                 fInit = false;

@@ -6,6 +6,10 @@
   --icon-color-primary: #59fcb3;
 }
 
+.sync-line {
+  background-color: #59fcb3;
+}
+
 .popup {
   background-color: rgba(0, 0, 0, 1);
   box-shadow: 0 0 15px rgba(90, 252, 180, 0.25);
