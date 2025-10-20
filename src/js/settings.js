@@ -469,7 +469,7 @@ async function askForAvatar() {
         directory: false,
         filters: [{
             name: 'Image',
-            extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif']
+            extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico']
         }]
     });
     if (!file) return;
@@ -508,7 +508,7 @@ async function askForBanner() {
         directory: false,
         filters: [{
             name: 'Image',
-            extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif']
+            extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico']
         }]
     });
     if (!file) return;
