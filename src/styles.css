@@ -2130,8 +2130,8 @@ select:disabled:hover {
 
 /* Position notification dot on chat back button (bottom-right) */
 #chat-back-btn .update-notification-dot {
-  top: auto;
-  bottom: 10px;
+  top: 10px;
+  bottom: auto;
   right: 8px;
 }
 
