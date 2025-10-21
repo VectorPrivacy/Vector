@@ -3244,7 +3244,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3611,6 +3611,18 @@ dependencies = [
  "serde_json",
  "unicode-normalization",
  "url",
+]
+
+[[package]]
+name = "nostr-blossom"
+version = "0.43.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb09560e29d780eb3d79e166c1620c8681bc163e7bb9b9bffdda8ad6c824a056"
+dependencies = [
+ "base64 0.22.1",
+ "nostr",
+ "reqwest",
+ "serde",
 ]
 
 [[package]]
@@ -7196,6 +7208,7 @@ dependencies = [
  "mdk-sqlite-storage",
  "mdk-storage-traits",
  "ndk-context",
+ "nostr-blossom",
  "nostr-sdk",
  "once_cell",
  "openssl",

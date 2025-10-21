@@ -2,7 +2,7 @@ use nostr_sdk::prelude::*;
 use tauri::Emitter;
 use tauri_plugin_fs::FsExt;
 
-use crate::{NOSTR_CLIENT, STATE, TAURI_APP, PUBLIC_NIP96_CONFIG};
+use crate::{NOSTR_CLIENT, STATE, TAURI_APP};
 use crate::db;
 use crate::message::AttachmentFile;
 
@@ -365,11 +365,6 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
         meta = meta.website(Url::parse(&profile.website).unwrap());
     }
 
-    // Add banner
-    if !profile.banner.is_empty() {
-        meta = meta.banner(Url::parse(&profile.banner).unwrap());
-    }
-
     // Add nip05
     if !profile.nip05.is_empty() {
         meta = meta.nip05(&profile.nip05);
@@ -475,59 +470,19 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     let mime_type = crate::util::mime_from_extension_safe(&attachment_file.extension, true)
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
-    // Upload the file to the server
+    // Upload the file to the server using Blossom with automatic failover
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
-    let conf = PUBLIC_NIP96_CONFIG.wait();
+    let servers = crate::get_blossom_servers();
 
-    // Create upload request
-    let upload_request = nostr_sdk::nips::nip96::UploadRequest::new(
-        &signer,
-        &conf,
-        &attachment_file.bytes
+    // Upload using Blossom with failover
+    crate::blossom::upload_blob_with_failover(
+        signer.clone(),
+        servers,
+        attachment_file.bytes,
+        Some(mime_type.as_str())
     )
     .await
-    .map_err(|e| e.to_string())?;
-
-    // Get the upload URL and authorization header
-    let upload_url = upload_request.url();
-    let auth_header = upload_request.authorization();
-
-    // Create the HTTP client
-    let http_client = reqwest::Client::new();
-
-    // Create the multipart form
-    let form = reqwest::multipart::Form::new()
-        .part("file", reqwest::multipart::Part::bytes(attachment_file.bytes)
-            .file_name(format!("avatar.{}", attachment_file.extension))
-            .mime_str(mime_type.as_str())
-            .map_err(|_| "Failed to set MIME type")?);
-
-    // Make the upload request
-    let response = http_client
-        .post(upload_url.clone())
-        .header("Authorization", auth_header)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send upload request: {}", e))?;
-
-    // Check if the request was successful
-    if !response.status().is_success() {
-        return Err(format!("Upload failed with status: {}", response.status()));
-    }
-
-    // Parse the response
-    let upload_response: nostr_sdk::nips::nip96::UploadResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
-
-    // Extract the URL from the response
-    match upload_response.download_url() {
-        Ok(url) => Ok(url.to_string()),
-        Err(e) => Err(format!("Failed to extract download URL: {}", e))
-    }
 }
 
 

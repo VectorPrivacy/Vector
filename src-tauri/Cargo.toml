@@ -23,7 +23,8 @@ tauri-build = { version = "2.2.0", features = [] }
 
 [dependencies]
 #tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-nostr-sdk = { version = "0.43", features = ["nip04", "nip06", "nip44", "nip59", "nip96"] }
+nostr-sdk = { version = "0.43", features = ["nip04", "nip06", "nip44", "nip59"] }
+nostr-blossom = "0.43.0"
 mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
 mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
 mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "fb86a349" }
