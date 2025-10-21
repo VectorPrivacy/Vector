@@ -1512,20 +1512,6 @@ async function sendFile(pubkey, replied_to, filepath) {
 }
 
 /**
- * A blocking function that continually polls NIP-96 servers for their configs.
- * 
- * Note: This function should only be called once, and COULD block for a very long time (i.e: if offline).
- */
-async function warmupUploadServers() {
-    // This simple function continually polls Vector's NIP-96 servers until configs are cached, for faster file uploads later
-    while (true) {
-        if (await invoke('warmup_nip96_servers')) break;
-        // If we reach here, this warmup attempt failed: sleep for a bit and try again soon
-        await sleep(5000);
-    }
-}
-
-/**
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
@@ -2058,15 +2044,38 @@ async function setupRustListeners() {
 let fInit = true;
 
 /**
- * Renders the relay list in the Settings Network section
+ * Renders the relay list and media servers in the Settings Network section
  */
 async function renderRelayList() {
     try {
         const relays = await invoke('get_relays');
+        const mediaServers = await invoke('get_media_servers');
         const networkList = document.getElementById('network-list');
         
         // Clear existing content
         networkList.innerHTML = '';
+        
+        // Add Nostr Relays subtitle with info button
+        const relaysTitle = document.createElement('h3');
+        relaysTitle.className = 'network-section-title';
+        relaysTitle.textContent = 'Nostr Relays';
+        
+        const relaysInfoBtn = document.createElement('span');
+        relaysInfoBtn.className = 'icon icon-info btn';
+        relaysInfoBtn.style.width = '16px';
+        relaysInfoBtn.style.height = '16px';
+        relaysInfoBtn.style.position = 'relative';
+        relaysInfoBtn.style.display = 'inline-block';
+        relaysInfoBtn.style.verticalAlign = 'middle';
+        relaysInfoBtn.style.marginLeft = '5px';
+        relaysInfoBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true);
+        };
+        
+        relaysTitle.appendChild(relaysInfoBtn);
+        networkList.appendChild(relaysTitle);
         
         // Create relay items
         relays.forEach(relay => {
@@ -2086,8 +2095,50 @@ async function renderRelayList() {
             relayItem.appendChild(relayStatus);
             networkList.appendChild(relayItem);
         });
+        
+        // Add Media Servers subtitle with info button
+        const mediaTitle = document.createElement('h3');
+        mediaTitle.className = 'network-section-title';
+        mediaTitle.style.marginTop = '2rem';
+        mediaTitle.textContent = 'Media Servers';
+        
+        const mediaInfoBtn = document.createElement('span');
+        mediaInfoBtn.className = 'icon icon-info btn';
+        mediaInfoBtn.style.width = '16px';
+        mediaInfoBtn.style.height = '16px';
+        mediaInfoBtn.style.position = 'relative';
+        mediaInfoBtn.style.display = 'inline-block';
+        mediaInfoBtn.style.verticalAlign = 'middle';
+        mediaInfoBtn.style.marginLeft = '5px';
+        mediaInfoBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.', true);
+        };
+        
+        mediaTitle.appendChild(mediaInfoBtn);
+        networkList.appendChild(mediaTitle);
+        
+        // Create media server items
+        mediaServers.forEach(serverUrl => {
+            const serverItem = document.createElement('div');
+            serverItem.className = 'relay-item media-server-item';
+            serverItem.setAttribute('data-server-url', serverUrl);
+            
+            const serverUrlSpan = document.createElement('span');
+            serverUrlSpan.className = 'relay-url';
+            serverUrlSpan.textContent = serverUrl;
+            
+            const serverStatus = document.createElement('span');
+            serverStatus.className = 'relay-status connected';
+            serverStatus.textContent = 'active';
+            
+            serverItem.appendChild(serverUrlSpan);
+            serverItem.appendChild(serverStatus);
+            networkList.appendChild(serverItem);
+        });
     } catch (error) {
-        console.error('Failed to fetch relays:', error);
+        console.error('Failed to fetch network info:', error);
     }
 }
 
@@ -2098,9 +2149,6 @@ async function login() {
     if (strPubkey) {
         // Connect to Nostr
         await invoke("connect");
-
-        // Warmup our Upload Servers
-        warmupUploadServers();
 
         // Setup our Rust Event listeners for efficient back<-->front sync
         await setupRustListeners();

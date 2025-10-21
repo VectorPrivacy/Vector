@@ -25,7 +25,7 @@ use voice::AudioRecorder;
 
 mod net;
 
-mod upload;
+mod blossom;
 
 mod util;
 use util::{get_file_type_description, calculate_file_hash};
@@ -60,17 +60,27 @@ pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationTyp
 /// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
 pub(crate) static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
 
-/// # Trusted Public NIP-96 Server
+/// # Blossom Media Servers
 ///
-/// A temporary hardcoded NIP-96 server, handling file uploads for public files (Avatars, etc)
-static TRUSTED_PUBLIC_NIP96: &str = "https://nostr.build";
-static PUBLIC_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
+/// A list of Blossom servers for file uploads with automatic failover.
+/// The system will try each server in order until one succeeds.
+static BLOSSOM_SERVERS: OnceCell<std::sync::Mutex<Vec<String>>> = OnceCell::new();
 
-/// # Trusted Private NIP-96 Server
-///
-/// A temporary hardcoded NIP-96 server, handling file uploads for encrypted files (in-chat)
-static TRUSTED_PRIVATE_NIP96: &str = "https://medea-1-swiss.vectorapp.io";
-static PRIVATE_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
+/// Initialize default Blossom servers
+fn init_blossom_servers() -> Vec<String> {
+    vec![
+        "https://blossom.primal.net".to_string(),
+    ]
+}
+
+/// Get the list of Blossom servers (internal function)
+pub(crate) fn get_blossom_servers() -> Vec<String> {
+    BLOSSOM_SERVERS
+        .get_or_init(|| std::sync::Mutex::new(init_blossom_servers()))
+        .lock()
+        .unwrap()
+        .clone()
+}
 
 
 static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
@@ -931,96 +941,6 @@ async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
     }
     
     Ok(updated_count as u32)
-}
-
-/// Pre-fetch the configs from our preferred NIP-96 servers to speed up uploads
-#[tauri::command]
-async fn warmup_nip96_servers() -> bool {
-    use nostr_sdk::nips::nip96::{get_server_config_url, ServerConfig};
-    use reqwest::Client;
-    
-    // Create HTTP client with timeout
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build() {
-        Ok(client) => client,
-        Err(_) => {
-            return false;
-        }
-    };
-
-    // Public Fileserver
-    if PUBLIC_NIP96_CONFIG.get().is_none() {
-        let config_url = match get_server_config_url(&Url::parse(TRUSTED_PUBLIC_NIP96).unwrap()) {
-            Ok(url) => url,
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        // Fetch the JSON configuration from the URL
-        let config_json = match client.get(config_url.to_string()).send().await {
-            Ok(response) => {
-                match response.text().await {
-                    Ok(json) => json,
-                    Err(_) => {
-                        return false;
-                    }
-                }
-            },
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        let _ = match ServerConfig::from_json(&config_json) {
-            Ok(conf) => {
-                PUBLIC_NIP96_CONFIG.set(conf).unwrap();
-                true
-            },
-            Err(_) => {
-                false
-            }
-        };
-    }
-
-    // Private Fileserver
-    if PRIVATE_NIP96_CONFIG.get().is_none() {
-        let config_url = match get_server_config_url(&Url::parse(TRUSTED_PRIVATE_NIP96).unwrap()) {
-            Ok(url) => url,
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        // Fetch the JSON configuration from the URL
-        let config_json = match client.get(config_url.to_string()).send().await {
-            Ok(response) => {
-                match response.text().await {
-                    Ok(json) => json,
-                    Err(_) => {
-                        return false;
-                    }
-                }
-            },
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        let _ = match ServerConfig::from_json(&config_json) {
-            Ok(conf) => {
-                PRIVATE_NIP96_CONFIG.set(conf).unwrap();
-                true
-            },
-            Err(_) => {
-                false
-            }
-        };
-    }
-
-    // We've got the configs for all our servers, nice!
-    true
 }
 
 
@@ -1963,6 +1883,12 @@ async fn get_relays() -> Result<Vec<RelayInfo>, String> {
         .collect();
     
     Ok(relay_infos)
+}
+
+/// Get the list of Blossom media servers (Tauri command)
+#[tauri::command]
+async fn get_media_servers() -> Vec<String> {
+    get_blossom_servers()
 }
 
 /// Monitor relay pool connection status changes
@@ -4358,13 +4284,13 @@ pub fn run() {
             fetch_messages,
             deep_rescan,
             is_scanning,
-            warmup_nip96_servers,
             get_chat_messages,
             generate_blurhash_preview,
             download_attachment,
             login,
             notifs,
             get_relays,
+            get_media_servers,
             monitor_relay_connections,
             start_typing,
             connect,
