@@ -41,6 +41,16 @@ const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileId = document.getElementById('profile-id');
 
+const domGroupOverview = document.getElementById('group-overview');
+const domGroupOverviewBackBtn = document.getElementById('group-overview-back-btn');
+const domGroupOverviewName = document.getElementById('group-overview-name');
+const domGroupOverviewStatus = document.getElementById('group-overview-status');
+let domGroupOverviewAvatar = document.getElementById('group-overview-avatar');
+const domGroupOverviewNameSecondary = document.getElementById('group-overview-secondary-name');
+const domGroupOverviewDescription = document.getElementById('group-overview-description');
+const domGroupOverviewMembers = document.getElementById('group-overview-members');
+const domGroupMemberSearchInput = document.getElementById('group-member-search-input');
+
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
 const domAccount = document.getElementById('account');
@@ -770,7 +780,6 @@ async function loadMLSGroups() {
         const detailed = await invoke('list_mls_groups_detailed');
         const groupsToRefresh = new Set();
 
-        console.log('MLS groups loaded (detailed):', Array.isArray(detailed) ? detailed.length : 0);
         if (!Array.isArray(detailed)) {
             throw new Error('Backend did not return detailed MLS groups array');
         }
@@ -811,7 +820,6 @@ async function loadMLSGroups() {
                         limit: 50
                     }) || [];
 
-                    console.log(`Loaded ${messages.length} messages for group ${String(groupId).substring(0, 8)}...`);
 
                     // Messages are already in the correct format from unified storage!
                     chat.messages = messages;
@@ -891,7 +899,6 @@ async function loadMLSInvites() {
         const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
         arrMLSInvites = (welcomes || []).filter(Boolean);
 
-        console.log('Pending MLS invites:', arrMLSInvites.length);
 
         // Render the invites UI
         renderMLSInvites();
@@ -2800,7 +2807,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.classList.remove('btn');
         } else if (isGroup) {
             domChatContact.textContent = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
-            domChatContact.classList.remove('btn');
+            // When the group name is clicked, expand the Group Overview
+            domChatContact.onclick = () => {
+                closeChat();
+                openGroupOverview(chat);
+            };
+            domChatContact.classList.add('btn');
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
             if (profile?.nickname || profile?.name) twemojify(domChatContact);
@@ -3903,6 +3915,7 @@ function openChat(contact) {
     domProfile.style.display = 'none';
     domChatNew.style.display = 'none';
     domChats.style.display = 'none';
+    domGroupOverview.style.display = 'none';
     domChat.style.display = '';
     domSettingsBtn.style.display = 'none';
 
@@ -3941,7 +3954,6 @@ function openChat(contact) {
                     limit: 50
                 }) || [];
 
-                console.log(`Loaded ${messages.length} messages for group ${String(contact).substring(0, 8)}...`);
 
                 // Messages are already in the correct format from unified storage!
                 // Merge with existing messages to avoid duplicates
@@ -4037,6 +4049,7 @@ async function closeChat() {
 
     // Reset the chat UI
     domProfile.style.display = 'none';
+    domGroupOverview.style.display = 'none';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
@@ -4076,6 +4089,7 @@ function openProfile(cProfile) {
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
+    domGroupOverview.style.display = 'none';
 
     // Render our own profile by default, but otherwise; the given one
     if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
@@ -4091,11 +4105,225 @@ function openProfile(cProfile) {
     }
 }
 
+/**
+ * Open the Group Overview view for a specific group chat
+ * @param {Chat} chat - The group chat object
+ */
+async function openGroupOverview(chat) {
+    if (!chat || chat.chat_type !== 'MlsGroup') return;
+    
+    navbarSelect('chat-btn');
+    domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+    domProfile.style.display = 'none';
+    domChat.style.display = 'none';
+
+    // Render the group overview
+    await renderGroupOverview(chat);
+
+    if (domGroupOverview.style.display !== '') {
+        // Run a subtle fade-in animation
+        domGroupOverview.classList.add('fadein-subtle-anim');
+        domGroupOverview.addEventListener('animationend', () => domGroupOverview.classList.remove('fadein-subtle-anim'), { once: true });
+
+        // Open the tab
+        domGroupOverview.style.display = '';
+    }
+}
+
+/**
+ * Render the Group Overview tab based on a given group chat
+ * @param {Chat} chat - The group chat object
+ */
+async function renderGroupOverview(chat) {
+    const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+    const memberCount = chat.metadata?.custom_fields?.member_count || '0';
+    
+    // Display Name (top header)
+    domGroupOverviewName.innerHTML = groupName;
+    domGroupOverviewStatus.textContent = `${memberCount} members`;
+    
+    // Secondary name
+    domGroupOverviewNameSecondary.innerHTML = groupName;
+    
+    // Group description (if available)
+    const description = chat.metadata?.custom_fields?.description;
+    if (description) {
+        domGroupOverviewDescription.textContent = description;
+        domGroupOverviewDescription.style.display = '';
+    } else {
+        domGroupOverviewDescription.style.display = 'none';
+    }
+    
+    // Fetch fresh member list and admins from the engine
+    let members = [];
+    let admins = [];
+    
+    try {
+        const result = await invoke('get_mls_group_members', { groupId: chat.id });
+        // The result is an object with 'members' and 'admins' array properties
+        members = result?.members || [];
+        admins = result?.admins || [];
+    } catch (e) {
+        console.error('Failed to fetch group members:');
+        console.error(e);
+    }
+    
+    // Function to render the member list (can be called for search filtering)
+    const renderMemberList = (searchQuery = '') => {
+        domGroupOverviewMembers.innerHTML = '';
+        
+        if (!members || members.length === 0) {
+            const noMembers = document.createElement('p');
+            noMembers.textContent = 'No members found';
+            noMembers.style.textAlign = 'center';
+            noMembers.style.color = '#999';
+            noMembers.style.padding = '20px';
+            domGroupOverviewMembers.appendChild(noMembers);
+            return;
+        }
+        
+        // Sort members: admins first, then regular members
+        const sortedMembers = [...members].sort((a, b) => {
+            const aIsAdmin = admins.includes(a);
+            const bIsAdmin = admins.includes(b);
+            if (aIsAdmin && !bIsAdmin) return -1;
+            if (!aIsAdmin && bIsAdmin) return 1;
+            return 0;
+        });
+        
+        // Filter members based on search query
+        const filteredMembers = sortedMembers.filter(member => {
+            if (!searchQuery) return true;
+            
+            const memberProfile = getProfile(member);
+            const query = searchQuery.toLowerCase();
+            
+            // Search in nickname, name, and npub
+            const nickname = (memberProfile?.nickname || '').toLowerCase();
+            const name = (memberProfile?.name || '').toLowerCase();
+            const npub = member.toLowerCase();
+            
+            return nickname.includes(query) || name.includes(query) || npub.includes(query);
+        });
+        
+        if (filteredMembers.length === 0) {
+            const noResults = document.createElement('p');
+            noResults.textContent = 'No members match your search';
+            noResults.style.textAlign = 'center';
+            noResults.style.color = '#999';
+            noResults.style.padding = '20px';
+            domGroupOverviewMembers.appendChild(noResults);
+            return;
+        }
+        
+        for (const member of filteredMembers) {
+            const isAdmin = admins.includes(member);
+            const memberDiv = document.createElement('div');
+            memberDiv.style.display = 'flex';
+            memberDiv.style.alignItems = 'center';
+            memberDiv.style.padding = '5px 10px';
+            memberDiv.style.borderRadius = '6px';
+            memberDiv.style.transition = 'background 0.2s ease';
+            memberDiv.style.isolation = 'isolate';
+            memberDiv.style.cursor = 'default';
+            
+            // Add hover effect with theme-based gradient using ::before pseudo-element approach
+            const bgDiv = document.createElement('div');
+            bgDiv.style.position = 'absolute';
+            bgDiv.style.top = '0';
+            bgDiv.style.left = '0';
+            bgDiv.style.right = '0';
+            bgDiv.style.bottom = '0';
+            bgDiv.style.borderRadius = '6px';
+            bgDiv.style.opacity = '0';
+            bgDiv.style.transition = 'opacity 0.2s ease';
+            bgDiv.style.pointerEvents = 'none';
+            bgDiv.style.zIndex = '0';
+            
+            memberDiv.style.position = 'relative';
+            memberDiv.appendChild(bgDiv);
+            
+            memberDiv.addEventListener('mouseenter', () => {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+                bgDiv.style.opacity = '1';
+            });
+            memberDiv.addEventListener('mouseleave', () => {
+                bgDiv.style.opacity = '0';
+            });
+            
+            // Get member profile
+            const memberProfile = getProfile(member);
+            
+            // Crown emoji for admins (or invisible spacer for alignment)
+            const crownSpan = document.createElement('span');
+            crownSpan.textContent = isAdmin ? '👑' : '';
+            crownSpan.style.width = '20px';
+            crownSpan.style.display = 'inline-block';
+            crownSpan.style.textAlign = 'center';
+            crownSpan.style.marginRight = '5px';
+            crownSpan.style.position = 'relative';
+            crownSpan.style.zIndex = '1';
+            crownSpan.style.fontSize = '14px';
+            memberDiv.appendChild(crownSpan);
+            
+            // Member avatar
+            let avatar;
+            if (memberProfile?.avatar) {
+                avatar = document.createElement('img');
+                avatar.src = memberProfile.avatar;
+                avatar.style.width = '25px';
+                avatar.style.height = '25px';
+                avatar.style.borderRadius = '50%';
+                avatar.style.objectFit = 'cover';
+            } else {
+                avatar = pubkeyToAvatar(member, memberProfile?.nickname || memberProfile?.name, 25);
+            }
+            avatar.style.marginRight = '10px';
+            avatar.style.position = 'relative';
+            avatar.style.zIndex = '1';
+            memberDiv.appendChild(avatar);
+            
+            // Member name
+            const nameSpan = document.createElement('div');
+            nameSpan.textContent = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
+            nameSpan.style.color = '#f7f4f4';
+            nameSpan.style.fontSize = '14px';
+            nameSpan.style.flex = '1';
+            nameSpan.style.textAlign = 'left';
+            nameSpan.style.position = 'relative';
+            nameSpan.style.zIndex = '1';
+            if (memberProfile?.nickname || memberProfile?.name) twemojify(nameSpan);
+            memberDiv.appendChild(nameSpan);
+            
+            domGroupOverviewMembers.appendChild(memberDiv);
+        }
+    };
+    
+    // Initial render of member list
+    renderMemberList();
+    
+    // Add search functionality
+    domGroupMemberSearchInput.value = '';
+    domGroupMemberSearchInput.oninput = (e) => {
+        renderMemberList(e.target.value);
+    };
+    
+    // Back button - return to the group chat
+    domGroupOverviewBackBtn.onclick = () => {
+        domGroupOverview.style.display = 'none';
+        openChat(chat.id);
+    };
+}
+
 async function openChatlist() {
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
+    domGroupOverview.style.display = 'none';
 
     if (domChats.style.display !== '') {
         // Run a subtle fade-in animation
@@ -4118,6 +4346,7 @@ function openSettings() {
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domInvites.style.display = 'none';
+    domGroupOverview.style.display = 'none';
 
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
@@ -4142,6 +4371,7 @@ async function openInvites() {
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
+    domGroupOverview.style.display = 'none';
 
     // Fetch and display the invite code
     const inviteCodeElement = document.getElementById('invite-code');

@@ -141,6 +141,34 @@
   </div>
 </div>
 
+<div id="group-overview" class="chats" style="display: none;">
+  <div style="height: 60px; background-color: #161616;">
+    <div id="group-overview-back-btn" class="btn nav-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <div>
+      <h3 id="group-overview-name" class="chat-contact-with-status btn"></h3>
+      <span id="group-overview-status" class="cutoff chat-contact-status btn"></span>
+    </div>
+  </div>
+  <div style="position: relative; margin-top: 25px; text-align: center; width: 100px; height: 100px; margin-left: auto; margin-right: auto;">
+    <span id="group-overview-avatar" class="icon icon-chat-circle" style="width: 100px; height: 100px; border-radius: initial; display: inline-block;"></span>
+  </div>
+  <div style="padding-bottom: 75px;">
+    <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn"></h3>
+    <span id="group-overview-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+    <div style="margin-top: 40px; width: 90%; margin-left: auto; margin-right: auto;">
+      <div class="emoji-search-container" style="padding: 10px 0px;">
+        <span class="emoji-search-icon icon icon-search" style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
+        <input id="group-member-search-input" placeholder="Search members..." style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
+      </div>
+      <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
+        <!-- Members will be rendered here dynamically -->
+      </div>
+    </div>
+  </div>
+</div>
+
       <div id="chats" class="chats">
         <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">
           <span class="icon icon-bookmark nav-icon"></span>
