@@ -3968,7 +3968,6 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
 #[derive(serde::Serialize, Clone)]
 struct GroupMembers {
     group_id: String,
-    engine_group_id: String,
     members: Vec<String>, // npubs
     admins: Vec<String>,  // admin npubs
 }
@@ -3999,99 +3998,30 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
 
             // Acquire non-Send engine; all calls below must be non-await while engine is in scope
             let engine = mls.engine().map_err(|e| e.to_string())?;
-
-            // Try to resolve members via engine API
             use mdk_core::prelude::GroupId;
-            use nostr_sdk::prelude::PublicKey;
 
-            // Decode engine id to GroupId; fallback to using wire id bytes if needed
             let mut members: Vec<String> = Vec::new();
             let mut admins: Vec<String> = Vec::new();
-            let mut engine_gid_hex = engine_id.clone();
-
-            // Preferred path: use engine_group_id if it's valid hex
             if let Ok(gid_bytes) = hex::decode(&engine_id) {
+                // Decode engine id to GroupId
                 let gid = GroupId::from_slice(&gid_bytes);
-                // Attempt API: get_group_members(&GroupId)
-                match engine.get_members(&gid) {
-                    Ok(pk_list) => {
-                        members = pk_list
-                            .into_iter()
-                            .filter_map(|pk| pk.to_bech32().ok())
-                            .collect();
-                        
-                        // Try to get admins from the group
-                        if let Ok(groups) = engine.get_groups() {
-                            for g in groups {
-                                let gid_hex = hex::encode(g.mls_group_id.as_slice());
-                                if gid_hex == engine_id {
-                                    admins = g.admin_pubkeys.iter()
-                                        .filter_map(|pk| pk.to_bech32().ok())
-                                        .collect();
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Fallback: enumerate engine groups and match by ids, then use any available member list on entry
-                        if let Ok(groups) = engine.get_groups() {
-                            for g in groups {
-                                let gid_hex = hex::encode(g.mls_group_id.as_slice());
-                                let wire_hex = hex::encode(&g.nostr_group_id);
-                                if gid_hex == engine_id || wire_hex == wire_id {
-                                    // Get admins from this group
-                                    admins = g.admin_pubkeys.iter()
-                                        .filter_map(|pk| pk.to_bech32().ok())
-                                        .collect();
-                                    // Try common field names for members (SDK variations)
-                                    #[allow(unused_mut)]
-                                    let mut found = false;
-                                    // If the group entry exposes `members` (Vec<PublicKey>)
-                                    #[allow(unused_variables)]
-                                    let maybe_members = {
-                                        // This block intentionally uses pattern matching guarded by cfg to avoid compile issues if field doesn't exist
-                                        // We will try to access a field named `members` via debug string as last resort (no-op here).
-                                        None::<Vec<PublicKey>>
-                                    };
-                                    if let Some(pks) = maybe_members {
-                                        members = pks
-                                            .into_iter()
-                                            .filter_map(|pk| pk.to_bech32().ok())
-                                            .collect();
-                                        found = true;
-                                    }
-                                    if !found {
-                                        // If not available, keep empty; engine.get_group_members is the canonical path
-                                    }
-                                    engine_gid_hex = gid_hex;
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                
+                // Get members via engine API
+                if let Ok(pk_list) = engine.get_members(&gid) {
+                    members = pk_list
+                        .into_iter()
+                        .filter_map(|pk| pk.to_bech32().ok())
+                        .collect();
                 }
-            } else {
-                // engine_id was not hex; try match by wire id in engine list
+                
+                // Get admins from the group
                 if let Ok(groups) = engine.get_groups() {
                     for g in groups {
-                        let wire_hex = hex::encode(&g.nostr_group_id);
-                        if wire_hex == wire_id {
-                            engine_gid_hex = hex::encode(g.mls_group_id.as_slice());
-                            // Get admins from this group
+                        let gid_hex = hex::encode(g.mls_group_id.as_slice());
+                        if gid_hex == engine_id {
                             admins = g.admin_pubkeys.iter()
                                 .filter_map(|pk| pk.to_bech32().ok())
                                 .collect();
-                            // Attempt direct engine API with resolved engine id
-                            if let Ok(gid_bytes) = hex::decode(&engine_gid_hex) {
-                                let gid = GroupId::from_slice(&gid_bytes);
-                                if let Ok(pk_list) = engine.get_members(&gid) {
-                                    members = pk_list
-                                        .into_iter()
-                                        .filter_map(|pk| pk.to_bech32().ok())
-                                        .collect();
-                                }
-                            }
                             break;
                         }
                     }
@@ -4100,7 +4030,6 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
 
             Ok(GroupMembers {
                 group_id: wire_id,
-                engine_group_id: engine_gid_hex,
                 members,
                 admins,
             })
