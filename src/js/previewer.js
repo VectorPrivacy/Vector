@@ -19,6 +19,8 @@ let startX = 0;
 let startY = 0;
 let lastTouchDistance = 0;
 let zoomInfoTimeout = null;
+let baseWidth = 0;
+let baseHeight = 0;
 
 /**
  * Create the image viewer overlay
@@ -126,6 +128,23 @@ function createViewer() {
     viewerImage.addEventListener('touchstart', handleTouchStart, { passive: false });
     viewerImage.addEventListener('touchmove', handleTouchMove, { passive: false });
     viewerImage.addEventListener('touchend', handleTouchEnd);
+    
+    // Handle window resize and orientation changes
+    window.addEventListener('resize', () => {
+        if (viewerOverlay && viewerOverlay.style.display !== 'none' && baseWidth > 0) {
+            measureBaseSize();
+            updateTransform();
+        }
+    });
+}
+
+/**
+ * Measure the base size of the image at scale 1
+ */
+function measureBaseSize() {
+    const rect = viewerImage.getBoundingClientRect();
+    baseWidth = rect.width / scale;
+    baseHeight = rect.height / scale;
 }
 
 /**
@@ -139,10 +158,18 @@ function openImageViewer(imageSrc) {
     translateX = 0;
     translateY = 0;
     isDragging = false;
+    baseWidth = 0;
+    baseHeight = 0;
     
     // Set image
     viewerImage.src = imageSrc;
     viewerImage.style.transform = 'translate(0, 0) scale(1)';
+    
+    // Measure base size once image loads
+    viewerImage.onload = () => {
+        measureBaseSize();
+        updateTransform();
+    };
     
     // Show overlay
     viewerOverlay.style.display = 'flex';
@@ -192,23 +219,21 @@ function handleWheel(e) {
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
     const newScale = Math.min(Math.max(0.5, scale * delta), 5);
     
-    // If we're at 1x zoom or going back to it, keep centered
-    if (scale === 1 || newScale === 1) {
-        scale = newScale;
-        translateX = 0;
-        translateY = 0;
-    } else {
-        // When already zoomed, zoom towards cursor position
-        const rect = viewerImage.getBoundingClientRect();
-        const offsetX = e.clientX - rect.left - rect.width / 2;
-        const offsetY = e.clientY - rect.top - rect.height / 2;
-        
-        const scaleChange = newScale / scale;
-        translateX = translateX * scaleChange + offsetX * (1 - scaleChange);
-        translateY = translateY * scaleChange + offsetY * (1 - scaleChange);
-        
-        scale = newScale;
-    }
+    // Get cursor position relative to the container
+    const containerRect = viewerContainer.getBoundingClientRect();
+    const cursorX = e.clientX - containerRect.left;
+    const cursorY = e.clientY - containerRect.top;
+    
+    // Calculate the point on the image that's under the cursor
+    const imageX = (cursorX - translateX) / scale;
+    const imageY = (cursorY - translateY) / scale;
+    
+    // Update scale
+    scale = newScale;
+    
+    // Adjust translation to keep the same point under the cursor
+    translateX = cursorX - imageX * scale;
+    translateY = cursorY - imageY * scale;
     
     updateTransform();
     updateZoomInfo();
@@ -248,12 +273,19 @@ function handleMouseUp() {
  */
 function handleTouchStart(e) {
     if (e.touches.length === 1) {
+        // Prevent scrolling if image is zoomed
+        if (scale > 1) {
+            e.preventDefault();
+        }
         // Single touch - prepare for drag
         isDragging = true;
         startX = e.touches[0].clientX - translateX;
         startY = e.touches[0].clientY - translateY;
         viewerImage.classList.add('dragging');
     } else if (e.touches.length === 2) {
+        // Stop dragging when pinching starts
+        isDragging = false;
+        viewerImage.classList.remove('dragging');
         // Two touches - prepare for pinch zoom
         e.preventDefault();
         const touch1 = e.touches[0];
@@ -289,16 +321,24 @@ function handleTouchMove(e) {
             const delta = distance / lastTouchDistance;
             const newScale = Math.min(Math.max(0.5, scale * delta), 5);
             
-            // Calculate center point between touches
+            // Get container's bounding rect to convert to container-relative coordinates
+            const containerRect = viewerContainer.getBoundingClientRect();
             const centerX = (touch1.clientX + touch2.clientX) / 2;
             const centerY = (touch1.clientY + touch2.clientY) / 2;
             
-            // Adjust translation to zoom towards center
-            const scaleChange = newScale / scale;
-            translateX = centerX - (centerX - translateX) * scaleChange;
-            translateY = centerY - (centerY - translateY) * scaleChange;
+            // Convert to container-relative coordinates
+            const containerCenterX = centerX - containerRect.left;
+            const containerCenterY = centerY - containerRect.top;
             
+            // Calculate zoom origin relative to the image
+            const originX = (containerCenterX - translateX) / scale;
+            const originY = (containerCenterY - translateY) / scale;
+            
+            // Apply new scale and adjust translation to keep origin point fixed
             scale = newScale;
+            translateX = containerCenterX - originX * scale;
+            translateY = containerCenterY - originY * scale;
+            
             updateTransform();
             updateZoomInfo();
         }
@@ -324,22 +364,32 @@ function handleTouchEnd(e) {
  * Update image transform
  */
 function updateTransform() {
-    // Apply bounds checking to prevent image from going off-screen
-    const rect = viewerImage.getBoundingClientRect();
     const containerWidth = viewerContainer.clientWidth;
     const containerHeight = viewerContainer.clientHeight;
     
-    // Calculate the scaled dimensions
-    const scaledWidth = rect.width / scale * scale;
-    const scaledHeight = rect.height / scale * scale;
+    // Use the base size (rendered size at scale 1) for calculations
+    const scaledWidth = baseWidth * scale;
+    const scaledHeight = baseHeight * scale;
     
-    // Calculate max translation bounds
-    const maxTranslateX = Math.max(0, (scaledWidth - containerWidth) / 2);
-    const maxTranslateY = Math.max(0, (scaledHeight - containerHeight) / 2);
+    // Calculate bounds - when image is smaller than container, we want to center it
+    const minTranslateX = Math.min(0, containerWidth - scaledWidth);
+    const minTranslateY = Math.min(0, containerHeight - scaledHeight);
     
-    // Constrain translation within bounds
-    translateX = Math.max(-maxTranslateX, Math.min(maxTranslateX, translateX));
-    translateY = Math.max(-maxTranslateY, Math.min(maxTranslateY, translateY));
+    if (scaledWidth <= containerWidth) {
+        // Keep the image centered when it is smaller than the container
+        translateX = (containerWidth - scaledWidth) / 2;
+    } else {
+        // Clamp translation so image doesn't go off-screen
+        translateX = Math.max(minTranslateX, Math.min(0, translateX));
+    }
+    
+    if (scaledHeight <= containerHeight) {
+        // Keep the image centered when it is smaller than the container
+        translateY = (containerHeight - scaledHeight) / 2;
+    } else {
+        // Clamp translation so image doesn't go off-screen
+        translateY = Math.max(minTranslateY, Math.min(0, translateY));
+    }
     
     viewerImage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
     viewerImage.classList.toggle('zoomed', scale > 1);

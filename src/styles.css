@@ -3124,14 +3124,14 @@ select:disabled:hover {
   position: relative;
   width: 100%;
   height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
   touch-action: none;
 }
 
 .image-viewer-image {
+  position: absolute;
+  top: 0;
+  left: 0;
   max-width: 95vw;
   max-height: 95vh;
   object-fit: contain;
@@ -3143,7 +3143,7 @@ select:disabled:hover {
   user-drag: none;
   pointer-events: auto;
   transition: transform 0.1s ease-out;
-  transform-origin: center center;
+  transform-origin: top left;
 }
 
 .image-viewer-image.dragging {
