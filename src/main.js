@@ -4257,17 +4257,20 @@ async function renderGroupOverview(chat) {
             // Get member profile
             const memberProfile = getProfile(member);
             
-            // Crown emoji for admins (or invisible spacer for alignment)
-            const crownSpan = document.createElement('span');
-            crownSpan.textContent = isAdmin ? '👑' : '';
-            crownSpan.style.width = '20px';
-            crownSpan.style.display = 'inline-block';
-            crownSpan.style.textAlign = 'center';
-            crownSpan.style.marginRight = '5px';
-            crownSpan.style.position = 'relative';
-            crownSpan.style.zIndex = '1';
-            crownSpan.style.fontSize = '14px';
-            memberDiv.appendChild(crownSpan);
+            // Crown icon for admins (or invisible spacer for alignment)
+            const crownContainer = document.createElement('span');
+            crownContainer.style.width = '20px';
+            crownContainer.style.height = '25px';
+            crownContainer.style.display = 'inline-flex';
+            crownContainer.style.alignItems = 'center';
+            crownContainer.style.justifyContent = 'center';
+            crownContainer.style.marginRight = '5px';
+            crownContainer.style.position = 'relative';
+            crownContainer.style.zIndex = '1';
+            if (isAdmin) {
+                crownContainer.innerHTML = '<span class="icon icon-crown" style="width: 16px; height: 16px; background-color: #fce459;"></span>';
+            }
+            memberDiv.appendChild(crownContainer);
             
             // Member avatar
             let avatar;

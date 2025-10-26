@@ -35,6 +35,10 @@
   mask-image: url("./icons/chats.svg");
 }
 
+.icon-crown {
+  mask-image: url("./icons/crown.svg");
+}
+
 .icon-new-msg {
   mask-image: url("./icons/new-chat.svg");
 }
