@@ -157,7 +157,6 @@ impl MlsService {
             .path()
             .resolve("mls/vector-mls.db", BaseDirectory::AppData)
             .map_err(|e| MlsError::StorageError(format!("resolve app data dir: {}", e)))?;
-        println!("[MLS] Persistent engine DB path: {}", db_path.display());
 
         // Ensure parent directory exists before opening SQLite
         if let Some(parent) = db_path.parent() {
@@ -545,7 +544,7 @@ impl MlsService {
     }
 
     /// Add a member device to an existing group
-    /// 
+    ///
     /// This will:
     /// 1. Fetch the device's keypackage from the network
     /// 2. Add the device to the group via nostr-mls
@@ -557,14 +556,162 @@ impl MlsService {
         member_pubkey: &str,
         device_id: &str,
     ) -> Result<(), MlsError> {
-        // TODO: Validate group exists
-        // TODO: Fetch member's keypackage from network or cache
-        // TODO: Use nostr-mls to add member
-        // TODO: Broadcast commit message to group
-        // TODO: Update "mls_groups" metadata with new updated_at
+        use nostr_sdk::prelude::*;
+
+        // Resolve client
+        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+
+        // Parse member public key
+        let member_pk = PublicKey::from_bech32(member_pubkey)
+            .map_err(|e| MlsError::CryptoError(format!("Invalid member npub: {}", e)))?;
+
+        // Fetch member's keypackage from index or network
+        let index = self.read_keypackage_index().await.unwrap_or_default();
+        let mut kp_event: Option<Event> = None;
+
+        // Try index first
+        for entry in &index {
+            if entry.owner_pubkey == member_pubkey && entry.device_id == device_id {
+                let id = EventId::from_hex(&entry.keypackage_ref)
+                    .map_err(|e| MlsError::CryptoError(format!("Invalid keypackage ref: {}", e)))?;
+                let filter = Filter::new().id(id).limit(1);
+                if let Ok(events) = client
+                    .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+                    .await
+                {
+                    kp_event = events.into_iter().next();
+                }
+                break;
+            }
+        }
+
+        // Fallback: fetch latest from network
+        if kp_event.is_none() {
+            let filter = Filter::new()
+                .author(member_pk)
+                .kind(Kind::MlsKeyPackage)
+                .limit(50);
+            if let Ok(events) = client
+                .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+                .await
+            {
+                kp_event = events.into_iter().max_by_key(|e| e.created_at.as_u64());
+            }
+        }
+
+        let kp_event = kp_event.ok_or_else(|| {
+            MlsError::NetworkError(format!("No keypackage found for {}:{}", member_pubkey, device_id))
+        })?;
+
+        // Find the group's MLS group ID
+        let groups = self.read_groups().await?;
+        let group_meta = groups.iter()
+            .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
+            .ok_or(MlsError::GroupNotFound)?;
         
-        // Stub implementation  
-        let _ = (group_id, member_pubkey, device_id);
+        // Convert engine_group_id hex to GroupId
+        let mls_group_id = GroupId::from_slice(
+            &hex::decode(&group_meta.engine_group_id)
+                .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
+        );
+
+        // Perform engine operations (add member but DON'T merge yet)
+        let (evolution_event, welcome_rumors) = {
+            let engine = self.engine()?;
+            
+            println!("[MLS][add_member] Adding member to group_id={}, member={}", group_id, member_pubkey);
+            
+            // Add member to group - returns AddMembersResult with evolution_event and welcome_rumors
+            let add_result = engine
+                .add_members(&mls_group_id, std::slice::from_ref(&kp_event))
+                .map_err(|e| {
+                    eprintln!("[MLS][add_member] add_members failed: {}", e);
+                    MlsError::NostrMlsError(format!("Failed to add member: {}", e))
+                })?;
+
+            println!("[MLS][add_member] Member added, welcome rumors count: {}", add_result.welcome_rumors.as_ref().map(|w| w.len()).unwrap_or(0));
+
+            (add_result.evolution_event, add_result.welcome_rumors)
+        };
+
+        // Send welcome before merging commit (welcome is created for current epoch)
+        if let Some(welcome_rumors) = welcome_rumors {
+            for welcome in welcome_rumors {
+                match client
+                    .gift_wrap_to([TRUSTED_RELAY], &member_pk, welcome, [])
+                    .await
+                {
+                    Ok(wrapper_id) => {
+                        println!(
+                            "[MLS][add_member][welcome_sent] wrapper_id={}, recipient={}, relay={}",
+                            wrapper_id.to_hex(),
+                            member_pubkey,
+                            TRUSTED_RELAY
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[MLS][add_member][welcome_error] recipient={}, relay={}, err={}",
+                            member_pubkey,
+                            TRUSTED_RELAY,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Publish evolution event (commit) to the relay
+        // The evolution_event is already a signed Event that other members will process
+        match client.send_event(&evolution_event).await {
+            Ok(event_id) => {
+                println!(
+                    "[MLS][add_member][commit_sent] event_id={}, relay={}",
+                    event_id.to_hex(),
+                    TRUSTED_RELAY
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[MLS][add_member][commit_error] relay={}, err={}",
+                    TRUSTED_RELAY,
+                    e
+                );
+                // Don't fail the whole operation if publishing fails
+            }
+        }
+
+        // NOW merge the pending commit after welcome and evolution event are sent
+        // This advances our local epoch to match the committed state
+        {
+            let engine = self.engine()?;
+            println!("[MLS][add_member] Merging pending commit...");
+            engine
+                .merge_pending_commit(&mls_group_id)
+                .map_err(|e| {
+                    eprintln!("[MLS][add_member] merge_pending_commit failed: {}", e);
+                    MlsError::NostrMlsError(format!("Failed to merge commit: {}", e))
+                })?;
+            println!("[MLS][add_member] Commit merged successfully");
+        }
+
+        // Update group metadata timestamp
+        let mut groups = self.read_groups().await?;
+        if let Some(group) = groups.iter_mut().find(|g| g.group_id == group_id) {
+            group.updated_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            self.write_groups(&groups).await?;
+        }
+
+        // Emit event to refresh UI
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("mls_group_updated", serde_json::json!({
+                "group_id": group_id
+            })).ok();
+        }
+
         Ok(())
     }
 
@@ -677,11 +824,6 @@ impl MlsService {
                 return Err(MlsError::GroupNotFound);
             }
         };
-        
-        println!("[MLS] send_group_message: Found group metadata:");
-        println!("[MLS]   - group_id (wire): {}", meta.group_id);
-        println!("[MLS]   - engine_group_id: {}", if meta.engine_group_id.is_empty() { "(empty - using wire id)" } else { &meta.engine_group_id });
-        println!("[MLS]   - name: {}", meta.name);
 
         // Resolve client and my pubkey (awaits before any engine usage)
         let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
@@ -733,9 +875,6 @@ impl MlsService {
 
             let engine = self.engine()?; // Arc<NostrMls<NostrMlsSqliteStorage>>
             
-            println!("[MLS] Attempting to create message with engine for group_id bytes: {}", engine_hex);
-            println!("[MLS]   - GroupId byte length: {}", gid_bytes.len());
-            
             // TODO: Handle potential rekey/commit flow if required by nostr-mls
             engine
                 .create_message(&gid, rumor)
@@ -753,17 +892,6 @@ impl MlsService {
                     MlsError::NostrMlsError(format!("create_message: group not found - {}", e))
                 })?
         }; // engine dropped here
-
-        // Debug: compact wrapper log
-        if let Some(tag) = wrapper_event.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
-            println!(
-                "[MLS] send wrapper: id={}, h={}",
-                wrapper_event.id,
-                tag.content().unwrap_or("<no-content>")
-            );
-        } else {
-            println!("[MLS] send wrapper: id={}, h=<missing>", wrapper_event.id);
-        }
 
         // Process the rumor through unified storage to replace pending message
         // This ensures replies and other metadata are properly extracted
@@ -898,13 +1026,6 @@ impl MlsService {
         }
         
         if send_success {
-            println!(
-                "[MLS] send_group_message published wrapper id={}, group_id={}, len={}",
-                wrapper_event.id,
-                group_id,
-                text.len()
-            );
-            
             // Mark message as successfully sent (no longer pending) and emit full message
             {
                 let mut state = crate::STATE.lock().await;
@@ -996,25 +1117,27 @@ impl MlsService {
         let mut cursors = self.read_event_cursors().await.unwrap_or_default();
 
         let now = Timestamp::now();
+        
+        // Check if this is a newly joined group (has joined_at timestamp)
+        let groups = self.read_groups().await.ok();
+        let group_metadata = groups.as_ref().and_then(|gs| {
+            gs.iter().find(|g| g.group_id == group_id || (!g.engine_group_id.is_empty() && g.engine_group_id == group_id))
+        });
+        
         let since = if let Some(cur) = cursors.get(group_id) {
+            // Existing cursor: continue from last seen
             Timestamp::from_secs(cur.last_seen_at)
         } else {
-            // Default to last 48h for initial backfill
+            // No cursor: default to last 48h for initial backfill
             Timestamp::from_secs(now.as_u64().saturating_sub(60 * 60 * 48))
         };
         let until = now;
 
         // Working group id for fetch/processing; prefer wire id from stored metadata if available
-        let gid_for_fetch = {
-            if let Ok(groups) = self.read_groups().await {
-                if let Some(m) = groups.iter().find(|g| g.group_id == group_id || (!g.engine_group_id.is_empty() && g.engine_group_id == group_id)) {
-                    m.group_id.clone() // wire id used on relay 'h' tag
-                } else {
-                    group_id.to_string()
-                }
-            } else {
-                group_id.to_string()
-            }
+        let gid_for_fetch = if let Some(meta) = group_metadata {
+            meta.group_id.clone() // wire id used on relay 'h' tag
+        } else {
+            group_id.to_string()
         };
         // 2) Build filter for MLS wrapper events (Kind 445) with 'h' tag = gid_for_fetch
         let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
@@ -1055,15 +1178,6 @@ impl MlsService {
             }
         };
 
-        if !events.is_empty() {
-            println!(
-                "[MLS] sync: primary fetch count={}, window={}..{}",
-                events.len(),
-                since.as_u64(),
-                until.as_u64()
-            );
-        }
-
         // Fallback: if zero results, try without 'h' tag
         if events.is_empty() {
             used_fallback = true;
@@ -1090,22 +1204,9 @@ impl MlsService {
                     )))
                 }
             };
-
-            println!(
-                "[MLS] sync: fallback fetch count={}, window={}..{}",
-                events.len(),
-                since.as_u64(),
-                until.as_u64()
-            );
         }
 
         if events.is_empty() {
-            println!(
-                "[MLS] sync_group_since_cursor: no events for group_id={} in window {}..{}",
-                gid_for_fetch,
-                since.as_u64(),
-                until.as_u64()
-            );
             return Ok((0, 0));
         }
 
@@ -1133,19 +1234,9 @@ impl MlsService {
                     })
                     .collect();
 
-                if filtered.is_empty() {
-                    println!(
-                        "[MLS] sync_group_since_cursor: fallback yielded h-tags but none matched our group_id={}; proceeding with engine-based selection",
-                        gid_for_fetch
-                    );
-                    // Keep 'ordered' as-is (unfiltered) so engine can select the right group.
-                } else {
+                if !filtered.is_empty() {
                     ordered = filtered;
                 }
-            } else {
-                println!(
-                    "[MLS][debug] fallback: no events contained an h-tag; proceeding without local filtering and delegating selection to MLS engine"
-                );
             }
         }
 
@@ -1207,7 +1298,7 @@ impl MlsService {
                     
                     match engine.create_message(&check_gid, dummy_rumor) {
                         Ok(_) => {
-                            println!("[MLS] ✓ Engine has group {} in state", check_id);
+                            // Engine has group in state
                         }
                         Err(e) => {
                             eprintln!("[MLS] ✗ Engine missing group {} - error: {}", check_id, e);
@@ -1234,22 +1325,22 @@ impl MlsService {
                 if let Some(tag) = ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
                     if let Some(h_val) = tag.content() {
                         if h_val != gid_for_fetch {
-                            println!("[MLS] skip wrapper: h={} does not match target group {}", h_val, gid_for_fetch);
+                            // Skip silently - this is expected when multiple groups exist
                             continue;
                         }
                     } else {
-                        println!("[MLS] skip wrapper: empty h tag for target {}", gid_for_fetch);
+                        // Skip silently - empty h tag
                         continue;
                     }
                 } else {
-                    println!("[MLS] skip wrapper without h tag while syncing group {}", gid_for_fetch);
+                    // Skip silently - no h tag
                     continue;
                 }
 
                 match engine.process_message(ev) {
                     Ok(res) => {
                         // Use native structured result types from nostr-mls
-                        println!("[MLS] process ok: id={}, type={:?}", ev.id, res);
+                        // Silently process - only log errors
                 
                         match res {
                             MessageProcessingResult::ApplicationMessage(msg) => {
@@ -1278,8 +1369,17 @@ impl MlsService {
                                 rumors_to_process.push((rumor_event, wrapper_id, is_mine));
                                 new_msgs = new_msgs.saturating_add(1);
                             }
+                            MessageProcessingResult::Commit => {
+                                // Commit processed - member list may have changed
+                                // Emit event to refresh UI member list
+                                if let Some(handle) = TAURI_APP.get() {
+                                    handle.emit("mls_group_updated", serde_json::json!({
+                                        "group_id": gid_for_fetch
+                                    })).ok();
+                                }
+                                processed = processed.saturating_add(1);
+                            }
                             MessageProcessingResult::Proposal(_)
-                            | MessageProcessingResult::Commit
                             | MessageProcessingResult::ExternalJoinProposal
                             | MessageProcessingResult::Unprocessable => {
                                 // No-op for local message persistence
@@ -1462,15 +1562,6 @@ impl MlsService {
                 }
             }
         }
-
-        println!(
-            "[MLS] sync_group_since_cursor done: group_id={}, processed={}, new={}, window={}..{}",
-            gid_for_fetch,
-            processed,
-            new_msgs,
-            since.as_u64(),
-            until.as_u64()
-        );
 
         Ok((processed, new_msgs))
     }

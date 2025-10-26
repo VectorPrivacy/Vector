@@ -50,6 +50,7 @@ const domGroupOverviewNameSecondary = document.getElementById('group-overview-se
 const domGroupOverviewDescription = document.getElementById('group-overview-description');
 const domGroupOverviewMembers = document.getElementById('group-overview-members');
 const domGroupMemberSearchInput = document.getElementById('group-member-search-input');
+const domGroupInviteMemberBtn = document.getElementById('group-invite-member-btn');
 
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
@@ -1616,6 +1617,30 @@ async function setupRustListeners() {
         await loadMLSGroups();
     });
 
+    // Listen for MLS group updates (member additions, removals, etc.)
+    await listen('mls_group_updated', async (evt) => {
+        try {
+            const { group_id } = evt.payload || {};
+            console.log('MLS group updated:', group_id);
+            
+            // Refresh member count
+            await refreshGroupMemberCount(group_id);
+            
+            // If the group overview is currently open for this group, refresh it
+            if (domGroupOverview.style.display !== 'none') {
+                const currentChat = arrChats.find(c => c.id === group_id);
+                if (currentChat) {
+                    await renderGroupOverview(currentChat);
+                }
+            }
+            
+            // Refresh chat list to update any UI elements
+            renderChatList();
+        } catch (e) {
+            console.error('Error handling mls_group_updated event:', e);
+        }
+    });
+    
     // Listen for MLS initial sync completion after joining a group
     await listen('mls_group_initial_sync', async (evt) => {
         try {
@@ -4138,23 +4163,6 @@ async function openGroupOverview(chat) {
  */
 async function renderGroupOverview(chat) {
     const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
-    const memberCount = chat.metadata?.custom_fields?.member_count || '0';
-    
-    // Display Name (top header)
-    domGroupOverviewName.innerHTML = groupName;
-    domGroupOverviewStatus.textContent = `${memberCount} members`;
-    
-    // Secondary name
-    domGroupOverviewNameSecondary.innerHTML = groupName;
-    
-    // Group description (if available)
-    const description = chat.metadata?.custom_fields?.description;
-    if (description) {
-        domGroupOverviewDescription.textContent = description;
-        domGroupOverviewDescription.style.display = '';
-    } else {
-        domGroupOverviewDescription.style.display = 'none';
-    }
     
     // Fetch fresh member list and admins from the engine
     let members = [];
@@ -4168,6 +4176,25 @@ async function renderGroupOverview(chat) {
     } catch (e) {
         console.error('Failed to fetch group members:');
         console.error(e);
+    }
+    
+    // Use actual member count from engine, not cached metadata
+    const memberCount = members.length;
+    
+    // Display Name (top header)
+    domGroupOverviewName.innerHTML = groupName;
+    domGroupOverviewStatus.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+    
+    // Secondary name
+    domGroupOverviewNameSecondary.innerHTML = groupName;
+    
+    // Group description (if available)
+    const description = chat.metadata?.custom_fields?.description;
+    if (description) {
+        domGroupOverviewDescription.textContent = description;
+        domGroupOverviewDescription.style.display = '';
+    } else {
+        domGroupOverviewDescription.style.display = 'none';
     }
     
     // Function to render the member list (can be called for search filtering)
@@ -4291,6 +4318,7 @@ async function renderGroupOverview(chat) {
             
             // Member name
             const nameSpan = document.createElement('div');
+            nameSpan.className = 'compact-member-name';
             nameSpan.textContent = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
             nameSpan.style.color = '#f7f4f4';
             nameSpan.style.fontSize = '14px';
@@ -4314,10 +4342,330 @@ async function renderGroupOverview(chat) {
         renderMemberList(e.target.value);
     };
     
+    // Check if current user is an admin to show/hide invite button
+    const myProfile = arrProfiles.find(p => p.mine);
+    const isAdmin = myProfile && admins.includes(myProfile.id);
+    
+    if (isAdmin) {
+        domGroupInviteMemberBtn.style.display = 'flex';
+        // Invite Member button - open member selection UI
+        domGroupInviteMemberBtn.onclick = async () => {
+            await openInviteMemberToGroup(chat);
+        };
+    } else {
+        domGroupInviteMemberBtn.style.display = 'none';
+    }
+    
     // Back button - return to the group chat
     domGroupOverviewBackBtn.onclick = () => {
         domGroupOverview.style.display = 'none';
         openChat(chat.id);
+    };
+}
+
+/**
+ * Open the invite member UI for a specific group
+ * @param {Chat} chat - The group chat object
+ */
+async function openInviteMemberToGroup(chat) {
+    // Get current group members to exclude them from selection
+    let currentMembers = [];
+    try {
+        const result = await invoke('get_mls_group_members', { groupId: chat.id });
+        currentMembers = result?.members || [];
+    } catch (e) {
+        console.error('Failed to fetch group members:', e);
+    }
+    
+    // Create a modal/popup for member selection
+    const modal = document.createElement('div');
+    modal.style.position = 'fixed';
+    modal.style.top = '0';
+    modal.style.left = '0';
+    modal.style.right = '0';
+    modal.style.bottom = '0';
+    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+    modal.style.display = 'flex';
+    modal.style.alignItems = 'center';
+    modal.style.justifyContent = 'center';
+    modal.style.zIndex = '10000';
+    modal.style.padding = '20px';
+    
+    const container = document.createElement('div');
+    container.style.backgroundColor = '#0a0a0a';
+    container.style.borderRadius = '12px';
+    container.style.padding = '24px';
+    container.style.maxWidth = '500px';
+    container.style.width = '100%';
+    container.style.maxHeight = '80vh';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.borderStyle = 'solid';
+    container.style.borderColor = '#1c1c1c';
+    container.style.borderWidth = '1px';
+    
+    // Header
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.justifyContent = 'space-between';
+    header.style.alignItems = 'center';
+    header.style.marginBottom = '20px';
+    
+    const title = document.createElement('h3');
+    title.textContent = 'Invite Member';
+    title.style.margin = '0';
+    title.style.color = '#f7f4f4';
+    header.appendChild(title);
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    closeBtn.className = 'btn';
+    closeBtn.style.padding = '8px 12px';
+    closeBtn.style.fontSize = '18px';
+    closeBtn.onclick = () => modal.remove();
+    header.appendChild(closeBtn);
+    
+    container.appendChild(header);
+    
+    // Search input
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'emoji-search-container';
+    searchContainer.style.marginBottom = '16px';
+    
+    const searchIcon = document.createElement('span');
+    searchIcon.className = 'emoji-search-icon icon icon-search';
+    searchIcon.style.setProperty('margin-left', '20px', 'important');
+    searchIcon.style.setProperty('width', '25px', 'important');
+    searchIcon.style.setProperty('height', '25px', 'important');
+    searchContainer.appendChild(searchIcon);
+    
+    const searchInput = document.createElement('input');
+    searchInput.placeholder = 'Search contacts...';
+    searchInput.style.padding = '10px 40px';
+    searchInput.style.backgroundColor = 'transparent';
+    searchInput.style.border = '1px solid rgba(57, 57, 57, 0.5)';
+    searchInput.style.width = '100%';
+    searchContainer.appendChild(searchInput);
+    
+    container.appendChild(searchContainer);
+    
+    // Member list (matching the group overview member list style)
+    const memberList = document.createElement('div');
+    memberList.style.flex = '1';
+    memberList.style.overflowY = 'auto';
+    memberList.style.marginBottom = '16px';
+    memberList.style.border = '1px solid rgba(57, 57, 57, 0.5)';
+    memberList.style.borderRadius = '8px';
+    memberList.style.padding = '6px';
+    
+    // Status message
+    const statusMsg = document.createElement('p');
+    statusMsg.style.textAlign = 'center';
+    statusMsg.style.color = '#999';
+    statusMsg.style.margin = '10px 0';
+    statusMsg.style.display = 'none';
+    container.appendChild(statusMsg);
+    
+    // Invite button
+    const inviteBtn = document.createElement('button');
+    inviteBtn.textContent = 'Invite';
+    inviteBtn.className = 'btn';
+    inviteBtn.style.padding = '12px 24px';
+    inviteBtn.style.background = 'linear-gradient(135deg, var(--icon-color-primary), var(--icon-color-secondary))';
+    inviteBtn.style.borderRadius = '6px';
+    inviteBtn.style.fontWeight = '500';
+    inviteBtn.style.width = '100%';
+    inviteBtn.disabled = true;
+    inviteBtn.style.opacity = '0.5';
+    
+    let selectedMember = null;
+    
+    const renderMemberList = (filterText = '') => {
+        memberList.innerHTML = '';
+        const filter = filterText.toLowerCase();
+        
+        // Get mine profile to exclude self
+        const mine = arrProfiles.find(p => p.mine)?.id;
+        
+        // Filter available contacts (exclude self and current members)
+        const availableContacts = arrProfiles.filter(p => {
+            if (!p || !p.id || p.id === mine) return false;
+            if (currentMembers.includes(p.id)) return false;
+            
+            if (filter) {
+                const name = (p.nickname || p.name || '').toLowerCase();
+                const npub = p.id.toLowerCase();
+                return name.includes(filter) || npub.includes(filter);
+            }
+            return true;
+        });
+        
+        if (availableContacts.length === 0) {
+            const empty = document.createElement('p');
+            empty.textContent = filter ? 'No matches' : 'No contacts available to invite';
+            empty.style.textAlign = 'center';
+            empty.style.color = '#999';
+            empty.style.padding = '20px';
+            memberList.appendChild(empty);
+            return;
+        }
+        
+        for (const contact of availableContacts) {
+            const contactProfile = getProfile(contact.id);
+            const name = contactProfile?.nickname || contactProfile?.name || '';
+            
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.padding = '5px 10px';
+            row.style.borderRadius = '6px';
+            row.style.transition = 'background 0.2s ease';
+            row.style.isolation = 'isolate';
+            row.style.cursor = 'pointer';
+            row.style.position = 'relative';
+            
+            // Add hover effect with theme-based gradient
+            const bgDiv = document.createElement('div');
+            bgDiv.style.position = 'absolute';
+            bgDiv.style.top = '0';
+            bgDiv.style.left = '0';
+            bgDiv.style.right = '0';
+            bgDiv.style.bottom = '0';
+            bgDiv.style.borderRadius = '6px';
+            bgDiv.style.opacity = '0';
+            bgDiv.style.transition = 'opacity 0.2s ease';
+            bgDiv.style.pointerEvents = 'none';
+            bgDiv.style.zIndex = '0';
+            row.appendChild(bgDiv);
+            
+            row.addEventListener('mouseenter', () => {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+                bgDiv.style.opacity = '1';
+            });
+            row.addEventListener('mouseleave', () => {
+                bgDiv.style.opacity = '0';
+            });
+            
+            // Avatar (compact size like member list)
+            let avatar;
+            if (contactProfile?.avatar) {
+                avatar = document.createElement('img');
+                avatar.src = contactProfile.avatar;
+                avatar.style.width = '25px';
+                avatar.style.height = '25px';
+                avatar.style.borderRadius = '50%';
+                avatar.style.objectFit = 'cover';
+            } else {
+                avatar = pubkeyToAvatar(contact.id, name, 25);
+            }
+            avatar.style.marginRight = '10px';
+            avatar.style.position = 'relative';
+            avatar.style.zIndex = '1';
+            row.appendChild(avatar);
+            
+            // Name
+            const nameSpan = document.createElement('div');
+            nameSpan.className = 'compact-member-name';
+            nameSpan.textContent = name || contact.id.substring(0, 10) + '...';
+            nameSpan.style.color = '#f7f4f4';
+            nameSpan.style.fontSize = '14px';
+            nameSpan.style.flex = '1';
+            nameSpan.style.textAlign = 'left';
+            nameSpan.style.position = 'relative';
+            nameSpan.style.zIndex = '1';
+            if (name) twemojify(nameSpan);
+            row.appendChild(nameSpan);
+            
+            // Selection indicator (right-aligned)
+            const indicator = document.createElement('div');
+            indicator.style.width = '18px';
+            indicator.style.height = '18px';
+            indicator.style.borderRadius = '50%';
+            indicator.style.border = '2px solid var(--icon-color-primary)';
+            indicator.style.position = 'relative';
+            indicator.style.zIndex = '1';
+            indicator.style.flexShrink = '0';
+            row.appendChild(indicator);
+            
+            row.onclick = () => {
+                // Deselect previous
+                memberList.querySelectorAll('div[data-contact-row]').forEach(r => {
+                    const ind = r.querySelector('div:last-child');
+                    if (ind) ind.style.backgroundColor = '';
+                });
+                
+                // Select this one
+                indicator.style.backgroundColor = 'var(--icon-color-primary)';
+                selectedMember = contact.id;
+                inviteBtn.disabled = false;
+                inviteBtn.style.opacity = '1';
+            };
+            
+            row.setAttribute('data-contact-row', 'true');
+            memberList.appendChild(row);
+        }
+    };
+    
+    renderMemberList();
+    searchInput.oninput = (e) => renderMemberList(e.target.value);
+    
+    inviteBtn.onclick = async () => {
+        if (!selectedMember) return;
+        
+        inviteBtn.disabled = true;
+        inviteBtn.textContent = 'Inviting...';
+        statusMsg.style.display = '';
+        statusMsg.style.color = '#999';
+        statusMsg.textContent = 'Preparing invitation...';
+        
+        try {
+            await invoke('invite_member_to_group', {
+                groupId: chat.id,
+                memberNpub: selectedMember
+            });
+            
+            statusMsg.style.color = '#4caf50';
+            statusMsg.textContent = 'Member invited successfully!';
+            
+            // Refresh the group overview
+            setTimeout(async () => {
+                modal.remove();
+                await renderGroupOverview(chat);
+            }, 1000);
+        } catch (e) {
+            const errorMsg = (e || '').toString();
+            let friendlyMsg = errorMsg;
+            
+            // Map backend errors to friendly messages
+            if (errorMsg.includes('no device keypackag')) {
+                const match = errorMsg.match(/for (\S+)/);
+                if (match) {
+                    const npub = match[1];
+                    const prof = arrProfiles.find(p => p.id === npub);
+                    const display = prof?.nickname || prof?.name || 'This user';
+                    friendlyMsg = `${display} is using an older Vector version! Please ask them to upgrade.`;
+                }
+            }
+            
+            statusMsg.style.color = '#f44336';
+            statusMsg.textContent = friendlyMsg;
+            inviteBtn.disabled = false;
+            inviteBtn.textContent = 'Invite';
+            
+            // Error is already displayed in the modal, no need for popup
+        }
+    };
+    
+    container.appendChild(memberList);
+    container.appendChild(inviteBtn);
+    
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+    
+    // Close on background click
+    modal.onclick = (e) => {
+        if (e.target === modal) modal.remove();
     };
 }
 

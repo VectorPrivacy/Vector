@@ -3438,6 +3438,39 @@ async fn add_mls_member_device(
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
+/// Invite a new member to an existing MLS group
+/// Similar to create_group_chat, this refreshes the member's keypackages and adds them to the group
+#[tauri::command]
+async fn invite_member_to_group(
+    group_id: String,
+    member_npub: String,
+) -> Result<(), String> {
+    // Refresh keypackages for the new member
+    let devices = refresh_keypackages_for_contact(member_npub.clone()).await.map_err(|e| {
+        format!("Failed to refresh device keypackage for {}: {}", member_npub, e)
+    })?;
+
+    // Choose the first device (same policy as group creation)
+    let (device_id, _kp_ref) = devices
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("No device keypackages found for {}", member_npub))?;
+
+    // Run non-Send MLS engine work on a blocking thread
+    tokio::task::spawn_blocking(move || {
+        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async move {
+            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            mls.add_member_device(&group_id, &member_npub, &device_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
 /// Remove a member device from an MLS group
 #[tauri::command]
 async fn remove_mls_member_device(
@@ -3643,8 +3676,8 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 let nostr_group_id_bytes = welcome.nostr_group_id.clone();
                 let group_name = welcome.group_name.clone();
                 let welcomer_hex = welcome.welcomer.to_hex();
-                let wrapper_id_hex = welcome.wrapper_event_id.to_hex();
-                
+                let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
+
                 // Accept the welcome - this updates engine state internally
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
                 
@@ -3689,7 +3722,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 println!("[MLS]   - engine_group_id: {}", engine_group_id);
                 println!("[MLS]   - group_name: {}", group_name);
                 
-                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_id_hex)
+                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex)
             }; // engine dropped here
             
             // Now persist the group metadata (awaitable section)
@@ -4279,6 +4312,7 @@ pub fn run() {
             // MLS advanced helpers
             process_mls_event,
             add_mls_member_device,
+            invite_member_to_group,
             remove_mls_member_device,
             get_mls_group_members,
             leave_mls_group,

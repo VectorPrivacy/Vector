@@ -3042,6 +3042,13 @@ select:disabled:hover {
   margin-right: auto;
 }
 
+/* Compact member list emoji styling */
+.compact-member-name img.emoji {
+    width: 15px !important;
+    height: 15px !important;
+    vertical-align: middle !important;
+}
+
 /* MLS Group Invite Styles */
 .mls-invite-item {
   background: rgba(255, 255, 255, 0.05);
