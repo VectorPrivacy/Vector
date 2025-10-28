@@ -831,18 +831,70 @@ impl MlsService {
                 .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
         );
 
+        // Sync the group first to ensure we have the latest state
+        println!("[MLS][remove_member] Syncing group to ensure latest state...");
+        if let Err(e) = self.sync_group_since_cursor(group_id).await {
+            eprintln!("[MLS][remove_member] Warning: Failed to sync group before removal: {}", e);
+            // Continue anyway - the sync might fail if we're already up to date
+        }
+        
         // Perform engine operation (remove member but DON'T merge yet)
         let evolution_event = {
             let engine = self.engine()?;
             
             println!("[MLS][remove_member] Removing member {} from group_id={}", member_pubkey, group_id);
             
+            // Verify the member exists in the group
+            let current_members = engine.get_members(&mls_group_id)
+                .map_err(|e| {
+                    eprintln!("[MLS][remove_member] Failed to get current members: {}", e);
+                    MlsError::NostrMlsError(format!("Failed to get group members: {}", e))
+                })?;
+            
+            println!("[MLS][remove_member] Current group has {} members", current_members.len());
+            println!("[MLS][remove_member] All members in group:");
+            for (i, pk) in current_members.iter().enumerate() {
+                let npub = pk.to_bech32().unwrap_or_else(|_| "invalid".to_string());
+                println!("[MLS][remove_member]   {}. {} (matches target: {})",
+                    i + 1,
+                    npub,
+                    pk == &member_pk
+                );
+            }
+            println!("[MLS][remove_member] Target member to remove: {}", member_pubkey);
+            
+            if !current_members.contains(&member_pk) {
+                eprintln!("[MLS][remove_member] Member {} not found in group.", member_pubkey);
+                return Err(MlsError::NostrMlsError(
+                    "Member not found in group. The group state may be out of sync. Try refreshing the member list.".to_string()
+                ));
+            }
+            
+            println!("[MLS][remove_member] Member verified in group, proceeding with removal");
+            
+            // Try to get more detailed info about the group state
+            // Check if there are any pending proposals that might interfere
+            println!("[MLS][remove_member] Attempting removal with MDK...");
+            
             // Remove member from group - returns RemoveMembersResult with evolution_event
             let remove_result = engine
                 .remove_members(&mls_group_id, &[member_pk])
                 .map_err(|e| {
-                    eprintln!("[MLS][remove_member] remove_members failed: {}", e);
-                    MlsError::NostrMlsError(format!("Failed to remove member: {}", e))
+                    let error_str = e.to_string();
+                    eprintln!("[MLS][remove_member] remove_members failed: {}", error_str);
+                    
+                    // If this is the "non-existing member" error, it might be a bug in MDK
+                    // or the member might have multiple leaf nodes and we're targeting the wrong one
+                    if error_str.contains("non-existing member") {
+                        eprintln!("[MLS][remove_member] DIAGNOSTIC: Member exists in get_members() but remove_members() fails");
+                        eprintln!("[MLS][remove_member] This suggests an internal MDK state inconsistency");
+                        eprintln!("[MLS][remove_member] Possible causes:");
+                        eprintln!("[MLS][remove_member]   1. Member has multiple devices/leaf nodes");
+                        eprintln!("[MLS][remove_member]   2. Pending proposals in the group");
+                        eprintln!("[MLS][remove_member]   3. MDK internal state mismatch");
+                    }
+                    
+                    MlsError::NostrMlsError(format!("Failed to remove member: {}", error_str))
                 })?;
 
             println!("[MLS][remove_member] Member removal commit created");
@@ -1653,15 +1705,8 @@ impl MlsService {
                            error_msg.contains("evicted from it") {
                             eprintln!("[MLS] ⚠️  EVICTION DETECTED - We were removed from group: {}", gid_for_fetch);
                             
-                            // Mark this group for removal after engine scope
-                            // We'll clean it up after processing all events
-                            if let Some(handle) = TAURI_APP.get() {
-                                handle.emit("mls_group_left", serde_json::json!({
-                                    "group_id": gid_for_fetch
-                                })).ok();
-                            }
-                            
                             // Set flag to remove this group after engine scope
+                            // The event will be emitted AFTER cleanup is complete
                             was_evicted = true;
                             println!("[MLS] Will remove group {} from local state after sync", gid_for_fetch);
                         } else if !error_msg.contains("group not found") {
@@ -1871,6 +1916,18 @@ impl MlsService {
                     eprintln!("[MLS] Failed to delete chat from storage: {}", e);
                 } else {
                     println!("[MLS] Successfully deleted chat from storage: {}", evicted_chat_id);
+                }
+            }
+            
+            // NOW emit the event after all cleanup is complete
+            println!("[MLS] Emitting mls_group_left event for: {}", gid_for_fetch);
+            if let Some(handle) = TAURI_APP.get() {
+                if let Err(e) = handle.emit("mls_group_left", serde_json::json!({
+                    "group_id": gid_for_fetch
+                })) {
+                    eprintln!("[MLS] Failed to emit mls_group_left event: {}", e);
+                } else {
+                    println!("[MLS] Successfully emitted mls_group_left event");
                 }
             }
         } else {

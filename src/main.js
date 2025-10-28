@@ -637,6 +637,11 @@ let arrMLSInvites = [];
 let strOpenChat = "";
 
 /**
+ * The chat ID we came from when opening a profile (to return to on back)
+ */
+let previousChatBeforeProfile = "";
+
+/**
  * Get a DM chat for a user
  * @param {string} npub - The user's npub
  * @returns {Chat|undefined} - The chat if it exists
@@ -861,13 +866,17 @@ async function loadMLSGroups() {
  */
 async function refreshGroupMemberCount(groupId) {
     try {
-        const members = await invoke('get_mls_group_members', { groupId });
+        const result = await invoke('get_mls_group_members', { groupId });
         const chat = getOrCreateChat(groupId, 'MlsGroup');
-        if (Array.isArray(members)) {
+        
+        // get_mls_group_members returns { group_id, members, admins }
+        if (result && result.members) {
             chat.metadata = chat.metadata || {};
             chat.metadata.custom_fields = chat.metadata.custom_fields || {};
-            chat.metadata.custom_fields.member_count = String(members.length);
-            chat.participants = members.slice();
+            chat.metadata.custom_fields.member_count = result.members.length;
+            chat.participants = result.members.slice();
+            
+            console.log(`[MLS] Updated member count for ${groupId.substring(0, 8)}: ${result.members.length} members`);
         }
         if (strOpenChat === groupId) {
             // Update the chat header subtext (respects typing indicators)
@@ -1650,12 +1659,15 @@ async function setupRustListeners() {
     await listen('mls_group_left', async (evt) => {
         try {
             const { group_id } = evt.payload || {};
-            console.log('Left MLS group:', group_id);
+            console.log('[MLS][Frontend] Received mls_group_left event for group:', group_id?.substring(0, 16));
             
             // Remove the group from the chat list
             const chatIndex = arrChats.findIndex(c => c.id === group_id);
             if (chatIndex !== -1) {
+                console.log('[MLS][Frontend] Removing group from arrChats at index:', chatIndex);
                 arrChats.splice(chatIndex, 1);
+            } else {
+                console.log('[MLS][Frontend] Group not found in arrChats');
             }
             
             // Close the group overview if it's open for this group
@@ -2565,7 +2577,17 @@ function renderProfileTab(cProfile) {
         
         // Show the 'Back' button and link it to the profile's chat
         domProfileBackBtn.style.display = '';
-        domProfileBackBtn.onclick = () => openChat(cProfile.id);
+        domProfileBackBtn.onclick = () => {
+            // If we came from a chat (especially a group chat), return to it
+            if (previousChatBeforeProfile) {
+                const chatToOpen = previousChatBeforeProfile;
+                previousChatBeforeProfile = ''; // Clear before opening to avoid loops
+                openChat(chatToOpen);
+            } else {
+                // Default to opening DM with this user
+                openChat(cProfile.id);
+            }
+        };
         
         // Hide the Navbar
         domNavbar.style.display = 'none';
@@ -2879,7 +2901,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (profile?.nickname || profile?.name) twemojify(domChatContact);
             // When the name or status is clicked, expand their Profile
             domChatContact.onclick = () => {
-                closeChat();
+                // Store the current chat so we can return to it
+                previousChatBeforeProfile = strOpenChat;
                 openProfile(profile);
             };
             domChatContact.classList.add('btn');
@@ -3175,7 +3198,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 const imgAvatar = document.createElement('img');
                 imgAvatar.classList.add('avatar', 'btn');
                 imgAvatar.onclick = () => {
-                    closeChat();
+                    // Store the current chat so we can return to it
+                    previousChatBeforeProfile = strOpenChat;
                     openProfile(authorProfile);
                 };
                 imgAvatar.src = authorProfile.avatar;
@@ -3190,7 +3214,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 if (otherFullId) {
                     placeholder.onclick = () => {
                         const prof = getProfile(otherFullId) || authorProfile;
-                        closeChat();
+                        // Store the current chat so we can return to it
+                        previousChatBeforeProfile = strOpenChat;
                         openProfile(prof || { id: otherFullId });
                     };
                 }
@@ -3215,7 +3240,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     if (otherFullId) {
                         usernameLabel.onclick = () => {
                             const prof = getProfile(otherFullId) || authorProfile;
-                            closeChat();
+                            // Store the current chat so we can return to it
+                            previousChatBeforeProfile = strOpenChat;
                             openProfile(prof || { id: otherFullId });
                         };
                     }
@@ -4115,6 +4141,7 @@ async function closeChat() {
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
+    previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
     
     // Reset procedural scroll state
@@ -4151,9 +4178,14 @@ function openProfile(cProfile) {
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    domChat.style.display = 'none'; // Hide the chat view when opening profile
 
     // Render our own profile by default, but otherwise; the given one
-    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
+    if (!cProfile) {
+        cProfile = arrProfiles.find(a => a.mine);
+        // Clear previous chat when opening our own profile from navbar
+        previousChatBeforeProfile = '';
+    }
     renderProfileTab(cProfile);
 
     if (domProfile.style.display !== '') {
@@ -4396,6 +4428,9 @@ async function renderGroupOverview(chat) {
                 kickBtn.onclick = async (e) => {
                     e.stopPropagation();
                     
+                    // Prevent double-clicks
+                    if (kickBtn.disabled) return;
+                    
                     const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
                     const confirmed = await popupConfirm(
                         `Remove ${memberName} from the group?`,
@@ -4403,6 +4438,13 @@ async function renderGroupOverview(chat) {
                     );
                     
                     if (!confirmed) return;
+                    
+                    // Disable button and show loading state
+                    kickBtn.disabled = true;
+                    kickBtn.style.opacity = '0.5';
+                    kickBtn.style.cursor = 'not-allowed';
+                    const originalText = kickBtn.textContent;
+                    kickBtn.textContent = 'Removing...';
                     
                     try {
                         // Call the remove_mls_member_device command
@@ -4423,6 +4465,12 @@ async function renderGroupOverview(chat) {
                     } catch (error) {
                         console.error('[MLS] Failed to kick member:', error);
                         alert(`Failed to remove member: ${error}`);
+                        
+                        // Re-enable button on error
+                        kickBtn.disabled = false;
+                        kickBtn.style.opacity = '1';
+                        kickBtn.style.cursor = 'pointer';
+                        kickBtn.textContent = originalText;
                     }
                 };
                 
@@ -4808,6 +4856,7 @@ async function openChatlist() {
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    previousChatBeforeProfile = ""; // Clear when navigating away
 
     if (domChats.style.display !== '') {
         // Run a subtle fade-in animation
@@ -4831,6 +4880,7 @@ function openSettings() {
     domChats.style.display = 'none';
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    previousChatBeforeProfile = ""; // Clear when navigating away
 
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
@@ -4856,6 +4906,7 @@ async function openInvites() {
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domGroupOverview.style.display = 'none';
+    previousChatBeforeProfile = ""; // Clear when navigating away
 
     // Fetch and display the invite code
     const inviteCodeElement = document.getElementById('invite-code');

@@ -1627,6 +1627,7 @@ async fn notifs() -> Result<bool, String> {
                         let app_handle = TAURI_APP.get().unwrap().clone();
                         let my_npub_for_block = my_pubkey_bech32.clone();
                         let group_id_for_persist = group_wire_id.clone();
+                        let group_id_for_emit = group_wire_id.clone();
                         
                         // Process message and persist in one blocking operation to avoid Send issues
                         let emit_record = tokio::task::spawn_blocking(move || {
@@ -1970,8 +1971,22 @@ async fn notifs() -> Result<bool, String> {
                                     }
                                 }
                                 Err(e) => {
-                                    if !e.to_string().contains("group not found") {
-                                        eprintln!("[MLS] live process_message failed (id={}): {}", ev.id, e);
+                                    let error_msg = e.to_string();
+                                    
+                                    // Check if this is an eviction error
+                                    if error_msg.contains("evicted from it") ||
+                                       error_msg.contains("after being evicted") ||
+                                       error_msg.contains("own leaf not found") {
+                                        eprintln!("[MLS][live] ⚠️  EVICTION DETECTED in live subscription - group: {}", group_id_for_persist);
+                                        
+                                        // Emit eviction event to trigger cleanup
+                                        if let Some(handle) = TAURI_APP.get() {
+                                            handle.emit("mls_group_left", serde_json::json!({
+                                                "group_id": group_id_for_persist
+                                            })).ok();
+                                        }
+                                    } else if !error_msg.contains("group not found") {
+                                        eprintln!("[MLS] live process_message failed (id={}): {}", ev.id, error_msg);
                                     }
                                     None
                                 }
@@ -1983,7 +1998,7 @@ async fn notifs() -> Result<bool, String> {
                         if let Some(record) = emit_record {
                             // Emit UI event (no MLS operations here, just event emission)
                             let _ = handle.emit("mls_message_new", serde_json::json!({
-                                "group_id": group_wire_id,
+                                "group_id": group_id_for_emit,
                                 "message": record
                             }));
                         }
