@@ -51,6 +51,7 @@ const domGroupOverviewDescription = document.getElementById('group-overview-desc
 const domGroupOverviewMembers = document.getElementById('group-overview-members');
 const domGroupMemberSearchInput = document.getElementById('group-member-search-input');
 const domGroupInviteMemberBtn = document.getElementById('group-invite-member-btn');
+const domGroupLeaveBtn = document.getElementById('group-leave-btn');
 
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
@@ -1626,18 +1627,53 @@ async function setupRustListeners() {
             // Refresh member count
             await refreshGroupMemberCount(group_id);
             
-            // If the group overview is currently open for this group, refresh it
+            // If the group overview is currently open for THIS SPECIFIC group, refresh it
             if (domGroupOverview.style.display !== 'none') {
-                const currentChat = arrChats.find(c => c.id === group_id);
-                if (currentChat) {
-                    await renderGroupOverview(currentChat);
+                // Check if the overview is for the same group that was updated
+                const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
+                if (overviewGroupId === group_id) {
+                    const currentChat = arrChats.find(c => c.id === group_id);
+                    if (currentChat) {
+                        await renderGroupOverview(currentChat);
+                    }
                 }
             }
             
             // Refresh chat list to update any UI elements
-            renderChatList();
+            renderChatlist();
         } catch (e) {
             console.error('Error handling mls_group_updated event:', e);
+        }
+    });
+    
+    // Listen for MLS group left events
+    await listen('mls_group_left', async (evt) => {
+        try {
+            const { group_id } = evt.payload || {};
+            console.log('Left MLS group:', group_id);
+            
+            // Remove the group from the chat list
+            const chatIndex = arrChats.findIndex(c => c.id === group_id);
+            if (chatIndex !== -1) {
+                arrChats.splice(chatIndex, 1);
+            }
+            
+            // Close the group overview if it's open for this group
+            const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
+            if (overviewGroupId === group_id) {
+                domGroupOverview.style.display = 'none';
+                domGroupOverview.removeAttribute('data-group-id');
+            }
+            
+            // If this was the active chat, close it and return to chat list
+            if (strOpenChat === group_id) {
+                await closeChat();
+            }
+            
+            // Refresh chat list
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_left event:', e);
         }
     });
     
@@ -4144,6 +4180,9 @@ async function openGroupOverview(chat) {
     domProfile.style.display = 'none';
     domChat.style.display = 'none';
 
+    // Store which group is being viewed
+    domGroupOverview.setAttribute('data-group-id', chat.id);
+
     // Render the group overview
     await renderGroupOverview(chat);
 
@@ -4329,6 +4368,67 @@ async function renderGroupOverview(chat) {
             if (memberProfile?.nickname || memberProfile?.name) twemojify(nameSpan);
             memberDiv.appendChild(nameSpan);
             
+            // Kick button (only visible to admins, and not for themselves)
+            const isMe = member === strPubkey;
+            const iAmAdmin = admins.includes(strPubkey);
+            if (iAmAdmin && !isMe) {
+                const kickBtn = document.createElement('button');
+                kickBtn.textContent = 'Kick';
+                kickBtn.style.padding = '4px 12px';
+                kickBtn.style.fontSize = '12px';
+                kickBtn.style.borderRadius = '4px';
+                kickBtn.style.border = 'none';
+                kickBtn.style.background = '#ff4444';
+                kickBtn.style.color = 'white';
+                kickBtn.style.cursor = 'pointer';
+                kickBtn.style.transition = 'background 0.2s ease';
+                kickBtn.style.position = 'relative';
+                kickBtn.style.zIndex = '1';
+                kickBtn.style.marginLeft = '10px';
+                
+                kickBtn.addEventListener('mouseenter', () => {
+                    kickBtn.style.background = '#ff6666';
+                });
+                kickBtn.addEventListener('mouseleave', () => {
+                    kickBtn.style.background = '#ff4444';
+                });
+                
+                kickBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    
+                    const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
+                    const confirmed = await popupConfirm(
+                        `Remove ${memberName} from the group?`,
+                        'This will remove them from the group immediately.'
+                    );
+                    
+                    if (!confirmed) return;
+                    
+                    try {
+                        // Call the remove_mls_member_device command
+                        // We don't have device_id, so we pass an empty string (backend will handle it)
+                        await window.__TAURI__.core.invoke('remove_mls_member_device', {
+                            groupId: chat.id,
+                            memberNpub: member,
+                            deviceId: ''
+                        });
+                        
+                        console.log(`[MLS] Successfully kicked member: ${member}`);
+                        
+                        // The mls_group_updated event will trigger a refresh
+                        // But we can also manually refresh the overview
+                        setTimeout(async () => {
+                            await renderGroupOverview(chat);
+                        }, 500);
+                    } catch (error) {
+                        console.error('[MLS] Failed to kick member:', error);
+                        alert(`Failed to remove member: ${error}`);
+                    }
+                };
+                
+                memberDiv.appendChild(kickBtn);
+            }
+            
             domGroupOverviewMembers.appendChild(memberDiv);
         }
     };
@@ -4356,9 +4456,42 @@ async function renderGroupOverview(chat) {
         domGroupInviteMemberBtn.style.display = 'none';
     }
     
+    // Leave Group button - TEMPORARILY HIDDEN until fully tested
+    // domGroupLeaveBtn.style.display = 'flex';
+    // domGroupLeaveBtn.onclick = async () => {
+    //     // Confirm before leaving using popupConfirm
+    //     const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+    //     const confirmed = await popupConfirm(
+    //         'Leave Group',
+    //         `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
+    //         false, // Not a notice, show cancel button
+    //         '', // No input
+    //         'vector_warning.svg'
+    //     );
+    //
+    //     if (!confirmed) return;
+    //
+    //     try {
+    //         await invoke('leave_mls_group', { groupId: chat.id });
+    //
+    //         // Close the group overview
+    //         domGroupOverview.style.display = 'none';
+    //         domGroupOverview.removeAttribute('data-group-id');
+    //
+    //         // Open the chat list
+    //         openChatlist();
+    //
+    //         // The group will be removed from the chat list via the mls_group_left event
+    //     } catch (error) {
+    //         console.error('Failed to leave group:', error);
+    //         await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
+    //     }
+    // };
+    
     // Back button - return to the group chat
     domGroupOverviewBackBtn.onclick = () => {
         domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
         openChat(chat.id);
     };
 }
