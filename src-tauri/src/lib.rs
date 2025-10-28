@@ -1920,31 +1920,47 @@ async fn notifs() -> Result<bool, String> {
                                             let mls_group_id = GroupId::from_slice(&group_id_bytes);
                                             
                                             let my_pubkey_hex = my_npub_for_block.clone();
-                                            let still_member = engine.get_members(&mls_group_id)
-                                                .ok()
-                                                .and_then(|members| {
+                                            
+                                            // Be VERY careful here - only evict if we're CERTAIN they were removed
+                                            // If get_members() fails, we should NOT evict (could be a temporary error)
+                                            let membership_check = engine.get_members(&mls_group_id)
+                                                .map(|members| {
                                                     nostr_sdk::PublicKey::from_bech32(&my_pubkey_hex)
                                                         .ok()
                                                         .map(|pk| members.contains(&pk))
-                                                })
-                                                .unwrap_or(false);
-                                            
-                                            if !still_member {
-                                                // We've been removed from the group!
-                                                eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Commit - We were removed from group: {}", group_id_for_persist);
-                                                
-                                                // Perform full cleanup using the helper method
-                                                rt.block_on(async {
-                                                    if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                                                        eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
-                                                    }
+                                                        .unwrap_or(true) // If pubkey parsing fails, assume still member (safe default)
                                                 });
-                                            } else {
-                                                // Still a member, just update the UI
-                                                if let Some(handle) = TAURI_APP.get() {
-                                                    handle.emit("mls_group_updated", serde_json::json!({
-                                                        "group_id": group_id_for_persist
-                                                    })).ok();
+                                            
+                                            match membership_check {
+                                                Ok(is_member) if !is_member => {
+                                                    // We successfully checked membership and we're NOT a member - evict!
+                                                    eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Commit - We were removed from group: {}", group_id_for_persist);
+                                                    
+                                                    // Perform full cleanup using the helper method
+                                                    rt.block_on(async {
+                                                        if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                            eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                                Ok(_is_member) => {
+                                                    // Still a member, just update the UI
+                                                    println!("[MLS][live] Commit processed, still a member of group: {}", group_id_for_persist);
+                                                    if let Some(handle) = TAURI_APP.get() {
+                                                        handle.emit("mls_group_updated", serde_json::json!({
+                                                            "group_id": group_id_for_persist
+                                                        })).ok();
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    // get_members() failed - DO NOT EVICT, could be temporary error
+                                                    // Still emit update event in case UI needs refreshing
+                                                    eprintln!("[MLS][live] Failed to check membership for Commit (NOT evicting): {}", e);
+                                                    if let Some(handle) = TAURI_APP.get() {
+                                                        handle.emit("mls_group_updated", serde_json::json!({
+                                                            "group_id": group_id_for_persist
+                                                        })).ok();
+                                                    }
                                                 }
                                             }
                                             None
@@ -1971,25 +1987,37 @@ async fn notifs() -> Result<bool, String> {
                                             let mls_group_id = GroupId::from_slice(&group_id_bytes);
                                             
                                             let my_pubkey_hex = my_npub_for_block.clone();
-                                            let still_member = engine.get_members(&mls_group_id)
-                                                .ok()
-                                                .and_then(|members| {
+                                            
+                                            // Be VERY careful here - only evict if we're CERTAIN they were removed
+                                            // If get_members() fails, we should NOT evict (could be a temporary error)
+                                            let membership_check = engine.get_members(&mls_group_id)
+                                                .map(|members| {
                                                     nostr_sdk::PublicKey::from_bech32(&my_pubkey_hex)
                                                         .ok()
                                                         .map(|pk| members.contains(&pk))
-                                                })
-                                                .unwrap_or(false);
-                                            
-                                            if !still_member {
-                                                // We've been removed from the group!
-                                                eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Unprocessable - We were removed from group: {}", group_id_for_persist);
-                                                
-                                                // Perform full cleanup using the helper method
-                                                rt.block_on(async {
-                                                    if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                                                        eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
-                                                    }
+                                                        .unwrap_or(true) // If pubkey parsing fails, assume still member (safe default)
                                                 });
+                                            
+                                            match membership_check {
+                                                Ok(is_member) if !is_member => {
+                                                    // We successfully checked membership and we're NOT a member - evict!
+                                                    eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Unprocessable - We were removed from group: {}", group_id_for_persist);
+                                                    
+                                                    // Perform full cleanup using the helper method
+                                                    rt.block_on(async {
+                                                        if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                            eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                                Ok(is_member) => {
+                                                    // Still a member, Unprocessable might be due to other reasons
+                                                    println!("[MLS][live] Unprocessable but still a member of group: {}", group_id_for_persist);
+                                                }
+                                                Err(e) => {
+                                                    // get_members() failed - DO NOT EVICT, could be temporary error
+                                                    eprintln!("[MLS][live] Failed to check membership for Unprocessable event (NOT evicting): {}", e);
+                                                }
                                             }
                                             None
                                         }
