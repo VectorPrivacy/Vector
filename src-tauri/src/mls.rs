@@ -668,6 +668,7 @@ impl MlsService {
 
         // Publish evolution event (commit) to the relay
         // The evolution_event is already a signed Event that other members will process
+        println!("[MLS][add_member] Publishing evolution_event: kind={}, id={}", evolution_event.kind.as_u16(), evolution_event.id.to_hex());
         match client.send_event(&evolution_event).await {
             Ok(event_id) => {
                 println!(
@@ -904,6 +905,7 @@ impl MlsService {
 
         // Publish evolution event (commit) to the relay
         // The evolution_event is already a signed Event that other members will process
+        println!("[MLS][remove_member] Publishing evolution_event: kind={}, id={}", evolution_event.kind.as_u16(), evolution_event.id.to_hex());
         match client.send_event(&evolution_event).await {
             Ok(event_id) => {
                 println!("[MLS][remove_member][commit_published] event_id={}, relay={}", event_id.to_hex(), TRUSTED_RELAY);
@@ -1869,66 +1871,15 @@ impl MlsService {
 
         // 6) Clean up if we were evicted from the group
         if was_evicted {
-            println!("[MLS] Cleaning up evicted group: {}", gid_for_fetch);
-            
-            // Mark group as evicted instead of deleting it
-            // This prevents accidental recreation while still allowing re-invites
-            let mut groups = self.read_groups().await.unwrap_or_default();
-            let mut marked = false;
-            for group in &mut groups {
-                if group.group_id == gid_for_fetch || group.engine_group_id == gid_for_fetch {
-                    group.evicted = true;
-                    marked = true;
-                    println!("[MLS] Marked group as evicted: {}", gid_for_fetch);
-                    break;
-                }
-            }
-            
-            if marked {
-                if let Err(e) = self.write_groups(&groups).await {
-                    eprintln!("[MLS] Failed to mark group as evicted: {}", e);
-                }
-            }
-            
             // Remove cursor for this group (will be reset if re-invited)
             cursors.remove(&gid_for_fetch);
             if let Err(e) = self.write_event_cursors(&cursors).await {
                 eprintln!("[MLS] Failed to remove cursor for evicted group: {}", e);
             }
             
-            // Delete the chat and all its messages from unified storage
-            // The chat_id is just the group_id itself (same as create_or_get_mls_group_chat uses)
-            let evicted_chat_id = gid_for_fetch.clone();
-            
-            // Remove from in-memory STATE first
-            {
-                let mut state = STATE.lock().await;
-                let original_count = state.chats.len();
-                state.chats.retain(|c| c.id() != evicted_chat_id.as_str());
-                if state.chats.len() < original_count {
-                    println!("[MLS] Removed evicted chat from in-memory STATE: {}", evicted_chat_id);
-                }
-            }
-            
-            // Then delete from database
-            if let Some(handle) = TAURI_APP.get() {
-                if let Err(e) = crate::db_migration::delete_chat(handle.clone(), &evicted_chat_id).await {
-                    eprintln!("[MLS] Failed to delete chat from storage: {}", e);
-                } else {
-                    println!("[MLS] Successfully deleted chat from storage: {}", evicted_chat_id);
-                }
-            }
-            
-            // NOW emit the event after all cleanup is complete
-            println!("[MLS] Emitting mls_group_left event for: {}", gid_for_fetch);
-            if let Some(handle) = TAURI_APP.get() {
-                if let Err(e) = handle.emit("mls_group_left", serde_json::json!({
-                    "group_id": gid_for_fetch
-                })) {
-                    eprintln!("[MLS] Failed to emit mls_group_left event: {}", e);
-                } else {
-                    println!("[MLS] Successfully emitted mls_group_left event");
-                }
+            // Perform full cleanup using the helper method
+            if let Err(e) = self.cleanup_evicted_group(&gid_for_fetch).await {
+                eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
             }
         } else {
             // 7) Advance cursor if anything processed (only if not evicted)
@@ -1950,6 +1901,63 @@ impl MlsService {
         }
 
         Ok((processed, new_msgs))
+    }
+
+    /// Clean up an evicted group (mark as evicted, remove from STATE, delete from DB)
+    /// This can be called from both sync and live subscription handlers
+    pub async fn cleanup_evicted_group(&self, group_id: &str) -> Result<(), MlsError> {
+        println!("[MLS] Cleaning up evicted group: {}", group_id);
+        
+        // 1. Mark group as evicted in metadata
+        let mut groups = self.read_groups().await.unwrap_or_default();
+        let mut marked = false;
+        for group in &mut groups {
+            if group.group_id == group_id || group.engine_group_id == group_id {
+                group.evicted = true;
+                marked = true;
+                println!("[MLS] Marked group as evicted: {}", group_id);
+                break;
+            }
+        }
+        
+        if marked {
+            if let Err(e) = self.write_groups(&groups).await {
+                eprintln!("[MLS] Failed to mark group as evicted: {}", e);
+            }
+        }
+        
+        // 2. Remove from in-memory STATE
+        {
+            let mut state = STATE.lock().await;
+            let original_count = state.chats.len();
+            state.chats.retain(|c| c.id() != group_id);
+            if state.chats.len() < original_count {
+                println!("[MLS] Removed evicted chat from in-memory STATE: {}", group_id);
+            }
+        }
+        
+        // 3. Delete from database
+        if let Some(handle) = TAURI_APP.get() {
+            if let Err(e) = crate::db_migration::delete_chat(handle.clone(), group_id).await {
+                eprintln!("[MLS] Failed to delete chat from storage: {}", e);
+            } else {
+                println!("[MLS] Successfully deleted chat from storage: {}", group_id);
+            }
+        }
+        
+        // 4. Emit event to frontend
+        println!("[MLS] Emitting mls_group_left event for: {}", group_id);
+        if let Some(handle) = TAURI_APP.get() {
+            if let Err(e) = handle.emit("mls_group_left", serde_json::json!({
+                "group_id": group_id
+            })) {
+                eprintln!("[MLS] Failed to emit mls_group_left event: {}", e);
+            } else {
+                println!("[MLS] Successfully emitted mls_group_left event");
+            }
+        }
+        
+        Ok(())
     }
 
     // Internal helper methods for store access

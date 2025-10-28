@@ -1606,8 +1606,11 @@ async fn notifs() -> Result<bool, String> {
 
                         // Not a member - ignore this group message
                         if !is_member {
+                            println!("[MLS][live] Ignoring event for group {} - not a member", group_wire_id);
                             return Ok(false);
                         }
+                        
+                        println!("[MLS][live] Processing event for group {} - we are a member", group_wire_id);
 
                         // Resolve my pubkey bech32 for 'mine' flag
                         let my_pubkey_bech32 = {
@@ -1638,8 +1641,10 @@ async fn notifs() -> Result<bool, String> {
                             let svc = MlsService::new_persistent(&app_handle).ok()?;
                             let engine = svc.engine().ok()?;
 
+                            println!("[MLS][live] About to call process_message for event: {}", ev.id.to_hex());
                             match engine.process_message(&ev) {
                                 Ok(res) => {
+                                    println!("[MLS][live] process_message returned Ok, result type: {:?}", std::mem::discriminant(&res));
                                     // Use unified storage via process_rumor
                                     match res {
                                         mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => {
@@ -1907,6 +1912,7 @@ async fn notifs() -> Result<bool, String> {
                                             processed
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Commit => {
+                                            println!("[MLS][live] Received Commit result for group: {}", group_id_for_persist);
                                             // Commit processed - member list may have changed
                                             // Check if we're still a member of this group
                                             use mdk_core::prelude::GroupId;
@@ -1925,25 +1931,14 @@ async fn notifs() -> Result<bool, String> {
                                             
                                             if !still_member {
                                                 // We've been removed from the group!
-                                                println!("[MLS][live] We were removed from group: {}", group_id_for_persist);
+                                                eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Commit - We were removed from group: {}", group_id_for_persist);
                                                 
-                                                // Remove group from local metadata (async operation)
+                                                // Perform full cleanup using the helper method
                                                 rt.block_on(async {
-                                                    let svc = MlsService::new_persistent(&app_handle).ok()?;
-                                                    let mut groups = svc.read_groups().await.ok()?;
-                                                    groups.retain(|g| g.group_id != group_id_for_persist && g.engine_group_id != group_id_for_persist);
-                                                    svc.write_groups(&groups).await.ok()?;
-                                                    Some(())
+                                                    if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                        eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                                    }
                                                 });
-                                                
-                                                // Emit event to remove group from UI
-                                                if let Some(handle) = TAURI_APP.get() {
-                                                    handle.emit("mls_group_left", serde_json::json!({
-                                                        "group_id": group_id_for_persist
-                                                    })).ok();
-                                                }
-                                                
-                                                println!("[MLS][live] Group removed from local state after being kicked");
                                             } else {
                                                 // Still a member, just update the UI
                                                 if let Some(handle) = TAURI_APP.get() {
@@ -1966,8 +1961,43 @@ async fn notifs() -> Result<bool, String> {
                                             }
                                             None
                                         }
-                                        // Other message types (ExternalJoinProposal, Unprocessable) are not persisted as chat messages
-                                        _ => None,
+                                        mdk_core::prelude::MessageProcessingResult::Unprocessable => {
+                                            println!("[MLS][live] Received Unprocessable result for group: {} - checking if we were evicted", group_id_for_persist);
+                                            
+                                            // Unprocessable can mean we've been kicked and can no longer decrypt group messages
+                                            // Check if we're still a member of this group
+                                            use mdk_core::prelude::GroupId;
+                                            let group_id_bytes = hex::decode(&group_id_for_persist).ok()?;
+                                            let mls_group_id = GroupId::from_slice(&group_id_bytes);
+                                            
+                                            let my_pubkey_hex = my_npub_for_block.clone();
+                                            let still_member = engine.get_members(&mls_group_id)
+                                                .ok()
+                                                .and_then(|members| {
+                                                    nostr_sdk::PublicKey::from_bech32(&my_pubkey_hex)
+                                                        .ok()
+                                                        .map(|pk| members.contains(&pk))
+                                                })
+                                                .unwrap_or(false);
+                                            
+                                            if !still_member {
+                                                // We've been removed from the group!
+                                                eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Unprocessable - We were removed from group: {}", group_id_for_persist);
+                                                
+                                                // Perform full cleanup using the helper method
+                                                rt.block_on(async {
+                                                    if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                        eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                                    }
+                                                });
+                                            }
+                                            None
+                                        }
+                                        // Other message types (ExternalJoinProposal) are not persisted as chat messages
+                                        _ => {
+                                            println!("[MLS][live] Unhandled message processing result type for group: {}", group_id_for_persist);
+                                            None
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -1979,12 +2009,12 @@ async fn notifs() -> Result<bool, String> {
                                        error_msg.contains("own leaf not found") {
                                         eprintln!("[MLS][live] ⚠️  EVICTION DETECTED in live subscription - group: {}", group_id_for_persist);
                                         
-                                        // Emit eviction event to trigger cleanup
-                                        if let Some(handle) = TAURI_APP.get() {
-                                            handle.emit("mls_group_left", serde_json::json!({
-                                                "group_id": group_id_for_persist
-                                            })).ok();
-                                        }
+                                        // Perform full cleanup using the helper method
+                                        rt.block_on(async {
+                                            if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                            }
+                                        });
                                     } else if !error_msg.contains("group not found") {
                                         eprintln!("[MLS] live process_message failed (id={}): {}", ev.id, error_msg);
                                     }
