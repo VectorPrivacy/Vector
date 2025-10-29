@@ -624,17 +624,13 @@ impl MlsService {
         let (evolution_event, welcome_rumors) = {
             let engine = self.engine()?;
             
-            println!("[MLS][add_member] Adding member to group_id={}, member={}", group_id, member_pubkey);
-            
             // Add member to group - returns AddMembersResult with evolution_event and welcome_rumors
             let add_result = engine
                 .add_members(&mls_group_id, std::slice::from_ref(&kp_event))
                 .map_err(|e| {
-                    eprintln!("[MLS][add_member] add_members failed: {}", e);
+                    eprintln!("[MLS] Failed to add member: {}", e);
                     MlsError::NostrMlsError(format!("Failed to add member: {}", e))
                 })?;
-
-            println!("[MLS][add_member] Member added, welcome rumors count: {}", add_result.welcome_rumors.as_ref().map(|w| w.len()).unwrap_or(0));
 
             (add_result.evolution_event, add_result.welcome_rumors)
         };
@@ -642,63 +638,26 @@ impl MlsService {
         // Send welcome before merging commit (welcome is created for current epoch)
         if let Some(welcome_rumors) = welcome_rumors {
             for welcome in welcome_rumors {
-                match client
-                    .gift_wrap_to([TRUSTED_RELAY], &member_pk, welcome, [])
-                    .await
-                {
-                    Ok(wrapper_id) => {
-                        println!(
-                            "[MLS][add_member][welcome_sent] wrapper_id={}, recipient={}, relay={}",
-                            wrapper_id.to_hex(),
-                            member_pubkey,
-                            TRUSTED_RELAY
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[MLS][add_member][welcome_error] recipient={}, relay={}, err={}",
-                            member_pubkey,
-                            TRUSTED_RELAY,
-                            e
-                        );
-                    }
+                if let Err(e) = client.gift_wrap_to([TRUSTED_RELAY], &member_pk, welcome, []).await {
+                    eprintln!("[MLS] Failed to send welcome: {}", e);
                 }
             }
         }
 
         // Publish evolution event (commit) to the relay
-        // The evolution_event is already a signed Event that other members will process
-        println!("[MLS][add_member] Publishing evolution_event: kind={}, id={}", evolution_event.kind.as_u16(), evolution_event.id.to_hex());
-        match client.send_event(&evolution_event).await {
-            Ok(event_id) => {
-                println!(
-                    "[MLS][add_member][commit_sent] event_id={}, relay={}",
-                    event_id.to_hex(),
-                    TRUSTED_RELAY
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "[MLS][add_member][commit_error] relay={}, err={}",
-                    TRUSTED_RELAY,
-                    e
-                );
-                // Don't fail the whole operation if publishing fails
-            }
+        if let Err(e) = client.send_event(&evolution_event).await {
+            eprintln!("[MLS] Failed to publish commit: {}", e);
         }
 
         // NOW merge the pending commit after welcome and evolution event are sent
-        // This advances our local epoch to match the committed state
         {
             let engine = self.engine()?;
-            println!("[MLS][add_member] Merging pending commit...");
             engine
                 .merge_pending_commit(&mls_group_id)
                 .map_err(|e| {
-                    eprintln!("[MLS][add_member] merge_pending_commit failed: {}", e);
+                    eprintln!("[MLS] Failed to merge commit: {}", e);
                     MlsError::NostrMlsError(format!("Failed to merge commit: {}", e))
                 })?;
-            println!("[MLS][add_member] Commit merged successfully");
         }
 
         // Update group metadata timestamp
@@ -752,41 +711,26 @@ impl MlsService {
         let evolution_event = {
             let engine = self.engine()?;
             
-            println!("[MLS][leave_group] Leaving group_id={}", group_id);
-            
             // Leave the group - returns LeaveGroupResult with evolution_event
             let leave_result = engine
                 .leave_group(&mls_group_id)
                 .map_err(|e| {
-                    eprintln!("[MLS][leave_group] leave_group failed: {}", e);
+                    eprintln!("[MLS] Failed to leave group: {}", e);
                     MlsError::NostrMlsError(format!("Failed to leave group: {}", e))
                 })?;
-
-            println!("[MLS][leave_group] Leave proposal created");
 
             leave_result.evolution_event
         };
 
         // Publish the evolution event (leave proposal) to the relay
-        match client
-            .send_event(&evolution_event)
-            .await
-        {
-            Ok(output) => {
-                println!("[MLS][leave_group][proposal_sent] output={:?}, relay={}", output, TRUSTED_RELAY);
-            }
-            Err(e) => {
-                eprintln!("[MLS][leave_group] Failed to publish leave proposal: {}", e);
-                // Don't fail the whole operation if publishing fails
-            }
+        if let Err(e) = client.send_event(&evolution_event).await {
+            eprintln!("[MLS] Failed to publish leave proposal: {}", e);
         }
 
         // Remove the group from local metadata
         let mut groups = self.read_groups().await?;
         groups.retain(|g| g.group_id != group_id && g.engine_group_id != group_meta.engine_group_id);
         self.write_groups(&groups).await?;
-
-        println!("[MLS][leave_group] Group removed from local metadata");
 
         // Emit event to refresh UI
         if let Some(handle) = TAURI_APP.get() {
@@ -833,101 +777,57 @@ impl MlsService {
         );
 
         // Sync the group first to ensure we have the latest state
-        println!("[MLS][remove_member] Syncing group to ensure latest state...");
         if let Err(e) = self.sync_group_since_cursor(group_id).await {
-            eprintln!("[MLS][remove_member] Warning: Failed to sync group before removal: {}", e);
-            // Continue anyway - the sync might fail if we're already up to date
+            eprintln!("[MLS] Failed to sync group before removal: {}", e);
         }
         
         // Perform engine operation (remove member but DON'T merge yet)
         let evolution_event = {
             let engine = self.engine()?;
             
-            println!("[MLS][remove_member] Removing member {} from group_id={}", member_pubkey, group_id);
-            
             // Verify the member exists in the group
             let current_members = engine.get_members(&mls_group_id)
                 .map_err(|e| {
-                    eprintln!("[MLS][remove_member] Failed to get current members: {}", e);
+                    eprintln!("[MLS] Failed to get current members: {}", e);
                     MlsError::NostrMlsError(format!("Failed to get group members: {}", e))
                 })?;
             
-            println!("[MLS][remove_member] Current group has {} members", current_members.len());
-            println!("[MLS][remove_member] All members in group:");
-            for (i, pk) in current_members.iter().enumerate() {
-                let npub = pk.to_bech32().unwrap_or_else(|_| "invalid".to_string());
-                println!("[MLS][remove_member]   {}. {} (matches target: {})",
-                    i + 1,
-                    npub,
-                    pk == &member_pk
-                );
-            }
-            println!("[MLS][remove_member] Target member to remove: {}", member_pubkey);
-            
             if !current_members.contains(&member_pk) {
-                eprintln!("[MLS][remove_member] Member {} not found in group.", member_pubkey);
+                eprintln!("[MLS] Member {} not found in group", member_pubkey);
                 return Err(MlsError::NostrMlsError(
-                    "Member not found in group. The group state may be out of sync. Try refreshing the member list.".to_string()
+                    "Member not found in group. The group state may be out of sync.".to_string()
                 ));
             }
-            
-            println!("[MLS][remove_member] Member verified in group, proceeding with removal");
-            
-            // Try to get more detailed info about the group state
-            // Check if there are any pending proposals that might interfere
-            println!("[MLS][remove_member] Attempting removal with MDK...");
             
             // Remove member from group - returns RemoveMembersResult with evolution_event
             let remove_result = engine
                 .remove_members(&mls_group_id, &[member_pk])
                 .map_err(|e| {
-                    let error_str = e.to_string();
-                    eprintln!("[MLS][remove_member] remove_members failed: {}", error_str);
-                    
-                    // If this is the "non-existing member" error, it might be a bug in MDK
-                    // or the member might have multiple leaf nodes and we're targeting the wrong one
-                    if error_str.contains("non-existing member") {
-                        eprintln!("[MLS][remove_member] DIAGNOSTIC: Member exists in get_members() but remove_members() fails");
-                        eprintln!("[MLS][remove_member] This suggests an internal MDK state inconsistency");
-                        eprintln!("[MLS][remove_member] Possible causes:");
-                        eprintln!("[MLS][remove_member]   1. Member has multiple devices/leaf nodes");
-                        eprintln!("[MLS][remove_member]   2. Pending proposals in the group");
-                        eprintln!("[MLS][remove_member]   3. MDK internal state mismatch");
-                    }
-                    
-                    MlsError::NostrMlsError(format!("Failed to remove member: {}", error_str))
+                    eprintln!("[MLS] Failed to remove member: {}", e);
+                    MlsError::NostrMlsError(format!("Failed to remove member: {}", e))
                 })?;
-
-            println!("[MLS][remove_member] Member removal commit created");
 
             remove_result.evolution_event
         };
 
         // Publish evolution event (commit) to the relay
-        // The evolution_event is already a signed Event that other members will process
-        println!("[MLS][remove_member] Publishing evolution_event: kind={}, id={}", evolution_event.kind.as_u16(), evolution_event.id.to_hex());
         match client.send_event(&evolution_event).await {
-            Ok(event_id) => {
-                println!("[MLS][remove_member][commit_published] event_id={}, relay={}", event_id.to_hex(), TRUSTED_RELAY);
-            }
+            Ok(_) => {}
             Err(e) => {
-                eprintln!("[MLS][remove_member] Failed to publish commit: {}", e);
+                eprintln!("[MLS] Failed to publish commit: {}", e);
                 return Err(MlsError::NetworkError(format!("Failed to publish commit: {}", e)));
             }
         }
 
         // NOW merge the pending commit after evolution event is sent
-        // This advances our local epoch to match the committed state
         {
             let engine = self.engine()?;
-            println!("[MLS][remove_member] Merging pending commit...");
             engine
                 .merge_pending_commit(&mls_group_id)
                 .map_err(|e| {
-                    eprintln!("[MLS][remove_member] merge_pending_commit failed: {}", e);
+                    eprintln!("[MLS] Failed to merge commit: {}", e);
                     MlsError::NostrMlsError(format!("Failed to merge commit: {}", e))
                 })?;
-            println!("[MLS][remove_member] Pending commit merged successfully");
         }
 
         // Emit event to refresh UI member list
@@ -936,8 +836,6 @@ impl MlsService {
                 "group_id": group_id
             })).ok();
         }
-
-        println!("[MLS][remove_member] Member removed successfully");
         Ok(())
     }
 
@@ -991,19 +889,12 @@ impl MlsService {
             });
         }
 
-        // Resolve target metadata and allow the caller to pass either wire_id (UI) or engine_id.
+        // Resolve target metadata
         let groups = self.read_groups().await?;
         let meta = match groups.iter().find(|g| g.group_id == group_id || (!g.engine_group_id.is_empty() && g.engine_group_id == group_id)) {
             Some(m) => m.clone(),
             None => {
-                eprintln!("[MLS] send_group_message: Group not found in metadata for id={}", group_id);
-                eprintln!("[MLS] Available groups in metadata:");
-                for g in &groups {
-                    eprintln!("[MLS]   - group_id (wire)={}, engine_group_id={}, name={}",
-                             g.group_id,
-                             if g.engine_group_id.is_empty() { "(empty)" } else { &g.engine_group_id },
-                             g.name);
-                }
+                eprintln!("[MLS] Group not found: {}", group_id);
                 
                 // Mark pending message as failed and emit full message
                 {
@@ -1100,14 +991,7 @@ impl MlsService {
                         return MlsError::NostrMlsError("Group has pending proposal. Please ask an admin to re-invite you.".to_string());
                     }
                     
-                    eprintln!("[MLS] This likely means the group is not in the engine's state");
-                    eprintln!("[MLS] Possible causes:");
-                    eprintln!("[MLS]   1. Group was accepted via welcome but engine_group_id wasn't captured properly");
-                    eprintln!("[MLS]   2. Engine state was lost/corrupted");
-                    eprintln!("[MLS]   3. Group was removed from engine but metadata remains");
-                    eprintln!("[MLS] Suggested actions:");
-                    eprintln!("[MLS]   • Sync welcomes to rejoin the group (accept pending invites)");
-                    eprintln!("[MLS]   • If the issue persists, request a fresh invite and accept it");
+                    eprintln!("[MLS] Group not found in engine state");
                     MlsError::NostrMlsError(format!("create_message: group not found - {}", e))
                 })?
         }; // engine dropped here
@@ -1340,8 +1224,7 @@ impl MlsService {
         
         if let Some(meta) = group_metadata {
             if meta.evicted {
-                println!("[MLS] Skipping sync for evicted group: {}", group_id);
-                return Ok((0, 0)); // Return success but don't sync
+                return Ok((0, 0)); // Skip sync for evicted group
             }
         }
 
@@ -1351,18 +1234,12 @@ impl MlsService {
         let now = Timestamp::now();
         
         let since = if let Some(cur) = cursors.get(group_id) {
-            // Existing cursor: continue from last seen
-            println!("[MLS][sync] Using existing cursor for group {}: last_seen_at={}, last_seen_id={}",
-                     group_id, cur.last_seen_at, cur.last_seen_event_id);
             Timestamp::from_secs(cur.last_seen_at)
         } else {
             // No cursor: default to last 48h for initial backfill
-            println!("[MLS][sync] No cursor found for group {}, using 48h backfill", group_id);
             Timestamp::from_secs(now.as_u64().saturating_sub(60 * 60 * 48))
         };
         let until = now;
-        
-        println!("[MLS][sync] Syncing group {} from {} to {}", group_id, since.as_u64(), until.as_u64());
 
         // Working group id for fetch/processing; prefer wire id from stored metadata if available
         let gid_for_fetch = if let Some(meta) = group_metadata {
@@ -1437,8 +1314,6 @@ impl MlsService {
             };
         }
 
-        println!("[MLS][sync] Fetched {} events for group {} (since={}, until={})",
-                 events.len(), gid_for_fetch, since.as_u64(), until.as_u64());
         
         if events.is_empty() {
             return Ok((0, 0));
@@ -1533,24 +1408,14 @@ impl MlsService {
                     let dummy_rumor = EventBuilder::new(Kind::Custom(9), "engine_check")
                         .build(nostr_sdk::PublicKey::from_hex("000000000000000000000000000000000000000000000000000000000000dead").unwrap());
                     
-                    match engine.create_message(&check_gid, dummy_rumor) {
-                        Ok(_) => {
-                            // Engine has group in state
-                        }
-                        Err(e) => {
-                            eprintln!("[MLS] ✗ Engine missing group {} - error: {}", check_id, e);
-                            eprintln!("[MLS]   → Group exists in metadata but not in engine state");
-                            eprintln!("[MLS]   → User needs to sync welcomes to rejoin this group");
-                            
-                            // Emit an event to notify the frontend that this group needs re-joining
-                            if let Some(handle) = TAURI_APP.get() {
-                                handle.emit("mls_group_needs_rejoin", serde_json::json!({
-                                    "group_id": gid_for_fetch,
-                                    "reason": "Group not found in MLS engine state"
-                                })).unwrap_or_else(|e| {
-                                    eprintln!("[MLS] Failed to emit mls_group_needs_rejoin event: {}", e);
-                                });
-                            }
+                    if let Err(e) = engine.create_message(&check_gid, dummy_rumor) {
+                        eprintln!("[MLS] Engine missing group: {}", e);
+                        
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_group_needs_rejoin", serde_json::json!({
+                                "group_id": gid_for_fetch,
+                                "reason": "Group not found in MLS engine state"
+                            })).ok();
                         }
                     }
                 }
@@ -1577,15 +1442,6 @@ impl MlsService {
                 match engine.process_message(ev) {
                     Ok(res) => {
                         // Log what type of message we got
-                        let msg_type = match &res {
-                            MessageProcessingResult::ApplicationMessage(_) => "ApplicationMessage",
-                            MessageProcessingResult::Commit => "Commit",
-                            MessageProcessingResult::Proposal(_) => "Proposal",
-                            MessageProcessingResult::ExternalJoinProposal => "ExternalJoinProposal",
-                            MessageProcessingResult::Unprocessable => "Unprocessable",
-                        };
-                        println!("[MLS][process] Event {} -> {}", ev.id.to_hex().chars().take(8).collect::<String>(), msg_type);
-                
                         match res {
                             MessageProcessingResult::ApplicationMessage(msg) => {
                                 // Convert MLS ApplicationMessage to RumorEvent for protocol-agnostic processing
@@ -1600,14 +1456,6 @@ impl MlsService {
 
                                 let is_mine = !my_pubkey_hex.is_empty() && msg.pubkey.to_hex() == my_pubkey_hex;
                                 let wrapper_id = msg.wrapper_event_id.to_hex();
-
-                                let author_short: String = msg.pubkey.to_hex().chars().take(8).collect();
-                                println!(
-                                    "[MLS] Buffering rumor for processing: kind={}, author={}, mine={}",
-                                    msg.kind.as_u16(),
-                                    author_short,
-                                    is_mine
-                                );
 
                                 // Buffer the rumor for async processing after engine scope
                                 rumors_to_process.push((rumor_event, wrapper_id, is_mine));
@@ -1626,16 +1474,7 @@ impl MlsService {
                                         let still_member = if let Some(pk) = my_pk {
                                             engine.get_members(&check_gid)
                                                 .ok()
-                                                .map(|members| {
-                                                    let is_member = members.contains(&pk);
-                                                    println!("[MLS] Member check after commit: group={}, my_pk={}, is_member={}, total_members={}",
-                                                        gid_for_fetch.chars().take(8).collect::<String>(),
-                                                        pk.to_string().chars().take(8).collect::<String>(),
-                                                        is_member,
-                                                        members.len()
-                                                    );
-                                                    is_member
-                                                })
+                                                .map(|members| members.contains(&pk))
                                                 .unwrap_or(false)
                                         } else {
                                             false
@@ -1643,18 +1482,11 @@ impl MlsService {
                                         
                                         if !still_member {
                                             // We've been removed from the group!
-                                            println!("[MLS] ⚠️  We were removed from group: {}", gid_for_fetch);
-                                            
-                                            // Note: We can't do async operations here in the engine scope
-                                            // The group removal will be handled when they try to use the group next
-                                            // For now, just emit the event
                                             if let Some(handle) = TAURI_APP.get() {
                                                 handle.emit("mls_group_left", serde_json::json!({
                                                     "group_id": gid_for_fetch
                                                 })).ok();
                                             }
-                                            
-                                            println!("[MLS] Emitted group_left event - group will be cleaned up");
                                         } else {
                                             // Still a member, just update the UI
                                             if let Some(handle) = TAURI_APP.get() {
@@ -1708,9 +1540,7 @@ impl MlsService {
                             eprintln!("[MLS] ⚠️  EVICTION DETECTED - We were removed from group: {}", gid_for_fetch);
                             
                             // Set flag to remove this group after engine scope
-                            // The event will be emitted AFTER cleanup is complete
                             was_evicted = true;
-                            println!("[MLS] Will remove group {} from local state after sync", gid_for_fetch);
                         } else if !error_msg.contains("group not found") {
                             eprintln!(
                                 "[MLS] process_message failed (group_id={}, id={}): {}",
@@ -1727,10 +1557,7 @@ impl MlsService {
 
         // Process buffered rumors and persist after engine scope ends using unified Chat storage
         // BUT: Skip if we were evicted from this group during sync
-        if !rumors_to_process.is_empty() {
-            if was_evicted {
-                println!("[MLS] Skipping {} buffered rumors - group was evicted during sync", rumors_to_process.len());
-            } else {
+        if !rumors_to_process.is_empty() && !was_evicted {
             // Get or create the MLS group chat in STATE with metadata
             let chat_id = {
                 let mut state = STATE.lock().await;
@@ -1807,12 +1634,6 @@ impl MlsService {
                                         false
                                     }
                                 };
-                                
-                                if was_added {
-                                    println!("[MLS] Reaction added to group message: {}", reaction.reference_id);
-                                } else {
-                                    println!("[MLS] Reaction target message not found: {}", reaction.reference_id);
-                                }
                             }
                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
                                 let profile_short: String = profile_id.chars().take(16).collect();
@@ -1856,15 +1677,14 @@ impl MlsService {
                 }
             }
             
-                // Persist the chat and its messages using unified storage
-                if let Some(handle) = TAURI_APP.get() {
-                    let state = STATE.lock().await;
-                    if let Some(chat) = state.get_chat(&chat_id) {
-                        // Save chat metadata
-                        let _ = save_chat(handle.clone(), chat).await;
-                        // Save all messages
-                        let _ = save_chat_messages(handle.clone(), &chat_id, &chat.messages).await;
-                    }
+            // Persist the chat and its messages using unified storage
+            if let Some(handle) = TAURI_APP.get() {
+                let state = STATE.lock().await;
+                if let Some(chat) = state.get_chat(&chat_id) {
+                    // Save chat metadata
+                    let _ = save_chat(handle.clone(), chat).await;
+                    // Save all messages
+                    let _ = save_chat_messages(handle.clone(), &chat_id, &chat.messages).await;
                 }
             }
         }
@@ -1906,8 +1726,6 @@ impl MlsService {
     /// Clean up an evicted group (mark as evicted, remove from STATE, delete from DB)
     /// This can be called from both sync and live subscription handlers
     pub async fn cleanup_evicted_group(&self, group_id: &str) -> Result<(), MlsError> {
-        println!("[MLS] Cleaning up evicted group: {}", group_id);
-        
         // 1. Mark group as evicted in metadata
         let mut groups = self.read_groups().await.unwrap_or_default();
         let mut marked = false;
@@ -1915,7 +1733,6 @@ impl MlsService {
             if group.group_id == group_id || group.engine_group_id == group_id {
                 group.evicted = true;
                 marked = true;
-                println!("[MLS] Marked group as evicted: {}", group_id);
                 break;
             }
         }
@@ -1929,31 +1746,22 @@ impl MlsService {
         // 2. Remove from in-memory STATE
         {
             let mut state = STATE.lock().await;
-            let original_count = state.chats.len();
             state.chats.retain(|c| c.id() != group_id);
-            if state.chats.len() < original_count {
-                println!("[MLS] Removed evicted chat from in-memory STATE: {}", group_id);
-            }
         }
         
         // 3. Delete from database
         if let Some(handle) = TAURI_APP.get() {
             if let Err(e) = crate::db_migration::delete_chat(handle.clone(), group_id).await {
                 eprintln!("[MLS] Failed to delete chat from storage: {}", e);
-            } else {
-                println!("[MLS] Successfully deleted chat from storage: {}", group_id);
             }
         }
         
         // 4. Emit event to frontend
-        println!("[MLS] Emitting mls_group_left event for: {}", group_id);
         if let Some(handle) = TAURI_APP.get() {
             if let Err(e) = handle.emit("mls_group_left", serde_json::json!({
                 "group_id": group_id
             })) {
                 eprintln!("[MLS] Failed to emit mls_group_left event: {}", e);
-            } else {
-                println!("[MLS] Successfully emitted mls_group_left event");
             }
         }
         
@@ -2273,14 +2081,35 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent) -
             };
             
             // Now get the MLS engine and create message (no await while engine is in scope)
-            let mls_wrapper = {
+            let mls_wrapper_result = {
                 let engine = service.engine()
                     .map_err(|e| format!("Failed to get MLS engine: {}", e))?;
                 
-                engine
-                    .create_message(&engine_group_id, rumor.clone())
-                    .map_err(|e| format!("Failed to create MLS message: {}", e))?
+                engine.create_message(&engine_group_id, rumor.clone())
             }; // engine dropped here
+            
+            // Check for eviction errors after engine is dropped
+            let mls_wrapper = match mls_wrapper_result {
+                Ok(wrapper) => wrapper,
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    
+                    // Check if this is an eviction error
+                    if error_msg.contains("own leaf not found") ||
+                       error_msg.contains("after being evicted") ||
+                       error_msg.contains("evicted from it") ||
+                       error_msg.contains("group not found") {
+                        eprintln!("[MLS] Eviction detected while sending to group: {}", group_id);
+                        
+                        // Perform cleanup (we're in an async context now)
+                        if let Err(cleanup_err) = service.cleanup_evicted_group(&group_id).await {
+                            eprintln!("[MLS] Failed to cleanup evicted group: {}", cleanup_err);
+                        }
+                    }
+                    
+                    return Err(format!("Failed to create MLS message: {}", e));
+                }
+            };
             
             // Check if this is a typing indicator and add expiration to wrapper if so
             let is_typing_indicator = rumor.kind == nostr_sdk::Kind::ApplicationSpecificData
@@ -2320,19 +2149,13 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent) -
                     .send_event_to([TRUSTED_RELAY], &wrapper_with_expiry)
                     .await
                     .map_err(|e| format!("Failed to send MLS wrapper: {}", e))?;
-                
-                println!("[MLS] Sent typing indicator to group {} with 30s expiration (wrapper id={})", group_id, wrapper_with_expiry.id);
             } else {
                 // Send normal wrapper without expiration
                 client
                     .send_event_to([TRUSTED_RELAY], &mls_wrapper)
                     .await
                     .map_err(|e| format!("Failed to send MLS wrapper: {}", e))?;
-                
-                println!("[MLS] Sent message to group {} (wrapper id={})", group_id, mls_wrapper.id);
             }
-            
-            println!("[MLS] Sent message to group {} (wrapper id={})", group_id, mls_wrapper.id);
             
             Ok(())
         })

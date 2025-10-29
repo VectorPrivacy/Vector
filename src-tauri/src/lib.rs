@@ -1053,8 +1053,6 @@ async fn start_typing(receiver: String) -> bool {
         Err(_) => {
             // This is a group chat - use MLS
             let group_id = receiver.clone();
-            let group_short: String = group_id.chars().take(8).collect();
-            println!("[TYPING] 📤 Sending MLS group typing indicator: me={} → group={}", my_pubkey_short, group_short);
             
             // Build the typing indicator rumor
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
@@ -1070,14 +1068,8 @@ async fn start_typing(receiver: String) -> bool {
 
             // Send via MLS
             match mls::send_mls_message(&group_id, rumor).await {
-                Ok(_) => {
-                    println!("[TYPING] ✅ MLS group typing indicator sent successfully");
-                    true
-                }
-                Err(e) => {
-                    eprintln!("[TYPING] ❌ Failed to send MLS group typing indicator: {}", e);
-                    false
-                }
+                Ok(_) => true,
+                Err(_e) => false,
             }
         }
     }
@@ -1168,12 +1160,9 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         if let Ok(mls) = svc {
                             if let Ok(engine) = mls.engine() {
                                 match engine.process_welcome(&wrapper_id, &unsigned) {
-                                    Ok(_) => {
-                                        println!("[MLS][live][welcome] processed wrapper_id={}", wrapper_id);
-                                        return true;
-                                    }
+                                    Ok(_) => return true,
                                     Err(e) => {
-                                        eprintln!("[MLS][live][welcome] process_welcome failed wrapper_id={} err={}", wrapper_id, e);
+                                        eprintln!("[MLS] Failed to process welcome: {}", e);
                                         return false;
                                     }
                                 }
@@ -1196,7 +1185,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         return false;
                     }
                 } else {
-                    eprintln!("[MLS][live][welcome] failed to convert rumor to UnsignedEvent");
+                    eprintln!("[MLS] Failed to convert rumor to UnsignedEvent");
                     return false;
                 }
             }
@@ -1515,24 +1504,6 @@ async fn list_group_cursors() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn reset_group_cursor(group_id: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            let mut cursors = mls.read_event_cursors().await.map_err(|e| e.to_string())?;
-            cursors.remove(&group_id);
-            mls.write_event_cursors(&cursors).await.map_err(|e| e.to_string())?;
-            println!("[MLS] Reset cursor for group: {}", group_id);
-            Ok(())
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
-
-#[tauri::command]
 async fn notifs() -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
@@ -1606,12 +1577,9 @@ async fn notifs() -> Result<bool, String> {
 
                         // Not a member - ignore this group message
                         if !is_member {
-                            println!("[MLS][live] Ignoring event for group {} - not a member", group_wire_id);
                             return Ok(false);
                         }
                         
-                        println!("[MLS][live] Processing event for group {} - we are a member", group_wire_id);
-
                         // Resolve my pubkey for filtering and 'mine' flag
                         let (my_pubkey, my_pubkey_bech32) = {
                             let client = NOSTR_CLIENT.get().unwrap();
@@ -1629,7 +1597,6 @@ async fn notifs() -> Result<bool, String> {
                         // Skip processing our own events - they're already processed locally when sent
                         if let Some(my_pk) = my_pubkey {
                             if ev.pubkey == my_pk {
-                                println!("[MLS][live] Skipping our own event for group: {}", group_wire_id);
                                 return Ok(false);
                             }
                         }
@@ -1649,10 +1616,8 @@ async fn notifs() -> Result<bool, String> {
                             let svc = MlsService::new_persistent(&app_handle).ok()?;
                             let engine = svc.engine().ok()?;
 
-                            println!("[MLS][live] About to call process_message for event: {}", ev.id.to_hex());
                             match engine.process_message(&ev) {
                                 Ok(res) => {
-                                    println!("[MLS][live] process_message returned Ok, result type: {:?}", std::mem::discriminant(&res));
                                     // Use unified storage via process_rumor
                                     match res {
                                         mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => {
@@ -1870,7 +1835,7 @@ async fn notifs() -> Result<bool, String> {
                                                             }
                                                             RumorProcessingResult::Reaction(reaction) => {
                                                                 // Handle reactions in real-time
-                                                                let was_added = {
+                                                                let _was_added = {
                                                                     let mut state = crate::STATE.lock().await;
                                                                     if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
                                                                         msg.add_reaction(reaction.clone(), Some(chat_id))
@@ -1878,10 +1843,6 @@ async fn notifs() -> Result<bool, String> {
                                                                         false
                                                                     }
                                                                 };
-                                                                
-                                                                if was_added {
-                                                                    println!("[MLS][live] Reaction added: {}", reaction.reference_id);
-                                                                }
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
@@ -1904,7 +1865,6 @@ async fn notifs() -> Result<bool, String> {
                                                                     }));
                                                                 }
                                                                 
-                                                                println!("[MLS][live] Typing indicator processed for group: {}", group_id_for_persist);
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::Ignored => None,
@@ -1920,7 +1880,6 @@ async fn notifs() -> Result<bool, String> {
                                             processed
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Commit => {
-                                            println!("[MLS][live] Received Commit result for group: {}", group_id_for_persist);
                                             // Commit processed - member list may have changed
                                             // Check if we're still a member of this group
                                             use mdk_core::prelude::GroupId;
@@ -1941,18 +1900,17 @@ async fn notifs() -> Result<bool, String> {
                                             match membership_check {
                                                 Some(false) => {
                                                     // Successfully checked and confirmed NOT a member - evict!
-                                                    eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Commit - We were removed from group: {}", group_id_for_persist);
+                                                    eprintln!("[MLS] Eviction detected via Commit - group: {}", group_id_for_persist);
                                                     
                                                     // Perform full cleanup using the helper method
                                                     rt.block_on(async {
                                                         if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                                                            eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                                            eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
                                                         }
                                                     });
                                                 }
                                                 Some(true) => {
                                                     // Still a member, just update the UI
-                                                    println!("[MLS][live] Commit processed, still a member of group: {}", group_id_for_persist);
                                                     if let Some(handle) = TAURI_APP.get() {
                                                         handle.emit("mls_group_updated", serde_json::json!({
                                                             "group_id": group_id_for_persist
@@ -1961,7 +1919,6 @@ async fn notifs() -> Result<bool, String> {
                                                 }
                                                 None => {
                                                     // Check failed - don't evict, just update UI
-                                                    println!("[MLS][live] Commit processed but couldn't verify membership (NOT evicting)");
                                                     if let Some(handle) = TAURI_APP.get() {
                                                         handle.emit("mls_group_updated", serde_json::json!({
                                                             "group_id": group_id_for_persist
@@ -1973,8 +1930,6 @@ async fn notifs() -> Result<bool, String> {
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Proposal(_proposal) => {
                                             // Proposal received (e.g., leave proposal)
-                                            println!("[MLS][live] Received proposal for group: {}", group_id_for_persist);
-                                            
                                             // Emit event to notify UI that group state may have changed
                                             if let Some(handle) = TAURI_APP.get() {
                                                 handle.emit("mls_group_updated", serde_json::json!({
@@ -1986,14 +1941,10 @@ async fn notifs() -> Result<bool, String> {
                                         mdk_core::prelude::MessageProcessingResult::Unprocessable => {
                                             // Unprocessable result - could be many reasons (out of order, can't decrypt, etc.)
                                             // Don't try to detect eviction here - wait for next message to trigger error-based detection
-                                            println!("[MLS][live] Received Unprocessable result for group: {} (ignoring - eviction will be detected on next message if real)", group_id_for_persist);
                                             None
                                         }
                                         // Other message types (ExternalJoinProposal) are not persisted as chat messages
-                                        _ => {
-                                            println!("[MLS][live] Unhandled message processing result type for group: {}", group_id_for_persist);
-                                            None
-                                        }
+                                        _ => None,
                                     }
                                 }
                                 Err(e) => {
@@ -2003,12 +1954,12 @@ async fn notifs() -> Result<bool, String> {
                                     if error_msg.contains("evicted from it") ||
                                        error_msg.contains("after being evicted") ||
                                        error_msg.contains("own leaf not found") {
-                                        eprintln!("[MLS][live] ⚠️  EVICTION DETECTED in live subscription - group: {}", group_id_for_persist);
+                                        eprintln!("[MLS] Eviction detected in live subscription - group: {}", group_id_for_persist);
                                         
                                         // Perform full cleanup using the helper method
                                         rt.block_on(async {
                                             if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                                                eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
+                                                eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
                                             }
                                         });
                                     } else if !error_msg.contains("group not found") {
@@ -2783,15 +2734,8 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
             std::thread::sleep(std::time::Duration::from_millis(800));
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
-                println!("[MLS] Spawning post-decrypt MLS group sync...");
-                match sync_mls_groups_now(None).await {
-                    Ok((processed, new_msgs)) => {
-                        println!("[MLS] Post-decrypt MLS sync finished: processed={}, new={}", processed, new_msgs);
-                    }
-                    Err(e) => {
-                        // Best-effort; do not affect login flow
-                        eprintln!("[MLS] Post-decrypt MLS sync failed: {}", e);
-                    }
+                if let Err(e) = sync_mls_groups_now(None).await {
+                    eprintln!("[MLS] Post-decrypt sync failed: {}", e);
                 }
             });
         });
@@ -3333,20 +3277,16 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
                 Ok(events) => {
                     // Check if we got any events - if so, the cached KeyPackage exists on relay
                     if events.iter().next().is_some() {
-                        println!("[MLS][KeyPackage] Verified on relay, using cached");
                         return Ok(serde_json::json!({
                             "device_id": device_id,
                             "owner_pubkey": owner_pubkey_b32,
                             "keypackage_ref": ref_id,
                             "cached": true
                         }));
-                    } else {
-                        println!("[MLS][KeyPackage] Not found on relay, creating new one");
-                        // Fall through to create new KeyPackage
                     }
+                    // Fall through to create new KeyPackage
                 }
                 _ => {
-                    println!("[MLS][KeyPackage] Not found on relay, creating new one");
                     // Fall through to create new KeyPackage
                 }
             }
@@ -4528,7 +4468,6 @@ pub fn run() {
             remove_mls_member_device,
             get_mls_group_members,
             leave_mls_group,
-            reset_group_cursor,
             list_group_cursors,
             refresh_keypackages_for_contact,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
