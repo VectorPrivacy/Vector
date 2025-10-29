@@ -1612,19 +1612,27 @@ async fn notifs() -> Result<bool, String> {
                         
                         println!("[MLS][live] Processing event for group {} - we are a member", group_wire_id);
 
-                        // Resolve my pubkey bech32 for 'mine' flag
-                        let my_pubkey_bech32 = {
+                        // Resolve my pubkey for filtering and 'mine' flag
+                        let (my_pubkey, my_pubkey_bech32) = {
                             let client = NOSTR_CLIENT.get().unwrap();
                             if let Ok(signer) = client.signer().await {
                                 if let Ok(pk) = signer.get_public_key().await {
-                                    pk.to_bech32().unwrap()
+                                    (Some(pk), pk.to_bech32().unwrap())
                                 } else {
-                                    String::new()
+                                    (None, String::new())
                                 }
                             } else {
-                                String::new()
+                                (None, String::new())
                             }
                         };
+                        
+                        // Skip processing our own events - they're already processed locally when sent
+                        if let Some(my_pk) = my_pubkey {
+                            if ev.pubkey == my_pk {
+                                println!("[MLS][live] Skipping our own event for group: {}", group_wire_id);
+                                return Ok(false);
+                            }
+                        }
 
                         // Process with non-Send MLS engine on a blocking thread (no awaits in scope)
                         let app_handle = TAURI_APP.get().unwrap().clone();
@@ -1921,19 +1929,18 @@ async fn notifs() -> Result<bool, String> {
                                             
                                             let my_pubkey_hex = my_npub_for_block.clone();
                                             
-                                            // Be VERY careful here - only evict if we're CERTAIN they were removed
-                                            // If get_members() fails, we should NOT evict (could be a temporary error)
+                                            // Only evict if we can POSITIVELY CONFIRM removal
                                             let membership_check = engine.get_members(&mls_group_id)
-                                                .map(|members| {
+                                                .ok()
+                                                .and_then(|members| {
                                                     nostr_sdk::PublicKey::from_bech32(&my_pubkey_hex)
                                                         .ok()
                                                         .map(|pk| members.contains(&pk))
-                                                        .unwrap_or(true) // If pubkey parsing fails, assume still member (safe default)
                                                 });
                                             
                                             match membership_check {
-                                                Ok(is_member) if !is_member => {
-                                                    // We successfully checked membership and we're NOT a member - evict!
+                                                Some(false) => {
+                                                    // Successfully checked and confirmed NOT a member - evict!
                                                     eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Commit - We were removed from group: {}", group_id_for_persist);
                                                     
                                                     // Perform full cleanup using the helper method
@@ -1943,7 +1950,7 @@ async fn notifs() -> Result<bool, String> {
                                                         }
                                                     });
                                                 }
-                                                Ok(_is_member) => {
+                                                Some(true) => {
                                                     // Still a member, just update the UI
                                                     println!("[MLS][live] Commit processed, still a member of group: {}", group_id_for_persist);
                                                     if let Some(handle) = TAURI_APP.get() {
@@ -1952,10 +1959,9 @@ async fn notifs() -> Result<bool, String> {
                                                         })).ok();
                                                     }
                                                 }
-                                                Err(e) => {
-                                                    // get_members() failed - DO NOT EVICT, could be temporary error
-                                                    // Still emit update event in case UI needs refreshing
-                                                    eprintln!("[MLS][live] Failed to check membership for Commit (NOT evicting): {}", e);
+                                                None => {
+                                                    // Check failed - don't evict, just update UI
+                                                    println!("[MLS][live] Commit processed but couldn't verify membership (NOT evicting)");
                                                     if let Some(handle) = TAURI_APP.get() {
                                                         handle.emit("mls_group_updated", serde_json::json!({
                                                             "group_id": group_id_for_persist
@@ -1978,47 +1984,9 @@ async fn notifs() -> Result<bool, String> {
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Unprocessable => {
-                                            println!("[MLS][live] Received Unprocessable result for group: {} - checking if we were evicted", group_id_for_persist);
-                                            
-                                            // Unprocessable can mean we've been kicked and can no longer decrypt group messages
-                                            // Check if we're still a member of this group
-                                            use mdk_core::prelude::GroupId;
-                                            let group_id_bytes = hex::decode(&group_id_for_persist).ok()?;
-                                            let mls_group_id = GroupId::from_slice(&group_id_bytes);
-                                            
-                                            let my_pubkey_hex = my_npub_for_block.clone();
-                                            
-                                            // Be VERY careful here - only evict if we're CERTAIN they were removed
-                                            // If get_members() fails, we should NOT evict (could be a temporary error)
-                                            let membership_check = engine.get_members(&mls_group_id)
-                                                .map(|members| {
-                                                    nostr_sdk::PublicKey::from_bech32(&my_pubkey_hex)
-                                                        .ok()
-                                                        .map(|pk| members.contains(&pk))
-                                                        .unwrap_or(true) // If pubkey parsing fails, assume still member (safe default)
-                                                });
-                                            
-                                            match membership_check {
-                                                Ok(is_member) if !is_member => {
-                                                    // We successfully checked membership and we're NOT a member - evict!
-                                                    eprintln!("[MLS][live] ⚠️  EVICTION DETECTED via Unprocessable - We were removed from group: {}", group_id_for_persist);
-                                                    
-                                                    // Perform full cleanup using the helper method
-                                                    rt.block_on(async {
-                                                        if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
-                                                            eprintln!("[MLS][live] Failed to cleanup evicted group: {}", e);
-                                                        }
-                                                    });
-                                                }
-                                                Ok(is_member) => {
-                                                    // Still a member, Unprocessable might be due to other reasons
-                                                    println!("[MLS][live] Unprocessable but still a member of group: {}", group_id_for_persist);
-                                                }
-                                                Err(e) => {
-                                                    // get_members() failed - DO NOT EVICT, could be temporary error
-                                                    eprintln!("[MLS][live] Failed to check membership for Unprocessable event (NOT evicting): {}", e);
-                                                }
-                                            }
+                                            // Unprocessable result - could be many reasons (out of order, can't decrypt, etc.)
+                                            // Don't try to detect eviction here - wait for next message to trigger error-based detection
+                                            println!("[MLS][live] Received Unprocessable result for group: {} (ignoring - eviction will be detected on next message if real)", group_id_for_persist);
                                             None
                                         }
                                         // Other message types (ExternalJoinProposal) are not persisted as chat messages
