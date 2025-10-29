@@ -1008,7 +1008,6 @@ async fn start_typing(receiver: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
-    let my_pubkey_short: String = my_public_key.to_hex().chars().take(8).collect();
 
     // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
@@ -1879,13 +1878,9 @@ async fn notifs() -> Result<bool, String> {
     
                                             processed
                                         }
-                                        mdk_core::prelude::MessageProcessingResult::Commit => {
+                                        mdk_core::prelude::MessageProcessingResult::Commit { mls_group_id } => {
                                             // Commit processed - member list may have changed
                                             // Check if we're still a member of this group
-                                            use mdk_core::prelude::GroupId;
-                                            let group_id_bytes = hex::decode(&group_id_for_persist).ok()?;
-                                            let mls_group_id = GroupId::from_slice(&group_id_bytes);
-                                            
                                             let my_pubkey_hex = my_npub_for_block.clone();
                                             
                                             // Only evict if we can POSITIVELY CONFIRM removal
@@ -1938,7 +1933,7 @@ async fn notifs() -> Result<bool, String> {
                                             }
                                             None
                                         }
-                                        mdk_core::prelude::MessageProcessingResult::Unprocessable => {
+                                        mdk_core::prelude::MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
                                             // Unprocessable result - could be many reasons (out of order, can't decrypt, etc.)
                                             // Don't try to detect eviction here - wait for next message to trigger error-based detection
                                             None

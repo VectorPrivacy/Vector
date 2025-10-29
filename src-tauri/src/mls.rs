@@ -1461,7 +1461,7 @@ impl MlsService {
                                 rumors_to_process.push((rumor_event, wrapper_id, is_mine));
                                 new_msgs = new_msgs.saturating_add(1);
                             }
-                            MessageProcessingResult::Commit => {
+                            MessageProcessingResult::Commit { mls_group_id: _ } => {
                                 // Commit processed - member list may have changed
                                 // Check if we're still a member of this group
                                 // Use group_check_id (engine's group_id) instead of gid_for_fetch (wrapper id)
@@ -1502,11 +1502,7 @@ impl MlsService {
                             }
                             MessageProcessingResult::Proposal(_proposal) => {
                                 // Proposal received (e.g., leave proposal)
-                                // The proposal has been processed and stored in the MLS group state
-                                println!("[MLS] Received proposal for group: {}", gid_for_fetch);
-                                
                                 // Emit event to notify UI that group state may have changed
-                                // The admin will need to manually commit proposals or we can auto-commit in the future
                                 if let Some(handle) = TAURI_APP.get() {
                                     handle.emit("mls_group_updated", serde_json::json!({
                                         "group_id": gid_for_fetch
@@ -1515,12 +1511,12 @@ impl MlsService {
                                 
                                 processed = processed.saturating_add(1);
                             }
-                            MessageProcessingResult::ExternalJoinProposal => {
+                            MessageProcessingResult::ExternalJoinProposal { mls_group_id: _ } => {
                                 // No-op for local message persistence
                             }
-                            MessageProcessingResult::Unprocessable => {
+                            MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
                                 // Log unprocessable events for debugging
-                                eprintln!("[MLS][process] Unprocessable event: id={}, created_at={}",
+                                eprintln!("[MLS] Unprocessable event: id={}, created_at={}",
                                          ev.id.to_hex(), ev.created_at.as_u64());
                             }
                         }
@@ -1626,14 +1622,10 @@ impl MlsService {
                             }
                             RumorProcessingResult::Reaction(reaction) => {
                                 // Reactions now work with unified storage!
-                                let was_added = {
-                                    let mut state = STATE.lock().await;
-                                    if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
-                                        msg.add_reaction(reaction.clone(), Some(chat_id))
-                                    } else {
-                                        false
-                                    }
-                                };
+                                let mut state = STATE.lock().await;
+                                if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
+                                    msg.add_reaction(reaction.clone(), Some(chat_id));
+                                }
                             }
                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
                                 let profile_short: String = profile_id.chars().take(16).collect();
