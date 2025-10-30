@@ -151,6 +151,14 @@
   mask-image: url("./icons/send.svg");
 }
 
+.icon-users {
+  mask-image: url("./icons/users.svg");
+}
+
+.icon-chevron-double-right {
+  mask-image: url("./icons/chevron-double-right.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -198,6 +206,56 @@ body {
   flex-direction: column;
   justify-content: center;
   text-align: center;
+}
+
+/* Login Page*/
+#login-form {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #060606;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 400px;
+  padding: 40px 20px;
+}
+
+.login-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  width: 100%;
+  margin-top: 40px;
+}
+
+.login-buttons button {
+  width: 100%;
+  margin: 0;
+}
+
+.login-credits {
+  margin-top: 30px;
+  opacity: 0.7;
+}
+
+/* Widescreen login*/
+@media (min-width: 1024px) {
+  #login-form {
+    position: fixed;
+    background: #060606;
+  }
 }
 
 .settings-btn {
@@ -3015,4 +3073,252 @@ select:disabled:hover {
   display: inline-block !important;
   -webkit-appearance: checkbox;
   appearance: checkbox;
+}
+
+.icon-users {
+  background-color: var(--icon-color-primary) !important;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.icon-chevron-double-right {
+  background-color: var(--icon-color-primary) !important;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.icon-bookmark {
+  background-color: var(--icon-color-primary) !important;
+  margin-top: -10px;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+/* Widescreen Layout */
+@media (min-width: 1024px) {
+  .container {
+    flex-direction: row;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* Left Panel - Navigation and Content */
+  .left-panel {
+    width: 400px;
+    min-width: 400px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    background-color: #060606;
+  }
+
+  /* Right Panel - Chat Area */
+  .right-panel {
+    flex: 1;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-color: #0a0a0a;
+    position: relative;
+  }
+
+  /* Member Panel */
+.member-panel {
+  width: 240px;
+  background: #000000; /* Changed to black */
+  border-left: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+}
+
+.member-panel-header {
+  padding: 16px 8px 8px 16px; /* Reduced bottom padding */
+  font-size: 12px;
+  font-weight: 600;
+  color: #8e9297;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0; /* Remove margin */
+  border-bottom: 1px solid #333;
+}
+
+  /* Hello Screen */
+  .hello-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .hello-title {
+    font-size: 32px;
+    margin-bottom: 15px;
+    color: #59fcb3;
+  }
+
+  .hello-subtitle {
+    font-size: 16px;
+    opacity: 0.7;
+    line-height: 1.5;
+    max-width: 400px;
+  }
+
+  /* Adjust existing components for widescreen */
+  #chats {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  #profile,
+  #settings,
+  #invites {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .navbar {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+  
+  #profile > div:first-child {
+  padding-top: 25px !important;
+  min-height: 95px !important;
+  align-items: center;
+}
+
+#profile-name {
+  margin-top: 40px !important;
+}
+
+  /* Chat tab account header in left panel */
+  .account {
+    padding-top: 25px;
+    padding-bottom: 25px;
+  }
+
+  /* Chat in right panel */
+  #chat {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    padding-top: 0 !important;
+  }
+
+  .chat-new-header,
+  .chat-new-content,
+  .chat-new-center-content,
+  .chat-new-input-box {
+    position: relative;
+    bottom: auto;
+    width: auto;
+  }
+
+  .chat-new-center-content {
+    margin-top: 50px;
+  }
+
+  /* Create Group adjustments */
+  #create-group {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  /* Member list styles */
+.member-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 8px 0 8px; /* Reduced bottom padding, added top padding */
+}
+
+.member-item {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  border-radius: 4px;
+  margin-bottom: 2px;
+}
+
+.member-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  margin-right: 12px;
+}
+
+.member-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.member-name {
+  font-size: 14px;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.member-count {
+  margin-top: 20px;
+  text-align: left;
+  margin-left: 15px;
+}
+
+  /* Panel toggle button */
+  .panel-toggle {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+  }
+
+  /* Ensure encrypted notes stays in left panel */
+  .chat-bookmarks-btn {
+    position: absolute;
+    top: 28px;
+    right: 23px;
+    z-index: 10;
+  }
+}
+
+/* Smooth transitions for layout changes */
+.layout-transition {
+  transition: all 0.3s ease-in-out;
+}
+
+/* Mobile view (default) */
+@media (max-width: 1023px) {
+  .left-panel,
+  .right-panel,
+  .member-panel {
+    width: 100% !important;
+    min-width: auto !important;
+  }
+  
+  .hello-screen {
+    display: none !important;
+  }
+
+  .panel-toggle {
+      display: none !important;
+    }
+    
+  .member-panel {
+      display: none !important;
+    }
 }

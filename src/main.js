@@ -2209,6 +2209,15 @@ function renderCurrentProfile(cProfile) {
     /* Start Chat Tab */
     // Render our Share npub
     domShareNpub.textContent = strPubkey;
+
+    // In widescreen, ensure the encrypted notes button is properly positioned
+  if (isWidescreen && domChatBookmarksBtn) {
+    domChatBookmarksBtn.style.position = 'absolute';
+    domChatBookmarksBtn.style.top = '28px';
+    domChatBookmarksBtn.style.right = '23px';
+    domChatBookmarksBtn.style.bottom = 'auto';
+    domChatBookmarksBtn.style.left = 'auto';
+  }
 }
 
 /**
@@ -4144,7 +4153,15 @@ window.addEventListener("DOMContentLoaded", async () => {
             popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
     }
-    domChatBackBtn.onclick = closeChat;
+    domChatBackBtn.onclick = () => {
+  if (isWidescreen) {
+    // In widescreen, close chat and show hello screen
+    closeChat();
+  } else {
+    // Mobile behavior
+    closeChat();
+  }
+};
     domChatBookmarksBtn.onclick = () => {
         openChat(strPubkey);
     };
@@ -4458,6 +4475,12 @@ domChatMessageInput.oninput = async () => {
             });
         }
     });
+
+  setupEncryptedNotesButton();
+  setupProfileBackButton();
+  
+  // Initialize widescreen layout after DOM is loaded
+  initWidescreenLayout();
 });
 
 // Listen for app-wide click interations
@@ -4875,4 +4898,503 @@ Create Group UI wiring
     };
 })();
 
+// Widescreen layout state
+let isWidescreen = window.innerWidth >= 1024;
+let memberPanelVisible = false;
 
+// Initialize widescreen layout
+function initWidescreenLayout() {
+  const wasWidescreen = isWidescreen;
+  isWidescreen = window.innerWidth >= 1024;
+  
+  if (isWidescreen) {
+    document.body.classList.add('widescreen');
+    
+    // Show hello screen by default in right panel if no chat is open
+    if (!strOpenChat) {
+      showHelloScreen();
+    }
+    
+    // Setup panel toggle if chat is open
+    if (strOpenChat) {
+      setupMemberPanelToggle();
+    }
+  } else {
+    document.body.classList.remove('widescreen');
+    hideMemberPanel();
+    // Ensure mobile view is clean
+    document.querySelectorAll('.panel-toggle').forEach(toggle => {
+      toggle.style.display = 'none';
+    });
+
+    // Reset encrypted notes button positioning for mobile
+    if (domChatBookmarksBtn) {
+      domChatBookmarksBtn.style.position = 'absolute';
+      domChatBookmarksBtn.style.top = '28px';
+      domChatBookmarksBtn.style.right = '23px';
+    }
+  }
+  
+  adjustSize();
+}
+
+// Show hello screen in right panel
+function showHelloScreen() {
+  if (!isWidescreen) return;
+  
+  const rightPanel = document.querySelector('.right-panel');
+  const helloScreen = document.querySelector('.hello-screen');
+  const chatElements = document.querySelectorAll('#chat, #chat-new, #create-group');
+  
+  // Hide all chat views
+  chatElements.forEach(el => {
+    el.style.display = 'none';
+  });
+  
+  // Show hello screen
+  helloScreen.style.display = 'flex';
+  
+  // Hide member panel
+  hideMemberPanel();
+}
+
+// Setup member panel toggle
+function setupMemberPanelToggle() {
+  const chatElement = document.getElementById('chat');
+  if (!chatElement) return;
+  
+  // Remove existing toggle if any
+  const existingToggle = chatElement.querySelector('.panel-toggle');
+  if (existingToggle) {
+    existingToggle.remove();
+  }
+  
+  // Add toggle button for member panel
+  const toggleBtn = document.createElement('div');
+  toggleBtn.className = 'panel-toggle';
+  toggleBtn.innerHTML = '<span class="icon icon-users"></span>';
+  toggleBtn.onclick = toggleMemberPanel;
+  
+  chatElement.appendChild(toggleBtn);
+  updateToggleButton();
+}
+
+// Toggle member panel visibility
+function toggleMemberPanel() {
+  if (!isWidescreen) return;
+  
+  memberPanelVisible = !memberPanelVisible;
+  const memberPanel = document.querySelector('.member-panel');
+  
+  if (memberPanelVisible) {
+    memberPanel.style.display = 'flex';
+    loadMemberPanel();
+  } else {
+    memberPanel.style.display = 'none';
+  }
+  
+  updateToggleButton();
+}
+
+// Update toggle button icon 
+function updateToggleButton() {
+  const toggleBtn = document.querySelector('.panel-toggle');
+  if (!toggleBtn) return;
+  
+  const icon = toggleBtn.querySelector('.icon');
+  if (memberPanelVisible) {
+    icon.classList.remove('icon-users');
+    icon.classList.add('icon-chevron-double-right'); 
+  } else {
+    icon.classList.remove('icon-chevron-double-right');
+    icon.classList.add('icon-users');
+  }
+}
+
+// Hide member panel
+function hideMemberPanel() {
+  memberPanelVisible = false;
+  const memberPanel = document.querySelector('.member-panel');
+  if (memberPanel) {
+    memberPanel.style.display = 'none';
+  }
+  updateToggleButton();
+}
+
+// Load members into member panel 
+function loadMemberPanel() {
+  if (!isWidescreen || !memberPanelVisible) return;
+  
+  const memberList = document.getElementById('member-list');
+  const memberCount = document.getElementById('member-count');
+  
+  if (!memberList || !memberCount) return;
+  
+  const currentChat = arrChats.find(c => c.id === strOpenChat);
+  if (!currentChat) return;
+  
+  memberList.innerHTML = '';
+  
+  // Handle different chat types
+  if (currentChat.chat_type === 'MlsGroup') {
+    // Group chat - show all members including current user
+    const members = currentChat.participants || [];
+    const totalMembers = members.length + 1; // +1 for current user
+    memberCount.textContent = `Members — ${totalMembers}`;
+    
+    // Add current user first
+    const myProfile = arrProfiles.find(p => p.mine);
+    if (myProfile) {
+      const myItem = createMemberItem(myProfile, strPubkey);
+      memberList.appendChild(myItem);
+    }
+    
+    // Add other members
+    members.forEach(npub => {
+      const profile = getProfile(npub);
+      const memberItem = createMemberItem(profile, npub);
+      memberList.appendChild(memberItem);
+    });
+  } else {
+    // DM chat - show both users
+    memberCount.textContent = `Members — 2`;
+    const myProfile = arrProfiles.find(p => p.mine);
+    const otherProfile = getProfile(currentChat.id);
+    
+    // Add current user
+    if (myProfile) {
+      const myItem = createMemberItem(myProfile, strPubkey);
+      memberList.appendChild(myItem);
+    }
+    
+    // Add other user
+    if (otherProfile) {
+      const otherItem = createMemberItem(otherProfile, currentChat.id);
+      memberList.appendChild(otherItem);
+    }
+  }
+}
+
+// Simple member list item
+function createMemberItem(profile, npub) {
+  const memberItem = document.createElement('div');
+  memberItem.className = 'member-item';
+  
+  // Avatar
+  const avatar = document.createElement('div');
+  avatar.className = 'member-avatar';
+  
+  if (profile?.avatar) {
+    const img = document.createElement('img');
+    img.src = profile.avatar;
+    img.onerror = () => {
+      // If image fails to load, fallback to generated avatar
+      const fallbackAvatar = pubkeyToAvatar(npub, profile?.nickname || profile?.name, 32);
+      avatar.innerHTML = '';
+      avatar.appendChild(fallbackAvatar);
+    };
+    avatar.appendChild(img);
+  } else {
+    // Use generated avatar if no profile avatar
+    avatar.appendChild(pubkeyToAvatar(npub, profile?.nickname || profile?.name, 32));
+  }
+  
+  // User name - make sure we have a display name
+  const name = document.createElement('div');
+  name.className = 'member-name';
+  
+  // Get display name with proper fallbacks
+  let displayName = 'Unknown User';
+  if (profile) {
+    displayName = profile.nickname || profile.name || npub.substring(0, 8) + '...';
+  } else {
+    // If no profile found, try to get from profiles array
+    const foundProfile = getProfile(npub);
+    if (foundProfile) {
+      displayName = foundProfile.nickname || foundProfile.name || npub.substring(0, 8) + '...';
+    } else {
+      displayName = npub.substring(0, 8) + '...';
+    }
+  }
+  
+  name.textContent = displayName;
+  
+  memberItem.appendChild(avatar);
+  memberItem.appendChild(name);
+  
+  return memberItem;
+}
+
+// Modified openChat function for proper widescreen behavior
+const originalOpenChat = openChat;
+openChat = function(contact) {
+  // Clear any auto-scroll timer
+  if (chatOpenAutoScrollTimer) {
+    clearTimeout(chatOpenAutoScrollTimer);
+    chatOpenAutoScrollTimer = null;
+  }
+
+  // Record when the chat was opened
+  chatOpenTimestamp = Date.now();
+
+  // After 100ms, stop auto-scrolling on media loads
+  chatOpenAutoScrollTimer = setTimeout(() => {
+    chatOpenTimestamp = 0;
+    chatOpenAutoScrollTimer = null;
+  }, 100);
+
+  if (isWidescreen) {
+    // Widescreen behavior
+    navbarSelect('chat-btn');
+    
+    // Get the chat
+    const chat = arrChats.find(c => c.id === contact);
+    const isGroup = chat?.chat_type === 'MlsGroup';
+    const profile = !isGroup ? getProfile(contact) : null;
+    strOpenChat = contact;
+    
+    if (isGroup) { 
+      refreshGroupMemberCount(contact); 
+    }
+
+    // Hide notes button when opening any chat
+  updateEncryptedNotesButton();
+    
+    // Hide hello screen and show chat in right panel
+    const rightPanel = document.querySelector('.right-panel');
+    const helloScreen = document.querySelector('.hello-screen');
+    const chatElement = document.getElementById('chat');
+    
+    helloScreen.style.display = 'none';
+    chatElement.style.display = 'flex';
+    
+    // For encrypted notes, don't show member panel
+    if (contact === strPubkey) {
+      hideMemberPanel();
+      // Remove the panel toggle button for encrypted notes
+      const toggleBtn = chatElement.querySelector('.panel-toggle');
+      if (toggleBtn) {
+        toggleBtn.style.display = 'none';
+      }
+    } else {
+      // Setup member panel for groups and DMs
+      setupMemberPanelToggle();
+      if (memberPanelVisible) {
+        loadMemberPanel();
+      }
+    }
+    
+    // Update chat content
+    updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
+    
+  } else {
+    // Mobile behavior - use original function
+    originalOpenChat(contact);
+  }
+};
+
+function setupEncryptedNotesButton() {
+  const notesBtn = document.getElementById('chat-bookmarks-btn');
+  if (notesBtn) {
+    notesBtn.onclick = openEncryptedNotes;
+    
+    // Simple visibility management
+    updateEncryptedNotesButton();
+  }
+}
+
+// Simple function to show/hide notes button
+function updateEncryptedNotesButton() {
+  const notesBtn = document.getElementById('chat-bookmarks-btn');
+  if (!notesBtn) return;
+  
+  // Hide notes button when ANY chat is open (including notes)
+  // Show it only when no chat is open (chat list view)
+  if (strOpenChat) {
+    notesBtn.style.display = 'none';
+  } else {
+    notesBtn.style.display = 'flex';
+  }
+}
+
+function openEncryptedNotes() {
+  if (isWidescreen) {
+    openChat(strPubkey);
+  } else {
+    openChat(strPubkey);
+  }
+}
+
+// Back button handling for profile view
+function setupProfileBackButton() {
+  if (domProfileBackBtn) {
+    domProfileBackBtn.onclick = () => {
+      if (isWidescreen) {
+        if (strOpenChat === strPubkey) {
+          closeChat();
+        } else {
+          openChatlist();
+        }
+      } else {
+        if (strOpenChat) {
+          openChat(strOpenChat);
+        } else {
+          openChatlist();
+        }
+      }
+    };
+  }
+}
+
+// Modified closeChat function for clean transitions
+const originalCloseChat = closeChat;
+closeChat = async function() {
+  if (isWidescreen) {
+    // Widescreen cleanup
+    if (chatOpenAutoScrollTimer) {
+      clearTimeout(chatOpenAutoScrollTimer);
+      chatOpenAutoScrollTimer = null;
+    }
+
+    // Release memory
+    while (domChatMessages.firstElementChild) {
+      const domChild = domChatMessages.firstElementChild;
+      const domMedias = domChild?.querySelectorAll('img, audio, video');
+      for (const domMedia of domMedias) {
+        if (domMedia instanceof HTMLMediaElement) {
+          domMedia.pause();
+          if (platformFeatures.os === 'android' && domMedia.src.startsWith('blob:')) {
+            URL.revokeObjectURL(domMedia.src);
+          }
+          domMedia.removeAttribute('src');
+          domMedia.load();
+        }
+        if (domMedia instanceof HTMLImageElement) {
+          if (domMedia.src.startsWith('blob:')) {
+            URL.revokeObjectURL(domMedia.src);
+          }
+          domMedia.removeAttribute('src');
+        }
+      }
+      domChild.remove();
+    }
+
+    // Reset state
+    strOpenChat = "";
+    nLastTypingIndicator = 0;
+
+    // Show notes button when closing chat 
+  updateEncryptedNotesButton();
+
+    // Cancel any ongoing replies or selections
+    strCurrentReactionReference = "";
+    strCurrentReplyReference = "";
+    cancelReply();
+
+    // Show hello screen
+    showHelloScreen();
+
+    // Hide member panel
+    hideMemberPanel();
+
+    // Update chat list
+    renderChatlist();
+
+    adjustSize();
+  } else {
+    await originalCloseChat();
+  }
+};
+
+// Modified navigation functions for widescreen
+function openChatlist() {
+  if (isWidescreen) {
+    navbarSelect('chat-btn');
+    domProfile.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+    domChats.style.display = '';
+
+    // Show hello screen in right panel
+    showHelloScreen();
+    
+    // Load MLS invites
+    loadMLSInvites();
+  } else {
+    // Original mobile behavior
+    navbarSelect('chat-btn');
+    domProfile.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+
+    if (domChats.style.display !== '') {
+      domChats.classList.add('fadein-subtle-anim');
+      domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
+      domChats.style.display = '';
+    }
+    
+    loadMLSInvites();
+  }
+}
+
+function openProfile(cProfile) {
+  if (isWidescreen) {
+    navbarSelect('profile-btn');
+    domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+
+    // Render profile in left panel, keep right panel as is
+    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
+    renderProfileTab(cProfile);
+
+    if (domProfile.style.display !== '') {
+      domProfile.classList.add('fadein-subtle-anim');
+      domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
+      domProfile.style.display = '';
+    }
+  } else {
+    // Original mobile behavior
+    navbarSelect('profile-btn');
+    domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+
+    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
+    renderProfileTab(cProfile);
+
+    if (domProfile.style.display !== '') {
+      domProfile.classList.add('fadein-subtle-anim');
+      domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
+      domProfile.style.display = '';
+    }
+  }
+}
+
+// Enhanced resize handler with smooth transitions
+let resizeTimeout;
+window.addEventListener('resize', () => {
+  const wasWidescreen = isWidescreen;
+  
+  // Debounce resize events
+  clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
+    document.body.classList.add('layout-transition');
+    
+    initWidescreenLayout();
+    
+    // If layout changed significantly, force a clean re-render
+    if (wasWidescreen !== isWidescreen) {
+      if (strOpenChat) {
+        // Re-open current chat to ensure proper layout
+        const currentChat = strOpenChat;
+        strOpenChat = "";
+        setTimeout(() => openChat(currentChat), 50);
+      }
+    }
+    
+    setTimeout(() => {
+      document.body.classList.remove('layout-transition');
+    }, 300);
+  }, 100);
+});
