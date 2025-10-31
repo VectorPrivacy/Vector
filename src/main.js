@@ -1113,6 +1113,18 @@ function updateChatHeaderSubtext(chat) {
             domChatContactStatus.classList.remove('text-gradient');
             twemojify(domChatContactStatus);
         }
+        const profile = getProfile(chat.id);
+domChatContact.onclick = () => {
+    if (isWidescreen && strOpenChat === chat.id) {
+        // In widescreen, show profile in the chat area
+        showProfileInChatArea(profile);
+    } else {
+        // Mobile behavior - open profile tab
+        closeChat();
+        openProfile(profile);
+    }
+};
+domChatContact.classList.add('btn');
     }
 }
 
@@ -4981,19 +4993,36 @@ function setupMemberPanelToggle() {
 
 // Toggle member panel visibility
 function toggleMemberPanel() {
-  if (!isWidescreen) return;
-  
-  memberPanelVisible = !memberPanelVisible;
-  const memberPanel = document.querySelector('.member-panel');
-  
-  if (memberPanelVisible) {
-    memberPanel.style.display = 'flex';
-    loadMemberPanel();
-  } else {
-    memberPanel.style.display = 'none';
-  }
-  
-  updateToggleButton();
+    if (!isWidescreen) return;
+    
+    memberPanelVisible = !memberPanelVisible;
+    const memberPanel = document.querySelector('.member-panel');
+    const chatContainer = document.getElementById('chat');
+    
+    if (memberPanelVisible) {
+        memberPanel.style.display = 'flex';
+        memberPanel.style.flex = '0 0 300px'; // Fixed width, don't grow or shrink
+        
+        // If profile is open, let flexbox handle the width automatically
+        if (window.isViewingProfileInChat) {
+            domProfile.style.flex = '1'; // Take remaining space
+            domProfile.style.minWidth = '400px'; // Minimum width
+            domProfile.style.width = ''; // Remove manual width
+        }
+        loadMemberPanel();
+    } else {
+        memberPanel.style.display = 'none';
+        memberPanel.style.flex = '';
+        
+        // If profile is open, restore full width
+        if (window.isViewingProfileInChat) {
+            domProfile.style.flex = '1';
+            domProfile.style.minWidth = '0';
+            domProfile.style.width = ''; 
+        }
+    }
+    
+    updateToggleButton();
 }
 
 // Update toggle button icon 
@@ -5225,85 +5254,162 @@ function openEncryptedNotes() {
   }
 }
 
+// Function to show profile in chat area
+function showProfileInChatArea(profile) {
+    if (!profile || !isWidescreen) return;
+    
+    // Render the profile
+    renderProfileTab(profile);
+    
+    // Hide messages and show profile in chat area
+    domChatMessages.style.display = 'none';
+    domChatMessageBox.style.display = 'none';
+    
+    // Position profile in chat area
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer.contains(domProfile)) {
+        chatContainer.appendChild(domProfile);
+    }
+    
+    // Style for chat area display - use flexbox for proper layout
+    domProfile.style.display = '';
+    domProfile.style.position = 'relative';
+    domProfile.style.top = '0';
+    domProfile.style.margin = '0';
+    domProfile.style.maxWidth = 'none';
+    domProfile.style.width = ''; 
+    domProfile.style.overflowY = 'auto';
+    domProfile.style.maxHeight = 'calc(100vh - 80px)'; 
+    domProfile.style.padding = '20px';
+    domProfile.style.flex = '1'; 
+    domProfile.style.minWidth = '0'; 
+    
+    domProfileBackBtn.onclick = () => {
+        closeProfileInChatArea();
+    };
+    domProfileBackBtn.style.display = '';
+    
+    // Store that we're viewing profile in chat context
+    window.isViewingProfileInChat = true;
+}
+
+// Function to close profile and return to chat
+function closeProfileInChatArea() {
+    // Hide profile
+    domProfile.style.display = 'none';
+    
+    // Reset styles
+    domProfile.style.position = '';
+    domProfile.style.top = '';
+    domProfile.style.margin = '';
+    domProfile.style.maxWidth = '';
+    domProfile.style.width = '';
+    domProfile.style.overflowY = '';
+    domProfile.style.maxHeight = '';
+    domProfile.style.padding = '';
+    domProfile.style.flex = '';
+    
+    // Show messages and input box
+    domChatMessages.style.display = '';
+    domChatMessageBox.style.display = '';
+    
+    const mainContainer = document.getElementById('popup-container');
+    if (mainContainer && !mainContainer.contains(domProfile)) {
+        mainContainer.appendChild(domProfile);
+    }
+    
+    // Clear the profile viewing state
+    window.isViewingProfileInChat = false;
+}
+
+
 // Back button handling for profile view
 function setupProfileBackButton() {
-  if (domProfileBackBtn) {
-    domProfileBackBtn.onclick = () => {
-      if (isWidescreen) {
-        if (strOpenChat === strPubkey) {
-          closeChat();
-        } else {
-          openChatlist();
-        }
-      } else {
-        if (strOpenChat) {
-          openChat(strOpenChat);
-        } else {
-          openChatlist();
-        }
-      }
-    };
-  }
+    if (domProfileBackBtn) {
+        domProfileBackBtn.onclick = () => {
+            if (isWidescreen) {
+                if (window.isViewingProfileInChat) {
+                    // If viewing profile in chat, return to chat
+                    closeProfileInChatArea();
+                } else if (strOpenChat === strPubkey) {
+                    closeChat();
+                } else {
+                    openChatlist();
+                }
+            } else {
+                if (strOpenChat) {
+                    openChat(strOpenChat);
+                } else {
+                    openChatlist();
+                }
+            }
+        };
+    }
 }
 
 // Modified closeChat function for clean transitions
 const originalCloseChat = closeChat;
 closeChat = async function() {
-  if (isWidescreen) {
-    // Widescreen cleanup
-    if (chatOpenAutoScrollTimer) {
-      clearTimeout(chatOpenAutoScrollTimer);
-      chatOpenAutoScrollTimer = null;
-    }
-
-    // Release memory
-    while (domChatMessages.firstElementChild) {
-      const domChild = domChatMessages.firstElementChild;
-      const domMedias = domChild?.querySelectorAll('img, audio, video');
-      for (const domMedia of domMedias) {
-        if (domMedia instanceof HTMLMediaElement) {
-          domMedia.pause();
-          if (platformFeatures.os === 'android' && domMedia.src.startsWith('blob:')) {
-            URL.revokeObjectURL(domMedia.src);
-          }
-          domMedia.removeAttribute('src');
-          domMedia.load();
+    if (isWidescreen) {
+        // Widescreen cleanup
+        if (chatOpenAutoScrollTimer) {
+            clearTimeout(chatOpenAutoScrollTimer);
+            chatOpenAutoScrollTimer = null;
         }
-        if (domMedia instanceof HTMLImageElement) {
-          if (domMedia.src.startsWith('blob:')) {
-            URL.revokeObjectURL(domMedia.src);
-          }
-          domMedia.removeAttribute('src');
+
+        // Release memory
+        while (domChatMessages.firstElementChild) {
+            const domChild = domChatMessages.firstElementChild;
+            const domMedias = domChild?.querySelectorAll('img, audio, video');
+            for (const domMedia of domMedias) {
+                if (domMedia instanceof HTMLMediaElement) {
+                    domMedia.pause();
+                    if (platformFeatures.os === 'android' && domMedia.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(domMedia.src);
+                    }
+                    domMedia.removeAttribute('src');
+                    domMedia.load();
+                }
+                if (domMedia instanceof HTMLImageElement) {
+                    if (domMedia.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(domMedia.src);
+                    }
+                    domMedia.removeAttribute('src');
+                }
+            }
+            domChild.remove();
         }
-      }
-      domChild.remove();
+
+        // Reset state
+        strOpenChat = "";
+        nLastTypingIndicator = 0;
+
+        // Show notes button when closing chat 
+        updateEncryptedNotesButton();
+
+        // Cancel any ongoing replies or selections
+        strCurrentReactionReference = "";
+        strCurrentReplyReference = "";
+        cancelReply();
+
+        // Close profile if it's open in chat area
+        if (window.isViewingProfileInChat) {
+            closeProfileInChatArea();
+        }
+
+        // Show hello screen (conversation area)
+        showHelloScreen();
+
+        // Hide member panel
+        hideMemberPanel();
+
+        // Update chat list
+        renderChatlist();
+
+        adjustSize();
+    } else {
+        await originalCloseChat();
     }
-
-    // Reset state
-    strOpenChat = "";
-    nLastTypingIndicator = 0;
-
-    // Show notes button when closing chat 
-  updateEncryptedNotesButton();
-
-    // Cancel any ongoing replies or selections
-    strCurrentReactionReference = "";
-    strCurrentReplyReference = "";
-    cancelReply();
-
-    // Show hello screen
-    showHelloScreen();
-
-    // Hide member panel
-    hideMemberPanel();
-
-    // Update chat list
-    renderChatlist();
-
-    adjustSize();
-  } else {
-    await originalCloseChat();
-  }
 };
 
 // Modified navigation functions for widescreen
