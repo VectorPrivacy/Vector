@@ -2809,6 +2809,26 @@ async fn logout<R: Runtime>(handle: AppHandle<R>) {
     // Erase the Database completely for a clean logout
     db::nuke(handle.clone()).unwrap();
 
+    // Delete the downloads folder (vector folder in Downloads or Documents on iOS)
+    let base_directory = if cfg!(target_os = "ios") {
+        tauri::path::BaseDirectory::Document
+    } else {
+        tauri::path::BaseDirectory::Download
+    };
+    
+    if let Ok(downloads_dir) = handle.path().resolve("vector", base_directory) {
+        if downloads_dir.exists() {
+            let _ = std::fs::remove_dir_all(&downloads_dir);
+        }
+    }
+
+    // Delete the MLS folder in AppData
+    if let Ok(mls_dir) = handle.path().resolve("mls", tauri::path::BaseDirectory::AppData) {
+        if mls_dir.exists() {
+            let _ = std::fs::remove_dir_all(&mls_dir);
+        }
+    }
+
     // Restart the Core process
     handle.restart();
 }
