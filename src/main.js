@@ -362,6 +362,8 @@ picker.addEventListener('click', (e) => {
             } else {
                 // Add to message input
                 domChatMessageInput.value += cEmoji.emoji;
+                // Manually trigger the oninput event to update the send/mic button state
+                domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
             }
             
             // Close the picker - use class instead of inline style
@@ -420,6 +422,8 @@ emojiSearch.onkeydown = async (e) => {
         } else {
             // Add to message input
             domChatMessageInput.value += cEmoji.emoji;
+            // Manually trigger the oninput event to update the send/mic button state
+            domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
         }
 
         // Reset the UI state - use class instead of inline style
@@ -3437,8 +3441,6 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
     } else {
         // Render their text content (using our custom Markdown renderer)
-        // NOTE: the input IS HTML-sanitised, however, heavy auditing of the sanitisation method should be done, it is a bit sketchy
-        // NOTE: parseMarkdown internally protects URLs from being mangled by markdown formatting
         spanMessage.innerHTML = parseMarkdown(msg.content.trim());
         
         // Make URLs clickable (after markdown parsing, before twemojify)
@@ -5458,6 +5460,33 @@ document.addEventListener('click', (e) => {
     if (e.target.tagName === 'A' && e.target.href) {
         e.preventDefault();
         return openUrl(e.target.href);
+    }
+
+    // If we're clicking a <summary> to toggle <details>, handle scroll adjustment
+    if (e.target.tagName === 'SUMMARY') {
+        const details = e.target.parentElement;
+        if (details && details.tagName === 'DETAILS') {
+            // Add button class if not already present
+            if (!e.target.classList.contains('btn')) {
+                e.target.classList.add('btn');
+            }
+            
+            const chatMessages = document.getElementById('chat-messages');
+            if (chatMessages) {
+                // Check scroll position BEFORE toggle
+                const wasNearBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 150;
+                
+                // Wait for the DOM to update after toggle
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        if (wasNearBottom && details.open) {
+                            // Scroll to bottom to reveal expanded content
+                            scrollToBottom(chatMessages, true);
+                        }
+                    });
+                });
+            }
+        }
     }
 
     // If we're clicking a Reply button, begin a reply
