@@ -102,6 +102,31 @@ pub async fn save_chat<R: Runtime>(handle: AppHandle<R>, chat: &Chat) -> Result<
     save_all_chats(&handle, chats).await
 }
 
+/// Delete a chat and all its messages from the database
+pub async fn delete_chat<R: Runtime>(handle: AppHandle<R>, chat_id: &str) -> Result<(), String> {
+    let store = get_store(&handle);
+    
+    // 1. Remove chat from the chats list
+    let mut chats = get_all_chats(&handle).await?;
+    let original_count = chats.len();
+    chats.retain(|c| c.id != chat_id);
+    
+    if chats.len() < original_count {
+        save_all_chats(&handle, chats).await?;
+        println!("[DB] Removed chat from chats list: {}", chat_id);
+    }
+    
+    // 2. Delete the chat's messages
+    let messages_key = format!("chat_messages_{}", chat_id);
+    store.delete(messages_key);
+    
+    // 3. Force save to persist deletions immediately
+    store.save().map_err(|e| format!("Failed to save store after chat deletion: {}", e))?;
+    
+    println!("[DB] Deleted chat and messages from storage: {}", chat_id);
+    Ok(())
+}
+
 /// Get all messages for a specific chat
 pub async fn get_chat_messages<R: Runtime>(handle: &AppHandle<R>, chat_id: &str) -> Result<Vec<Message>, String> {
     let store = get_store(handle);

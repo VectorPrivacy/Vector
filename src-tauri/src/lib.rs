@@ -25,7 +25,7 @@ use voice::AudioRecorder;
 
 mod net;
 
-mod upload;
+mod blossom;
 
 mod util;
 use util::{get_file_type_description, calculate_file_hash};
@@ -60,17 +60,27 @@ pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationTyp
 /// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
 pub(crate) static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
 
-/// # Trusted Public NIP-96 Server
+/// # Blossom Media Servers
 ///
-/// A temporary hardcoded NIP-96 server, handling file uploads for public files (Avatars, etc)
-static TRUSTED_PUBLIC_NIP96: &str = "https://nostr.build";
-static PUBLIC_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
+/// A list of Blossom servers for file uploads with automatic failover.
+/// The system will try each server in order until one succeeds.
+static BLOSSOM_SERVERS: OnceCell<std::sync::Mutex<Vec<String>>> = OnceCell::new();
 
-/// # Trusted Private NIP-96 Server
-///
-/// A temporary hardcoded NIP-96 server, handling file uploads for encrypted files (in-chat)
-static TRUSTED_PRIVATE_NIP96: &str = "https://medea-1-swiss.vectorapp.io";
-static PRIVATE_NIP96_CONFIG: OnceCell<ServerConfig> = OnceCell::new();
+/// Initialize default Blossom servers
+fn init_blossom_servers() -> Vec<String> {
+    vec![
+        "https://blossom.primal.net".to_string(),
+    ]
+}
+
+/// Get the list of Blossom servers (internal function)
+pub(crate) fn get_blossom_servers() -> Vec<String> {
+    BLOSSOM_SERVERS
+        .get_or_init(|| std::sync::Mutex::new(init_blossom_servers()))
+        .lock()
+        .unwrap()
+        .clone()
+}
 
 
 static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
@@ -414,9 +424,38 @@ async fn fetch_messages<R: Runtime>(
                 // Load chats and their messages from database
                 let slim_chats_result = db_migration::get_all_chats(&handle).await;
                 if let Ok(slim_chats) = slim_chats_result {
+                    // Load MLS groups to check for evicted status
+                    // Read groups data directly from store to avoid Send issues with MLS service
+                    let mls_groups: Option<Vec<mls::MlsGroupMetadata>> = {
+                        let store = db::get_store(&handle);
+                        let enc_opt = store.get("mls_groups").and_then(|v| v.as_str().map(|s| s.to_string()));
+                        if let Some(enc) = enc_opt {
+                            if let Ok(json) = crypto::internal_decrypt(enc, None).await {
+                                serde_json::from_str(&json).ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    
                     // Convert slim chats to full chats and load their messages
                     for slim_chat in slim_chats {
                         let mut chat = slim_chat.to_chat();
+                        
+                        // Skip MLS group chats that are marked as evicted
+                        // MLS group chat IDs are just the group_id (no prefix)
+                        if chat.chat_type == ChatType::MlsGroup {
+                            if let Some(ref groups) = mls_groups {
+                                if let Some(group) = groups.iter().find(|g| g.group_id.as_str() == chat.id()) {
+                                    if group.evicted {
+                                        println!("[Startup] Skipping evicted MLS group chat: {}", chat.id());
+                                        continue; // Skip this chat
+                                    }
+                                }
+                            }
+                        }
                         
                         // Load messages for this chat
                         let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
@@ -472,8 +511,37 @@ async fn fetch_messages<R: Runtime>(
             if db::get_db_version(handle.clone()).unwrap_or(None).unwrap_or(0) >= 2 && state.chats.is_empty() {
                 let slim_chats_result = db_migration::get_all_chats(&handle).await;
                 if let Ok(slim_chats) = slim_chats_result {
+                    // Load MLS groups to check for evicted status
+                    // Read groups data directly from store to avoid Send issues with MLS service
+                    let mls_groups: Option<Vec<mls::MlsGroupMetadata>> = {
+                        let store = db::get_store(&handle);
+                        let enc_opt = store.get("mls_groups").and_then(|v| v.as_str().map(|s| s.to_string()));
+                        if let Some(enc) = enc_opt {
+                            if let Ok(json) = crypto::internal_decrypt(enc, None).await {
+                                serde_json::from_str(&json).ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    
                     for slim_chat in slim_chats {
                         let mut chat = slim_chat.to_chat();
+
+                        // Skip MLS group chats that are marked as evicted
+                        // MLS group chat IDs are just the group_id (no prefix)
+                        if chat.chat_type == ChatType::MlsGroup {
+                            if let Some(ref groups) = mls_groups {
+                                if let Some(group) = groups.iter().find(|g| g.group_id.as_str() == chat.id()) {
+                                    if group.evicted {
+                                        println!("[Startup] Skipping evicted MLS group chat: {}", chat.id());
+                                        continue; // Skip this chat
+                                    }
+                                }
+                            }
+                        }
 
                         // Load messages for this chat
                         let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
@@ -933,96 +1001,6 @@ async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
     Ok(updated_count as u32)
 }
 
-/// Pre-fetch the configs from our preferred NIP-96 servers to speed up uploads
-#[tauri::command]
-async fn warmup_nip96_servers() -> bool {
-    use nostr_sdk::nips::nip96::{get_server_config_url, ServerConfig};
-    use reqwest::Client;
-    
-    // Create HTTP client with timeout
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build() {
-        Ok(client) => client,
-        Err(_) => {
-            return false;
-        }
-    };
-
-    // Public Fileserver
-    if PUBLIC_NIP96_CONFIG.get().is_none() {
-        let config_url = match get_server_config_url(&Url::parse(TRUSTED_PUBLIC_NIP96).unwrap()) {
-            Ok(url) => url,
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        // Fetch the JSON configuration from the URL
-        let config_json = match client.get(config_url.to_string()).send().await {
-            Ok(response) => {
-                match response.text().await {
-                    Ok(json) => json,
-                    Err(_) => {
-                        return false;
-                    }
-                }
-            },
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        let _ = match ServerConfig::from_json(&config_json) {
-            Ok(conf) => {
-                PUBLIC_NIP96_CONFIG.set(conf).unwrap();
-                true
-            },
-            Err(_) => {
-                false
-            }
-        };
-    }
-
-    // Private Fileserver
-    if PRIVATE_NIP96_CONFIG.get().is_none() {
-        let config_url = match get_server_config_url(&Url::parse(TRUSTED_PRIVATE_NIP96).unwrap()) {
-            Ok(url) => url,
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        // Fetch the JSON configuration from the URL
-        let config_json = match client.get(config_url.to_string()).send().await {
-            Ok(response) => {
-                match response.text().await {
-                    Ok(json) => json,
-                    Err(_) => {
-                        return false;
-                    }
-                }
-            },
-            Err(_) => {
-                return false;
-            }
-        };
-        
-        let _ = match ServerConfig::from_json(&config_json) {
-            Ok(conf) => {
-                PRIVATE_NIP96_CONFIG.set(conf).unwrap();
-                true
-            },
-            Err(_) => {
-                false
-            }
-        };
-    }
-
-    // We've got the configs for all our servers, nice!
-    true
-}
-
 
 
 #[tauri::command]
@@ -1030,7 +1008,6 @@ async fn start_typing(receiver: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
-    let my_pubkey_short: String = my_public_key.to_hex().chars().take(8).collect();
 
     // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
@@ -1075,8 +1052,6 @@ async fn start_typing(receiver: String) -> bool {
         Err(_) => {
             // This is a group chat - use MLS
             let group_id = receiver.clone();
-            let group_short: String = group_id.chars().take(8).collect();
-            println!("[TYPING] 📤 Sending MLS group typing indicator: me={} → group={}", my_pubkey_short, group_short);
             
             // Build the typing indicator rumor
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
@@ -1092,14 +1067,8 @@ async fn start_typing(receiver: String) -> bool {
 
             // Send via MLS
             match mls::send_mls_message(&group_id, rumor).await {
-                Ok(_) => {
-                    println!("[TYPING] ✅ MLS group typing indicator sent successfully");
-                    true
-                }
-                Err(e) => {
-                    eprintln!("[TYPING] ❌ Failed to send MLS group typing indicator: {}", e);
-                    false
-                }
+                Ok(_) => true,
+                Err(_e) => false,
             }
         }
     }
@@ -1190,12 +1159,9 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         if let Ok(mls) = svc {
                             if let Ok(engine) = mls.engine() {
                                 match engine.process_welcome(&wrapper_id, &unsigned) {
-                                    Ok(_) => {
-                                        println!("[MLS][live][welcome] processed wrapper_id={}", wrapper_id);
-                                        return true;
-                                    }
+                                    Ok(_) => return true,
                                     Err(e) => {
-                                        eprintln!("[MLS][live][welcome] process_welcome failed wrapper_id={} err={}", wrapper_id, e);
+                                        eprintln!("[MLS] Failed to process welcome: {}", e);
                                         return false;
                                     }
                                 }
@@ -1218,7 +1184,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         return false;
                     }
                 } else {
-                    eprintln!("[MLS][live][welcome] failed to convert rumor to UnsignedEvent");
+                    eprintln!("[MLS] Failed to convert rumor to UnsignedEvent");
                     return false;
                 }
             }
@@ -1520,6 +1486,22 @@ MLS live subscriptions overview (using Marmot/MDK):
   • We do not log plaintext message content. Logs are limited to ids, counts, kinds, and outcomes
     to aid QA without leaking sensitive content.
 */
+
+#[tauri::command]
+async fn list_group_cursors() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async move {
+            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let cursors = mls.read_event_cursors().await.map_err(|e| e.to_string())?;
+            serde_json::to_value(&cursors).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
 #[tauri::command]
 async fn notifs() -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -1596,25 +1578,33 @@ async fn notifs() -> Result<bool, String> {
                         if !is_member {
                             return Ok(false);
                         }
-
-                        // Resolve my pubkey bech32 for 'mine' flag
-                        let my_pubkey_bech32 = {
+                        
+                        // Resolve my pubkey for filtering and 'mine' flag
+                        let (my_pubkey, my_pubkey_bech32) = {
                             let client = NOSTR_CLIENT.get().unwrap();
                             if let Ok(signer) = client.signer().await {
                                 if let Ok(pk) = signer.get_public_key().await {
-                                    pk.to_bech32().unwrap()
+                                    (Some(pk), pk.to_bech32().unwrap())
                                 } else {
-                                    String::new()
+                                    (None, String::new())
                                 }
                             } else {
-                                String::new()
+                                (None, String::new())
                             }
                         };
+                        
+                        // Skip processing our own events - they're already processed locally when sent
+                        if let Some(my_pk) = my_pubkey {
+                            if ev.pubkey == my_pk {
+                                return Ok(false);
+                            }
+                        }
 
                         // Process with non-Send MLS engine on a blocking thread (no awaits in scope)
                         let app_handle = TAURI_APP.get().unwrap().clone();
                         let my_npub_for_block = my_pubkey_bech32.clone();
                         let group_id_for_persist = group_wire_id.clone();
+                        let group_id_for_emit = group_wire_id.clone();
                         
                         // Process message and persist in one blocking operation to avoid Send issues
                         let emit_record = tokio::task::spawn_blocking(move || {
@@ -1844,7 +1834,7 @@ async fn notifs() -> Result<bool, String> {
                                                             }
                                                             RumorProcessingResult::Reaction(reaction) => {
                                                                 // Handle reactions in real-time
-                                                                let was_added = {
+                                                                let _was_added = {
                                                                     let mut state = crate::STATE.lock().await;
                                                                     if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
                                                                         msg.add_reaction(reaction.clone(), Some(chat_id))
@@ -1852,10 +1842,6 @@ async fn notifs() -> Result<bool, String> {
                                                                         false
                                                                     }
                                                                 };
-                                                                
-                                                                if was_added {
-                                                                    println!("[MLS][live] Reaction added: {}", reaction.reference_id);
-                                                                }
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
@@ -1878,7 +1864,6 @@ async fn notifs() -> Result<bool, String> {
                                                                     }));
                                                                 }
                                                                 
-                                                                println!("[MLS][live] Typing indicator processed for group: {}", group_id_for_persist);
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::Ignored => None,
@@ -1893,13 +1878,87 @@ async fn notifs() -> Result<bool, String> {
     
                                             processed
                                         }
-                                        // Other message types (Proposal, Commit, etc.) are not persisted as chat messages here
+                                        mdk_core::prelude::MessageProcessingResult::Commit { mls_group_id } => {
+                                            // Commit processed - member list may have changed
+                                            // Check if we're still a member of this group
+                                            let my_pubkey_hex = my_npub_for_block.clone();
+                                            
+                                            // Only evict if we can POSITIVELY CONFIRM removal
+                                            let membership_check = engine.get_members(&mls_group_id)
+                                                .ok()
+                                                .and_then(|members| {
+                                                    nostr_sdk::PublicKey::from_bech32(&my_pubkey_hex)
+                                                        .ok()
+                                                        .map(|pk| members.contains(&pk))
+                                                });
+                                            
+                                            match membership_check {
+                                                Some(false) => {
+                                                    // Successfully checked and confirmed NOT a member - evict!
+                                                    eprintln!("[MLS] Eviction detected via Commit - group: {}", group_id_for_persist);
+                                                    
+                                                    // Perform full cleanup using the helper method
+                                                    rt.block_on(async {
+                                                        if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                            eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                                Some(true) => {
+                                                    // Still a member, just update the UI
+                                                    if let Some(handle) = TAURI_APP.get() {
+                                                        handle.emit("mls_group_updated", serde_json::json!({
+                                                            "group_id": group_id_for_persist
+                                                        })).ok();
+                                                    }
+                                                }
+                                                None => {
+                                                    // Check failed - don't evict, just update UI
+                                                    if let Some(handle) = TAURI_APP.get() {
+                                                        handle.emit("mls_group_updated", serde_json::json!({
+                                                            "group_id": group_id_for_persist
+                                                        })).ok();
+                                                    }
+                                                }
+                                            }
+                                            None
+                                        }
+                                        mdk_core::prelude::MessageProcessingResult::Proposal(_proposal) => {
+                                            // Proposal received (e.g., leave proposal)
+                                            // Emit event to notify UI that group state may have changed
+                                            if let Some(handle) = TAURI_APP.get() {
+                                                handle.emit("mls_group_updated", serde_json::json!({
+                                                    "group_id": group_id_for_persist
+                                                })).ok();
+                                            }
+                                            None
+                                        }
+                                        mdk_core::prelude::MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
+                                            // Unprocessable result - could be many reasons (out of order, can't decrypt, etc.)
+                                            // Don't try to detect eviction here - wait for next message to trigger error-based detection
+                                            None
+                                        }
+                                        // Other message types (ExternalJoinProposal) are not persisted as chat messages
                                         _ => None,
                                     }
                                 }
                                 Err(e) => {
-                                    if !e.to_string().contains("group not found") {
-                                        eprintln!("[MLS] live process_message failed (id={}): {}", ev.id, e);
+                                    let error_msg = e.to_string();
+                                    
+                                    // Check if this is an eviction error
+                                    if error_msg.contains("evicted from it") ||
+                                       error_msg.contains("after being evicted") ||
+                                       error_msg.contains("own leaf not found") {
+                                        eprintln!("[MLS] Eviction detected in live subscription - group: {}", group_id_for_persist);
+                                        
+                                        // Perform full cleanup using the helper method
+                                        rt.block_on(async {
+                                            if let Err(e) = svc.cleanup_evicted_group(&group_id_for_persist).await {
+                                                eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
+                                            }
+                                        });
+                                    } else if !error_msg.contains("group not found") {
+                                        eprintln!("[MLS] live process_message failed (id={}): {}", ev.id, error_msg);
                                     }
                                     None
                                 }
@@ -1911,7 +1970,7 @@ async fn notifs() -> Result<bool, String> {
                         if let Some(record) = emit_record {
                             // Emit UI event (no MLS operations here, just event emission)
                             let _ = handle.emit("mls_message_new", serde_json::json!({
-                                "group_id": group_wire_id,
+                                "group_id": group_id_for_emit,
                                 "message": record
                             }));
                         }
@@ -1963,6 +2022,12 @@ async fn get_relays() -> Result<Vec<RelayInfo>, String> {
         .collect();
     
     Ok(relay_infos)
+}
+
+/// Get the list of Blossom media servers (Tauri command)
+#[tauri::command]
+async fn get_media_servers() -> Vec<String> {
+    get_blossom_servers()
 }
 
 /// Monitor relay pool connection status changes
@@ -2507,7 +2572,6 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     let keys: Keys;
 
     // If we're already logged in (i.e: Developer Mode with frontend hot-loading), just return the existing keys.
-    // TODO: in the future, with event-based state changes, we need to make sure the state syncs correctly too!
     if let Some(client) = NOSTR_CLIENT.get() {
         let signer = client.signer().await.unwrap();
         let new_keys = Keys::parse(&import_key).unwrap();
@@ -2665,15 +2729,8 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
             std::thread::sleep(std::time::Duration::from_millis(800));
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
-                println!("[MLS] Spawning post-decrypt MLS group sync...");
-                match sync_mls_groups_now(None).await {
-                    Ok((processed, new_msgs)) => {
-                        println!("[MLS] Post-decrypt MLS sync finished: processed={}, new={}", processed, new_msgs);
-                    }
-                    Err(e) => {
-                        // Best-effort; do not affect login flow
-                        eprintln!("[MLS] Post-decrypt MLS sync failed: {}", e);
-                    }
+                if let Err(e) = sync_mls_groups_now(None).await {
+                    eprintln!("[MLS] Post-decrypt sync failed: {}", e);
                 }
             });
         });
@@ -2837,6 +2894,7 @@ async fn export_keys() -> Result<serde_json::Value, String> {
 struct PlatformFeatures {
     transcription: bool,
     os: String,
+    is_mobile: bool,
     // Add more features here as needed
 }
 
@@ -2857,9 +2915,12 @@ async fn get_platform_features() -> PlatformFeatures {
         "unknown"
     };
 
+    let is_mobile = cfg!(target_os = "android") || cfg!(target_os = "ios");
+
     PlatformFeatures {
         transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
         os: os.to_string(),
+        is_mobile,
     }
 }
 
@@ -3211,20 +3272,16 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
                 Ok(events) => {
                     // Check if we got any events - if so, the cached KeyPackage exists on relay
                     if events.iter().next().is_some() {
-                        println!("[MLS][KeyPackage] Verified on relay, using cached");
                         return Ok(serde_json::json!({
                             "device_id": device_id,
                             "owner_pubkey": owner_pubkey_b32,
                             "keypackage_ref": ref_id,
                             "cached": true
                         }));
-                    } else {
-                        println!("[MLS][KeyPackage] Not found on relay, creating new one");
-                        // Fall through to create new KeyPackage
                     }
+                    // Fall through to create new KeyPackage
                 }
                 _ => {
-                    println!("[MLS][KeyPackage] Not found on relay, creating new one");
                     // Fall through to create new KeyPackage
                 }
             }
@@ -3509,6 +3566,39 @@ async fn add_mls_member_device(
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
+/// Invite a new member to an existing MLS group
+/// Similar to create_group_chat, this refreshes the member's keypackages and adds them to the group
+#[tauri::command]
+async fn invite_member_to_group(
+    group_id: String,
+    member_npub: String,
+) -> Result<(), String> {
+    // Refresh keypackages for the new member
+    let devices = refresh_keypackages_for_contact(member_npub.clone()).await.map_err(|e| {
+        format!("Failed to refresh device keypackage for {}: {}", member_npub, e)
+    })?;
+
+    // Choose the first device (same policy as group creation)
+    let (device_id, _kp_ref) = devices
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("No device keypackages found for {}", member_npub))?;
+
+    // Run non-Send MLS engine work on a blocking thread
+    tokio::task::spawn_blocking(move || {
+        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async move {
+            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            mls.add_member_device(&group_id, &member_npub, &device_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
 /// Remove a member device from an MLS group
 #[tauri::command]
 async fn remove_mls_member_device(
@@ -3561,9 +3651,10 @@ async fn sync_mls_groups_now(
                 let group_ids: Vec<String> = if let Some(enc) = enc_opt {
                     match crypto::internal_decrypt(enc, None).await {
                         Ok(json) => {
-                            let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
-                            arr.into_iter()
-                                .filter_map(|v| v.get("group_id").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                            let groups: Vec<mls::MlsGroupMetadata> = serde_json::from_str(&json).unwrap_or_default();
+                            groups.into_iter()
+                                .filter(|g| !g.evicted) // Skip evicted groups
+                                .map(|g| g.group_id)
                                 .collect()
                         }
                         Err(_) => Vec::new(),
@@ -3714,8 +3805,8 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 let nostr_group_id_bytes = welcome.nostr_group_id.clone();
                 let group_name = welcome.group_name.clone();
                 let welcomer_hex = welcome.welcomer.to_hex();
-                let wrapper_id_hex = welcome.wrapper_event_id.to_hex();
-                
+                let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
+
                 // Accept the welcome - this updates engine state internally
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
                 
@@ -3760,16 +3851,30 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 println!("[MLS]   - engine_group_id: {}", engine_group_id);
                 println!("[MLS]   - group_name: {}", group_name);
                 
-                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_id_hex)
+                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex)
             }; // engine dropped here
             
             // Now persist the group metadata (awaitable section)
             let mut groups = mls.read_groups().await.map_err(|e| e.to_string())?;
             
-            // Check if group already exists (idempotent)
-            let exists = groups.iter().any(|g| g.group_id == nostr_group_id);
+            // Check if group already exists or was previously evicted
+            let existing_index = groups.iter().position(|g| g.group_id == nostr_group_id);
             
-            if !exists {
+            if let Some(idx) = existing_index {
+                // Group exists - check if it was evicted and we're being re-invited
+                if groups[idx].evicted {
+                    println!("[MLS] Re-invited to previously evicted group: {}", nostr_group_id);
+                    // Clear the evicted flag and update metadata
+                    groups[idx].evicted = false;
+                    groups[idx].updated_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|e| e.to_string())?
+                        .as_secs();
+                    mls.write_groups(&groups).await.map_err(|e| e.to_string())?;
+                } else {
+                    println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
+                }
+            } else {
                 // Build metadata for the accepted group
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -3784,6 +3889,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                     avatar_ref: None,
                     created_at: now_secs,
                     updated_at: now_secs,
+                    evicted: false,                           // Accepting a welcome means we're joining, not evicted
                 };
                 
                 groups.push(metadata.clone());
@@ -3809,8 +3915,6 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 }
                 
                 println!("[MLS] Persisted group metadata after accept: group_id={}", nostr_group_id);
-            } else {
-                println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
             }
 
             // Remove this welcome from the notified set since it's been accepted
@@ -3957,7 +4061,17 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
                         // Build enriched infos with member_count computed from engine (fallback to 0 on any failure)
                         let infos = arr
                             .into_iter()
-                            .map(|v| {
+                            .filter_map(|v| {
+                                // Skip evicted groups
+                                let evicted = v
+                                    .get("evicted")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(false);
+                                
+                                if evicted {
+                                    return None;
+                                }
+
                                 let group_id = v
                                     .get("group_id")
                                     .and_then(|s| s.as_str())
@@ -4010,7 +4124,7 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
                                     }
                                 }
 
-                                MlsGroupInfo {
+                                Some(MlsGroupInfo {
                                     group_id,
                                     engine_group_id,
                                     name,
@@ -4018,7 +4132,7 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
                                     created_at,
                                     updated_at,
                                     member_count,
-                                }
+                                })
                             })
                             .collect::<Vec<MlsGroupInfo>>();
 
@@ -4039,8 +4153,8 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
 #[derive(serde::Serialize, Clone)]
 struct GroupMembers {
     group_id: String,
-    engine_group_id: String,
     members: Vec<String>, // npubs
+    admins: Vec<String>,  // admin npubs
 }
 
 /// Get members (npubs) of an MLS group from the persistent engine (on-demand)
@@ -4069,78 +4183,30 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
 
             // Acquire non-Send engine; all calls below must be non-await while engine is in scope
             let engine = mls.engine().map_err(|e| e.to_string())?;
-
-            // Try to resolve members via engine API
             use mdk_core::prelude::GroupId;
-            use nostr_sdk::prelude::PublicKey;
 
-            // Decode engine id to GroupId; fallback to using wire id bytes if needed
             let mut members: Vec<String> = Vec::new();
-            let mut engine_gid_hex = engine_id.clone();
-
-
-            // Preferred path: use engine_group_id if it’s valid hex
+            let mut admins: Vec<String> = Vec::new();
             if let Ok(gid_bytes) = hex::decode(&engine_id) {
+                // Decode engine id to GroupId
                 let gid = GroupId::from_slice(&gid_bytes);
-                // Attempt API: get_group_members(&GroupId)
-                match engine.get_members(&gid) {
-                    Ok(pk_list) => {
-                        members = pk_list
-                            .into_iter()
-                            .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
-                            .collect();
-                    }
-                    Err(_) => {
-                        // Fallback: enumerate engine groups and match by ids, then use any available member list on entry
-                        if let Ok(groups) = engine.get_groups() {
-                            for g in groups {
-                                let gid_hex = hex::encode(g.mls_group_id.as_slice());
-                                let wire_hex = hex::encode(&g.nostr_group_id);
-                                if gid_hex == engine_id || wire_hex == wire_id {
-                                    // Try common field names for members (SDK variations)
-                                    #[allow(unused_mut)]
-                                    let mut found = false;
-                                    // If the group entry exposes `members` (Vec<PublicKey>)
-                                    #[allow(unused_variables)]
-                                    let maybe_members = {
-                                        // This block intentionally uses pattern matching guarded by cfg to avoid compile issues if field doesn't exist
-                                        // We will try to access a field named `members` via debug string as last resort (no-op here).
-                                        None::<Vec<PublicKey>>
-                                    };
-                                    if let Some(pks) = maybe_members {
-                                        members = pks
-                                            .into_iter()
-                                            .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
-                                            .collect();
-                                        found = true;
-                                    }
-                                    if !found {
-                                        // If not available, keep empty; engine.get_group_members is the canonical path
-                                    }
-                                    engine_gid_hex = gid_hex;
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                
+                // Get members via engine API
+                if let Ok(pk_list) = engine.get_members(&gid) {
+                    members = pk_list
+                        .into_iter()
+                        .filter_map(|pk| pk.to_bech32().ok())
+                        .collect();
                 }
-            } else {
-                // engine_id was not hex; try match by wire id in engine list
+                
+                // Get admins from the group
                 if let Ok(groups) = engine.get_groups() {
                     for g in groups {
-                        let wire_hex = hex::encode(&g.nostr_group_id);
-                        if wire_hex == wire_id {
-                            engine_gid_hex = hex::encode(g.mls_group_id.as_slice());
-                            // Attempt direct engine API with resolved engine id
-                            if let Ok(gid_bytes) = hex::decode(&engine_gid_hex) {
-                                let gid = GroupId::from_slice(&gid_bytes);
-                                if let Ok(pk_list) = engine.get_members(&gid) {
-                                    members = pk_list
-                                        .into_iter()
-                                        .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
-                                        .collect();
-                                }
-                            }
+                        let gid_hex = hex::encode(g.mls_group_id.as_slice());
+                        if gid_hex == engine_id {
+                            admins = g.admin_pubkeys.iter()
+                                .filter_map(|pk| pk.to_bech32().ok())
+                                .collect();
                             break;
                         }
                     }
@@ -4149,8 +4215,8 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
 
             Ok(GroupMembers {
                 group_id: wire_id,
-                engine_group_id: engine_gid_hex,
                 members,
+                admins,
             })
         })
     })
@@ -4161,25 +4227,20 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
 /// Leave an MLS group
 /// TODO: Implement MLS leave operation
 #[tauri::command]
-async fn leave_mls_group(
-    group_id: String,
-    /*
-    UI error mapping and behavior for rust.refresh_keypackages_for_contact()
-    - Invalid npub format:
-      • PublicKey::from_bech32(&npub) -> Err(String). The exact string is bubbled to the frontend and shown verbatim.
-    - Network fetch failures:
-      • client.fetch_events_from(... Kind::MlsKeyPackage ...) -> Err(String). Bubbled as actionable error text.
-    - Empty result (no KeyPackages):
-      • Returns Ok(vec![]) here. In rust.create_group_chat(), an empty device list yields "No device keypackages found for {npub}" and aborts group creation (atomic create semantics).
-    - Index persistence:
-      • Updates plaintext "mls_keypackage_index" synchronously after network await; avoids awaits while store is held to prevent deadlocks.
-    - Return value:
-      • Vec(device_id, keypackage_ref); where both are currently the KeyPackage event id (hex). Device selection policy is currently "first result"; can evolve to "newest by fetched_at" later.
-    */
-) -> Result<(), String> {
-    // TODO: Implement leave operation via MlsService
-    let _ = group_id;
-    Err("Not implemented".to_string())
+async fn leave_mls_group(group_id: String) -> Result<(), String> {
+    // Run non-Send MLS engine work on a blocking thread
+    tokio::task::spawn_blocking(move || {
+        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async move {
+            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            mls.leave_group(&group_id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 //// Refresh keypackages for a contact from TRUSTED_RELAY
@@ -4355,13 +4416,13 @@ pub fn run() {
             fetch_messages,
             deep_rescan,
             is_scanning,
-            warmup_nip96_servers,
             get_chat_messages,
             generate_blurhash_preview,
             download_attachment,
             login,
             notifs,
             get_relays,
+            get_media_servers,
             monitor_relay_connections,
             start_typing,
             connect,
@@ -4398,9 +4459,11 @@ pub fn run() {
             // MLS advanced helpers
             process_mls_event,
             add_mls_member_device,
+            invite_member_to_group,
             remove_mls_member_device,
             get_mls_group_members,
             leave_mls_group,
+            list_group_cursors,
             refresh_keypackages_for_contact,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,

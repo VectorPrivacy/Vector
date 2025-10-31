@@ -35,6 +35,10 @@
   mask-image: url("./icons/chats.svg");
 }
 
+.icon-crown {
+  mask-image: url("./icons/crown.svg");
+}
+
 .icon-new-msg {
   mask-image: url("./icons/new-chat.svg");
 }
@@ -97,6 +101,10 @@
 
 .icon-bookmark {
   mask-image: url("./icons/bookmark.svg");
+}
+
+.icon-bot {
+  mask-image: url("./icons/bot.svg");
 }
 
 .icon-chevron-down {
@@ -708,10 +716,16 @@ body {
 }
 
 .chatlist-contact-timestamp {
+  margin-top: auto;
+  margin-bottom: auto;
   margin-left: auto;
   margin-right: auto;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.5);
   line-height: normal;
+}
+
+.chatlist-contact-timestamp.read {
+  font-size: 0.8em;
 }
 
 .chatlist-contact img {
@@ -747,21 +761,35 @@ body {
 }
 
 .chatlist-contact-preview h4 {
-  padding-left: 15px;
+  padding-left: 10px;
   padding-right: 15px;
   margin-top: auto;
-  margin-bottom: auto;
+  margin-bottom: -4px;
   text-align: left;
+  color: rgba(255, 255, 255, 0.75);
+  transition: color 0.2s ease;
 }
 
 .chatlist-contact-preview p {
-  /* Opacity breaks the Popup by making the text bleed through it... WTF? */
-  /* opacity: 0.6;*/
   margin: 0;
-  margin-left: 15px;
+  margin-left: 10px;
   text-align: left;
   font-family: 'Rubik';
   font-weight: 100;
+  color: rgb(161, 161, 161);
+  transition: color 0.2s ease;
+}
+
+.chatlist-contact:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.chatlist-contact:hover .chatlist-contact-preview h4 {
+  color: rgba(255, 255, 255, 1);
+}
+
+.chatlist-contact:hover .chatlist-contact-preview p {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .chats {
@@ -900,6 +928,23 @@ body {
   border-bottom-left-radius: 0px;
   word-break: break-word;
   font-weight: 100;
+}
+
+.file-ext-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 1px;
+  background-color: rgba(0, 0, 0, 0.25);
+  color: white;
+  padding: 0px 6px;
+  border-radius: 14px;
+  font-size: 10px;
+  font-weight: 400;
+  opacity: 1;
+  pointer-events: none;
+  user-select: none;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .msg-them .avatar {
@@ -1396,6 +1441,13 @@ body {
   grid-template-columns: repeat(6, 1fr); 
   gap: 4px;
   margin-top: -12px;
+}
+
+/* Mobile: 5 columns instead of 6 */
+@media (max-width: 380px) {
+  .emoji-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
 }
 
 .emoji-grid span {
@@ -2153,6 +2205,13 @@ select:disabled:hover {
   animation: pulse-notification 2s ease-in-out infinite;
 }
 
+/* Position notification dot on chat back button (bottom-right) */
+#chat-back-btn .update-notification-dot {
+  top: 10px;
+  bottom: auto;
+  right: 8px;
+}
+
 @keyframes pulse-notification {
   0% {
     transform: scale(1);
@@ -2395,8 +2454,35 @@ select:disabled:hover {
   width: 45px;
 }
 
-.sync-status-container {
-  margin-bottom: 15px;
+.sync-line {
+  height: 2px;
+  width: 100%;
+  margin-top: -14px;
+  margin-bottom: 10px;
+  opacity: 1;
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sync-line.active {
+  transform: scaleX(1);
+  animation: pulse-sync 1.5s ease-in-out infinite 0.4s;
+}
+
+.sync-line.fade-out {
+  transform: scaleX(0);
+  animation: none;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes pulse-sync {
+  0%, 100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .chat-bookmarks-btn {
@@ -3014,6 +3100,13 @@ select:disabled:hover {
   margin-right: auto;
 }
 
+/* Compact member list emoji styling */
+.compact-member-name img.emoji {
+    width: 15px !important;
+    height: 15px !important;
+    vertical-align: middle !important;
+}
+
 /* MLS Group Invite Styles */
 .mls-invite-item {
   background: rgba(255, 255, 255, 0.05);
@@ -3321,4 +3414,137 @@ select:disabled:hover {
   .member-panel {
       display: none !important;
     }
+}
+/* Image Viewer Modal */
+.image-viewer-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.95);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.image-viewer-overlay.active {
+  opacity: 1;
+}
+
+.image-viewer-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.image-viewer-image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: 95vw;
+  max-height: 95vh;
+  object-fit: contain;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  -moz-user-drag: none;
+  user-drag: none;
+  pointer-events: auto;
+  transition: transform 0.1s ease-out;
+  transform-origin: top left;
+}
+
+.image-viewer-image.dragging {
+  cursor: grabbing !important;
+  transition: none;
+}
+
+.image-viewer-image.zoomed {
+  cursor: grab;
+}
+
+.image-viewer-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  background-color: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s ease;
+}
+
+.image-viewer-close:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.image-viewer-close::before,
+.image-viewer-close::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 2px;
+  background-color: white;
+}
+
+.image-viewer-close::before {
+  transform: rotate(45deg);
+}
+
+.image-viewer-close::after {
+  transform: rotate(-45deg);
+}
+
+.image-viewer-zoom-info {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 10001;
+}
+
+.image-viewer-zoom-info.visible {
+  opacity: 1;
+}
+
+.image-viewer-tip {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  z-index: 10001;
+}
+
+.image-viewer-tip.visible {
+  opacity: 1;
 }

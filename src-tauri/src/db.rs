@@ -46,6 +46,7 @@ pub struct SlimProfile {
     last_read: String,
     status: Status,
     muted: bool,
+    bot: bool,
     // Omitting: messages, last_updated, typing_until, mine
 }
 
@@ -66,6 +67,7 @@ impl Default for SlimProfile {
             last_read: String::new(),
             status: Status::new(),
             muted: false,
+            bot: false,
         }
     }
 }
@@ -87,6 +89,7 @@ impl From<&Profile> for SlimProfile {
             last_read: profile.last_read.clone(),
             status: profile.status.clone(),
             muted: profile.muted,
+            bot: profile.bot,
         }
     }
 }
@@ -112,6 +115,7 @@ impl SlimProfile {
             typing_until: 0,      // Default value
             mine: false,          // Default value
             muted: self.muted,
+            bot: self.bot,
         }
     }
     

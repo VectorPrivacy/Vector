@@ -368,6 +368,49 @@ pub fn calculate_file_hash(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Generate a blurhash from RGBA8 image data with adaptive downscaling for optimal performance
+///
+/// This function uses adaptive downscaling based on image size:
+/// - 1% for 4K+ images (≥3840px)
+/// - 2.5% for large images (≥1920px)
+/// - 5% for medium images (≥960px)
+/// - 10% for smaller images (<960px)
+///
+/// Returns the blurhash string, or None if encoding fails
+pub fn generate_blurhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Option<String> {
+    // Adaptive downscaling based on image size for optimal blurhash performance
+    let max_dimension = width.max(height);
+    let scale_factor = if max_dimension >= 3840 {
+        0.01  // 1% for 4K+ images
+    } else if max_dimension >= 1920 {
+        0.025 // 2.5% for large images
+    } else if max_dimension >= 960 {
+        0.05  // 5% for medium images
+    } else {
+        0.10  // 10% for smaller images
+    };
+    
+    let thumbnail_width = (width as f32 * scale_factor).max(1.0) as u32;
+    let thumbnail_height = (height as f32 * scale_factor).max(1.0) as u32;
+    
+    // Fast manual nearest-neighbor downsampling
+    let mut thumbnail_pixels = Vec::with_capacity((thumbnail_width * thumbnail_height * 4) as usize);
+    
+    let x_ratio = width as f32 / thumbnail_width as f32;
+    let y_ratio = height as f32 / thumbnail_height as f32;
+    
+    for ty in 0..thumbnail_height {
+        let sy = (ty as f32 * y_ratio) as u32;
+        for tx in 0..thumbnail_width {
+            let sx = (tx as f32 * x_ratio) as u32;
+            let src_idx = ((sy * width + sx) * 4) as usize;
+            thumbnail_pixels.extend_from_slice(&pixels[src_idx..src_idx + 4]);
+        }
+    }
+    
+    blurhash::encode(4, 3, thumbnail_width, thumbnail_height, &thumbnail_pixels).ok()
+}
+
 /// Decode a blurhash string to a Base64-encoded PNG data URL
 /// Returns a data URL string that can be used directly in an <img> src attribute
 pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch: f32) -> String {

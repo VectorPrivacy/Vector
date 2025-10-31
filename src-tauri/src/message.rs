@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use ::image::{ImageBuffer, ImageEncoder, Rgba};
-use blurhash;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -12,7 +11,6 @@ use crate::STATE;
 use crate::util::{self, calculate_file_hash};
 use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
-use crate::PRIVATE_NIP96_CONFIG;
 
 #[cfg(target_os = "android")]
 use crate::android::{clipboard, filesystem};
@@ -473,12 +471,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Upload the file to the server
             let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
             let signer = client.signer().await.unwrap();
-            let conf = PRIVATE_NIP96_CONFIG.wait();
+            let servers = crate::get_blossom_servers();
             let file_size = enc_file.len();
             // Clone the Arc outside the closure for use inside a seperate-threaded progress callback
             let pending_id_for_callback = Arc::clone(&pending_id);
             // Create a progress callback for file uploads
-            let progress_callback: crate::upload::ProgressCallback = Box::new(move |percentage, _| {
+            let progress_callback: crate::blossom::ProgressCallback = std::sync::Arc::new(move |percentage, _bytes| {
                     if let Some(pct) = percentage {
                         handle.emit("attachment_upload_progress", serde_json::json!({
                             "id": pending_id_for_callback.as_ref(),
@@ -488,8 +486,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 Ok(())
             });
 
-            // Upload the file with both a Progress Emitter and multiple re-try attempts in case of connection instability
-            match crate::upload::upload_data_with_progress(&signer, &conf, enc_file, Some(mime_type.as_str()), None, progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            // Upload the file with progress, retries, and automatic server failover
+            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, enc_file, Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -500,12 +498,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                             .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_url_update))
                             .unwrap();
                         if let Some(attachment) = message.attachments.last_mut() {
-                            attachment.url = url.to_string();
+                            attachment.url = url.clone();
                         }
                     }
                     
                     // Create the attachment rumor
-                    let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url.to_string());
+                    let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url);
                     
                     // Only add p-tag for DMs, not for MLS groups
                     if !is_group_chat {
@@ -530,11 +528,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                     attachment_rumor
                 },
-                Err(_) => {
+                Err(e) => {
                     // The file upload failed: so we mark the message as failed and notify of an error
                     mark_message_failed(Arc::clone(&pending_id), &receiver).await;
                     // Return the error
-                    return Err(String::from("Failed to upload file"));
+                    eprintln!("[Blossom Error] Upload failed: {}", e);
+                    return Err(format!("Failed to upload file: {}", e));
                 }
             }
         } else {
@@ -791,14 +790,15 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     ).map_err(|e| e.to_string())?;
 
     // Generate image metadata with Blurhash and dimensions
-    let img_meta: Option<ImageMetadata> = match blurhash::encode(4, 3, img.width(), img.height(), &pixels) {
-        Ok(hash) => Some(ImageMetadata {
-            blurhash: hash,
-            width: img.width(),
-            height: img.height(),
-        }),
-        Err(_) => None
-    };
+    let img_meta: Option<ImageMetadata> = util::generate_blurhash_from_rgba(
+        img.as_raw(),
+        img.width(),
+        img.height()
+    ).map(|blurhash| ImageMetadata {
+        blurhash,
+        width: img.width(),
+        height: img.height(),
+    });
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
@@ -854,22 +854,19 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     };
 
     // Generate image metadata if the file is an image
-    if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+    if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
         // Try to load and decode the image
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
-            // Convert to RGBA8 format for blurhash
             let rgba_img = img.to_rgba8();
-            let (width, height) = rgba_img.dimensions();
-            let pixels = rgba_img.as_raw();
-
-            // Generate Blurhash
-            if let Ok(hash) = blurhash::encode(4, 3, width, height, pixels) {
-                attachment_file.img_meta = Some(ImageMetadata {
-                    blurhash: hash,
-                    width,
-                    height,
-                });
-            }
+            attachment_file.img_meta = util::generate_blurhash_from_rgba(
+                rgba_img.as_raw(),
+                img.width(),
+                img.height()
+            ).map(|blurhash| ImageMetadata {
+                blurhash,
+                width: img.width(),
+                height: img.height(),
+            });
         }
     }
 

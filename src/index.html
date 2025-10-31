@@ -7,11 +7,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vector</title>
     <script src="/main.js" defer></script>
+    <script src="/js/chat-scroll.js" defer></script>
     <script src="/js/settings.js" defer></script>
     <script src="/js/misc.js" defer></script>
     <script src="/js/db.js" defer></script>
     <script src="/js/voice.js" defer></script>
     <script src="/js/updater.js" defer></script>
+    <script src="/js/previewer.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <script src="/js/markdown.js"></script>
     <script src="/js/emoji.js"></script>
@@ -40,23 +42,195 @@
     </div>
 
     <main class="container">
-      <!-- The Global emoji picker popup -->
-      <div class="emoji-picker" tabindex="-1">
-        <div class="emoji-search-container">
-          <input id="emoji-search-input" placeholder="Search...">
-          <span class="emoji-search-icon icon icon-search"></span>
+<!-- The Global emoji picker popup -->
+<div class="emoji-picker" tabindex="-1">
+  <div class="emoji-search-container">
+    <input id="emoji-search-input" placeholder="Search...">
+    <span class="emoji-search-icon icon icon-search"></span>
+  </div>
+  <div class="emoji-picker-content">
+    <div class="emoji-sidebar">
+      <button class="emoji-category-btn active" data-category="recents">
+        <span class="icon icon-clock"></span>
+      </button>
+      <button class="emoji-category-btn" data-category="favorites">
+        <span class="icon icon-star"></span>
+      </button>
+      <button class="emoji-category-btn" data-category="all">
+        <span class="icon icon-smile-face"></span>
+      </button>
+    </div>
+    <div class="emoji-main">
+      <div class="emoji-section" id="emoji-recents">
+        <div class="emoji-section-header">
+          <span class="section-icon icon icon-clock"></span>
+          <span class="header-text">Recently Used</span>
+          <span class="icon icon-chevron-down"></span>
         </div>
-        <div class="emoji-picker-content">
-          <div class="emoji-sidebar">
-            <button class="emoji-category-btn active" data-category="recents">
-              <span class="icon icon-clock"></span>
-            </button>
-            <button class="emoji-category-btn" data-category="favorites">
-              <span class="icon icon-star"></span>
-            </button>
-            <button class="emoji-category-btn" data-category="all">
-              <span class="icon icon-smile-face"></span>
-            </button>
+        <div class="emoji-grid" id="emoji-recents-grid"></div>
+      </div>
+      <div class="emoji-section" id="emoji-favorites">
+        <div class="emoji-section-header">
+          <span class="section-icon icon icon-star"></span>
+          <span class="header-text">Favorites</span>
+          <span class="icon icon-chevron-down"></span>
+        </div>
+        <div class="emoji-grid" id="emoji-favorites-grid"></div>
+      </div>
+      <div class="emoji-section" id="emoji-all">
+        <div class="emoji-section-header">
+          <span class="section-icon icon icon-smile-face"></span>
+          <span class="header-text">Emojis</span>
+          <span class="icon icon-chevron-down"></span>
+        </div>
+        <div class="emoji-grid" id="emoji-all-grid"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="profile" class="chats" style="display: none;">
+  <div style="height: 60px; background-color: #161616;">
+    <div id="profile-back-btn" class="btn nav-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <div>
+      <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
+      <span id="profile-status" class="cutoff chat-contact-status btn"></span>
+    </div>
+  </div>
+  <div style="position: relative;">
+    <img id="profile-banner" class="profile-banner">
+    <div class="profile-banner-edit btn">
+      <span class="icon icon-edit"></span>
+    </div>
+    <div class="profile-avatar-container">
+      <img id="profile-avatar" class="profile-avatar">
+      <div class="profile-avatar-edit btn">
+        <span class="icon icon-plus-circle"></span>
+      </div>
+    </div>
+  </div>
+  <div style="padding-bottom: 75px;">
+    <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
+    <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
+    <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"></div>
+    <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+    <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
+    <div id="profile-option-list" class="profile-options">
+      <div id="profile-option-mute" class="btn profile-option">
+        <span class="icon icon-volume-mute navbar-icon"></span>
+        <p class="navbar-text">Mute</p>
+      </div>
+      <div id="profile-option-nickname" class="btn profile-option">
+        <span class="icon icon-edit-user navbar-icon"></span>
+        <p class="navbar-text">Rename</p>
+      </div>
+    </div>
+    <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
+      <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
+    </div>
+    <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
+      <span id="profile-npub" class="profile-npub"></span>
+      <button id="profile-npub-copy" class="btn profile-npub-copy">
+        <span class="icon icon-copy"></span>
+      </button>
+    </div>
+    <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
+    <span id="profile-id" style="display: none;"></span>
+  </div>
+</div>
+
+<div id="group-overview" class="chats" style="display: none;">
+  <div style="height: 60px; background-color: #161616;">
+    <div id="group-overview-back-btn" class="btn nav-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <div>
+      <h3 id="group-overview-name" class="chat-contact-with-status btn"></h3>
+      <span id="group-overview-status" class="cutoff chat-contact-status btn"></span>
+    </div>
+  </div>
+  <div style="position: relative; margin-top: 25px; text-align: center; width: 100px; height: 100px; margin-left: auto; margin-right: auto;">
+    <span id="group-overview-avatar" class="icon icon-chat-circle" style="width: 100px; height: 100px; border-radius: initial; display: inline-block;"></span>
+  </div>
+  <div style="padding-bottom: 75px;">
+    <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn"></h3>
+    <span id="group-overview-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+    <div style="margin-top: 40px; width: 90%; margin-left: auto; margin-right: auto;">
+      <div style="display: flex; justify-content: center; margin-bottom: 10px;">
+        <button id="group-invite-member-btn" class="btn accept-btn btn-bounce" style="background-color: transparent; display: flex; align-items: center; gap: 6px;">
+          <span class="icon icon-add-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
+          <span style="color: white;">Invite Member</span>
+        </button>
+        <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="background-color: transparent; display: none; align-items: center; gap: 6px;">
+          <span class="icon icon-trash" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-danger);"></span>
+          <span style="color: var(--color-danger);">Leave Group</span>
+        </button>
+      </div>
+      <div class="emoji-search-container" style="padding: 10px 0px;">
+        <span class="emoji-search-icon icon icon-search" style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
+        <input id="group-member-search-input" placeholder="Search members..." style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
+      </div>
+      <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
+        <!-- Members will be rendered here dynamically -->
+      </div>
+    </div>
+  </div>
+</div>
+
+      <div id="chats" class="chats">
+        <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">
+          <span class="icon icon-bookmark nav-icon"></span>
+        </div>
+        <div id="account" class="account" style="display: none;"></div>
+        <div id="sync-line" class="sync-line"></div>
+        
+        <!-- MLS Group Invites Section (hidden by default) -->
+        <div id="mls-invites-section" class="mls-invites-section" style="display: none; margin: 10px 15px 20px;">
+          <div id="mls-invites-container" style="max-height: 145px; overflow-y: auto;">
+            <!-- Invites will be rendered here dynamically -->
+          </div>
+        </div>
+        
+        <!-- New Chat Buttons -->
+        <div style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
+          <button id="new-chat-btn" class="new-chat-btn btn" style="width: 50%; margin-right: 5px; display: none;">
+            <span class="icon icon-new-msg"></span>
+            <span style="width: 100%">New Chat</span>
+          </button>
+          <button id="create-group-btn" class="new-chat-btn btn" style="width: 50%; margin-left: 5px; margin-right: 10px; display: none;">
+            <span class="icon icon-chat-circle"></span>
+            <span style="width: 100%">Group Chat</span>
+          </button>
+        </div>
+        
+        <div id="chat-list">
+          
+        </div>
+      </div>
+
+      <div id="chat" class="chat" style="display: none;">
+        <div id="chat-back-btn" class="btn nav-back-btn">
+          <span class="icon icon-chevron-double-left nav-icon"></span>
+          <span id="chat-back-notification-dot" class="update-notification-dot" style="display: none;"></span>
+        </div>
+        <h3 id="chat-contact"></h3>
+        <span class="cutoff chat-contact-status" id="chat-contact-status"></span>
+        <div id="msg-top-fade" class="fadeout-top-msgs"></div>
+        <div id="chat-messages" class="chat-messages">
+
+        </div>
+        <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span></button>
+
+        <div class="row input-box" id="chat-box">
+          <div class="row chat-input-container">
+            <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
+            <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
+            <textarea id="chat-input" placeholder="Enter message..."></textarea>
+            <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>
+            <button id="chat-input-voice"><span class="icon icon-mic-on"></span></button>
+            <button id="chat-input-send" style="display: none;"><span class="icon icon-send"></span></button>
           </div>
           <div class="emoji-main">
             <div class="emoji-section" id="emoji-recents">
@@ -191,8 +365,8 @@
 
            <div class="form-group">
             <label class="toggle-container">
-              <span><span id="whisper-auto-translate-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto Translate</span>
-              <input type="checkbox" id="auto-translate-toggle">
+              <span><span id="privacy-strip-tracking-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Prevent URL tracking</span>
+              <input type="checkbox" id="privacy-strip-tracking-toggle" checked>
               <span class="neon-toggle"></span>
             </label>
           </div>

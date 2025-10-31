@@ -41,11 +41,22 @@ const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileId = document.getElementById('profile-id');
 
+const domGroupOverview = document.getElementById('group-overview');
+const domGroupOverviewBackBtn = document.getElementById('group-overview-back-btn');
+const domGroupOverviewName = document.getElementById('group-overview-name');
+const domGroupOverviewStatus = document.getElementById('group-overview-status');
+let domGroupOverviewAvatar = document.getElementById('group-overview-avatar');
+const domGroupOverviewNameSecondary = document.getElementById('group-overview-secondary-name');
+const domGroupOverviewDescription = document.getElementById('group-overview-description');
+const domGroupOverviewMembers = document.getElementById('group-overview-members');
+const domGroupMemberSearchInput = document.getElementById('group-member-search-input');
+const domGroupInviteMemberBtn = document.getElementById('group-invite-member-btn');
+const domGroupLeaveBtn = document.getElementById('group-leave-btn');
+
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
 const domAccount = document.getElementById('account');
-const domSyncStatusContainer = document.getElementById('sync-status-container');
-const domSyncStatus = document.getElementById('sync-status');
+const domSyncLine = document.getElementById('sync-line');
 const domChatList = document.getElementById('chat-list');
 const domChatNewDM = document.getElementById('new-chat-btn');
 const domChatNewGroup = document.getElementById('create-group-btn');
@@ -58,6 +69,7 @@ const domSettingsBtn = document.getElementById('settings-btn');
 
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
+const domChatBackNotificationDot = document.getElementById('chat-back-notification-dot');
 const domChatContact = document.getElementById('chat-contact');
 const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessagesFade = document.getElementById('msg-top-fade');
@@ -625,6 +637,11 @@ let arrMLSInvites = [];
 let strOpenChat = "";
 
 /**
+ * The chat ID we came from when opening a profile (to return to on back)
+ */
+let previousChatBeforeProfile = "";
+
+/**
  * Get a DM chat for a user
  * @param {string} npub - The user's npub
  * @returns {Chat|undefined} - The chat if it exists
@@ -770,7 +787,6 @@ async function loadMLSGroups() {
         const detailed = await invoke('list_mls_groups_detailed');
         const groupsToRefresh = new Set();
 
-        console.log('MLS groups loaded (detailed):', Array.isArray(detailed) ? detailed.length : 0);
         if (!Array.isArray(detailed)) {
             throw new Error('Backend did not return detailed MLS groups array');
         }
@@ -811,7 +827,6 @@ async function loadMLSGroups() {
                         limit: 50
                     }) || [];
 
-                    console.log(`Loaded ${messages.length} messages for group ${String(groupId).substring(0, 8)}...`);
 
                     // Messages are already in the correct format from unified storage!
                     chat.messages = messages;
@@ -851,13 +866,17 @@ async function loadMLSGroups() {
  */
 async function refreshGroupMemberCount(groupId) {
     try {
-        const members = await invoke('get_mls_group_members', { groupId });
+        const result = await invoke('get_mls_group_members', { groupId });
         const chat = getOrCreateChat(groupId, 'MlsGroup');
-        if (Array.isArray(members)) {
+        
+        // get_mls_group_members returns { group_id, members, admins }
+        if (result && result.members) {
             chat.metadata = chat.metadata || {};
             chat.metadata.custom_fields = chat.metadata.custom_fields || {};
-            chat.metadata.custom_fields.member_count = String(members.length);
-            chat.participants = members.slice();
+            chat.metadata.custom_fields.member_count = result.members.length;
+            chat.participants = result.members.slice();
+            
+            console.log(`[MLS] Updated member count for ${groupId.substring(0, 8)}: ${result.members.length} members`);
         }
         if (strOpenChat === groupId) {
             // Update the chat header subtext (respects typing indicators)
@@ -891,7 +910,6 @@ async function loadMLSInvites() {
         const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
         arrMLSInvites = (welcomes || []).filter(Boolean);
 
-        console.log('Pending MLS invites:', arrMLSInvites.length);
 
         // Render the invites UI
         renderMLSInvites();
@@ -1178,6 +1196,9 @@ function renderChatlist() {
         divFade.style.bottom = `65px`;
         domChatList.appendChild(divFade);
     }
+    
+    // Update the back button notification dot when chatlist changes
+    updateChatBackNotification();
 }
 
 /**
@@ -1264,6 +1285,20 @@ function renderChat(chat) {
     } else {
         h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
+        
+        // Add bot icon if this is a bot profile
+        if (profile?.bot) {
+            const botIconContainer = document.createElement('span');
+            botIconContainer.className = 'icon icon-bot';
+            botIconContainer.style.width = '14px';
+            botIconContainer.style.height = '14px';
+            botIconContainer.style.marginLeft = '6px';
+            botIconContainer.style.display = 'inline-block';
+            botIconContainer.style.verticalAlign = 'initial';
+            botIconContainer.style.position = 'relative';
+            botIconContainer.style.backgroundColor = '#59fcb3';
+            h4ContactName.appendChild(botIconContainer);
+        }
     }
     h4ContactName.classList.add('cutoff')
     divPreviewContainer.appendChild(h4ContactName);
@@ -1366,7 +1401,12 @@ function renderChat(chat) {
         pTimeAgo.textContent = timeAgo(cLastMsg.at);
     }
     // Apply 'Unread' final styling
-    if (nUnread) pTimeAgo.style.color = '#59fcb3';
+    if (nUnread) {
+        pTimeAgo.style.color = '#59fcb3';
+    } else {
+        // Add 'read' class for smaller font size when no unread messages
+        pTimeAgo.classList.add('read');
+    }
     divContact.appendChild(pTimeAgo);
 
     return divContact;
@@ -1417,6 +1457,45 @@ function countUnreadMessages(chat) {
 }
 
 /**
+ * Update the notification dot on the chat back button
+ * Shows the dot if there are unread messages in OTHER chats (not the currently open one)
+ */
+function updateChatBackNotification() {
+    if (!domChatBackNotificationDot) return;
+    
+    // Check if we're currently in a chat
+    if (!strOpenChat) {
+        domChatBackNotificationDot.style.display = 'none';
+        return;
+    }
+    
+    // Check if any OTHER chat has unread messages
+    const hasOtherUnreads = arrChats.some(chat => {
+        // Skip the currently open chat
+        if (chat.id === strOpenChat) return false;
+        
+        // Skip chats with no messages (same as chatlist rendering)
+        if (!chat.messages || chat.messages.length === 0) return false;
+        
+        // Skip our own profile (bookmarks/notes)
+        if (chat.id === strPubkey) return false;
+        
+        // Get profile for DM chats
+        const isGroup = chat.chat_type === 'MlsGroup';
+        const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+        
+        // Skip muted chats or muted profiles (same logic as chatlist rendering)
+        if (chat.muted || (profile && profile.muted)) return false;
+        
+        // Check if this chat has unread messages
+        return countUnreadMessages(chat) > 0;
+    });
+    
+    // Show or hide the notification dot
+    domChatBackNotificationDot.style.display = hasOtherUnreads ? '' : 'none';
+}
+
+/**
  * Sets a specific message as the last read message
  * @param {Chat} chat - The Chat to update
  * @param {Message|string} message - The Message object or message ID to set as last read
@@ -1460,20 +1539,6 @@ async function sendFile(pubkey, replied_to, filepath) {
         popupConfirm(e, '', true, '', 'vector_warning.svg');
     }
     nLastTypingIndicator = 0;
-}
-
-/**
- * A blocking function that continually polls NIP-96 servers for their configs.
- * 
- * Note: This function should only be called once, and COULD block for a very long time (i.e: if offline).
- */
-async function warmupUploadServers() {
-    // This simple function continually polls Vector's NIP-96 servers until configs are cached, for faster file uploads later
-    while (true) {
-        if (await invoke('warmup_nip96_servers')) break;
-        // If we reach here, this warmup attempt failed: sleep for a bit and try again soon
-        await sleep(5000);
-    }
 }
 
 /**
@@ -1539,6 +1604,9 @@ async function setupRustListeners() {
         if (strOpenChat === group_id) {
             console.log('Updating open group chat with new message, pending:', newMessage.pending);
             updateChat(chat, [newMessage]);
+            // Increment rendered count since we're adding a new message
+            proceduralScrollState.renderedMessageCount++;
+            proceduralScrollState.totalMessageCount++;
         } else {
             console.log('Group chat not open, message added to background chat');
         }
@@ -1571,6 +1639,68 @@ async function setupRustListeners() {
         await loadMLSGroups();
     });
 
+    // Listen for MLS group updates (member additions, removals, etc.)
+    await listen('mls_group_updated', async (evt) => {
+        try {
+            const { group_id } = evt.payload || {};
+            console.log('MLS group updated:', group_id);
+            
+            // Refresh member count
+            await refreshGroupMemberCount(group_id);
+            
+            // If the group overview is currently open for THIS SPECIFIC group, refresh it
+            if (domGroupOverview.style.display !== 'none') {
+                // Check if the overview is for the same group that was updated
+                const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
+                if (overviewGroupId === group_id) {
+                    const currentChat = arrChats.find(c => c.id === group_id);
+                    if (currentChat) {
+                        await renderGroupOverview(currentChat);
+                    }
+                }
+            }
+            
+            // Refresh chat list to update any UI elements
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_updated event:', e);
+        }
+    });
+    
+    // Listen for MLS group left events
+    await listen('mls_group_left', async (evt) => {
+        try {
+            const { group_id } = evt.payload || {};
+            console.log('[MLS][Frontend] Received mls_group_left event for group:', group_id?.substring(0, 16));
+            
+            // Remove the group from the chat list
+            const chatIndex = arrChats.findIndex(c => c.id === group_id);
+            if (chatIndex !== -1) {
+                console.log('[MLS][Frontend] Removing group from arrChats at index:', chatIndex);
+                arrChats.splice(chatIndex, 1);
+            } else {
+                console.log('[MLS][Frontend] Group not found in arrChats');
+            }
+            
+            // Close the group overview if it's open for this group
+            const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
+            if (overviewGroupId === group_id) {
+                domGroupOverview.style.display = 'none';
+                domGroupOverview.removeAttribute('data-group-id');
+            }
+            
+            // If this was the active chat, close it and return to chat list
+            if (strOpenChat === group_id) {
+                await closeChat();
+            }
+            
+            // Refresh chat list
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_left event:', e);
+        }
+    });
+    
     // Listen for MLS initial sync completion after joining a group
     await listen('mls_group_initial_sync', async (evt) => {
         try {
@@ -1617,15 +1747,15 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Finish updates
     await listen('sync_finished', async (_) => {
-        // Display that we finished syncing
-        domSyncStatus.textContent = 'Synchronised';
-
-        // Wait 1 second, then slide out and hide when done
-        await slideout(domSyncStatusContainer, { delay: 1000 });
-
-        // Reset the text and adjust the UI if necessary
-        domSyncStatus.textContent = '';
-        if (!strOpenChat) adjustSize();
+        // Fade out the sync line
+        domSyncLine.classList.remove('active');
+        domSyncLine.classList.add('fade-out');
+        
+        // Wait for fade animation to complete, then reset
+        setTimeout(() => {
+            domSyncLine.classList.remove('fade-out');
+            if (!strOpenChat) adjustSize();
+        }, 300);
     });
 
     // Listen for Synchronisation Slice updates
@@ -1636,12 +1766,12 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Progress updates
     await listen('sync_progress', (evt) => {
-        // Display the dates we're syncing between
-        const options = { month: 'short', day: 'numeric' };
-        const start = new Date(evt.payload.since * 1000).toLocaleDateString('en-US', options);
-        const end = new Date(evt.payload.until * 1000).toLocaleDateString('en-US', options);
-        if (!fInit) domSyncStatusContainer.style.display = ``;
-        domSyncStatus.textContent = `Syncing Messages between ${start} - ${end}`;
+        // Show and activate the sync line when syncing is in progress
+        // Only add 'active' if it's not already active to avoid restarting the animation
+        if (!fInit && !domSyncLine.classList.contains('active')) {
+            domSyncLine.classList.remove('fade-out');
+            domSyncLine.classList.add('active');
+        }
         if (!strOpenChat) adjustSize();
     });
 
@@ -1928,6 +2058,9 @@ async function setupRustListeners() {
         // If this user has the open chat, then update the chat too
         if (strOpenChat === evt.payload.chat_id) {
             updateChat(chat, [newMessage]);
+            // Increment rendered count since we're adding a new message
+            proceduralScrollState.renderedMessageCount++;
+            proceduralScrollState.totalMessageCount++;
         }
 
         // Render the Chat List
@@ -2003,15 +2136,38 @@ async function setupRustListeners() {
 let fInit = true;
 
 /**
- * Renders the relay list in the Settings Network section
+ * Renders the relay list and media servers in the Settings Network section
  */
 async function renderRelayList() {
     try {
         const relays = await invoke('get_relays');
+        const mediaServers = await invoke('get_media_servers');
         const networkList = document.getElementById('network-list');
         
         // Clear existing content
         networkList.innerHTML = '';
+        
+        // Add Nostr Relays subtitle with info button
+        const relaysTitle = document.createElement('h3');
+        relaysTitle.className = 'network-section-title';
+        relaysTitle.textContent = 'Nostr Relays';
+        
+        const relaysInfoBtn = document.createElement('span');
+        relaysInfoBtn.className = 'icon icon-info btn';
+        relaysInfoBtn.style.width = '16px';
+        relaysInfoBtn.style.height = '16px';
+        relaysInfoBtn.style.position = 'relative';
+        relaysInfoBtn.style.display = 'inline-block';
+        relaysInfoBtn.style.verticalAlign = 'middle';
+        relaysInfoBtn.style.marginLeft = '5px';
+        relaysInfoBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true);
+        };
+        
+        relaysTitle.appendChild(relaysInfoBtn);
+        networkList.appendChild(relaysTitle);
         
         // Create relay items
         relays.forEach(relay => {
@@ -2031,8 +2187,50 @@ async function renderRelayList() {
             relayItem.appendChild(relayStatus);
             networkList.appendChild(relayItem);
         });
+        
+        // Add Media Servers subtitle with info button
+        const mediaTitle = document.createElement('h3');
+        mediaTitle.className = 'network-section-title';
+        mediaTitle.style.marginTop = '2rem';
+        mediaTitle.textContent = 'Media Servers';
+        
+        const mediaInfoBtn = document.createElement('span');
+        mediaInfoBtn.className = 'icon icon-info btn';
+        mediaInfoBtn.style.width = '16px';
+        mediaInfoBtn.style.height = '16px';
+        mediaInfoBtn.style.position = 'relative';
+        mediaInfoBtn.style.display = 'inline-block';
+        mediaInfoBtn.style.verticalAlign = 'middle';
+        mediaInfoBtn.style.marginLeft = '5px';
+        mediaInfoBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.', true);
+        };
+        
+        mediaTitle.appendChild(mediaInfoBtn);
+        networkList.appendChild(mediaTitle);
+        
+        // Create media server items
+        mediaServers.forEach(serverUrl => {
+            const serverItem = document.createElement('div');
+            serverItem.className = 'relay-item media-server-item';
+            serverItem.setAttribute('data-server-url', serverUrl);
+            
+            const serverUrlSpan = document.createElement('span');
+            serverUrlSpan.className = 'relay-url';
+            serverUrlSpan.textContent = serverUrl;
+            
+            const serverStatus = document.createElement('span');
+            serverStatus.className = 'relay-status connected';
+            serverStatus.textContent = 'active';
+            
+            serverItem.appendChild(serverUrlSpan);
+            serverItem.appendChild(serverStatus);
+            networkList.appendChild(serverItem);
+        });
     } catch (error) {
-        console.error('Failed to fetch relays:', error);
+        console.error('Failed to fetch network info:', error);
     }
 }
 
@@ -2043,9 +2241,6 @@ async function login() {
     if (strPubkey) {
         // Connect to Nostr
         await invoke("connect");
-
-        // Warmup our Upload Servers
-        warmupUploadServers();
 
         // Setup our Rust Event listeners for efficient back<-->front sync
         await setupRustListeners();
@@ -2115,11 +2310,6 @@ async function login() {
                 domAccount.style.display = ``;
                 domAccount.classList.add('fadein-anim');
                 domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
-
-                // Display our Synchronisation Status
-                domSyncStatusContainer.classList.add('intro-anim');
-                domSyncStatusContainer.addEventListener('animationend', () => domSyncStatusContainer.classList.remove('intro-anim'), { once: true });
-                if (domSyncStatus.textContent) domSyncStatusContainer.style.display = ``;
 
                 // Finished boot!
                 fInit = false;
@@ -2408,7 +2598,17 @@ function renderProfileTab(cProfile) {
         
         // Show the 'Back' button and link it to the profile's chat
         domProfileBackBtn.style.display = '';
-        domProfileBackBtn.onclick = () => openChat(cProfile.id);
+        domProfileBackBtn.onclick = () => {
+            // If we came from a chat (especially a group chat), return to it
+            if (previousChatBeforeProfile) {
+                const chatToOpen = previousChatBeforeProfile;
+                previousChatBeforeProfile = ''; // Clear before opening to avoid loops
+                openChat(chatToOpen);
+            } else {
+                // Default to opening DM with this user
+                openChat(cProfile.id);
+            }
+        };
         
         // Hide the Navbar
         domNavbar.style.display = 'none';
@@ -2711,13 +2911,19 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.classList.remove('btn');
         } else if (isGroup) {
             domChatContact.textContent = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
-            domChatContact.classList.remove('btn');
+            // When the group name is clicked, expand the Group Overview
+            domChatContact.onclick = () => {
+                closeChat();
+                openGroupOverview(chat);
+            };
+            domChatContact.classList.add('btn');
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
             if (profile?.nickname || profile?.name) twemojify(domChatContact);
             // When the name or status is clicked, expand their Profile
             domChatContact.onclick = () => {
-                closeChat();
+                // Store the current chat so we can return to it
+                previousChatBeforeProfile = strOpenChat;
                 openProfile(profile);
             };
             domChatContact.classList.add('btn');
@@ -2775,10 +2981,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 continue;
             }
 
-            // Ensure there's no more than 50 existing messages at max
-            if (domChatMessages.childElementCount >= 50) {
-                domChatMessages.firstElementChild.remove();
-            }
+            // Messages are managed by the procedural scroll system
 
             // Direct comparison with newest and oldest messages (most common cases)
             // This avoids expensive DOM operations for the common cases
@@ -2830,7 +3033,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 const oldestMsg = chat.messages.find(m => m.id === oldestMsgElement.id);
                 if (oldestMsg && msg.at < oldestMsg.at) {
                     // It's the oldest message, prepend it
-                    const domMsg = renderMessage(msg, profile);
+                    // Pass oldestMsgElement as context so renderMessage knows what comes after
+                    const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
                     domChatMessages.insertBefore(domMsg, oldestMsgElement);
                     continue;
                 }
@@ -2869,7 +3073,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     }
 
                     // Insert between these two messages
-                    const domMsg = renderMessage(msg, profile);
+                    // Pass nextNode.element as context so renderMessage knows what comes after
+                    const domMsg = renderMessage(msg, profile, '', nextNode.element);
                     domChatMessages.insertBefore(domMsg, nextNode.element);
                     inserted = true;
                     break;
@@ -2927,6 +3132,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     }
 
     adjustSize();
+    
+    // Update the back button notification dot after chat updates
+    updateChatBackNotification();
 }
 
 /**
@@ -2961,8 +3169,9 @@ function insertTimestamp(timestamp, parent = null) {
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
  * @param {string?} editID - the ID of the message being edited, used for improved renderer context
+ * @param {HTMLElement?} contextElement - the DOM element to use for context (for prepending)
  */
-function renderMessage(msg, sender, editID = '') {
+function renderMessage(msg, sender, editID = '', contextElement = null) {
     // Construct the message container (the DOM ID is the HEX Nostr Event ID)
     const divMessage = document.createElement('div');
     divMessage.id = msg.id;
@@ -2984,7 +3193,9 @@ function renderMessage(msg, sender, editID = '') {
     const pMessage = document.createElement('p');
 
     // Prepare our message container - including avatars and contextual bubble rendering
-    const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling : domChatMessages.lastElementChild;
+    // If contextElement is provided (prepending), use it; otherwise use lastElementChild (appending)
+    const domPrevMsg = editID ? document.getElementById(editID).previousElementSibling :
+                       (contextElement ? contextElement.previousElementSibling : domChatMessages.lastElementChild);
     const fIsMsg = !!domPrevMsg?.getAttribute('sender');
     
     // Find the last actual message (skip timestamps and other non-message elements)
@@ -3008,7 +3219,8 @@ function renderMessage(msg, sender, editID = '') {
                 const imgAvatar = document.createElement('img');
                 imgAvatar.classList.add('avatar', 'btn');
                 imgAvatar.onclick = () => {
-                    closeChat();
+                    // Store the current chat so we can return to it
+                    previousChatBeforeProfile = strOpenChat;
                     openProfile(authorProfile);
                 };
                 imgAvatar.src = authorProfile.avatar;
@@ -3023,7 +3235,8 @@ function renderMessage(msg, sender, editID = '') {
                 if (otherFullId) {
                     placeholder.onclick = () => {
                         const prof = getProfile(otherFullId) || authorProfile;
-                        closeChat();
+                        // Store the current chat so we can return to it
+                        previousChatBeforeProfile = strOpenChat;
                         openProfile(prof || { id: otherFullId });
                     };
                 }
@@ -3048,7 +3261,8 @@ function renderMessage(msg, sender, editID = '') {
                     if (otherFullId) {
                         usernameLabel.onclick = () => {
                             const prof = getProfile(otherFullId) || authorProfile;
-                            closeChat();
+                            // Store the current chat so we can return to it
+                            previousChatBeforeProfile = strOpenChat;
                             openProfile(prof || { id: otherFullId });
                         };
                     }
@@ -3254,8 +3468,12 @@ function renderMessage(msg, sender, editID = '') {
             const assetUrl = convertFileSrc(cAttachment.path);
 
             // Render the attachment appropriately for it's type
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp'].includes(cAttachment.extension)) {
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                 // Images
+                const imgContainer = document.createElement('div');
+                imgContainer.style.position = 'relative';
+                imgContainer.style.display = 'inline-block';
+                
                 const imgPreview = document.createElement('img');
                 // SVGs need a specific width to scale properly
                 if (cAttachment.extension === 'svg') {
@@ -3271,11 +3489,26 @@ function renderMessage(msg, sender, editID = '') {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
                         scrollToBottom(domChatMessages, false);
+                    } else if (proceduralScrollState.isLoadingOlderMessages) {
+                        // Correct scroll position for media loading during procedural scroll
+                        correctScrollForMediaLoad();
+                    } else {
+                        // Normal soft scroll for layout adjustments
+                        softChatScroll();
                     }
-                    // Also do soft scroll for normal layout adjustments
-                    softChatScroll();
                 }, { once: true });
-                pMessage.appendChild(imgPreview);
+                
+                // Attach image preview handler
+                attachImagePreview(imgPreview);
+                
+                // Add file extension badge
+                const extBadge = document.createElement('span');
+                extBadge.className = 'file-ext-badge';
+                extBadge.textContent = cAttachment.extension.toUpperCase();
+                
+                imgContainer.appendChild(imgPreview);
+                imgContainer.appendChild(extBadge);
+                pMessage.appendChild(imgContainer);
                 } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
@@ -3288,9 +3521,13 @@ function renderMessage(msg, sender, editID = '') {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
                         scrollToBottom(domChatMessages, false);
+                    } else if (proceduralScrollState.isLoadingOlderMessages) {
+                        // Correct scroll position for media loading during procedural scroll
+                        correctScrollForMediaLoad();
+                    } else {
+                        // Normal soft scroll for layout adjustments
+                        softChatScroll();
                     }
-                    // Also do soft scroll for normal layout adjustments
-                    softChatScroll();
                 };
                 
                 // Platform-specific video creation
@@ -3345,7 +3582,7 @@ function renderMessage(msg, sender, editID = '') {
             }
         } else if (cAttachment.downloading) {
             // For images, show blurhash preview while downloading (only for formats that support blurhash)
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                 // Generate blurhash preview for downloading image
                 // For group chats, use chat ID; for DMs, use sender.id
                 const blurhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
@@ -3357,8 +3594,14 @@ function renderMessage(msg, sender, editID = '') {
                         imgPreview.style.borderRadius = `8px`;
                         imgPreview.style.opacity = `0.7`;
                         imgPreview.src = base64Image;
-                        // Add soft scroll on blurhash load to prevent scrolling issues
-                        imgPreview.addEventListener('load', softChatScroll, { once: true });
+                        // Add scroll correction on blurhash load
+                        imgPreview.addEventListener('load', () => {
+                            if (proceduralScrollState.isLoadingOlderMessages) {
+                                correctScrollForMediaLoad();
+                            } else {
+                                softChatScroll();
+                            }
+                        }, { once: true });
                         
                         // Create container for relative positioning
                         const container = document.createElement('div');
@@ -3400,7 +3643,7 @@ function renderMessage(msg, sender, editID = '') {
                 const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES;
 
                 // For images, show blurhash preview with download button (unless auto-downloading)
-                if (['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                     // Generate blurhash preview for undownloaded image
                     // For group chats, use chat ID; for DMs, use sender.id
                     const blurhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
@@ -3412,8 +3655,14 @@ function renderMessage(msg, sender, editID = '') {
                             imgPreview.style.borderRadius = `8px`;
                             imgPreview.style.opacity = willAutoDownload ? `0.8` : `0.6`;
                             imgPreview.src = base64Image;
-                            // Add soft scroll on blurhash load to prevent scrolling issues
-                            imgPreview.addEventListener('load', softChatScroll, { once: true });
+                            // Add scroll correction on blurhash load
+                            imgPreview.addEventListener('load', () => {
+                                if (proceduralScrollState.isLoadingOlderMessages) {
+                                    correctScrollForMediaLoad();
+                                } else {
+                                    softChatScroll();
+                                }
+                            }, { once: true });
                             
                             // Create container for relative positioning
                             const container = document.createElement('div');
@@ -3511,7 +3760,7 @@ function renderMessage(msg, sender, editID = '') {
                 // If the size is known and within auto-download range; immediately begin downloading
                 if (willAutoDownload) {
                     // For non-images (which don't have blurhash previews), create a placeholder for progress bar targeting
-                    if (!['png', 'jpeg', 'jpg', 'gif', 'webp'].includes(cAttachment.extension)) {
+                    if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                         const iDownloading = document.createElement('i');
                         iDownloading.id = cAttachment.id;
                         iDownloading.textContent = `Starting download...`;
@@ -3546,7 +3795,13 @@ function renderMessage(msg, sender, editID = '') {
             const imgFavicon = document.createElement('img');
             imgFavicon.classList.add('favicon');
             imgFavicon.src = msg.preview_metadata.favicon;
-            imgFavicon.addEventListener('load', softChatScroll, { once: true });
+            imgFavicon.addEventListener('load', () => {
+                if (proceduralScrollState.isLoadingOlderMessages) {
+                    correctScrollForMediaLoad();
+                } else {
+                    softChatScroll();
+                }
+            }, { once: true });
 
             // Add the title (prefixed with the Favicon)
             const spanPreviewTitle = document.createElement('span');
@@ -3560,7 +3815,13 @@ function renderMessage(msg, sender, editID = '') {
             imgPreview.classList.add('msg-preview-img');
             imgPreview.src = msg.preview_metadata.og_image;
             // Auto-scroll the chat to correct against container resizes
-            imgPreview.addEventListener('load', softChatScroll, { once: true });
+            imgPreview.addEventListener('load', () => {
+                if (proceduralScrollState.isLoadingOlderMessages) {
+                    correctScrollForMediaLoad();
+                } else {
+                    softChatScroll();
+                }
+            }, { once: true });
             divPrevContainer.appendChild(imgPreview);
 
             // Render the Preview
@@ -3754,7 +4015,7 @@ function cancelReply() {
 
 /**
  * Open a chat with a particular contact
- * @param {string} contact 
+ * @param {string} contact
  */
 function openChat(contact) {
     // Display the Chat UI
@@ -3762,6 +4023,7 @@ function openChat(contact) {
     domProfile.style.display = 'none';
     domChatNew.style.display = 'none';
     domChats.style.display = 'none';
+    domGroupOverview.style.display = 'none';
     domChat.style.display = '';
     domSettingsBtn.style.display = 'none';
 
@@ -3800,7 +4062,6 @@ function openChat(contact) {
                     limit: 50
                 }) || [];
 
-                console.log(`Loaded ${messages.length} messages for group ${String(contact).substring(0, 8)}...`);
 
                 // Messages are already in the correct format from unified storage!
                 // Merge with existing messages to avoid duplicates
@@ -3823,8 +4084,19 @@ function openChat(contact) {
         })();
     }
 
-    // TODO: enable procedural rendering when the user scrolls up, this is a temp renderer optimisation
-    updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
+    // Initialize procedural scroll state
+    initProceduralScroll(chat);
+
+    // Render initial batch of messages (most recent ones)
+    const totalMessages = chat?.messages?.length || 0;
+    const initialMessages = totalMessages > 0
+        ? chat.messages.slice(-proceduralScrollState.renderedMessageCount)
+        : [];
+    
+    updateChat(chat, initialMessages, profile, true);
+    
+    // Update the back button notification dot
+    updateChatBackNotification();
 }
 
 /**
@@ -3885,11 +4157,19 @@ async function closeChat() {
 
     // Reset the chat UI
     domProfile.style.display = 'none';
+    domGroupOverview.style.display = 'none';
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
     strOpenChat = "";
+    previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
+    
+    // Reset procedural scroll state
+    resetProceduralScroll();
+    
+    // Hide the back button notification dot when closing chat
+    updateChatBackNotification();
 
     // Display the Navbar
     domNavbar.style.display = ``;
@@ -3918,9 +4198,15 @@ function openProfile(cProfile) {
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
+    domGroupOverview.style.display = 'none';
+    domChat.style.display = 'none'; // Hide the chat view when opening profile
 
     // Render our own profile by default, but otherwise; the given one
-    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
+    if (!cProfile) {
+        cProfile = arrProfiles.find(a => a.mine);
+        // Clear previous chat when opening our own profile from navbar
+        previousChatBeforeProfile = '';
+    }
     renderProfileTab(cProfile);
 
     if (domProfile.style.display !== '') {
@@ -3933,11 +4219,665 @@ function openProfile(cProfile) {
     }
 }
 
+/**
+ * Open the Group Overview view for a specific group chat
+ * @param {Chat} chat - The group chat object
+ */
+async function openGroupOverview(chat) {
+    if (!chat || chat.chat_type !== 'MlsGroup') return;
+    
+    navbarSelect('chat-btn');
+    domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+    domProfile.style.display = 'none';
+    domChat.style.display = 'none';
+
+    // Store which group is being viewed
+    domGroupOverview.setAttribute('data-group-id', chat.id);
+
+    // Render the group overview
+    await renderGroupOverview(chat);
+
+    if (domGroupOverview.style.display !== '') {
+        // Run a subtle fade-in animation
+        domGroupOverview.classList.add('fadein-subtle-anim');
+        domGroupOverview.addEventListener('animationend', () => domGroupOverview.classList.remove('fadein-subtle-anim'), { once: true });
+
+        // Open the tab
+        domGroupOverview.style.display = '';
+    }
+}
+
+/**
+ * Render the Group Overview tab based on a given group chat
+ * @param {Chat} chat - The group chat object
+ */
+async function renderGroupOverview(chat) {
+    const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+    
+    // Fetch fresh member list and admins from the engine
+    let members = [];
+    let admins = [];
+    
+    try {
+        const result = await invoke('get_mls_group_members', { groupId: chat.id });
+        // The result is an object with 'members' and 'admins' array properties
+        members = result?.members || [];
+        admins = result?.admins || [];
+    } catch (e) {
+        console.error('Failed to fetch group members:');
+        console.error(e);
+    }
+    
+    // Use actual member count from engine, not cached metadata
+    const memberCount = members.length;
+    
+    // Display Name (top header)
+    domGroupOverviewName.innerHTML = groupName;
+    domGroupOverviewStatus.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+    
+    // Secondary name
+    domGroupOverviewNameSecondary.innerHTML = groupName;
+    
+    // Group description (if available)
+    const description = chat.metadata?.custom_fields?.description;
+    if (description) {
+        domGroupOverviewDescription.textContent = description;
+        domGroupOverviewDescription.style.display = '';
+    } else {
+        domGroupOverviewDescription.style.display = 'none';
+    }
+    
+    // Function to render the member list (can be called for search filtering)
+    const renderMemberList = (searchQuery = '') => {
+        domGroupOverviewMembers.innerHTML = '';
+        
+        if (!members || members.length === 0) {
+            const noMembers = document.createElement('p');
+            noMembers.textContent = 'No members found';
+            noMembers.style.textAlign = 'center';
+            noMembers.style.color = '#999';
+            noMembers.style.padding = '20px';
+            domGroupOverviewMembers.appendChild(noMembers);
+            return;
+        }
+        
+        // Sort members: admins first, then regular members
+        const sortedMembers = [...members].sort((a, b) => {
+            const aIsAdmin = admins.includes(a);
+            const bIsAdmin = admins.includes(b);
+            if (aIsAdmin && !bIsAdmin) return -1;
+            if (!aIsAdmin && bIsAdmin) return 1;
+            return 0;
+        });
+        
+        // Filter members based on search query
+        const filteredMembers = sortedMembers.filter(member => {
+            if (!searchQuery) return true;
+            
+            const memberProfile = getProfile(member);
+            const query = searchQuery.toLowerCase();
+            
+            // Search in nickname, name, and npub
+            const nickname = (memberProfile?.nickname || '').toLowerCase();
+            const name = (memberProfile?.name || '').toLowerCase();
+            const npub = member.toLowerCase();
+            
+            return nickname.includes(query) || name.includes(query) || npub.includes(query);
+        });
+        
+        if (filteredMembers.length === 0) {
+            const noResults = document.createElement('p');
+            noResults.textContent = 'No members match your search';
+            noResults.style.textAlign = 'center';
+            noResults.style.color = '#999';
+            noResults.style.padding = '20px';
+            domGroupOverviewMembers.appendChild(noResults);
+            return;
+        }
+        
+        for (const member of filteredMembers) {
+            const isAdmin = admins.includes(member);
+            const memberDiv = document.createElement('div');
+            memberDiv.style.display = 'flex';
+            memberDiv.style.alignItems = 'center';
+            memberDiv.style.padding = '5px 10px';
+            memberDiv.style.borderRadius = '6px';
+            memberDiv.style.transition = 'background 0.2s ease';
+            memberDiv.style.isolation = 'isolate';
+            memberDiv.style.cursor = 'default';
+            
+            // Add hover effect with theme-based gradient using ::before pseudo-element approach
+            const bgDiv = document.createElement('div');
+            bgDiv.style.position = 'absolute';
+            bgDiv.style.top = '0';
+            bgDiv.style.left = '0';
+            bgDiv.style.right = '0';
+            bgDiv.style.bottom = '0';
+            bgDiv.style.borderRadius = '6px';
+            bgDiv.style.opacity = '0';
+            bgDiv.style.transition = 'opacity 0.2s ease';
+            bgDiv.style.pointerEvents = 'none';
+            bgDiv.style.zIndex = '0';
+            
+            memberDiv.style.position = 'relative';
+            memberDiv.appendChild(bgDiv);
+            
+            memberDiv.addEventListener('mouseenter', () => {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+                bgDiv.style.opacity = '1';
+            });
+            memberDiv.addEventListener('mouseleave', () => {
+                bgDiv.style.opacity = '0';
+            });
+            
+            // Get member profile
+            const memberProfile = getProfile(member);
+            
+            // Crown icon for admins (or invisible spacer for alignment)
+            const crownContainer = document.createElement('span');
+            crownContainer.style.width = '20px';
+            crownContainer.style.height = '25px';
+            crownContainer.style.display = 'inline-flex';
+            crownContainer.style.alignItems = 'center';
+            crownContainer.style.justifyContent = 'center';
+            crownContainer.style.marginRight = '5px';
+            crownContainer.style.position = 'relative';
+            crownContainer.style.zIndex = '1';
+            if (isAdmin) {
+                crownContainer.innerHTML = '<span class="icon icon-crown" style="width: 16px; height: 16px; background-color: #fce459;"></span>';
+            }
+            memberDiv.appendChild(crownContainer);
+            
+            // Member avatar
+            let avatar;
+            if (memberProfile?.avatar) {
+                avatar = document.createElement('img');
+                avatar.src = memberProfile.avatar;
+                avatar.style.width = '25px';
+                avatar.style.height = '25px';
+                avatar.style.borderRadius = '50%';
+                avatar.style.objectFit = 'cover';
+            } else {
+                avatar = pubkeyToAvatar(member, memberProfile?.nickname || memberProfile?.name, 25);
+            }
+            avatar.style.marginRight = '10px';
+            avatar.style.position = 'relative';
+            avatar.style.zIndex = '1';
+            memberDiv.appendChild(avatar);
+            
+            // Member name
+            const nameSpan = document.createElement('div');
+            nameSpan.className = 'compact-member-name';
+            nameSpan.textContent = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
+            nameSpan.style.color = '#f7f4f4';
+            nameSpan.style.fontSize = '14px';
+            nameSpan.style.flex = '1';
+            nameSpan.style.textAlign = 'left';
+            nameSpan.style.position = 'relative';
+            nameSpan.style.zIndex = '1';
+            if (memberProfile?.nickname || memberProfile?.name) twemojify(nameSpan);
+            memberDiv.appendChild(nameSpan);
+            
+            // Kick button (only visible to admins, and not for themselves)
+            const isMe = member === strPubkey;
+            const iAmAdmin = admins.includes(strPubkey);
+            if (iAmAdmin && !isMe) {
+                const kickBtn = document.createElement('button');
+                kickBtn.textContent = 'Kick';
+                kickBtn.style.padding = '4px 12px';
+                kickBtn.style.fontSize = '12px';
+                kickBtn.style.borderRadius = '4px';
+                kickBtn.style.border = 'none';
+                kickBtn.style.background = '#ff4444';
+                kickBtn.style.color = 'white';
+                kickBtn.style.cursor = 'pointer';
+                kickBtn.style.transition = 'background 0.2s ease';
+                kickBtn.style.position = 'relative';
+                kickBtn.style.zIndex = '1';
+                kickBtn.style.marginLeft = '10px';
+                
+                kickBtn.addEventListener('mouseenter', () => {
+                    kickBtn.style.background = '#ff6666';
+                });
+                kickBtn.addEventListener('mouseleave', () => {
+                    kickBtn.style.background = '#ff4444';
+                });
+                
+                kickBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    
+                    // Prevent double-clicks
+                    if (kickBtn.disabled) return;
+                    
+                    const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
+                    const confirmed = await popupConfirm(
+                        `Remove ${memberName} from the group?`,
+                        'This will remove them from the group immediately.'
+                    );
+                    
+                    if (!confirmed) return;
+                    
+                    // Disable button and show loading state
+                    kickBtn.disabled = true;
+                    kickBtn.style.opacity = '0.5';
+                    kickBtn.style.cursor = 'not-allowed';
+                    const originalText = kickBtn.textContent;
+                    kickBtn.textContent = 'Removing...';
+                    
+                    try {
+                        // Call the remove_mls_member_device command
+                        // We don't have device_id, so we pass an empty string (backend will handle it)
+                        await window.__TAURI__.core.invoke('remove_mls_member_device', {
+                            groupId: chat.id,
+                            memberNpub: member,
+                            deviceId: ''
+                        });
+                        
+                        console.log(`[MLS] Successfully kicked member: ${member}`);
+                        
+                        // The mls_group_updated event will trigger a refresh
+                        // But we can also manually refresh the overview
+                        setTimeout(async () => {
+                            await renderGroupOverview(chat);
+                        }, 500);
+                    } catch (error) {
+                        console.error('[MLS] Failed to kick member:', error);
+                        alert(`Failed to remove member: ${error}`);
+                        
+                        // Re-enable button on error
+                        kickBtn.disabled = false;
+                        kickBtn.style.opacity = '1';
+                        kickBtn.style.cursor = 'pointer';
+                        kickBtn.textContent = originalText;
+                    }
+                };
+                
+                memberDiv.appendChild(kickBtn);
+            }
+            
+            domGroupOverviewMembers.appendChild(memberDiv);
+        }
+    };
+    
+    // Initial render of member list
+    renderMemberList();
+    
+    // Add search functionality
+    domGroupMemberSearchInput.value = '';
+    domGroupMemberSearchInput.oninput = (e) => {
+        renderMemberList(e.target.value);
+    };
+    
+    // Check if current user is an admin to show/hide invite button
+    const myProfile = arrProfiles.find(p => p.mine);
+    const isAdmin = myProfile && admins.includes(myProfile.id);
+    
+    if (isAdmin) {
+        domGroupInviteMemberBtn.style.display = 'flex';
+        // Invite Member button - open member selection UI
+        domGroupInviteMemberBtn.onclick = async () => {
+            await openInviteMemberToGroup(chat);
+        };
+    } else {
+        domGroupInviteMemberBtn.style.display = 'none';
+    }
+    
+    // Leave Group button - TEMPORARILY HIDDEN until fully tested
+    // domGroupLeaveBtn.style.display = 'flex';
+    // domGroupLeaveBtn.onclick = async () => {
+    //     // Confirm before leaving using popupConfirm
+    //     const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+    //     const confirmed = await popupConfirm(
+    //         'Leave Group',
+    //         `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
+    //         false, // Not a notice, show cancel button
+    //         '', // No input
+    //         'vector_warning.svg'
+    //     );
+    //
+    //     if (!confirmed) return;
+    //
+    //     try {
+    //         await invoke('leave_mls_group', { groupId: chat.id });
+    //
+    //         // Close the group overview
+    //         domGroupOverview.style.display = 'none';
+    //         domGroupOverview.removeAttribute('data-group-id');
+    //
+    //         // Open the chat list
+    //         openChatlist();
+    //
+    //         // The group will be removed from the chat list via the mls_group_left event
+    //     } catch (error) {
+    //         console.error('Failed to leave group:', error);
+    //         await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
+    //     }
+    // };
+    
+    // Back button - return to the group chat
+    domGroupOverviewBackBtn.onclick = () => {
+        domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
+        openChat(chat.id);
+    };
+}
+
+/**
+ * Open the invite member UI for a specific group
+ * @param {Chat} chat - The group chat object
+ */
+async function openInviteMemberToGroup(chat) {
+    // Get current group members to exclude them from selection
+    let currentMembers = [];
+    try {
+        const result = await invoke('get_mls_group_members', { groupId: chat.id });
+        currentMembers = result?.members || [];
+    } catch (e) {
+        console.error('Failed to fetch group members:', e);
+    }
+    
+    // Create a modal/popup for member selection
+    const modal = document.createElement('div');
+    modal.style.position = 'fixed';
+    modal.style.top = '0';
+    modal.style.left = '0';
+    modal.style.right = '0';
+    modal.style.bottom = '0';
+    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+    modal.style.display = 'flex';
+    modal.style.alignItems = 'center';
+    modal.style.justifyContent = 'center';
+    modal.style.zIndex = '10000';
+    modal.style.padding = '20px';
+    
+    const container = document.createElement('div');
+    container.style.backgroundColor = '#0a0a0a';
+    container.style.borderRadius = '12px';
+    container.style.padding = '24px';
+    container.style.maxWidth = '500px';
+    container.style.width = '100%';
+    container.style.maxHeight = '80vh';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.borderStyle = 'solid';
+    container.style.borderColor = '#1c1c1c';
+    container.style.borderWidth = '1px';
+    
+    // Header
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.justifyContent = 'space-between';
+    header.style.alignItems = 'center';
+    header.style.marginBottom = '20px';
+    
+    const title = document.createElement('h3');
+    title.textContent = 'Invite Member';
+    title.style.margin = '0';
+    title.style.color = '#f7f4f4';
+    header.appendChild(title);
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    closeBtn.className = 'btn';
+    closeBtn.style.padding = '8px 12px';
+    closeBtn.style.fontSize = '18px';
+    closeBtn.onclick = () => modal.remove();
+    header.appendChild(closeBtn);
+    
+    container.appendChild(header);
+    
+    // Search input
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'emoji-search-container';
+    searchContainer.style.marginBottom = '16px';
+    
+    const searchIcon = document.createElement('span');
+    searchIcon.className = 'emoji-search-icon icon icon-search';
+    searchIcon.style.setProperty('margin-left', '20px', 'important');
+    searchIcon.style.setProperty('width', '25px', 'important');
+    searchIcon.style.setProperty('height', '25px', 'important');
+    searchContainer.appendChild(searchIcon);
+    
+    const searchInput = document.createElement('input');
+    searchInput.placeholder = 'Search contacts...';
+    searchInput.style.padding = '10px 40px';
+    searchInput.style.backgroundColor = 'transparent';
+    searchInput.style.border = '1px solid rgba(57, 57, 57, 0.5)';
+    searchInput.style.width = '100%';
+    searchContainer.appendChild(searchInput);
+    
+    container.appendChild(searchContainer);
+    
+    // Member list (matching the group overview member list style)
+    const memberList = document.createElement('div');
+    memberList.style.flex = '1';
+    memberList.style.overflowY = 'auto';
+    memberList.style.marginBottom = '16px';
+    memberList.style.border = '1px solid rgba(57, 57, 57, 0.5)';
+    memberList.style.borderRadius = '8px';
+    memberList.style.padding = '6px';
+    
+    // Status message
+    const statusMsg = document.createElement('p');
+    statusMsg.style.textAlign = 'center';
+    statusMsg.style.color = '#999';
+    statusMsg.style.margin = '10px 0';
+    statusMsg.style.display = 'none';
+    container.appendChild(statusMsg);
+    
+    // Invite button
+    const inviteBtn = document.createElement('button');
+    inviteBtn.textContent = 'Invite';
+    inviteBtn.className = 'btn';
+    inviteBtn.style.padding = '12px 24px';
+    inviteBtn.style.background = 'linear-gradient(135deg, var(--icon-color-primary), var(--icon-color-secondary))';
+    inviteBtn.style.borderRadius = '6px';
+    inviteBtn.style.fontWeight = '500';
+    inviteBtn.style.width = '100%';
+    inviteBtn.disabled = true;
+    inviteBtn.style.opacity = '0.5';
+    
+    let selectedMember = null;
+    
+    const renderMemberList = (filterText = '') => {
+        memberList.innerHTML = '';
+        const filter = filterText.toLowerCase();
+        
+        // Get mine profile to exclude self
+        const mine = arrProfiles.find(p => p.mine)?.id;
+        
+        // Filter available contacts (exclude self and current members)
+        const availableContacts = arrProfiles.filter(p => {
+            if (!p || !p.id || p.id === mine) return false;
+            if (currentMembers.includes(p.id)) return false;
+            
+            if (filter) {
+                const name = (p.nickname || p.name || '').toLowerCase();
+                const npub = p.id.toLowerCase();
+                return name.includes(filter) || npub.includes(filter);
+            }
+            return true;
+        });
+        
+        if (availableContacts.length === 0) {
+            const empty = document.createElement('p');
+            empty.textContent = filter ? 'No matches' : 'No contacts available to invite';
+            empty.style.textAlign = 'center';
+            empty.style.color = '#999';
+            empty.style.padding = '20px';
+            memberList.appendChild(empty);
+            return;
+        }
+        
+        for (const contact of availableContacts) {
+            const contactProfile = getProfile(contact.id);
+            const name = contactProfile?.nickname || contactProfile?.name || '';
+            
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.padding = '5px 10px';
+            row.style.borderRadius = '6px';
+            row.style.transition = 'background 0.2s ease';
+            row.style.isolation = 'isolate';
+            row.style.cursor = 'pointer';
+            row.style.position = 'relative';
+            
+            // Add hover effect with theme-based gradient
+            const bgDiv = document.createElement('div');
+            bgDiv.style.position = 'absolute';
+            bgDiv.style.top = '0';
+            bgDiv.style.left = '0';
+            bgDiv.style.right = '0';
+            bgDiv.style.bottom = '0';
+            bgDiv.style.borderRadius = '6px';
+            bgDiv.style.opacity = '0';
+            bgDiv.style.transition = 'opacity 0.2s ease';
+            bgDiv.style.pointerEvents = 'none';
+            bgDiv.style.zIndex = '0';
+            row.appendChild(bgDiv);
+            
+            row.addEventListener('mouseenter', () => {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+                bgDiv.style.opacity = '1';
+            });
+            row.addEventListener('mouseleave', () => {
+                bgDiv.style.opacity = '0';
+            });
+            
+            // Avatar (compact size like member list)
+            let avatar;
+            if (contactProfile?.avatar) {
+                avatar = document.createElement('img');
+                avatar.src = contactProfile.avatar;
+                avatar.style.width = '25px';
+                avatar.style.height = '25px';
+                avatar.style.borderRadius = '50%';
+                avatar.style.objectFit = 'cover';
+            } else {
+                avatar = pubkeyToAvatar(contact.id, name, 25);
+            }
+            avatar.style.marginRight = '10px';
+            avatar.style.position = 'relative';
+            avatar.style.zIndex = '1';
+            row.appendChild(avatar);
+            
+            // Name
+            const nameSpan = document.createElement('div');
+            nameSpan.className = 'compact-member-name';
+            nameSpan.textContent = name || contact.id.substring(0, 10) + '...';
+            nameSpan.style.color = '#f7f4f4';
+            nameSpan.style.fontSize = '14px';
+            nameSpan.style.flex = '1';
+            nameSpan.style.textAlign = 'left';
+            nameSpan.style.position = 'relative';
+            nameSpan.style.zIndex = '1';
+            if (name) twemojify(nameSpan);
+            row.appendChild(nameSpan);
+            
+            // Selection indicator (right-aligned)
+            const indicator = document.createElement('div');
+            indicator.style.width = '18px';
+            indicator.style.height = '18px';
+            indicator.style.borderRadius = '50%';
+            indicator.style.border = '2px solid var(--icon-color-primary)';
+            indicator.style.position = 'relative';
+            indicator.style.zIndex = '1';
+            indicator.style.flexShrink = '0';
+            row.appendChild(indicator);
+            
+            row.onclick = () => {
+                // Deselect previous
+                memberList.querySelectorAll('div[data-contact-row]').forEach(r => {
+                    const ind = r.querySelector('div:last-child');
+                    if (ind) ind.style.backgroundColor = '';
+                });
+                
+                // Select this one
+                indicator.style.backgroundColor = 'var(--icon-color-primary)';
+                selectedMember = contact.id;
+                inviteBtn.disabled = false;
+                inviteBtn.style.opacity = '1';
+            };
+            
+            row.setAttribute('data-contact-row', 'true');
+            memberList.appendChild(row);
+        }
+    };
+    
+    renderMemberList();
+    searchInput.oninput = (e) => renderMemberList(e.target.value);
+    
+    inviteBtn.onclick = async () => {
+        if (!selectedMember) return;
+        
+        inviteBtn.disabled = true;
+        inviteBtn.textContent = 'Inviting...';
+        statusMsg.style.display = '';
+        statusMsg.style.color = '#999';
+        statusMsg.textContent = 'Preparing invitation...';
+        
+        try {
+            await invoke('invite_member_to_group', {
+                groupId: chat.id,
+                memberNpub: selectedMember
+            });
+            
+            statusMsg.style.color = '#4caf50';
+            statusMsg.textContent = 'Member invited successfully!';
+            
+            // Refresh the group overview
+            setTimeout(async () => {
+                modal.remove();
+                await renderGroupOverview(chat);
+            }, 1000);
+        } catch (e) {
+            const errorMsg = (e || '').toString();
+            let friendlyMsg = errorMsg;
+            
+            // Map backend errors to friendly messages
+            if (errorMsg.includes('no device keypackag')) {
+                const match = errorMsg.match(/for (\S+)/);
+                if (match) {
+                    const npub = match[1];
+                    const prof = arrProfiles.find(p => p.id === npub);
+                    const display = prof?.nickname || prof?.name || 'This user';
+                    friendlyMsg = `${display} is using an older Vector version! Please ask them to upgrade.`;
+                }
+            }
+            
+            statusMsg.style.color = '#f44336';
+            statusMsg.textContent = friendlyMsg;
+            inviteBtn.disabled = false;
+            inviteBtn.textContent = 'Invite';
+            
+            // Error is already displayed in the modal, no need for popup
+        }
+    };
+    
+    container.appendChild(memberList);
+    container.appendChild(inviteBtn);
+    
+    modal.appendChild(container);
+    document.body.appendChild(modal);
+    
+    // Close on background click
+    modal.onclick = (e) => {
+        if (e.target === modal) modal.remove();
+    };
+}
+
 async function openChatlist() {
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
+    domGroupOverview.style.display = 'none';
+    previousChatBeforeProfile = ""; // Clear when navigating away
 
     if (domChats.style.display !== '') {
         // Run a subtle fade-in animation
@@ -3960,6 +4900,8 @@ function openSettings() {
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domInvites.style.display = 'none';
+    domGroupOverview.style.display = 'none';
+    previousChatBeforeProfile = ""; // Clear when navigating away
 
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
@@ -3984,6 +4926,8 @@ async function openInvites() {
     domProfile.style.display = 'none';
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
+    domGroupOverview.style.display = 'none';
+    previousChatBeforeProfile = ""; // Clear when navigating away
 
     // Fetch and display the invite code
     const inviteCodeElement = document.getElementById('invite-code');
@@ -4178,6 +5122,16 @@ window.addEventListener("DOMContentLoaded", async () => {
         openChat(strPubkey);
     };
     domChatNewBackBtn.onclick = closeChat;
+    
+    // Add scroll event listener for procedural message loading
+    let scrollTimeout;
+    domChatMessages.addEventListener('scroll', () => {
+        // Debounce scroll events for performance
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+            handleProceduralScroll();
+        }, 100);
+    });
     domChatNewStartBtn.onclick = () => {
         openChat(domChatNewInput.value.trim());
         domChatNewInput.value = ``;
@@ -4518,14 +5472,22 @@ document.addEventListener('click', (e) => {
     if (e.target.classList.contains('msg-reply') || e.target.parentElement?.classList.contains('msg-reply')  || e.target.parentElement?.parentElement?.classList.contains('msg-reply')) {
         // Note: The `substring(2)` removes the `r-` prefix
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
-        const domMsg = document.getElementById(strID.substring(2));
-        centerInView(domMsg);
+        const targetMsgId = strID.substring(2);
+        const domMsg = document.getElementById(targetMsgId);
+        
+        if (domMsg) {
+            // Message is already rendered, just scroll to it
+            centerInView(domMsg);
 
-        // Run an animation to bring the user's eye to the message
-        const pContainer = domMsg.querySelector('p');
-        if (!pContainer.classList.contains('no-background')) {
-            domMsg.classList.add('highlight-animation');
-            setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+            // Run an animation to bring the user's eye to the message
+            const pContainer = domMsg.querySelector('p');
+            if (!pContainer.classList.contains('no-background')) {
+                domMsg.classList.add('highlight-animation');
+                setTimeout(() => domMsg.classList.remove('highlight-animation'), 1500);
+            }
+        } else {
+            // Message not rendered yet, load it and surrounding messages
+            loadAndScrollToMessage(targetMsgId);
         }
         return;
     }
