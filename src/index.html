@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
     <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
+    <link rel="stylesheet" href="/highlight-github-dark.min.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vector</title>
     <script src="/main.js" defer></script>
@@ -15,6 +16,12 @@
     <script src="/js/updater.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
+    <!-- DOMPurify - HTML sanitization -->
+    <script src="/js/dompurify.min.js"></script>
+    <!-- Highlight.js - Syntax highlighting for code blocks -->
+    <script src="/js/highlight.min.js"></script>
+    <!-- Marked.js - Modern markdown parser (local copy) -->
+    <script src="/js/marked.min.js"></script>
     <script src="/js/markdown.js"></script>
     <script src="/js/emoji.js"></script>
     <script src="/js/payments.js"></script>

@@ -828,6 +828,7 @@ body {
 .msg-me {
   display: flex;
   align-self: flex-end;
+  max-width: 100%;
 }
 
 .avatar {
@@ -856,6 +857,7 @@ body {
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
+  overflow-x: auto;
 }
 
 .msg-them p {
@@ -870,6 +872,7 @@ body {
   border-bottom-left-radius: 0px;
   word-break: break-word;
   font-weight: 100;
+  overflow-x: auto;
 }
 
 .file-ext-badge {
@@ -1031,6 +1034,7 @@ body {
 .msg-them {
   align-self: flex-start;
   display: flex;
+  max-width: 100%;
 }
 
 .msg-preview-container {
@@ -3242,4 +3246,225 @@ select:disabled:hover {
 
 .image-viewer-tip.visible {
   opacity: 1;
+}
+
+/* Markdown Rendering Styles */
+
+/* Collapsible sections (details/summary) */
+details {
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid rgba(89, 252, 179, 0.2);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+details summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(89, 252, 179, 0.1);
+  font-weight: 500;
+  user-select: none;
+  list-style: none;
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
+}
+
+details summary::-webkit-details-marker {
+  display: none;
+}
+
+details summary::before {
+  content: '▶';
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 0.2s ease;
+  color: #59fcb3;
+}
+
+details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+details summary:hover {
+  opacity: 1;
+}
+
+details[open] summary {
+  border-bottom: 1px solid rgba(89, 252, 179, 0.2);
+  margin-bottom: 10px;
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+details > *:not(summary) {
+  padding: 12px !important;
+  margin-top: 8px;
+}
+
+details > p,
+details > div,
+details > ul,
+details > ol {
+  padding: 12px !important;
+}
+
+/* Code blocks inside details need horizontal scroll */
+details pre {
+  overflow-x: auto;
+  margin: 8px 0 !important;
+  padding: 12px !important;
+}
+
+/* Emojis in Detaol blocks shouldn't have any padding */
+details .emoji {
+  padding: 0 !important;
+  margin: 0;
+}
+
+/* Code block wrapper with copy button */
+.code-block-wrapper {
+  position: relative;
+  margin: 8px 0;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(89, 252, 179, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.code-copy-btn:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.8);
+  border-color: rgba(89, 252, 179, 0.5);
+  transform: scale(1.05);
+}
+
+.code-copy-btn.copied {
+  background: rgba(89, 252, 179, 0.2);
+  border-color: #59fcb3;
+}
+
+.code-copy-btn .icon {
+  width: 16px;
+  height: 16px;
+  background-color: #59fcb3;
+}
+
+/* Code block styling */
+pre {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  border: none;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Inline code */
+code {
+  background: rgba(90, 252, 180, 0.05);
+  border: 1px solid rgba(90, 252, 180, 0.45);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.9em;
+}
+
+/* Thinner scrollbars for code blocks */
+pre::-webkit-scrollbar,
+details pre::-webkit-scrollbar,
+pre code.hljs::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+pre::-webkit-scrollbar-track,
+details pre::-webkit-scrollbar-track,
+pre code.hljs::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+pre::-webkit-scrollbar-thumb,
+details pre::-webkit-scrollbar-thumb,
+pre code.hljs::-webkit-scrollbar-thumb {
+  background-color: rgba(71, 71, 71, 0.6);
+  border-radius: 4px;
+}
+
+pre::-webkit-scrollbar-thumb:hover,
+details pre::-webkit-scrollbar-thumb:hover,
+pre code.hljs::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(180, 180, 180, 0.8);
+}
+
+/* Lists */
+ul, ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+li {
+  margin: 4px 0;
+}
+
+/* Blockquotes */
+blockquote {
+  border-left: 3px solid #59fcb3;
+  padding-left: 12px;
+  margin: 8px 0;
+  color: rgba(255, 255, 255, 0.8);
+  font-style: italic;
+}
+
+/* Tables */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+
+/* Emphasis */
+.chat em {
+  opacity: 0.7;
+}
+
+th, td {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 8px;
+  text-align: left;
+}
+
+th {
+  background: rgba(89, 252, 179, 0.1);
+  font-weight: 600;
+}
+
+/* Horizontal rules */
+hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  margin: 16px 0;
 }
