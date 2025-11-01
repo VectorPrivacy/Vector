@@ -129,7 +129,29 @@ function initializeMarked() {
         </div>`;
     };
 
-    marked.use({ tokenizer, renderer });
+    // Spoiler extension: ||spoiler text||
+    const spoilerExtension = {
+        name: 'spoiler',
+        level: 'inline',
+        start(src) {
+            return src.match(/\|\|/)?.index;
+        },
+        tokenizer(src) {
+            const match = src.match(/^\|\|([^|]+)\|\|/);
+            if (match) {
+                return {
+                    type: 'spoiler',
+                    raw: match[0],
+                    text: match[1]
+                };
+            }
+        },
+        renderer(token) {
+            return `<span class="spoiler-wrapper"><span class="spoiler" data-spoiler-text="${encodeAttr(token.text)}">${encodeAttr(token.text)}</span></span>`;
+        }
+    };
+
+    marked.use({ tokenizer, renderer, extensions: [spoilerExtension] });
 }
 
 /**
@@ -304,7 +326,7 @@ function parseMarkdown(md) {
     ];
 
     const SAFE_ATTRS = [
-        'class', 'aria-label', 'aria-hidden', 'open', 'data-code', 'title', 'start'
+        'class', 'aria-label', 'aria-hidden', 'open', 'data-code', 'title', 'start', 'data-spoiler-text'
     ];
 
     const sanitized = DOMPurify.sanitize(rendered, {
@@ -346,6 +368,20 @@ document.addEventListener('click', (e) => {
     }).catch(err => {
         console.error('Failed to copy code:', err);
     });
+});
+
+/**
+ * Set up event delegation for spoiler reveals
+ * Click to reveal spoiler (stays revealed, doesn't toggle back)
+ */
+document.addEventListener('click', (e) => {
+    const spoiler = e.target.closest('.spoiler');
+    if (!spoiler) return;
+    
+    // Only reveal if not already revealed
+    if (!spoiler.classList.contains('revealed')) {
+        spoiler.classList.add('revealed');
+    }
 });
 
 // Initialize marked when the script loads (if it's already available)

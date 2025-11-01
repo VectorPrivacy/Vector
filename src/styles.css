@@ -3468,3 +3468,78 @@ hr {
   border-top: 1px solid rgba(255, 255, 255, 0.2);
   margin: 16px 0;
 }
+
+/* Spoilers */
+.spoiler-wrapper {
+  display: inline;
+}
+
+.spoiler {
+  position: relative;
+  display: inline;
+  cursor: pointer;
+  padding: 2px 4px;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: 3px;
+  /* Ensure backgrounds clone across line breaks */
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Blurred, glassy cover effect - animated gradient shows through the blur */
+.spoiler:not(.revealed) {
+  background: linear-gradient(to right, #01ff96, #04110d, #00ff96);
+  background-size: 200% 200%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* Add glow effect */
+  text-shadow: 0 0 14px rgba(89, 252, 179, 0.7);
+  filter: blur(4px);
+  -webkit-filter: blur(4px);
+  /* Dark background for matte glass effect */
+  background-color: rgba(0, 0, 0, 0.35);
+  /* Fast gradient animation - constant speed */
+  animation: spoilerGradientShift 4s linear infinite;
+}
+
+/* Gradient position animation - seamless loop */
+@keyframes spoilerGradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+/* Revealed state - normal text, selectable, stays revealed */
+.spoiler.revealed {
+  color: inherit;
+  background: transparent;
+  cursor: text;
+  filter: none;
+  -webkit-filter: none;
+  text-shadow: none;
+  user-select: text;
+  -webkit-user-select: text;
+  animation: spoilerReveal 0.3s ease-out;
+}
+
+/* Smooth reveal animation */
+@keyframes spoilerReveal {
+  0% {
+    filter: blur(4px);
+    -webkit-filter: blur(4px);
+    color: rgba(89, 252, 179, 0.7);
+    text-shadow: 0 0 16px rgba(89, 252, 179, 0.6);
+  }
+  100% {
+    filter: blur(0px);
+    -webkit-filter: blur(0px);
+    color: inherit;
+    text-shadow: none;
+  }
+}
