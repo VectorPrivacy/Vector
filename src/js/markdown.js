@@ -113,12 +113,15 @@ function initializeMarked() {
             }
         }
 
-        // Store the raw code and language in data attributes for post-processing
+        // Store the raw code in data attribute for post-processing
         const encodedRaw = encodeAttr(raw);
-        const langAttr = lang ? ` data-language="${encodeAttr(lang)}"` : '';
+        const codeClasses = ['hljs'];
+        if (lang) {
+            codeClasses.push(`language-${encodeAttr(lang)}`);
+        }
         
-        return `<div data-raw-code="${encodedRaw}"${langAttr}>
-            <pre><code>${highlighted}</code></pre>
+        return `<div class="code-block-wrapper" data-raw-code="${encodedRaw}">
+            <pre><code class="${codeClasses.join(' ')}">${highlighted}</code></pre>
         </div>`;
     };
 
@@ -319,21 +322,47 @@ function parseMarkdown(md) {
     ];
 
     const SAFE_ATTRS = [
-        'aria-label', 'aria-hidden', 'open', 'data-raw-code', 'data-language', 'title', 'start', 'data-spoiler-text'
+        'class', 'aria-label', 'aria-hidden', 'open', 'data-raw-code', 'data-language', 'title', 'start', 'data-spoiler-text'
     ];
+
+    // Whitelist of allowed class prefixes (for highlight.js and our own classes)
+    const ALLOWED_CLASS_PREFIXES = ['hljs', 'language-'];
+    const ALLOWED_CLASSES = ['code-block-wrapper', 'markdown-paragraph', 'spoiler-wrapper', 'spoiler', 'revealed'];
+
+    // Create a one-time hook for this sanitization call
+    DOMPurify.removeAllHooks();
+    DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+        if (node.hasAttribute('class')) {
+            const classes = node.getAttribute('class').split(/\s+/).filter(Boolean);
+            const validClasses = classes.filter(cls => {
+                // Allow exact matches
+                if (ALLOWED_CLASSES.includes(cls)) return true;
+                // Allow prefix matches (hljs-*, language-*)
+                return ALLOWED_CLASS_PREFIXES.some(prefix => cls.startsWith(prefix));
+            });
+            
+            if (validClasses.length > 0) {
+                node.setAttribute('class', validClasses.join(' '));
+            } else {
+                node.removeAttribute('class');
+            }
+        }
+    });
 
     const sanitized = DOMPurify.sanitize(rendered, {
         ALLOWED_TAGS: SAFE_TAGS,
         ALLOWED_ATTR: SAFE_ATTRS,
         FORBID_TAGS: ['style', 'script', 'form', 'input', 'button'],
         FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onmouseout', 'onfocus', 'onblur'],
-        ALLOW_DATA_ATTR: false,
         ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
     });
 
+    // Clean up the hook after use
+    DOMPurify.removeAllHooks();
+
     const withoutParagraphs = removeParagraphTags(sanitized);
-    const withCopyButtons = addCopyButtonsToCodeBlocks(withoutParagraphs);
-    return addClassesToMarkdownElements(withCopyButtons);
+    const withClasses = addClassesToMarkdownElements(withoutParagraphs);
+    return addCopyButtonsToCodeBlocks(withClasses);
 }
 
 /**
@@ -382,21 +411,6 @@ function addClassesToMarkdownElements(html) {
     
     const temp = document.createElement('div');
     temp.innerHTML = html;
-    
-    // Add classes to code blocks and their code elements
-    temp.querySelectorAll('div[data-raw-code]').forEach(wrapper => {
-        wrapper.classList.add('code-block-wrapper');
-        
-        // Add language class if specified
-        const lang = wrapper.getAttribute('data-language');
-        const codeEl = wrapper.querySelector('code');
-        if (codeEl) {
-            codeEl.classList.add('hljs');
-            if (lang) {
-                codeEl.classList.add(`language-${lang}`);
-            }
-        }
-    });
     
     // Add classes to spoiler elements (identified by data-spoiler-text attribute)
     temp.querySelectorAll('span[data-spoiler-text]').forEach(el => {
