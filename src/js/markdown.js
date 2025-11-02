@@ -260,15 +260,6 @@ function removeParagraphTags(html) {
         }
     });
 
-    // Add spacing after blockquotes if they're followed by other content
-    const blockquotes = temp.querySelectorAll('blockquote');
-    blockquotes.forEach((bq) => {
-        const nextSibling = bq.nextElementSibling;
-        if (nextSibling) {
-            const br = document.createElement('br');
-            bq.after(br);
-        }
-    });
 
     // Fix numbered list continuity across interrupting elements
     // When lists are separated by code blocks, set the 'start' attribute to continue numbering
