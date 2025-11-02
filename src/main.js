@@ -3766,11 +3766,29 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
     if (!msg.pending && !msg.failed && fWebPreviewsEnabled) {
-        if (msg.preview_metadata?.og_image) {
+        // Check if we have metadata with either an image OR a title/description
+        const hasMetadata = msg.preview_metadata && (
+            msg.preview_metadata.og_image ||
+            msg.preview_metadata.og_title ||
+            msg.preview_metadata.title ||
+            msg.preview_metadata.og_description ||
+            msg.preview_metadata.description
+        );
+        
+        if (hasMetadata) {
             // Setup the Preview container
             const divPrevContainer = document.createElement('div');
             divPrevContainer.classList.add('msg-preview-container', 'btn');
             divPrevContainer.setAttribute('url', msg.preview_metadata.og_url || msg.preview_metadata.domain);
+
+            // Check if we have both description and image
+            const description = msg.preview_metadata.og_description || msg.preview_metadata.description;
+            const hasImage = !!msg.preview_metadata.og_image;
+            
+            // If we have both description and image, set bottom padding to 0
+            if (description && hasImage) {
+                divPrevContainer.style.paddingBottom = '0';
+            }
 
             // Setup the Favicon
             const imgFavicon = document.createElement('img');
@@ -3787,23 +3805,56 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // Add the title (prefixed with the Favicon)
             const spanPreviewTitle = document.createElement('span');
             spanPreviewTitle.appendChild(imgFavicon);
-            const spanText = document.createTextNode(msg.preview_metadata.title || msg.preview_metadata.og_title);
+            const spanText = document.createTextNode(msg.preview_metadata.title || msg.preview_metadata.og_title || 'Link Preview');
             spanPreviewTitle.appendChild(spanText);
             divPrevContainer.appendChild(spanPreviewTitle);
 
-            // Load the Preview image
-            const imgPreview = document.createElement('img');
-            imgPreview.classList.add('msg-preview-img');
-            imgPreview.src = msg.preview_metadata.og_image;
-            // Auto-scroll the chat to correct against container resizes
-            imgPreview.addEventListener('load', () => {
-                if (proceduralScrollState.isLoadingOlderMessages) {
-                    correctScrollForMediaLoad();
-                } else {
-                    softChatScroll();
+            // Add description if available (especially useful for Twitter/X posts)
+            if (description) {
+                const spanDescription = document.createElement('span');
+                spanDescription.classList.add('msg-preview-description');
+                
+                // Safely render text with line breaks by manually creating text nodes and <br> elements
+                // Split by <br> tags first (from Twitter HTML), then by \n (from other sources)
+                const parts = description.split(/<br\s*\/?>/i);
+                parts.forEach((part, index) => {
+                    // For each part, split by \n and add text nodes with <br> between them
+                    const subParts = part.split('\n');
+                    subParts.forEach((subPart, subIndex) => {
+                        if (subPart) {
+                            spanDescription.appendChild(document.createTextNode(subPart));
+                        }
+                        if (subIndex < subParts.length - 1) {
+                            spanDescription.appendChild(document.createElement('br'));
+                        }
+                    });
+                    if (index < parts.length - 1) {
+                        spanDescription.appendChild(document.createElement('br'));
+                    }
+                });
+                
+                // If there's an image, remove border radius so description sits flush
+                if (hasImage) {
+                    spanDescription.style.borderRadius = '0';
                 }
-            }, { once: true });
-            divPrevContainer.appendChild(imgPreview);
+                divPrevContainer.appendChild(spanDescription);
+            }
+
+            // Load the Preview image if available
+            if (hasImage) {
+                const imgPreview = document.createElement('img');
+                imgPreview.classList.add('msg-preview-img');
+                imgPreview.src = msg.preview_metadata.og_image;
+                // Auto-scroll the chat to correct against container resizes
+                imgPreview.addEventListener('load', () => {
+                    if (proceduralScrollState.isLoadingOlderMessages) {
+                        correctScrollForMediaLoad();
+                    } else {
+                        softChatScroll();
+                    }
+                }, { once: true });
+                divPrevContainer.appendChild(imgPreview);
+            }
 
             // Render the Preview
             pMessage.appendChild(divPrevContainer);
