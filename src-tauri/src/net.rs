@@ -321,7 +321,81 @@ pub struct SiteMetadata {
     pub favicon: Option<String>,
 }
 
+/// Fetch metadata specifically for Twitter/X posts using their oEmbed API
+async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
+    // Use Twitter's oEmbed API for reliable metadata extraction
+    let encoded_url = url.replace("&", "%26").replace("?", "%3F").replace("=", "%3D");
+    let oembed_url = format!("https://publish.twitter.com/oembed?url={}", encoded_url);
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    
+    let response = client
+        .get(&oembed_url)
+        .send()
+        .await
+        .map_err(|e| format!("Twitter oEmbed request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Twitter oEmbed returned status: {}", response.status()));
+    }
+    
+    let oembed_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Twitter oEmbed response: {}", e))?;
+    
+    // Extract metadata from oEmbed response
+    let author_name = oembed_data["author_name"].as_str().unwrap_or("Twitter");
+    let html = oembed_data["html"].as_str().unwrap_or("");
+    
+    // Parse the HTML to extract the tweet text
+    let document = Html::parse_document(html);
+    let text_selector = Selector::parse("p").unwrap();
+    let tweet_text = document
+        .select(&text_selector)
+        .next()
+        .map(|el| {
+            // Get the inner HTML to preserve <br> tags
+            el.inner_html()
+                // Remove links to other tweets and media
+                .split("<a ")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    
+    // Note: Twitter's oEmbed API does not provide images for regular tweets
+    // Images are only available for video tweets via thumbnail_url
+    let thumbnail_url = oembed_data["thumbnail_url"]
+        .as_str()
+        .map(|s| s.to_string());
+    
+    let metadata = SiteMetadata {
+        domain: "https://x.com/".to_string(),
+        og_title: Some(format!("{} on X", author_name)),
+        og_description: Some(tweet_text),
+        og_image: thumbnail_url,
+        og_url: Some(url.to_string()),
+        og_type: Some("article".to_string()),
+        title: Some(format!("{} on X", author_name)),
+        description: Some(format!("Post by {}", author_name)),
+        favicon: Some("https://abs.twimg.com/favicons/twitter.3.ico".to_string()),
+    };
+    
+    Ok(metadata)
+}
+
 pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
+    // Check if this is a Twitter/X URL and use specialized handler
+    if url.contains("twitter.com") || url.contains("x.com") {
+        return fetch_twitter_metadata(url).await;
+    }
+    
     // Extract and normalize domain
     let domain = {
         let parts: Vec<&str> = url.split('/').collect();
@@ -475,6 +549,31 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
             if let Some(content) = element.attr("content") {
                 match name {
                     "description" => metadata.description = Some(content.to_string()),
+                    // Twitter/X specific meta tags
+                    "twitter:title" => {
+                        if metadata.og_title.is_none() {
+                            metadata.og_title = Some(content.to_string());
+                        }
+                    },
+                    "twitter:description" => {
+                        if metadata.og_description.is_none() {
+                            metadata.og_description = Some(content.to_string());
+                        }
+                    },
+                    "twitter:image" => {
+                        if metadata.og_image.is_none() {
+                            let image_url = if content.starts_with("https://") {
+                                content.to_string()
+                            } else if content.starts_with("//") {
+                                format!("https:{}", content)
+                            } else if content.starts_with('/') {
+                                format!("{}{}", domain.trim_end_matches('/'), content)
+                            } else {
+                                format!("{}{}", domain.trim_end_matches('/'), content)
+                            };
+                            metadata.og_image = Some(image_url);
+                        }
+                    },
                     _ => {}
                 }
             }

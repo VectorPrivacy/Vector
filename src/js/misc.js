@@ -748,7 +748,7 @@ function cleanTrackingFromUrl(urlString) {
     if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
       const youtubeTrackingParams = [
         'feature', 'si', 'app', 'kw', 'annotation_id', 'src_vid',
-        'ab_channel', 'start_radio', 'rv'
+        'ab_channel', 'start_radio', 'rv', 'pp'
       ];
       youtubeTrackingParams.forEach(param => url.searchParams.delete(param));
     }
