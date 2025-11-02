@@ -806,7 +806,11 @@ function cleanTrackingFromUrl(urlString) {
     }
     
     // Remove common tracking parameters from all URLs
-    commonTrackingParams.forEach(param => url.searchParams.delete(param));
+    // Exception: YouTube uses 't' for timestamps, so skip it for YouTube URLs
+    commonTrackingParams.forEach(param => {
+      if ((hostname.includes('youtube.com') || hostname.includes('youtu.be')) && param === 't') return;
+      url.searchParams.delete(param);
+    });
     
     return url.toString();
   } catch (e) {
