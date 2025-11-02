@@ -594,6 +594,9 @@ async fn fetch_messages<R: Runtime>(
             );
             
             if needs_integrity_check {
+                // Clean up empty file attachments first
+                cleanup_empty_file_attachments(&handle, &mut state).await;
+                
                 // Check integrity without dropping state
                 check_attachment_filesystem_integrity(&handle, &mut state).await;
                 
@@ -603,6 +606,9 @@ async fn fetch_messages<R: Runtime>(
                     "chats": &state.chats
                 })).unwrap();
             } else {
+                // Even if no integrity check needed, still clean up empty files
+                cleanup_empty_file_attachments(&handle, &mut state).await;
+                
                 // No integrity check needed, send init immediately
                 handle.emit("init_finished", serde_json::json!({
                     "profiles": &state.profiles,
@@ -848,6 +854,64 @@ async fn fetch_messages<R: Runtime>(
     }
 }
 
+/// Removes attachments with empty file hash from all messages
+/// Also removes messages that have ONLY corrupted attachments (no content)
+/// This cleans up corrupted uploads that resulted in 0-byte files
+async fn cleanup_empty_file_attachments<R: Runtime>(
+    handle: &AppHandle<R>,
+    state: &mut ChatState,
+) {
+    const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let mut cleaned_count = 0;
+    let mut chats_to_update = Vec::new();
+    
+    for chat in &mut state.chats {
+        let mut chat_had_changes = false;
+        
+        // First pass: remove attachments with empty file hash
+        for message in &mut chat.messages {
+            let original_count = message.attachments.len();
+            
+            // Remove attachments with empty file hash in their URL
+            message.attachments.retain(|attachment| {
+                !attachment.url.contains(EMPTY_FILE_HASH)
+            });
+            
+            let removed = original_count - message.attachments.len();
+            if removed > 0 {
+                cleaned_count += removed;
+                chat_had_changes = true;
+            }
+        }
+        
+        // Second pass: remove messages that are now empty (no content, no attachments)
+        let messages_before = chat.messages.len();
+        chat.messages.retain(|message| {
+            !message.content.is_empty() || !message.attachments.is_empty()
+        });
+        
+        if chat.messages.len() < messages_before {
+            chat_had_changes = true;
+        }
+        
+        // If this chat had changes, save all its messages
+        if chat_had_changes {
+            chats_to_update.push((chat.id(), chat.messages.clone()));
+        }
+    }
+    
+    // Save updated chats to database
+    for (chat_id, messages) in chats_to_update {
+        if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &messages).await {
+            eprintln!("Failed to save chat after cleaning empty attachments: {}", e);
+        }
+    }
+    
+    if cleaned_count > 0 {
+        eprintln!("Cleaned up {} empty file attachments", cleaned_count);
+    }
+}
+
 /// Checks if downloaded attachments still exist on the filesystem
 /// Sets downloaded=false for any missing files and updates the database
 async fn check_attachment_filesystem_integrity<R: Runtime>(
@@ -931,14 +995,16 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
         // Save updated messages for each chat that had changes
         let mut saved_count = 0;
         let total_chats = chats_with_updates.len();
-        for (chat_idx, messages) in chats_with_updates {
+        for (chat_idx, _updated_messages) in chats_with_updates {
             // Since we're iterating over existing indices, we know the chat exists
             let chat = &state.chats[chat_idx];
             let chat_id = chat.id().clone();
             
-            // Save all messages for this chat
-            let all_messages = messages;
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
+            // CRITICAL FIX: Save ALL messages from the chat, not just the updated ones
+            // The updated_messages only contains messages with attachments that were checked
+            // Saving only those would DELETE all text messages!
+            let all_messages = &chat.messages;
+            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, all_messages).await {
                 eprintln!("Failed to update messages after filesystem check: {}", e);
             } else {
                 saved_count += 1;
@@ -2465,16 +2531,59 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
         }
     };
 
+    // Check if we got a reasonable amount of data
+    if encrypted_data.len() < 16 {
+        eprintln!("Downloaded file too small: {} bytes for attachment {}", encrypted_data.len(), attachment_id);
+        let mut state = STATE.lock().await;
+        
+        // Find and update the attachment status
+        for chat in &mut state.chats {
+            let is_target_chat = match &chat.chat_type {
+                ChatType::MlsGroup => chat.id == npub,
+                ChatType::DirectMessage => chat.has_participant(&npub),
+            };
+            
+            if is_target_chat {
+                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
+                        attachment.downloading = false;
+                        attachment.downloaded = false;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Emit a more helpful error
+        let error_msg = format!("Downloaded file too small ({} bytes). URL may be invalid or expired.", encrypted_data.len());
+        handle.emit("attachment_download_result", serde_json::json!({
+            "profile_id": npub,
+            "msg_id": msg_id,
+            "id": attachment_id,
+            "success": false,
+            "result": error_msg
+        })).unwrap();
+        return false;
+    }
+    
     // Decrypt and save the file
     let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment).await;
     
     // Process the result
     match result {
         Err(error) => {
+            // Check if this is a corrupted attachment (decryption failure)
+            let is_decryption_error = error.contains("aead") || error.contains("decrypt");
+            
+            if is_decryption_error {
+                eprintln!("Decryption failed for attachment {}: corrupted keys/data mismatch", attachment_id);
+            }
+            
             // Handle decryption/saving error
             let mut state = STATE.lock().await;
             
             // Find and update the attachment status
+            let mut should_remove = false;
             for chat in &mut state.chats {
                 let is_target_chat = match &chat.chat_type {
                     ChatType::MlsGroup => chat.id == npub,
@@ -2486,9 +2595,49 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                         if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
                             attachment.downloading = false;
                             attachment.downloaded = false;
+                            
+                            // If it's a decryption error, mark for removal as it's corrupted
+                            if is_decryption_error {
+                                eprintln!("Marking corrupted attachment for removal: {}", attachment_id);
+                                should_remove = true;
+                            }
                             break;
                         }
                     }
+                }
+            }
+            
+            // Remove corrupted attachment if needed and save
+            if should_remove {
+                // Collect chat_id and messages to save
+                let save_data: Option<(String, Vec<Message>)> = {
+                    let mut result = None;
+                    for chat in &mut state.chats {
+                        let is_target_chat = match &chat.chat_type {
+                            ChatType::MlsGroup => chat.id == npub,
+                            ChatType::DirectMessage => chat.has_participant(&npub),
+                        };
+                        
+                        if is_target_chat {
+                            let chat_id = chat.id().to_string();
+                            
+                            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
+                                let original_count = message.attachments.len();
+                                message.attachments.retain(|a| a.id != attachment_id);
+                                if message.attachments.len() < original_count {
+                                    result = Some((chat_id, vec![message.clone()]));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    result
+                };
+                
+                // Drop state and save
+                drop(state);
+                if let Some((chat_id, messages)) = save_data {
+                    let _ = save_chat_messages(handle.clone(), &chat_id, &messages).await;
                 }
             }
 
@@ -2498,7 +2647,11 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                 "msg_id": msg_id,
                 "id": attachment_id,
                 "success": false,
-                "result": error
+                "result": if should_remove {
+                    "Corrupted attachment removed. Please re-send the file.".to_string()
+                } else {
+                    error
+                }
             })).unwrap();
             return false;
         }

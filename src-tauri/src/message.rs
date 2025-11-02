@@ -283,9 +283,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         // Calculate the file hash first (before encryption)
         let file_hash = calculate_file_hash(&attached_file.bytes);
+        
+        // The SHA-256 hash of an empty file - we should never reuse this
+        const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
         // Check for existing attachment with same hash across all profiles BEFORE encrypting
-        let existing_attachment = {
+        // BUT: Never reuse empty file hashes - always force a new upload
+        let existing_attachment = if file_hash == EMPTY_FILE_HASH {
+            None
+        } else {
             let state = STATE.lock().await;
             let mut found_attachment: Option<(String, Attachment)> = None;
             
@@ -318,12 +324,29 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             found_attachment
         };
 
-        // Only encrypt if we don't have an existing attachment (optimization)
-        let (params, enc_file) = if existing_attachment.is_some() {
+        // Determine if we need to encrypt based on whether we'll reuse an existing attachment
+        let will_reuse_existing = if let Some((_, ref existing)) = existing_attachment {
+            // Check if URL contains empty hash - never reuse those
+            const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            if existing.url.contains(EMPTY_FILE_HASH) {
+                false
+            } else {
+                // Check if URL is live
+                match net::check_url_live(&existing.url).await {
+                    Ok(is_live) => is_live,
+                    Err(_) => false
+                }
+            }
+        } else {
+            false
+        };
+
+        // Only encrypt if we won't reuse an existing attachment
+        let (params, enc_file) = if will_reuse_existing {
             // Skip encryption for duplicate files - we'll reuse existing encryption params
             (crypto::EncryptionParams { key: String::new(), nonce: String::new() }, Vec::new())
         } else {
-            // Encrypt the attachment only if it's a new file
+            // Encrypt the attachment - either it's new or the existing URL is dead
             let params = crypto::generate_encryption_params();
             let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
             (params, enc_file)
@@ -409,10 +432,18 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // Check if we found an existing attachment with the same hash
         let mut should_upload = true;
         let attachment_rumor = if let Some((_found_profile_id, existing_attachment)) = existing_attachment {
-            // Verify the URL is still live before reusing
-            let url_is_live = match net::check_url_live(&existing_attachment.url).await {
-                Ok(is_live) => is_live,
-                Err(_) => false // Treat errors as dead URL
+            // Never reuse URLs with the empty file hash
+            const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            let is_empty_hash = existing_attachment.url.contains(EMPTY_FILE_HASH);
+            
+            // Verify the URL is still live before reusing (but skip if it's an empty hash)
+            let url_is_live = if is_empty_hash {
+                false
+            } else {
+                match net::check_url_live(&existing_attachment.url).await {
+                    Ok(is_live) => is_live,
+                    Err(_) => false // Treat errors as dead URL
+                }
             };
             
             if url_is_live {
@@ -830,9 +861,21 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
+            let path = std::path::Path::new(&file_path);
+            
+            // Check if file exists first
+            if !path.exists() {
+                return Err(format!("File does not exist: {}", file_path));
+            }
+            
             // Read file bytes
             let bytes = std::fs::read(&file_path)
                 .map_err(|e| format!("Failed to read file: {}", e))?;
+            
+            // Check if file is empty
+            if bytes.is_empty() {
+                return Err(format!("File is empty (0 bytes): {}", file_path));
+            }
 
             // Extract extension from filepath
             let extension = file_path

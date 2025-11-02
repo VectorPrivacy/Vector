@@ -203,6 +203,13 @@ async fn process_file_attachment(
     // Extract content storage URL
     let content_url = rumor.content.clone();
     
+    // Skip attachments with empty file hash - these are corrupted uploads
+    const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    if content_url.contains(EMPTY_FILE_HASH) {
+        eprintln!("Skipping attachment with empty file hash in URL: {}", content_url);
+        return Err("Attachment contains empty file hash - skipping".to_string());
+    }
+    
     // Extract image metadata if provided
     let img_meta: Option<ImageMetadata> = {
         let blurhash_opt = rumor.tags
