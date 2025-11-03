@@ -1221,24 +1221,15 @@ function renderChat(chat) {
     divAvatarContainer.style.position = `relative`;
     
     if (isGroup) {
-        // For groups, show a group icon or placeholder
-        const groupIcon = document.createElement('div');
-        groupIcon.style.width = '50px';
-        groupIcon.style.height = '50px';
-        groupIcon.style.borderRadius = '50%';
-        groupIcon.style.backgroundColor = '#444';
-        groupIcon.style.display = 'flex';
-        groupIcon.style.alignItems = 'center';
-        groupIcon.style.justifyContent = 'center';
-        groupIcon.innerHTML = '<span class="icon icon-chats" style="color: #fff;"></span>';
-        divAvatarContainer.appendChild(groupIcon);
+        // For groups, show the group placeholder SVG
+        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
     } else if (profile?.avatar) {
         const imgAvatar = document.createElement('img');
         imgAvatar.src = profile?.avatar;
         divAvatarContainer.appendChild(imgAvatar);
     } else {
-        // Otherwise, generate a Gradient Avatar
-        divAvatarContainer.appendChild(pubkeyToAvatar(profile?.id || chat.id, profile?.nickname || profile?.name, 50));
+        // Otherwise, generate a placeholder avatar
+        divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -2370,8 +2361,8 @@ function renderCurrentProfile(cProfile) {
         domAvatar = document.createElement('img');
         domAvatar.src = cProfile.avatar;
     } else {
-        // Display our Gradient Avatar
-        domAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 50);
+        // Display our placeholder avatar
+        domAvatar = createPlaceholderAvatar(false, 50);
     }
     domAvatar.classList.add('btn');
     domAvatar.onclick = () => openProfile();
@@ -2452,7 +2443,7 @@ function renderProfileTab(cProfile) {
         }
         domProfileAvatar.src = cProfile.avatar;
     } else {
-        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 175);
+        const newAvatar = createPlaceholderAvatar(false, 175);
         domProfileAvatar.replaceWith(newAvatar);
         domProfileAvatar = newAvatar;
     }
@@ -3210,8 +3201,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 avatarEl = imgAvatar;
             } else {
                 // Provide a deterministic placeholder when no avatar URL is available
-                const displayName = authorProfile?.nickname || authorProfile?.name || '';
-                const placeholder = pubkeyToAvatar(otherFullId, displayName, 35);
+                const placeholder = createPlaceholderAvatar(false, 35);
                 // Ensure visual sizing and interactivity match real avatars
                 placeholder.classList.add('avatar', 'btn');
                 // Only wire profile click if we have an identifiable user
@@ -4433,7 +4423,7 @@ async function renderGroupOverview(chat) {
                 avatar.style.borderRadius = '50%';
                 avatar.style.objectFit = 'cover';
             } else {
-                avatar = pubkeyToAvatar(member, memberProfile?.nickname || memberProfile?.name, 25);
+                avatar = createPlaceholderAvatar(false, 25);
             }
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
@@ -4791,7 +4781,7 @@ async function openInviteMemberToGroup(chat) {
                 avatar.style.borderRadius = '50%';
                 avatar.style.objectFit = 'cover';
             } else {
-                avatar = pubkeyToAvatar(contact.id, name, 25);
+                avatar = createPlaceholderAvatar(false, 25);
             }
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
@@ -5660,7 +5650,7 @@ function renderCreateGroupList(filterText = '') {
             img.src = p.avatar;
             avatarContainer.appendChild(img);
         } else {
-            avatarContainer.appendChild(pubkeyToAvatar(p.id, name, 50));
+            avatarContainer.appendChild(createPlaceholderAvatar(false, 50));
         }
         row.appendChild(avatarContainer);
 
