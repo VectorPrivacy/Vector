@@ -908,7 +908,7 @@ body {
   font-size: 15px;
   color: rgba(255, 255, 255, 1);
   text-align: center;
-  max-width: 100px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
