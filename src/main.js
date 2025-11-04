@@ -2331,8 +2331,8 @@ async function login() {
                             console.log('[FAWKES] Showing success popup!');
                             // Show celebration popup
                             popupConfirm(
-                                '🎭 Guy Fawkes Day Badge Claimed!',
-                                'Congratulations! You\'ve been awarded the <b>Guy Fawkes Day 2025</b> badge for logging in on this special day, celebrating the Vector v0.2 Open Beta release!<br><br><i>Remember, remember the 5th of November...</i>',
+                                'V for Vector Badge',
+                                '<b>Congratulations!</b> You\'ve claimed this limited badge for logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 14px;">Remember, remember the 5th of November...</i>',
                                 true,
                                 '',
                                 'fawkes_mask.svg'
@@ -2488,7 +2488,7 @@ function renderProfileTab(cProfile) {
         if (count > 0) {
             domProfileBadgeInvite.style.display = '';
             domProfileBadgeInvite.onclick = () => {
-                popupConfirm('Vector Beta Inviter', `${cProfile.mine ? 'You' : 'They' } have invited <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
+                popupConfirm('Vector Beta Inviter', `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
             }
         }
     }).catch(e => {});
@@ -2499,7 +2499,7 @@ function renderProfileTab(cProfile) {
         if (hasBadge) {
             domProfileBadgeFawkes.style.display = '';
             domProfileBadgeFawkes.onclick = () => {
-                popupConfirm('Guy Fawkes Day 2025', `${cProfile.mine ? 'You' : 'They'} logged in on <b>Guy Fawkes Day</b> (5th November 2025), celebrating the Vector v0.2 Open Beta release!`, true, '', 'fawkes_mask.svg');
+                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 14px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
             };
         }
     }).catch(e => {});
