@@ -2852,6 +2852,22 @@ async fn encrypt(input: String, password: Option<String>) -> String {
         }
     }
 
+    // Bootstrap MLS device keypackage for newly created accounts (non-blocking)
+    // This ensures keypackages are published immediately after PIN setup, not just on restart
+    tokio::spawn(async move {
+        // Brief delay to allow encryption key to be set
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
+        match bootstrap_mls_device_keypackage().await {
+            Ok(info) => {
+                let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+                let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
+                println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
+            }
+            Err(e) => eprintln!("[MLS] Device KeyPackage bootstrap failed: {}", e),
+        }
+    });
+
     res
 }
 
