@@ -186,14 +186,38 @@ impl Status {
 
 #[tauri::command]
 pub async fn load_profile(npub: String) -> bool {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let client = match NOSTR_CLIENT.get() {
+        Some(c) => c,
+        None => {
+            eprintln!("[Profile] NOSTR_CLIENT not initialized for {}", &npub[..12]);
+            return false;
+        }
+    };
 
     // Convert the Bech32 String in to a PublicKey
-    let profile_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
+    let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("[Profile] Invalid npub format {}: {}", &npub[..12], e);
+            return false;
+        }
+    };
 
     // Grab our pubkey to check for profiles belonging to us
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let signer = match client.signer().await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[Profile] Failed to get signer for {}: {}", &npub[..12], e);
+            return false;
+        }
+    };
+    let my_public_key = match signer.get_public_key().await {
+        Ok(pk) => pk,
+        Err(e) => {
+            eprintln!("[Profile] Failed to get public key for {}: {}", &npub[..12], e);
+            return false;
+        }
+    };
 
     // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
     // Mutex Scope: we want to hold this lock as short as possible, given this function is "spammed" for very fast profile cache hit checks
@@ -259,10 +283,20 @@ pub async fn load_profile(npub: String) -> bool {
     };
 
     // Attempt to fetch their Metadata profile
-    match client
+    eprintln!("[Profile] Fetching metadata for {} from relays...", &npub[..12]);
+    let fetch_result = client
         .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(15))
-        .await
-    {
+        .await;
+    
+    eprintln!("[Profile] Fetch result for {}: {:?}", &npub[..12],
+        match &fetch_result {
+            Ok(Some(_)) => "Ok(Some(metadata))",
+            Ok(None) => "Ok(None)",
+            Err(e) => &format!("Err({})", e),
+        }
+    );
+    
+    match fetch_result {
         Ok(meta) => {
             if meta.is_some() {
                 // If it's ours, mark it as such
@@ -293,10 +327,26 @@ pub async fn load_profile(npub: String) -> bool {
                 }
                 return true;
             } else {
-                return false;
+                // Profile doesn't exist on relays - check if we have it in STATE already
+                let mut state = STATE.lock().await;
+                if let Some(profile) = state.get_profile_mut(&npub) {
+                    // We have the profile in STATE, just update the timestamp so we don't keep retrying
+                    profile.last_updated = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    eprintln!("[Profile] No new metadata for {} (using cached profile)", &npub[..12]);
+                    return true;
+                } else {
+                    // Profile truly doesn't exist anywhere
+                    eprintln!("[Profile] No metadata found for {} (profile doesn't exist)", &npub[..12]);
+                    return true;
+                }
             }
         }
-        Err(_) => {
+        Err(e) => {
+            // Network/relay error - this is a genuine failure
+            eprintln!("[Profile] Failed to fetch metadata for {}: {}", &npub[..12], e);
             return false;
         }
     }

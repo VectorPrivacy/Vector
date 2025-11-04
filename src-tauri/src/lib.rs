@@ -47,6 +47,8 @@ pub use message::{Message, Attachment, Reaction};
 mod profile;
 pub use profile::{Profile, Status};
 
+mod profile_sync;
+
 mod chat;
 pub use chat::{Chat, ChatType, ChatMetadata};
 
@@ -3378,6 +3380,113 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
     
     Ok(unique_acceptors.len() as u32)
 }
+
+// Guy Fawkes Day 2025 constants
+// TESTING: Using today (Nov 4th, 2025) for testing (will change to Nov 5th for production)
+const FAWKES_DAY_START: u64 = 1762214400; // 2025-11-04 00:00:00 UTC (TESTING - actual Nov 4, 2025)
+const FAWKES_DAY_END: u64 = 1762300800;   // 2025-11-05 00:00:00 UTC (TESTING - actual Nov 5, 2025)
+// PRODUCTION VALUES (uncomment for release):
+// const FAWKES_DAY_START: u64 = 1762300800; // 2025-11-05 00:00:00 UTC
+// const FAWKES_DAY_END: u64 = 1762387200;   // 2025-11-06 00:00:00 UTC
+
+/// Helper function to check if a user has a valid Guy Fawkes Day badge
+async fn has_fawkes_badge_internal(user_pubkey: PublicKey) -> Result<bool, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    
+    // Fetch the user's badge claim event
+    let filter = Filter::new()
+        .author(user_pubkey)
+        .kind(Kind::ApplicationSpecificData)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "fawkes_2025")
+        .limit(10);
+    
+    let events = client
+        .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    // Check if they have a valid badge claim
+    for event in events {
+        if event.content == "fawkes_badge_claimed" {
+            let timestamp = event.created_at.as_u64();
+            // Verify the timestamp is within the valid window
+            if timestamp >= FAWKES_DAY_START && timestamp < FAWKES_DAY_END {
+                return Ok(true);
+            }
+        }
+    }
+    
+    Ok(false)
+}
+
+/// Claim the Guy Fawkes Day badge (5th November 2025)
+/// This should be called on login to check if it's Guy Fawkes Day and claim the badge
+#[tauri::command]
+async fn claim_fawkes_badge() -> Result<bool, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    
+    // Get current timestamp
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    
+    println!("[FAWKES] Current timestamp: {}", now);
+    println!("[FAWKES] Valid window: {} - {}", FAWKES_DAY_START, FAWKES_DAY_END);
+    
+    // Check if we're in the valid time window
+    if now < FAWKES_DAY_START || now >= FAWKES_DAY_END {
+        println!("[FAWKES] Outside valid time window, not claiming badge");
+        return Ok(false); // Not Guy Fawkes Day
+    }
+    
+    println!("[FAWKES] Inside valid time window, proceeding with claim...");
+    
+    // Get my public key
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    
+    // Check if we already have the badge using the helper function
+    if has_fawkes_badge_internal(my_public_key).await? {
+        return Ok(true); // Already claimed
+    }
+    
+    // Create and publish the badge claim event
+    // TESTING: Add 5-minute expiration for testing (remove for production)
+    let expiry_time = Timestamp::from_secs(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 300 // 5 minutes for testing
+    );
+    
+    let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "fawkes_badge_claimed")
+        .tag(Tag::custom(TagKind::d(), vec!["fawkes_2025"]))
+        .tag(Tag::expiration(expiry_time)); // TESTING: Remove this line for production
+    
+    // Build and sign the event
+    let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
+    
+    // Verify the timestamp is within the valid window (double-check after signing)
+    if event.created_at.as_u64() < FAWKES_DAY_START || event.created_at.as_u64() >= FAWKES_DAY_END {
+        return Err("Event timestamp is outside the valid Guy Fawkes Day window".to_string());
+    }
+    
+    // Send to trusted relay
+    client.send_event_to([TRUSTED_RELAY], &event).await.map_err(|e| e.to_string())?;
+    
+    Ok(true)
+}
+
+/// Check if a user has the Guy Fawkes Day badge
+#[tauri::command]
+async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
+    // Convert npub to PublicKey
+    let user_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
+    
+    // Use the helper function
+    has_fawkes_badge_internal(user_pubkey).await
+}
 // MLS Tauri Commands
 
 
@@ -3758,18 +3867,24 @@ async fn invite_member_to_group(
         .ok_or_else(|| format!("No device keypackages found for {}", member_npub))?;
 
     // Run non-Send MLS engine work on a blocking thread
+    let group_id_clone = group_id.clone();
     tokio::task::spawn_blocking(move || {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.add_member_device(&group_id, &member_npub, &device_id)
+            mls.add_member_device(&group_id_clone, &member_npub, &device_id)
                 .await
                 .map_err(|e| e.to_string())
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+    
+    // Sync participants array after adding member
+    sync_mls_group_participants(group_id).await?;
+    
+    Ok(())
 }
 
 /// Remove a member device from an MLS group
@@ -3780,18 +3895,24 @@ async fn remove_mls_member_device(
     device_id: String,
 ) -> Result<(), String> {
     // Run non-Send MLS engine work on a blocking thread; drive async via current runtime
+    let group_id_clone = group_id.clone();
     tokio::task::spawn_blocking(move || {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.remove_member_device(&group_id, &member_npub, &device_id)
+            mls.remove_member_device(&group_id_clone, &member_npub, &device_id)
                 .await
                 .map_err(|e| e.to_string())
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+    
+    // Sync participants array after removing member
+    sync_mls_group_participants(group_id).await?;
+    
+    Ok(())
 }
 
 /// Sync MLS groups with the network
@@ -3848,6 +3969,11 @@ async fn sync_mls_groups_now(
                         Err(e) => {
                             eprintln!("[MLS] sync_group_since_cursor failed for {}: {}", gid, e);
                         }
+                    }
+                    
+                    // Sync participants array to ensure it matches actual group members
+                    if let Err(e) = sync_mls_group_participants(gid.clone()).await {
+                        eprintln!("[MLS] Failed to sync participants for group {}: {}", gid, e);
                     }
                 }
 
@@ -4104,6 +4230,11 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 }));
             }
 
+            // Sync the participants array with actual group members from the engine
+            if let Err(e) = sync_mls_group_participants(nostr_group_id.clone()).await {
+                eprintln!("[MLS] Failed to sync participants after welcome accept: {}", e);
+            }
+
             // Immediately prefetch recent MLS messages for this group so the chat list shows previews
             // and ordering without requiring the user to open the chat. This loads a recent slice
             // (48h window by default in sync_group_since_cursor) rather than full history.
@@ -4330,6 +4461,45 @@ struct GroupMembers {
     admins: Vec<String>,  // admin npubs
 }
 
+/// Sync the participants array for an MLS group chat with the actual members from the engine
+/// This ensures chat.participants is always up-to-date
+async fn sync_mls_group_participants(group_id: String) -> Result<(), String> {
+    // Get actual members from the engine
+    let group_members = get_mls_group_members(group_id.clone()).await?;
+    
+    // Update the chat's participants array
+    let mut state = STATE.lock().await;
+    if let Some(chat) = state.get_chat_mut(&group_id) {
+        let old_count = chat.participants.len();
+        chat.participants = group_members.members.clone();
+        let new_count = chat.participants.len();
+        
+        if old_count != new_count {
+            eprintln!(
+                "[MLS] Synced participants for group {}: {} -> {} members",
+                &group_id[..8],
+                old_count,
+                new_count
+            );
+        }
+        
+        // Save updated chat to disk
+        let chat_clone = chat.clone();
+        drop(state);
+        
+        if let Some(handle) = TAURI_APP.get() {
+            if let Err(e) = db_migration::save_chat(handle.clone(), &chat_clone).await {
+                eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
+            }
+        }
+    } else {
+        drop(state);
+        eprintln!("[MLS] Chat not found when syncing participants: {}", group_id);
+    }
+    
+    Ok(())
+}
+
 /// Get members (npubs) of an MLS group from the persistent engine (on-demand)
 #[tauri::command]
 async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String> {
@@ -4493,6 +4663,38 @@ async fn refresh_keypackages_for_contact(
 
 /// Remove orphaned MLS groups from metadata that are not in engine state
 
+#[tauri::command]
+async fn queue_profile_sync(npub: String, priority: String, force_refresh: bool) -> Result<(), String> {
+    let sync_priority = match priority.as_str() {
+        "critical" => profile_sync::SyncPriority::Critical,
+        "high" => profile_sync::SyncPriority::High,
+        "medium" => profile_sync::SyncPriority::Medium,
+        "low" => profile_sync::SyncPriority::Low,
+        _ => return Err(format!("Invalid priority: {}", priority)),
+    };
+    
+    profile_sync::queue_profile_sync(npub, sync_priority, force_refresh).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn queue_chat_profiles_sync(chat_id: String, is_opening: bool) -> Result<(), String> {
+    profile_sync::queue_chat_profiles(chat_id, is_opening).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn refresh_profile_now(npub: String) -> Result<(), String> {
+    profile_sync::refresh_profile_now(npub).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_all_profiles() -> Result<(), String> {
+    profile_sync::sync_all_profiles().await;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -4547,6 +4749,12 @@ pub fn run() {
 
             // Set as our accessible static app handle
             TAURI_APP.set(handle).unwrap();
+            
+            // Start the profile sync background processor
+            tauri::async_runtime::spawn(async {
+                profile_sync::start_profile_sync_processor().await;
+            });
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4612,6 +4820,8 @@ pub fn run() {
             get_or_create_invite_code,
             accept_invite_code,
             get_invited_users,
+            claim_fawkes_badge,
+            check_fawkes_badge,
             db::get_invite_code,
             db::set_invite_code,
             export_keys,
@@ -4638,6 +4848,11 @@ pub fn run() {
             leave_mls_group,
             list_group_cursors,
             refresh_keypackages_for_contact,
+            // Profile sync commands
+            queue_profile_sync,
+            queue_chat_profiles_sync,
+            refresh_profile_now,
+            sync_all_profiles,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

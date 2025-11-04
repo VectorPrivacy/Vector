@@ -773,6 +773,12 @@ function cleanTrackingFromUrl(urlString) {
       linkedinTrackingParams.forEach(param => url.searchParams.delete(param));
     }
     
+    // Vimeo-specific
+    else if (hostname.includes('vimeo.com')) {
+      const vimeoTrackingParams = ['share', 'fl', 'fe'];
+      vimeoTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
     // Remove common tracking parameters from all URLs
     // Exception: YouTube uses 't' for timestamps, so skip it for YouTube URLs
     commonTrackingParams.forEach(param => {

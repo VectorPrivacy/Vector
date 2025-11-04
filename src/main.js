@@ -34,6 +34,7 @@ let domProfileAvatar = document.getElementById('profile-avatar');
 const domProfileNameSecondary = document.getElementById('profile-secondary-name');
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
 const domProfileBadgeInvite = document.getElementById('profile-badge-invites');
+const domProfileBadgeFawkes = document.getElementById('profile-badge-fawkes');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
@@ -1058,10 +1059,8 @@ function declineMLSInvite(welcomeEventId) {
  * A "thread" function dedicated to refreshing Profile data in the background
  */
 async function fetchProfiles() {
-    // Poll for changes in profiles
-    for (const profile of arrProfiles) {
-        await invoke("load_profile", { npub: profile.id });
-    }
+    // Use the new profile sync system
+    await invoke("sync_all_profiles");
 }
 
 /**
@@ -2322,6 +2321,30 @@ async function login() {
                 // Setup our Unread Counters
                 await invoke("update_unread_counter");
 
+                // Try to claim Guy Fawkes badge after a 1-second delay
+                console.log('[FAWKES] Setting up badge claim with 1s delay...');
+                setTimeout(() => {
+                    console.log('[FAWKES] Attempting to claim badge...');
+                    invoke("claim_fawkes_badge").then(claimed => {
+                        console.log('[FAWKES] Badge claim result:', claimed);
+                        if (claimed) {
+                            console.log('[FAWKES] Showing success popup!');
+                            // Show celebration popup
+                            popupConfirm(
+                                '🎭 Guy Fawkes Day Badge Claimed!',
+                                'Congratulations! You\'ve been awarded the <b>Guy Fawkes Day 2025</b> badge for logging in on this special day, celebrating the Vector v0.2 Open Beta release!<br><br><i>Remember, remember the 5th of November...</i>',
+                                true,
+                                '',
+                                'fawkes_mask.svg'
+                            );
+                        } else {
+                            console.log('[FAWKES] Badge not claimed (not the right day or already claimed)');
+                        }
+                    }).catch(err => {
+                        console.error('[FAWKES] Failed to claim Fawkes badge:', err);
+                    });
+                }, 1000);
+
                 // Monitor relay connections
                 invoke("monitor_relay_connections");
 
@@ -2467,6 +2490,17 @@ function renderProfileTab(cProfile) {
             domProfileBadgeInvite.onclick = () => {
                 popupConfirm('Vector Beta Inviter', `${cProfile.mine ? 'You' : 'They' } have invited <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
             }
+        }
+    }).catch(e => {});
+
+    // Guy Fawkes Day Badge (5th November 2025 - Vector v0.2 Open Beta)
+    domProfileBadgeFawkes.style.display = 'none';
+    invoke("check_fawkes_badge", { npub: cProfile.id }).then(hasBadge => {
+        if (hasBadge) {
+            domProfileBadgeFawkes.style.display = '';
+            domProfileBadgeFawkes.onclick = () => {
+                popupConfirm('Guy Fawkes Day 2025', `${cProfile.mine ? 'You' : 'They'} logged in on <b>Guy Fawkes Day</b> (5th November 2025), celebrating the Vector v0.2 Open Beta release!`, true, '', 'fawkes_mask.svg');
+            };
         }
     }).catch(e => {});
 
@@ -2867,6 +2901,14 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
+    // Queue profiles for this chat
+    if (chat) {
+        await invoke("queue_chat_profiles_sync", {
+            chatId: chat.id,
+            isOpening: true
+        });
+    }
+    
     // Check if this is a group chat
     const isGroup = chat?.chat_type === 'MlsGroup';
 
@@ -3189,6 +3231,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // For group chats, use msg.npub; for DMs, use sender
             const otherFullId = msg.npub || sender?.id || '';
             const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
+            
+            // If no profile exists, queue for immediate fetch
+            if (!authorProfile && otherFullId) {
+                invoke("queue_profile_sync", {
+                    npub: otherFullId,
+                    priority: "critical",
+                    forceRefresh: false
+                });
+            }
+            
             if (authorProfile?.avatar) {
                 const imgAvatar = document.createElement('img');
                 imgAvatar.classList.add('avatar', 'btn');
@@ -4057,6 +4109,16 @@ function openChat(contact) {
     const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    
+    // Queue profile sync for DMs (on-demand refresh when opening)
+    if (!isGroup && contact) {
+        invoke('queue_profile_sync', {
+            npub: contact,
+            priority: 'high',
+            forceRefresh: false
+        }).catch(err => console.error('Failed to queue DM profile sync:', err));
+    }
+    
     if (isGroup) { refreshGroupMemberCount(contact); }
 
     // Clear any existing auto-scroll timer
@@ -4215,7 +4277,12 @@ async function closeChat() {
  * Open the Expanded Profile view, optionally with a non-default profile
  * @param {Profile} cProfile - An optional profile to render
  */
-function openProfile(cProfile) {
+async function openProfile(cProfile) {
+    // Force immediate refresh when user views profile
+    if (cProfile && cProfile.id) {
+        await invoke("refresh_profile_now", { npub: cProfile.id });
+    }
+    
     navbarSelect('profile-btn');
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
