@@ -2322,13 +2322,9 @@ async function login() {
                 await invoke("update_unread_counter");
 
                 // Try to claim Guy Fawkes badge after a 1-second delay
-                console.log('[FAWKES] Setting up badge claim with 1s delay...');
                 setTimeout(() => {
-                    console.log('[FAWKES] Attempting to claim badge...');
                     invoke("claim_fawkes_badge").then(claimed => {
-                        console.log('[FAWKES] Badge claim result:', claimed);
                         if (claimed) {
-                            console.log('[FAWKES] Showing success popup!');
                             // Show celebration popup
                             popupConfirm(
                                 'V for Vector Badge',
@@ -2338,8 +2334,6 @@ async function login() {
                                 'fawkes_mask.svg',
                                 'text-gradient-green'
                             );
-                        } else {
-                            console.log('[FAWKES] Badge not claimed (not the right day or already claimed)');
                         }
                     }).catch(err => {
                         console.error('[FAWKES] Failed to claim Fawkes badge:', err);
