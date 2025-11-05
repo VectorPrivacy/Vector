@@ -3397,13 +3397,9 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
     Ok(unique_acceptors.len() as u32)
 }
 
-// Guy Fawkes Day 2025 constants
-// TESTING: Using today (Nov 4th, 2025) for testing (will change to Nov 5th for production)
-const FAWKES_DAY_START: u64 = 1762214400; // 2025-11-04 00:00:00 UTC (TESTING - actual Nov 4, 2025)
-const FAWKES_DAY_END: u64 = 1762300800;   // 2025-11-05 00:00:00 UTC (TESTING - actual Nov 5, 2025)
-// PRODUCTION VALUES (uncomment for release):
-// const FAWKES_DAY_START: u64 = 1762300800; // 2025-11-05 00:00:00 UTC
-// const FAWKES_DAY_END: u64 = 1762387200;   // 2025-11-06 00:00:00 UTC
+// Guy Fawkes Day 2025 constants - PRODUCTION
+const FAWKES_DAY_START: u64 = 1762300800; // 2025-11-05 00:00:00 UTC
+const FAWKES_DAY_END: u64 = 1762387200;   // 2025-11-06 00:00:00 UTC
 
 /// Helper function to check if a user has a valid Guy Fawkes Day badge
 async fn has_fawkes_badge_internal(user_pubkey: PublicKey) -> Result<bool, String> {
@@ -3467,18 +3463,8 @@ async fn claim_fawkes_badge() -> Result<bool, String> {
         return Ok(true); // Already claimed
     }
     
-    // Create and publish the badge claim event
-    // TESTING: Add 5-minute expiration for testing (remove for production)
-    let expiry_time = Timestamp::from_secs(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() + 300 // 5 minutes for testing
-    );
-    
     let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "fawkes_badge_claimed")
-        .tag(Tag::custom(TagKind::d(), vec!["fawkes_2025"]))
-        .tag(Tag::expiration(expiry_time)); // TESTING: Remove this line for production
+        .tag(Tag::custom(TagKind::d(), vec!["fawkes_2025"]));
     
     // Build and sign the event
     let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
