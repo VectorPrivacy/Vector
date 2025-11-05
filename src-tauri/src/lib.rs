@@ -3460,7 +3460,7 @@ async fn claim_fawkes_badge() -> Result<bool, String> {
     
     // Check if we already have the badge using the helper function
     if has_fawkes_badge_internal(my_public_key).await? {
-        return Ok(true); // Already claimed
+        return Ok(false); // Already claimed - don't show popup again
     }
     
     let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "fawkes_badge_claimed")
