@@ -2335,7 +2335,8 @@ async function login() {
                                 '<b>Congratulations!</b> You\'ve claimed this limited badge for logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 14px;">Remember, remember the 5th of November...</i>',
                                 true,
                                 '',
-                                'fawkes_mask.svg'
+                                'fawkes_mask.svg',
+                                'text-gradient-green'
                             );
                         } else {
                             console.log('[FAWKES] Badge not claimed (not the right day or already claimed)');

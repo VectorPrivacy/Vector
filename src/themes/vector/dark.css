@@ -22,6 +22,12 @@
   background-clip: text;
 }
 
+.text-gradient-green {
+  background: linear-gradient(to right, #59fcb3 13.87%, #2b976c 80%);
+  background-size: 200% 200%;
+  background-clip: text;
+}
+
 .back-btn {
   color: rgb(191, 191, 191);
 }

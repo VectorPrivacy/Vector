@@ -30,14 +30,17 @@ function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
  * @param {Boolean} fNotice - If this is a Notice or an Interactive Dialog.
  * @param {String} strInputPlaceholder - If specified, renders a text input with a custom placeholder, and returns a string instead of a boolean.
  * @param {String} strIcon - If specified, an icon to be displayed above the popup.
+ * @param {String} strTitleClass - If specified, a CSS class to be added to the title element (e.g., 'text-gradient').
  * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
  */
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '') {
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '') {
     // Display the popup and render the UI
     domPopup.style.display = '';
     domPopupIcon.src = './icons/' + strIcon;
     domPopupIcon.style.display = strIcon ? '' : 'none';
     domPopupTitle.innerText = strTitle;
+    // Clear any previous classes and add the new one if specified
+    domPopupTitle.className = strTitleClass;
     domPopupSubtext.innerHTML = strSubtext;
 
     // Adjust the 'Confirm' button if this is only a notice
