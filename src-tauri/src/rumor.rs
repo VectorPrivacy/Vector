@@ -367,7 +367,7 @@ async fn process_reaction(
 /// Currently handles typing indicators for real-time status updates.
 async fn process_app_specific(
     rumor: RumorEvent,
-    context: RumorContext,
+    _context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
     // Check if this is a typing indicator
     if is_typing_indicator(&rumor) {
@@ -395,30 +395,11 @@ async fn process_app_specific(
             let profile_id = rumor.pubkey.to_bech32()
                 .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
             
-            // Only log for MLS groups (not DMs)
-            if context.conversation_type == ConversationType::MlsGroup {
-                let sender_short: String = rumor.pubkey.to_hex().chars().take(8).collect();
-                let time_remaining = expiry_timestamp.saturating_sub(current_timestamp);
-                println!("[TYPING] 📥 Received typing indicator: sender={}, expires_in={}s, conversation={}",
-                    sender_short, time_remaining, context.conversation_id.chars().take(8).collect::<String>());
-            }
-            
             return Ok(RumorProcessingResult::TypingIndicator {
                 profile_id,
                 until: expiry_timestamp,
             });
         } else {
-            // Only log rejections for MLS groups (not DMs)
-            if context.conversation_type == ConversationType::MlsGroup {
-                let sender_short: String = rumor.pubkey.to_hex().chars().take(8).collect();
-                let time_diff = if expiry_timestamp > current_timestamp {
-                    format!("+{}s (too far in future)", expiry_timestamp - current_timestamp)
-                } else {
-                    format!("-{}s (expired)", current_timestamp - expiry_timestamp)
-                };
-                println!("[TYPING] ⏰ Ignored invalid typing indicator: sender={}, time_diff={}",
-                    sender_short, time_diff);
-            }
             return Ok(RumorProcessingResult::Ignored);
         }
     }

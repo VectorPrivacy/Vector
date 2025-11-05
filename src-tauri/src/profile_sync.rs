@@ -24,9 +24,6 @@ pub fn reset_all_profile_metadata_internal(state: &mut ChatState) -> usize {
         reset_count += 1;
     }
     
-    eprintln!("[ProfileSync] Reset metadata for {} profiles in STATE (including own profile)", reset_count);
-    eprintln!("[ProfileSync] Note: Database not cleared - profiles will be re-fetched and saved");
-    
     reset_count
 }
 
@@ -75,9 +72,7 @@ impl SyncPriority {
 #[derive(Debug, Clone)]
 struct QueueEntry {
     npub: String,
-    priority: SyncPriority,
     added_at: Instant,
-    force_refresh: bool,
 }
 
 /// Profile sync queue manager
@@ -135,9 +130,7 @@ impl ProfileSyncQueue {
         // Add to appropriate queue
         let entry = QueueEntry {
             npub,
-            priority,
             added_at: Instant::now(),
-            force_refresh,
         };
 
         match priority {
@@ -204,17 +197,6 @@ impl ProfileSyncQueue {
         self.last_fetched.insert(npub.to_string(), Instant::now());
     }
 
-    /// Get queue statistics for debugging
-    pub fn stats(&self) -> String {
-        format!(
-            "Critical: {}, High: {}, Medium: {}, Low: {}, Processing: {}",
-            self.critical_queue.len(),
-            self.high_queue.len(),
-            self.medium_queue.len(),
-            self.low_queue.len(),
-            self.processing.len()
-        )
-    }
 }
 
 // Global profile sync queue
@@ -225,8 +207,6 @@ lazy_static! {
 
 /// Background processor that continuously processes the profile sync queue
 pub async fn start_profile_sync_processor() {
-    eprintln!("[ProfileSync] Background processor started");
-    
     let mut last_own_profile_sync = std::time::Instant::now();
     let own_profile_sync_interval = Duration::from_secs(5 * 60); // Sync our own profile every 5 minutes
     
@@ -242,17 +222,14 @@ pub async fn start_profile_sync_processor() {
                 
                 let mut queue = PROFILE_SYNC_QUEUE.lock().await;
                 queue.add(npub.clone(), SyncPriority::Low, false);
-                eprintln!("[ProfileSync] Queued own profile {} for periodic sync (detect changes from other apps)", &npub[..8]);
                 drop(queue);
             }
             last_own_profile_sync = std::time::Instant::now();
         }
         
         // Check if we should process
-        let (batch, _queue_stats_before) = {
-            let lock_start = std::time::Instant::now();
+        let batch = {
             let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-            let lock_duration = lock_start.elapsed();
             
             // Prevent multiple processors
             if queue.is_processing {
@@ -262,7 +239,6 @@ pub async fn start_profile_sync_processor() {
             }
             
             queue.is_processing = true;
-            let stats_before = queue.stats();
             let batch = queue.get_next_batch();
             
             // Mark all as processing
@@ -270,16 +246,7 @@ pub async fn start_profile_sync_processor() {
                 queue.mark_processing(&entry.npub);
             }
             
-            if !batch.is_empty() {
-                eprintln!(
-                    "[ProfileSync] Acquired batch of {} profiles | queue_lock={}μs | Queue: {}",
-                    batch.len(),
-                    lock_duration.as_micros(),
-                    stats_before
-                );
-            }
-            
-            (batch, stats_before)
+            batch
         };
 
         if batch.is_empty() {
@@ -292,35 +259,10 @@ pub async fn start_profile_sync_processor() {
             continue;
         }
 
-        let batch_start = std::time::Instant::now();
-        let mut success_count = 0;
-        let mut _fail_count = 0;
-
         // Process the batch
         for entry in &batch {
-            let fetch_start = std::time::Instant::now();
-            
             // Fetch the profile
-            let success = profile::load_profile(entry.npub.clone()).await;
-            let fetch_duration = fetch_start.elapsed();
-            
-            if success {
-                success_count += 1;
-                eprintln!(
-                    "[ProfileSync] ✓ {}:{} | {}ms",
-                    format!("{:?}", entry.priority).chars().next().unwrap(),
-                    &entry.npub[..8],
-                    fetch_duration.as_millis()
-                );
-            } else {
-                _fail_count += 1;
-                eprintln!(
-                    "[ProfileSync] ✗ {}:{} | {}ms | FAILED",
-                    format!("{:?}", entry.priority).chars().next().unwrap(),
-                    &entry.npub[..8],
-                    fetch_duration.as_millis()
-                );
-            }
+            profile::load_profile(entry.npub.clone()).await;
 
             // Mark as done
             {
@@ -332,21 +274,10 @@ pub async fn start_profile_sync_processor() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let batch_duration = batch_start.elapsed();
-
-        // Release processing lock and get final stats
+        // Release processing lock
         {
             let mut queue = PROFILE_SYNC_QUEUE.lock().await;
             queue.is_processing = false;
-            
-            eprintln!(
-                "[ProfileSync] Batch complete: {}/{} succeeded | batch_time={}ms, avg={}ms/profile | Queue: {}",
-                success_count,
-                batch.len(),
-                batch_duration.as_millis(),
-                batch_duration.as_millis() / batch.len() as u128,
-                queue.stats()
-            );
         }
 
         // Small delay before next batch
@@ -356,36 +287,18 @@ pub async fn start_profile_sync_processor() {
 
 /// Queue a single profile for syncing
 pub async fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: bool) {
-    let lock_start = std::time::Instant::now();
     let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-    let lock_duration = lock_start.elapsed();
-    
-    let stats_before = queue.stats();
     queue.add(npub.clone(), priority, force_refresh);
-    
-    eprintln!(
-        "[ProfileSync] Queued {} with {:?} priority (force={}) | queue_lock={}μs | Queue: {}",
-        &npub[..8],
-        priority,
-        force_refresh,
-        lock_duration.as_micros(),
-        stats_before
-    );
 }
 
 /// Queue all profiles for a chat
 pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
-    let lock_start = std::time::Instant::now();
     let state = STATE.lock().await;
-    let lock_duration = lock_start.elapsed();
     
     // Find the chat
     let chat = match state.get_chat(&chat_id) {
         Some(c) => c,
-        None => {
-            eprintln!("[ProfileSync] Chat not found: {}", chat_id);
-            return;
-        }
+        None => return,
     };
 
     // Determine priority based on chat activity
@@ -396,7 +309,6 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
     };
 
     let mut profiles_to_queue = Vec::new();
-    let mut critical_count = 0;
 
     // Queue profiles for all participants
     // Note: chat.participants should be kept up-to-date by the MLS event handlers
@@ -412,8 +324,6 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
             .unwrap_or(false);
 
         let priority = if !has_metadata {
-            // No metadata = critical priority
-            critical_count += 1;
             SyncPriority::Critical
         } else {
             base_priority
@@ -422,60 +332,27 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
         profiles_to_queue.push((member_npub.clone(), priority));
     }
 
-    let participant_count = chat.participants.len();
-    let state_duration = lock_start.elapsed();
     drop(state); // Release state lock before queuing
 
     // Queue all profiles
-    let queue_start = std::time::Instant::now();
     let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-    let queue_lock_duration = queue_start.elapsed();
     
     for (npub, priority) in profiles_to_queue {
         queue.add(npub.to_string(), priority, false);
     }
-    
-    let total_duration = lock_start.elapsed();
-    
-    eprintln!(
-        "[ProfileSync] Queued {} profiles for chat {} ({} critical) | Timings: state_lock={}ms, state_ops={}ms, queue_lock={}ms, total={}ms | Queue: {}",
-        participant_count,
-        &chat_id[..8],
-        critical_count,
-        lock_duration.as_millis(),
-        state_duration.as_millis(),
-        queue_lock_duration.as_millis(),
-        total_duration.as_millis(),
-        queue.stats()
-    );
 }
 
 /// Force immediate refresh of a profile (for user clicks)
 pub async fn refresh_profile_now(npub: String) {
-    let lock_start = std::time::Instant::now();
     let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-    let lock_duration = lock_start.elapsed();
-    
     queue.add(npub.clone(), SyncPriority::Critical, true);
-    
-    eprintln!(
-        "[ProfileSync] Force refresh queued: {} | queue_lock={}μs | Queue: {}",
-        &npub[..8],
-        lock_duration.as_micros(),
-        queue.stats()
-    );
 }
 
 /// Sync all profiles in the system (replaces old fetchProfiles)
 pub async fn sync_all_profiles() {
-    let start = std::time::Instant::now();
-    let lock_start = std::time::Instant::now();
     let state = STATE.lock().await;
-    let state_lock_duration = lock_start.elapsed();
     
     let mut profiles_to_queue = Vec::new();
-    let mut critical_count = 0;
-    let mut low_count = 0;
     
     // Queue all profiles with appropriate priority
     for profile in &state.profiles {
@@ -484,39 +361,20 @@ pub async fn sync_all_profiles() {
         let was_fetched = profile.last_updated > 0;
         
         let priority = if !has_metadata && !was_fetched {
-            critical_count += 1;
             SyncPriority::Critical
         } else {
-            low_count += 1;
             SyncPriority::Low // Passive refresh for existing profiles
         };
         
         profiles_to_queue.push((profile.id.clone(), priority));
     }
     
-    let state_duration = lock_start.elapsed();
     drop(state); // Release state lock
     
     // Queue all profiles
-    let queue_start = std::time::Instant::now();
     let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-    let queue_lock_duration = queue_start.elapsed();
     
     for (npub, priority) in profiles_to_queue {
         queue.add(npub, priority, false);
     }
-    
-    let total_duration = start.elapsed();
-    
-    eprintln!(
-        "[ProfileSync] Sync all: queued {} profiles ({} critical, {} low) | Timings: state_lock={}ms, state_ops={}ms, queue_lock={}ms, total={}ms | Queue: {}",
-        critical_count + low_count,
-        critical_count,
-        low_count,
-        state_lock_duration.as_millis(),
-        state_duration.as_millis(),
-        queue_lock_duration.as_millis(),
-        total_duration.as_millis(),
-        queue.stats()
-    );
 }

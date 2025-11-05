@@ -188,35 +188,23 @@ impl Status {
 pub async fn load_profile(npub: String) -> bool {
     let client = match NOSTR_CLIENT.get() {
         Some(c) => c,
-        None => {
-            eprintln!("[Profile] NOSTR_CLIENT not initialized for {}", &npub[..12]);
-            return false;
-        }
+        None => return false,
     };
 
     // Convert the Bech32 String in to a PublicKey
     let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
         Ok(pk) => pk,
-        Err(e) => {
-            eprintln!("[Profile] Invalid npub format {}: {}", &npub[..12], e);
-            return false;
-        }
+        Err(_) => return false,
     };
 
     // Grab our pubkey to check for profiles belonging to us
     let signer = match client.signer().await {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("[Profile] Failed to get signer for {}: {}", &npub[..12], e);
-            return false;
-        }
+        Err(_) => return false,
     };
     let my_public_key = match signer.get_public_key().await {
         Ok(pk) => pk,
-        Err(e) => {
-            eprintln!("[Profile] Failed to get public key for {}: {}", &npub[..12], e);
-            return false;
-        }
+        Err(_) => return false,
     };
 
     // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
@@ -283,18 +271,9 @@ pub async fn load_profile(npub: String) -> bool {
     };
 
     // Attempt to fetch their Metadata profile
-    eprintln!("[Profile] Fetching metadata for {} from relays...", &npub[..12]);
     let fetch_result = client
         .fetch_metadata(profile_pubkey, std::time::Duration::from_secs(15))
         .await;
-    
-    eprintln!("[Profile] Fetch result for {}: {:?}", &npub[..12],
-        match &fetch_result {
-            Ok(Some(_)) => "Ok(Some(metadata))",
-            Ok(None) => "Ok(None)",
-            Err(e) => &format!("Err({})", e),
-        }
-    );
     
     match fetch_result {
         Ok(meta) => {
@@ -335,18 +314,15 @@ pub async fn load_profile(npub: String) -> bool {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs();
-                    eprintln!("[Profile] No new metadata for {} (using cached profile)", &npub[..12]);
                     return true;
                 } else {
                     // Profile truly doesn't exist anywhere
-                    eprintln!("[Profile] No metadata found for {} (profile doesn't exist)", &npub[..12]);
                     return true;
                 }
             }
         }
-        Err(e) => {
+        Err(_) => {
             // Network/relay error - this is a genuine failure
-            eprintln!("[Profile] Failed to fetch metadata for {}: {}", &npub[..12], e);
             return false;
         }
     }
