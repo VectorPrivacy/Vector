@@ -1015,6 +1015,9 @@ function renderMLSInvites() {
 
     // After rendering invites, recompute layout to avoid oversized chat list
     adjustSize();
+    
+    // Update the back button notification dot when invites change
+    updateChatBackNotification();
 }
 
 /**
@@ -1442,7 +1445,7 @@ function countUnreadMessages(chat) {
 
 /**
  * Update the notification dot on the chat back button
- * Shows the dot if there are unread messages in OTHER chats (not the currently open one)
+ * Shows the dot if there are unread messages in OTHER chats (not the currently open one) OR unanswered invites
  */
 function updateChatBackNotification() {
     if (!domChatBackNotificationDot) return;
@@ -1452,6 +1455,9 @@ function updateChatBackNotification() {
         domChatBackNotificationDot.style.display = 'none';
         return;
     }
+    
+    // Check if there are any unanswered MLS invites
+    const hasUnansweredInvites = arrMLSInvites.length > 0;
     
     // Check if any OTHER chat has unread messages
     const hasOtherUnreads = arrChats.some(chat => {
@@ -1475,8 +1481,8 @@ function updateChatBackNotification() {
         return countUnreadMessages(chat) > 0;
     });
     
-    // Show or hide the notification dot
-    domChatBackNotificationDot.style.display = hasOtherUnreads ? '' : 'none';
+    // Show or hide the notification dot (show if there are unread messages OR unanswered invites)
+    domChatBackNotificationDot.style.display = (hasOtherUnreads || hasUnansweredInvites) ? '' : 'none';
 }
 
 /**
