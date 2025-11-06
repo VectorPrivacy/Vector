@@ -1902,14 +1902,38 @@ async fn notifs() -> Result<bool, String> {
                                                             }
                                                             RumorProcessingResult::Reaction(reaction) => {
                                                                 // Handle reactions in real-time
-                                                                let _was_added = {
+                                                                let (was_added, chat_id_for_save) = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
+                                                                    let added = if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
                                                                         msg.add_reaction(reaction.clone(), Some(chat_id))
                                                                     } else {
                                                                         false
-                                                                    }
+                                                                    };
+                                                                    
+                                                                    // Get chat_id for saving if reaction was added
+                                                                    let chat_id_for_save = if added {
+                                                                        state.find_message(&reaction.reference_id)
+                                                                            .map(|(chat, _)| chat.id().clone())
+                                                                    } else {
+                                                                        None
+                                                                    };
+                                                                    
+                                                                    (added, chat_id_for_save)
                                                                 };
+                                                                
+                                                                // Save to database immediately (like DM reactions)
+                                                                if was_added {
+                                                                    if let Some(chat_id) = chat_id_for_save {
+                                                                        if let Some(handle) = TAURI_APP.get() {
+                                                                            let all_messages = {
+                                                                                let state = crate::STATE.lock().await;
+                                                                                state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
+                                                                            };
+                                                                            let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
+                                                                        }
+                                                                    }
+                                                                }
+                                                                
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
@@ -4739,7 +4763,6 @@ pub fn run() {
             message::paste_message,
             message::voice_message,
             message::file_message,
-            message::react,
             message::react_to_message,
             message::fetch_msg_metadata,
             fetch_messages,

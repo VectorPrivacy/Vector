@@ -358,7 +358,7 @@ picker.addEventListener('click', (e) => {
 
                     const divMessage = document.getElementById(cMsg.id);
                     divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
-                    invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
+                    invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
                 }
             } else {
                 // Add to message input

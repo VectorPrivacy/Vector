@@ -1618,30 +1618,59 @@ impl MlsService {
                                             eprintln!("[MLS] Failed to emit mls_message_new event: {}", e);
                                         });
                                     }
+                                    
+                                    // Save to database immediately
+                                    if let Some(handle) = TAURI_APP.get() {
+                                        let all_messages = {
+                                            let state = STATE.lock().await;
+                                            state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
+                                        };
+                                        let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
+                                    }
                                 }
                             }
                             RumorProcessingResult::Reaction(reaction) => {
                                 // Reactions now work with unified storage!
-                                let mut state = STATE.lock().await;
-                                if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
-                                    msg.add_reaction(reaction.clone(), Some(chat_id));
+                                let (was_added, chat_id_for_save) = {
+                                    let mut state = STATE.lock().await;
+                                    let added = if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
+                                        msg.add_reaction(reaction.clone(), Some(chat_id))
+                                    } else {
+                                        false
+                                    };
+                                    
+                                    // Get chat_id for saving if reaction was added
+                                    let chat_id_for_save = if added {
+                                        state.find_message(&reaction.reference_id)
+                                            .map(|(chat, _)| chat.id().clone())
+                                    } else {
+                                        None
+                                    };
+                                    
+                                    (added, chat_id_for_save)
+                                };
+                                
+                                // Save to database immediately (like DM reactions)
+                                if was_added {
+                                    if let Some(chat_id) = chat_id_for_save {
+                                        if let Some(handle) = TAURI_APP.get() {
+                                            let all_messages = {
+                                                let state = STATE.lock().await;
+                                                state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
+                                            };
+                                            let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
+                                        }
+                                    }
                                 }
                             }
                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
-                                let profile_short: String = profile_id.chars().take(16).collect();
-                                println!("[TYPING] 🔄 Processing MLS typing indicator: profile={}, until={}", profile_short, until);
-                                
                                 // Update the chat's typing participants
                                 let active_typers = {
                                     let mut state = STATE.lock().await;
                                     if let Some(chat) = state.get_chat_mut(&chat_id) {
                                         chat.update_typing_participant(profile_id.clone(), until);
-                                        let typers = chat.get_active_typers();
-                                        println!("[TYPING] 💾 Updated chat state: group={}, active_typers={:?}",
-                                            gid_for_fetch.chars().take(8).collect::<String>(), typers);
-                                        typers
+                                        chat.get_active_typers()
                                     } else {
-                                        println!("[TYPING] ⚠️  Chat not found for typing update: {}", chat_id);
                                         vec![]
                                     }
                                 };
@@ -1652,10 +1681,6 @@ impl MlsService {
                                         "conversation_id": gid_for_fetch,
                                         "typers": active_typers,
                                     }));
-                                    println!("[TYPING] 📡 Emitted typing-update event: conversation={}, typers_count={}",
-                                        gid_for_fetch.chars().take(8).collect::<String>(), active_typers.len());
-                                } else {
-                                    println!("[TYPING] ⚠️  Failed to get app handle for event emission");
                                 }
                             }
                             RumorProcessingResult::Ignored => {
