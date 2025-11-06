@@ -306,3 +306,8 @@ select:disabled {
   border: 1px solid rgba(177, 136, 226, 0.2);
   color: rgba(255, 255, 255, 0.8);
 }
+
+#popupConfirm {
+  background-color: #b188e2;
+  color: black;
+}

@@ -234,6 +234,15 @@ body {
   top: 0;
   left: 0;
   pointer-events: none;
+  background-color: rgba(0, 0, 0, 0);
+  transition: background-color 0.2s ease;
+}
+
+.popup-container.active {
+  pointer-events: auto;
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .popup {
@@ -251,12 +260,14 @@ body {
   max-height: 90vh;
   display: flex;
   flex-direction: column;
+  margin-left: 10px;
+  margin-right: 10px;
 }
 
 .popup-content {
   overflow-y: auto;
   max-height: calc(90vh - 150px);
-  margin-bottom: 20px;
+  margin-bottom: 10px;
   padding: 5px;
   word-break: keep-all;
 }
@@ -2000,8 +2011,15 @@ select:disabled:hover {
 }
 
 .popup-cancel-btn {
-  opacity: 0.8;
   margin-left: 10px;
+  backdrop-filter: none;
+  border-color: #ff2ea9;
+  background-color: #161616;
+}
+
+#popupConfirm {
+  background-color: #58fcb3;
+  color: black;
 }
 
 .nav-icon {

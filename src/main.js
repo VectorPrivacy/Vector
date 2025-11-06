@@ -2475,7 +2475,7 @@ function renderProfileTab(cProfile) {
         if (hasBadge) {
             domProfileBadgeFawkes.style.display = '';
             domProfileBadgeFawkes.onclick = () => {
-                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 14px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
+                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
             };
         }
     }).catch(e => {});

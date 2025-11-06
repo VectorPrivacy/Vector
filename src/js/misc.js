@@ -43,6 +43,9 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
     domPopupTitle.className = strTitleClass;
     domPopupSubtext.innerHTML = strSubtext;
 
+    // Show the backdrop by adding the active class
+    domApp.classList.add('active');
+
     // Adjust the 'Confirm' button if this is only a notice
     domPopupConfirmBtn.innerText = fNotice ? 'Okay!' : 'Confirm';
     domPopupCancelBtn.style.display = fNotice ? 'none' : '';
@@ -63,6 +66,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
         domPopupCancelBtn.removeEventListener('click', onCancelClick);
         domPopup.style.display = 'none';
+        domApp.classList.remove('active');
         resolve(strInputPlaceholder ? domPopupInput.value : true);
     };
 
@@ -71,6 +75,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
         domPopupCancelBtn.removeEventListener('click', onCancelClick);
         domPopup.style.display = 'none';
+        domApp.classList.remove('active');
         resolve(false);
     };
 
