@@ -1233,29 +1233,31 @@ function renderChat(chat) {
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
     // TODO: currently, we "emulate" the status; messages in the last 5m are "online", messages in the last 30m are "away", otherwise; offline.
-    const divStatusIcon = document.createElement('div');
-    divStatusIcon.classList.add('avatar-status-icon');
-    
-    // Find the last message from the contact (not from the user)
-    let cLastContactMsg = null;
-    for (let i = chat.messages.length - 1; i >= 0; i--) {
-        if (!chat.messages[i].mine) {
-            cLastContactMsg = chat.messages[i];
-            break;
+    if (!isGroup) {
+        const divStatusIcon = document.createElement('div');
+        divStatusIcon.classList.add('avatar-status-icon');
+        
+        // Find the last message from the contact (not from the user)
+        let cLastContactMsg = null;
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            if (!chat.messages[i].mine) {
+                cLastContactMsg = chat.messages[i];
+                break;
+            }
         }
+        
+        if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
+            // set the divStatusIcon .backgroundColor to green (online)
+            divStatusIcon.style.backgroundColor = '#59fcb3';
+            divAvatarContainer.appendChild(divStatusIcon);
+        }
+        else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
+            // set to orange (away)
+            divStatusIcon.style.backgroundColor = '#fce459';
+            divAvatarContainer.appendChild(divStatusIcon);
+        }
+        // offline... don't show status icon at all (no need to append the divStatusIcon)
     }
-    
-    if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
-        // set the divStatusIcon .backgroundColor to green (online)
-        divStatusIcon.style.backgroundColor = '#59fcb3';
-        divAvatarContainer.appendChild(divStatusIcon);
-    }
-    else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
-        // set to orange (away)
-        divStatusIcon.style.backgroundColor = '#fce459';
-        divAvatarContainer.appendChild(divStatusIcon);
-    }
-    // offline... don't show status icon at all (no need to append the divStatusIcon)
     
     divContact.appendChild(divAvatarContainer);
 
