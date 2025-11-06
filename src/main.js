@@ -2321,25 +2321,6 @@ async function login() {
                 // Setup our Unread Counters
                 await invoke("update_unread_counter");
 
-                // Try to claim Guy Fawkes badge after a 1-second delay
-                setTimeout(() => {
-                    invoke("claim_fawkes_badge").then(claimed => {
-                        if (claimed) {
-                            // Show celebration popup
-                            popupConfirm(
-                                'V for Vector Badge',
-                                '<b>Congratulations!</b> You\'ve claimed this limited badge for logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 14px;">Remember, remember the 5th of November...</i>',
-                                true,
-                                '',
-                                'fawkes_mask.svg',
-                                'text-gradient-green'
-                            );
-                        }
-                    }).catch(err => {
-                        console.error('[FAWKES] Failed to claim Fawkes badge:', err);
-                    });
-                }, 1000);
-
                 // Monitor relay connections
                 invoke("monitor_relay_connections");
 

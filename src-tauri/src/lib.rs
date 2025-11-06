@@ -3397,13 +3397,18 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
     Ok(unique_acceptors.len() as u32)
 }
 
-// Guy Fawkes Day 2025 constants - PRODUCTION
+// Guy Fawkes Day 2025 - V for Vector Badge (Event Ended)
 const FAWKES_DAY_START: u64 = 1762300800; // 2025-11-05 00:00:00 UTC
 const FAWKES_DAY_END: u64 = 1762387200;   // 2025-11-06 00:00:00 UTC
 
-/// Helper function to check if a user has a valid Guy Fawkes Day badge
-async fn has_fawkes_badge_internal(user_pubkey: PublicKey) -> Result<bool, String> {
+/// Check if a user has the Guy Fawkes Day badge
+/// Verifies they have a valid badge claim event from the November 5, 2025 event
+#[tauri::command]
+async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    
+    // Convert npub to PublicKey
+    let user_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
     
     // Fetch the user's badge claim event
     let filter = Filter::new()
@@ -3417,11 +3422,11 @@ async fn has_fawkes_badge_internal(user_pubkey: PublicKey) -> Result<bool, Strin
         .await
         .map_err(|e| e.to_string())?;
     
-    // Check if they have a valid badge claim
+    // Check if they have a valid badge claim from the event period
     for event in events {
         if event.content == "fawkes_badge_claimed" {
             let timestamp = event.created_at.as_u64();
-            // Verify the timestamp is within the valid window
+            // Verify the timestamp is within the valid event window
             if timestamp >= FAWKES_DAY_START && timestamp < FAWKES_DAY_END {
                 return Ok(true);
             }
@@ -3429,65 +3434,6 @@ async fn has_fawkes_badge_internal(user_pubkey: PublicKey) -> Result<bool, Strin
     }
     
     Ok(false)
-}
-
-/// Claim the Guy Fawkes Day badge (5th November 2025)
-/// This should be called on login to check if it's Guy Fawkes Day and claim the badge
-#[tauri::command]
-async fn claim_fawkes_badge() -> Result<bool, String> {
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    
-    // Get current timestamp
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
-    
-    println!("[FAWKES] Current timestamp: {}", now);
-    println!("[FAWKES] Valid window: {} - {}", FAWKES_DAY_START, FAWKES_DAY_END);
-    
-    // Check if we're in the valid time window
-    if now < FAWKES_DAY_START || now >= FAWKES_DAY_END {
-        println!("[FAWKES] Outside valid time window, not claiming badge");
-        return Ok(false); // Not Guy Fawkes Day
-    }
-    
-    println!("[FAWKES] Inside valid time window, proceeding with claim...");
-    
-    // Get my public key
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
-    
-    // Check if we already have the badge using the helper function
-    if has_fawkes_badge_internal(my_public_key).await? {
-        return Ok(false); // Already claimed - don't show popup again
-    }
-    
-    let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "fawkes_badge_claimed")
-        .tag(Tag::custom(TagKind::d(), vec!["fawkes_2025"]));
-    
-    // Build and sign the event
-    let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
-    
-    // Verify the timestamp is within the valid window (double-check after signing)
-    if event.created_at.as_u64() < FAWKES_DAY_START || event.created_at.as_u64() >= FAWKES_DAY_END {
-        return Err("Event timestamp is outside the valid Guy Fawkes Day window".to_string());
-    }
-    
-    // Send to trusted relay
-    client.send_event_to([TRUSTED_RELAY], &event).await.map_err(|e| e.to_string())?;
-    
-    Ok(true)
-}
-
-/// Check if a user has the Guy Fawkes Day badge
-#[tauri::command]
-async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
-    // Convert npub to PublicKey
-    let user_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
-    
-    // Use the helper function
-    has_fawkes_badge_internal(user_pubkey).await
 }
 // MLS Tauri Commands
 
@@ -4822,7 +4768,6 @@ pub fn run() {
             get_or_create_invite_code,
             accept_invite_code,
             get_invited_users,
-            claim_fawkes_badge,
             check_fawkes_badge,
             db::get_invite_code,
             db::set_invite_code,
