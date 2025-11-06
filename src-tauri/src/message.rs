@@ -935,8 +935,58 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
     
     match chat_type {
         ChatType::DirectMessage => {
-            // For DMs, use the existing DM reaction logic
-            react(reference_id, chat_id, emoji).await.map_err(|_| "DM reaction failed".to_string())
+            // For DMs, send gift-wrapped reaction
+            let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
+            let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
+            
+            // Build NIP-25 Reaction rumor
+            let rumor = EventBuilder::reaction_extended(
+                reference_event,
+                receiver_pubkey,
+                Some(Kind::PrivateDirectMessage),
+                &emoji,
+            )
+            .build(my_public_key);
+            let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
+            
+            // Send reaction to the receiver
+            client
+                .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+                .await
+                .map_err(|e| e.to_string())?;
+            
+            // Send reaction to ourselves for recovery
+            client
+                .gift_wrap(&my_public_key, rumor, [])
+                .await
+                .map_err(|e| e.to_string())?;
+            
+            // Add reaction to local state
+            let reaction = Reaction {
+                id: rumor_id,
+                reference_id: reference_id.clone(),
+                author_id: my_public_key.to_hex(),
+                emoji,
+            };
+            
+            let mut state = STATE.lock().await;
+            if let Some(chat) = state.chats.iter_mut().find(|c| c.has_participant(&chat_id)) {
+                if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == reference_id) {
+                    let was_added = msg.add_reaction(reaction, Some(&chat_id));
+                    
+                    if was_added {
+                        // Save to database
+                        if let Some(handle) = TAURI_APP.get() {
+                            let all_messages = chat.messages.clone();
+                            let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                        }
+                    }
+                    
+                    return Ok(was_added);
+                }
+            }
+            
+            Ok(false)
         }
         ChatType::MlsGroup => {
             // For group chats, send reaction through MLS
