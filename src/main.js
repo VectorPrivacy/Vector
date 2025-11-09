@@ -925,109 +925,11 @@ async function loadMLSInvites() {
         const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
         arrMLSInvites = (welcomes || []).filter(Boolean);
 
-
-        // Render the invites UI
-        renderMLSInvites();
+        // Make sure to notify if there's pending invites
+        updateChatBackNotification();
     } catch (e) {
         console.error('Failed to load MLS invites:', e);
-        // Ensure the section hides on error
-        const invitesSection = document.getElementById('mls-invites-section');
-        if (invitesSection) invitesSection.style.display = 'none';
-        // Recompute layout after invites section visibility change
-        adjustSize();
     }
-}
-
-/**
- * Render MLS invites in the chat tab
- */
-function renderMLSInvites() {
-    const invitesSection = document.getElementById('mls-invites-section');
-    const invitesContainer = document.getElementById('mls-invites-container');
-    if (!invitesSection || !invitesContainer) return;
-
-    // Clear existing content
-    invitesContainer.innerHTML = '';
-
-    // Hide section if no invites
-    const count = Array.isArray(arrMLSInvites) ? arrMLSInvites.length : 0;
-    if (!count) {
-        invitesSection.style.display = 'none';
-        // Recompute layout since invites section visibility changed
-        adjustSize();
-        return;
-    }
-
-    // Show section if there are invites
-    invitesSection.style.display = '';
-
-    // Render each invite safely (avoid exceptions on missing fields)
-    for (const invite of arrMLSInvites) {
-        try {
-            const divInvite = document.createElement('div');
-            divInvite.classList.add('mls-invite-item');
-
-            const groupId = invite.group_id || invite.id || '';
-            const groupName =
-                invite.group_name ||
-                invite.name ||
-                (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
-
-            // Backend returns 'welcomer' as npub string
-            const welcomerNpub = invite.welcomer || '';
-
-            // Get display name from profile (nickname > name > npub prefix)
-            let welcomerDisplay = 'Unknown';
-            if (welcomerNpub) {
-                const welcomerProfile = getProfile(welcomerNpub);
-                welcomerDisplay = welcomerProfile?.nickname ||
-                                 welcomerProfile?.name ||
-                                 welcomerNpub.substring(0, 16) + '...';
-            }
-
-            const memberCount =
-                (invite.member_count ??
-                    (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
-
-            // Group name
-            const h4Name = document.createElement('h4');
-            h4Name.textContent = groupName;
-            divInvite.appendChild(h4Name);
-
-            // Inviter info
-            const pInfo = document.createElement('p');
-            pInfo.textContent = `Invited by ${welcomerDisplay} • ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
-            divInvite.appendChild(pInfo);
-
-            // Action buttons
-            const divActions = document.createElement('div');
-            divActions.classList.add('invite-actions');
-
-            const btnAccept = document.createElement('button');
-            btnAccept.classList.add('btn', 'btn-bounce', 'accept-btn');
-            btnAccept.textContent = 'Accept';
-            btnAccept.onclick = () => acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
-
-            const btnDecline = document.createElement('button');
-            btnDecline.classList.add('btn', 'btn-bounce', 'logout-btn');
-            btnDecline.textContent = 'Decline';
-            btnDecline.onclick = () => declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
-
-            divActions.appendChild(btnAccept);
-            divActions.appendChild(btnDecline);
-            divInvite.appendChild(divActions);
-
-            invitesContainer.appendChild(divInvite);
-        } catch (err) {
-            console.warn('Failed to render MLS invite', invite, err);
-        }
-    }
-
-    // After rendering invites, recompute layout to avoid oversized chat list
-    adjustSize();
-    
-    // Update the back button notification dot when invites change
-    updateChatBackNotification();
 }
 
 /**
@@ -1062,7 +964,9 @@ async function acceptMLSInvite(welcomeEventId) {
 function declineMLSInvite(welcomeEventId) {
     // Remove from UI; next backend fetch will exclude if server persisted dismissal
     arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
-    renderMLSInvites();
+
+    // Make sure to notify if there's still pending invites, or remove the notification
+    updateChatBackNotification();
 
     // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
     adjustSize();
@@ -1156,12 +1060,33 @@ function updateChatHeaderSubtext(chat) {
 function renderChatlist() {
     if (fInit) return;
 
-    // Check if the order of chats has changed
-    const currentOrder = Array.from(domChatList.children).map(el => el.id.replace('chatlist-', ''));
-    const orderChanged = JSON.stringify(currentOrder) !== JSON.stringify(arrChats.map(chat => chat.id));
+    // Check if the order of chats has changed, including invites
+    const currentOrder = Array.from(domChatList.children).map(el => el.id.replace('chatlist-', '').replace('invite-', ''));
+    const expectedOrder = [...arrMLSInvites.map(inv => `invite-${inv.id || inv.welcome_event_id || inv.group_id}`), ...arrChats.map(chat => chat.id)];
+    const orderChanged = JSON.stringify(currentOrder) !== JSON.stringify(expectedOrder);
 
     // If the order of the chatlist changes (i.e: new message), prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
+    
+    // Render invites first (at the top of the chat list)
+    for (const invite of arrMLSInvites) {
+        try {
+            const divInvite = renderInviteItem(invite);
+            if (orderChanged) {
+                fragment.appendChild(divInvite);
+            } else {
+                const inviteId = `invite-${invite.id || invite.welcome_event_id || invite.group_id}`;
+                const domExistingInvite = document.getElementById(inviteId);
+                if (domExistingInvite) {
+                    domExistingInvite.replaceWith(divInvite);
+                }
+            }
+        } catch (err) {
+            console.warn('Failed to render MLS invite', invite, err);
+        }
+    }
+    
+    // Then render regular chats
     for (const chat of arrChats) {
         // For groups, we show them even if they have no messages yet
         // For DMs, we only show them if they have messages
@@ -1203,6 +1128,92 @@ function renderChatlist() {
     
     // Update the back button notification dot when chatlist changes
     updateChatBackNotification();
+}
+
+/**
+ * Render an MLS invite as a chat-like item
+ * @param {MLSWelcome} invite - The invite we're rendering
+ */
+function renderInviteItem(invite) {
+    const groupId = invite.group_id || invite.id || '';
+    const groupName =
+        invite.group_name ||
+        invite.name ||
+        (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
+
+    const memberCount =
+        (invite.member_count ??
+            (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
+
+    // Create the invite container styled like a chat item
+    const divInvite = document.createElement('div');
+    divInvite.classList.add('chatlist-contact', 'chatlist-invite');
+    divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
+    divInvite.style.borderColor = '#59fcb3';
+
+    // Avatar container with group placeholder
+    const divAvatarContainer = document.createElement('div');
+    divAvatarContainer.style.position = 'relative';
+    divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+    divInvite.appendChild(divAvatarContainer);
+
+    // Preview container with group name and member count
+    const divPreviewContainer = document.createElement('div');
+    divPreviewContainer.classList.add('chatlist-contact-preview');
+
+    // Group name
+    const h4Name = document.createElement('h4');
+    h4Name.textContent = groupName;
+    h4Name.classList.add('cutoff');
+    divPreviewContainer.appendChild(h4Name);
+
+    // Member count as subtext
+    const pMemberCount = document.createElement('p');
+    pMemberCount.classList.add('cutoff');
+    pMemberCount.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+    divPreviewContainer.appendChild(pMemberCount);
+
+    divInvite.appendChild(divPreviewContainer);
+
+    // Action buttons container (replaces timestamp area)
+    const divActions = document.createElement('div');
+    divActions.classList.add('invite-action-buttons');
+
+    // Accept button (green check)
+    const btnAccept = document.createElement('button');
+    btnAccept.classList.add('invite-action-btn', 'invite-accept-btn');
+    btnAccept.title = 'Accept Invite';
+    btnAccept.onclick = (e) => {
+        e.stopPropagation();
+        acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
+    };
+    const acceptIcon = document.createElement('span');
+    acceptIcon.classList.add('icon', 'icon-check');
+    acceptIcon.style.width = '16px';
+    acceptIcon.style.height = '16px';
+    acceptIcon.style.backgroundColor = '#59fcb3';
+    btnAccept.appendChild(acceptIcon);
+
+    // Decline button (danger color X)
+    const btnDecline = document.createElement('button');
+    btnDecline.classList.add('invite-action-btn', 'invite-decline-btn');
+    btnDecline.title = 'Decline Invite';
+    btnDecline.onclick = (e) => {
+        e.stopPropagation();
+        declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
+    };
+    const declineIcon = document.createElement('span');
+    declineIcon.classList.add('icon', 'icon-x');
+    declineIcon.style.width = '16px';
+    declineIcon.style.height = '16px';
+    declineIcon.style.backgroundColor = '#ff2ea9';
+    btnDecline.appendChild(declineIcon);
+
+    divActions.appendChild(btnAccept);
+    divActions.appendChild(btnDecline);
+    divInvite.appendChild(divActions);
+
+    return divInvite;
 }
 
 /**
@@ -5630,6 +5641,10 @@ document.addEventListener('click', (e) => {
     const cg = document.getElementById('create-group');
     const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
     if (!inCreateGroup && (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact"))) {
+        // Don't open chat if clicking on an invite item
+        if (e.target.classList.contains("chatlist-invite") || e.target.closest(".chatlist-invite")) {
+            return;
+        }
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
         return openChat(strID);
     }

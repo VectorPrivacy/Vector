@@ -127,6 +127,10 @@
   mask-image: url("./icons/cancel.svg");
 }
 
+.icon-x {
+  mask-image: url("./icons/x.svg");
+}
+
 .icon-chat-circle {
   mask-image: url("./icons/chat-circle.svg");
 }
@@ -3089,45 +3093,64 @@ select:disabled:hover {
 }
 
 /* MLS Group Invite Styles */
-.mls-invite-item {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(89, 252, 179, 0.2);
-  border-radius: 12px;
-  padding: 15px;
-  margin-bottom: 10px;
-  transition: all 0.3s ease;
+.chatlist-invite {
+  cursor: default !important;
+  background-color: rgba(255, 255, 255, 0.05);
 }
 
-.mls-invite-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(89, 252, 179, 0.4);
+.chatlist-invite .chatlist-contact-preview h4 {
+  color: rgba(255, 255, 255, 1);
 }
 
-.mls-invite-item h4 {
-  margin: 0 0 8px 0;
-  color: #59fcb3;
-  font-size: 16px;
+.chatlist-invite .chatlist-contact-preview p {
+  color: rgba(255, 255, 255, 0.85);
 }
 
-.mls-invite-item p {
-  margin: 0 0 12px 0;
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 14px;
-}
-
-.invite-actions {
+.invite-action-buttons {
   display: flex;
-  gap: 10px;
-  justify-content: center; /* center buttons horizontally */
+  flex-direction: row;
+  gap: 8px;
+  margin-top: auto;
+  margin-bottom: auto;
+  margin-left: auto;
+  padding-right: 10px;
 }
 
-.invite-actions button {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
+.invite-action-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: transparent;
   cursor: pointer;
-  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  padding: 0;
+}
+
+.invite-accept-btn {
+  border: 2px solid #59fcb3;
+}
+
+.invite-decline-btn {
+  border: 2px solid #ff2ea9;
+}
+
+.invite-action-btn:hover {
+  transform: scale(1.1);
+}
+
+.invite-action-btn:active {
+  transform: scale(0.95);
+}
+
+.invite-accept-btn:hover {
+  background: rgba(89, 252, 179, 0.2);
+}
+
+.invite-decline-btn:hover {
+  background: rgba(255, 46, 169, 0.2);
 }
 
 .btn-small {
