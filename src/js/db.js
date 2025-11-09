@@ -24,7 +24,7 @@ async function loadAndDecryptPrivateKey(password) {
  * @param {string} name - The model ID
  */
 async function saveChosenWhisperModel(name) {
-    await invoke('set_whisper_model_name', { name: name });
+    await invoke('set_sql_setting', { key: 'whisper_model_name', value: name });
 }
 
 /**
@@ -32,7 +32,15 @@ async function saveChosenWhisperModel(name) {
  * @returns {Promise<string>} - The model ID
  */
 async function loadChosenWhisperModel() {
-    return (await invoke('get_whisper_model_name') || '');
+    return (await invoke('get_sql_setting', { key: 'whisper_model_name' }) || '');
+}
+
+/**
+ * Save the user's theme preference to database
+ * @param {string} theme - The theme name (e.g., 'vector', 'chatstr')
+ */
+async function saveTheme(theme) {
+    return await invoke('set_sql_setting', { key: 'theme', value: theme });
 }
 
 /**
@@ -40,7 +48,9 @@ async function loadChosenWhisperModel() {
  * @returns {Promise<boolean>}
  */
 async function loadWhisperAutoTranslate() {
-    return (await invoke('get_whisper_auto_translate') || false);
+    const value = await invoke('get_sql_setting', { key: 'whisper_auto_translate' });
+    if (value === null || value === undefined) return false; // Default
+    return value === 'true' || value === '1';
 }
 
 /**
@@ -48,7 +58,7 @@ async function loadWhisperAutoTranslate() {
  * @param {boolean} bool - `true` to enable, `false` to disable
  */
 async function saveWhisperAutoTranslate(bool) {
-    return await invoke('set_whisper_auto_translate', { to: bool });
+    return await invoke('set_sql_setting', { key: 'whisper_auto_translate', value: bool ? 'true' : 'false' });
 }
 
 /**
@@ -56,7 +66,9 @@ async function saveWhisperAutoTranslate(bool) {
  * @returns {Promise<boolean>}
  */
 async function loadWhisperAutoTranscribe() {
-    return (await invoke('get_whisper_auto_transcribe') || false);
+    const value = await invoke('get_sql_setting', { key: 'whisper_auto_transcribe' });
+    if (value === null || value === undefined) return false; // Default
+    return value === 'true' || value === '1';
 }
 
 /**
@@ -64,7 +76,7 @@ async function loadWhisperAutoTranscribe() {
  * @param {boolean} bool - `true` to enable, `false` to disable
  */
 async function saveWhisperAutoTranscribe(bool) {
-    return await invoke('set_whisper_auto_transcribe', { to: bool });
+    return await invoke('set_sql_setting', { key: 'whisper_auto_transcribe', value: bool ? 'true' : 'false' });
 }
 
 /**
@@ -72,7 +84,9 @@ async function saveWhisperAutoTranscribe(bool) {
  * @returns {Promise<boolean>}
  */
 async function loadWebPreviews() {
-    return (await invoke('get_web_previews') ?? true);
+    const value = await invoke('get_sql_setting', { key: 'web_previews' });
+    if (value === null || value === undefined) return true; // Default to enabled
+    return value === 'true' || value === '1';
 }
 
 /**
@@ -80,7 +94,7 @@ async function loadWebPreviews() {
  * @param {boolean} bool - `true` to enable, `false` to disable
  */
 async function saveWebPreviews(bool) {
-    return await invoke('set_web_previews', { to: bool });
+    return await invoke('set_sql_setting', { key: 'web_previews', value: bool ? 'true' : 'false' });
 }
 
 /**
@@ -88,7 +102,9 @@ async function saveWebPreviews(bool) {
  * @returns {Promise<boolean>}
  */
 async function loadStripTracking() {
-    return (await invoke('get_strip_tracking') ?? true);
+    const value = await invoke('get_sql_setting', { key: 'strip_tracking' });
+    if (value === null || value === undefined) return true; // Default to enabled
+    return value === 'true' || value === '1';
 }
 
 /**
@@ -96,7 +112,7 @@ async function loadStripTracking() {
  * @param {boolean} bool - `true` to enable, `false` to disable
  */
 async function saveStripTracking(bool) {
-    return await invoke('set_strip_tracking', { to: bool });
+    return await invoke('set_sql_setting', { key: 'strip_tracking', value: bool ? 'true' : 'false' });
 }
 
 /**
@@ -104,7 +120,9 @@ async function saveStripTracking(bool) {
  * @returns {Promise<boolean>}
  */
 async function loadSendTypingIndicators() {
-    return (await invoke('get_send_typing_indicators') ?? true);
+    const value = await invoke('get_sql_setting', { key: 'send_typing_indicators' });
+    if (value === null || value === undefined) return true; // Default to enabled
+    return value === 'true' || value === '1';
 }
 
 /**
@@ -112,13 +130,14 @@ async function loadSendTypingIndicators() {
  * @param {boolean} bool - `true` to enable, `false` to disable
  */
 async function saveSendTypingIndicators(bool) {
-    return await invoke('set_send_typing_indicators', { to: bool });
+    return await invoke('set_sql_setting', { key: 'send_typing_indicators', value: bool ? 'true' : 'false' });
 }
 
 /**
- * `true` if a local encrypted key exists, `false` otherwise.
+ * Check if any account exists (SQL or Store-based).
+ * Checks both SQL accounts and Store-based accounts (for migration).
  * @returns {Promise<boolean>}
  */
-async function hasKey() {
-    return await invoke('get_pkey') !== null;
+async function hasAccount() {
+    return await invoke('check_any_account_exists');
 }

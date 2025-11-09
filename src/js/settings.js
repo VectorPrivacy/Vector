@@ -569,22 +569,31 @@ async function selectFile() {
 }
 
 /**
- * Set the theme of the app by hot-swapping theme CSS files
+ * Apply the theme visually by hot-swapping theme CSS files
  * @param {string} theme - The theme name, i.e: vector, chatstr
  * @param {string} mode - The theme mode, i.e: light, dark
  */
-async function setTheme(theme = 'vector', mode = 'dark') {
+function applyTheme(theme = 'vector', mode = 'dark') {
   document.body.classList.remove('vector-theme', 'chatstr-theme');
   document.body.classList.add(`${theme}-theme`);
   
   domTheme.href = `/themes/${theme}/${mode}.css`;
   domSettingsThemeSelect.value = theme;
-  await invoke('set_theme', { theme: theme });
+}
+
+/**
+ * Set and save the theme
+ * @param {string} theme - The theme name, i.e: vector, chatstr
+ * @param {string} mode - The theme mode, i.e: light, dark
+ */
+async function setTheme(theme = 'vector', mode = 'dark') {
+  applyTheme(theme, mode);
+  await saveTheme(theme);
 }
 
 // Apply Theme changes in real-time
-domSettingsThemeSelect.onchange = (evt) => {
-    setTheme(evt.target.value);
+domSettingsThemeSelect.onchange = async (evt) => {
+    await setTheme(evt.target.value);
 };
 
 // Listen for Logout clicks

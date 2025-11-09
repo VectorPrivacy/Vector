@@ -1,21 +1,200 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime, Emitter};
+use tauri::{AppHandle, Runtime};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use once_cell::sync::Lazy;
 
 use crate::{Message, Chat, ChatType};
 use crate::crypto::{internal_encrypt, internal_decrypt};
 use crate::db::{SlimMessage, get_store};
 
+/// In-memory cache for chat_identifier → integer ID mappings
+/// This avoids database lookups on every message operation
+static CHAT_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+/// In-memory cache for npub → integer ID mappings
+/// This avoids database lookups on every message operation
+static USER_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
 /// Slim version of Chat for database storage
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SlimChatDB {
-    pub id: String,
+    pub id: String,  // The semantic ID (npub or group_id) - used in code
     pub chat_type: ChatType,
     pub participants: Vec<String>,
     pub last_read: String,
     pub created_at: u64,
     pub metadata: crate::ChatMetadata,
     pub muted: bool,
+}
+
+/// Helper function to get or create integer chat ID from identifier
+/// Uses in-memory cache for maximum speed, only hits DB on cache miss
+fn get_or_create_chat_id<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_identifier: &str,
+) -> Result<i64, String> {
+    // Check cache first (fast path - no DB access)
+    {
+        let cache = CHAT_ID_CACHE.read().unwrap();
+        if let Some(&id) = cache.get(chat_identifier) {
+            return Ok(id);
+        }
+    }
+    
+    // Cache miss - check database
+    let conn = crate::account_manager::get_db_connection(handle)?;
+    
+    // Try to get existing ID from database
+    let existing_id: Option<i64> = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![chat_identifier],
+        |row| row.get(0)
+    ).ok();
+    
+    let id = if let Some(id) = existing_id {
+        id
+    } else {
+        // Create new chat entry with minimal data
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        conn.execute(
+            "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted)
+             VALUES (?1, 0, '[]', '', ?2, '{}', 0)",
+            rusqlite::params![chat_identifier, now as i64],
+        ).map_err(|e| format!("Failed to create chat: {}", e))?;
+        
+        // Get the auto-generated ID
+        conn.last_insert_rowid()
+    };
+    
+    // Return connection to pool
+    crate::account_manager::return_db_connection(conn);
+    
+    // Update cache with the ID (write to both DB and cache)
+    {
+        let mut cache = CHAT_ID_CACHE.write().unwrap();
+        cache.insert(chat_identifier.to_string(), id);
+    }
+    
+    Ok(id)
+}
+
+/// Helper function to get or create integer user ID from npub
+/// Uses in-memory cache for maximum speed, only hits DB on cache miss
+fn get_or_create_user_id<R: Runtime>(
+    handle: &AppHandle<R>,
+    npub: &str,
+) -> Result<Option<i64>, String> {
+    // If npub is empty, return None (for messages without author)
+    if npub.is_empty() {
+        return Ok(None);
+    }
+    
+    // Check cache first (fast path - no DB access)
+    {
+        let cache = USER_ID_CACHE.read().unwrap();
+        if let Some(&id) = cache.get(npub) {
+            return Ok(Some(id));
+        }
+    }
+    
+    // Cache miss - check database
+    let conn = crate::account_manager::get_db_connection(handle)?;
+    
+    // Try to get existing ID from database
+    let existing_id: Option<i64> = conn.query_row(
+        "SELECT id FROM profiles WHERE npub = ?1",
+        rusqlite::params![npub],
+        |row| row.get(0)
+    ).ok();
+    
+    let id = if let Some(id) = existing_id {
+        id
+    } else {
+        // Create new profile entry with minimal data (just the npub)
+        conn.execute(
+            "INSERT INTO profiles (npub, name, display_name) VALUES (?1, '', '')",
+            rusqlite::params![npub],
+        ).map_err(|e| format!("Failed to create profile stub: {}", e))?;
+        
+        // Get the auto-generated ID
+        conn.last_insert_rowid()
+    };
+    
+    // Return connection to pool
+    crate::account_manager::return_db_connection(conn);
+    
+    // Update cache with the ID (write to both DB and cache)
+    {
+        let mut cache = USER_ID_CACHE.write().unwrap();
+        cache.insert(npub.to_string(), id);
+    }
+    
+    Ok(Some(id))
+}
+
+/// Preload all ID mappings into memory cache on app startup
+/// This ensures all subsequent lookups are instant (no DB access)
+pub async fn preload_id_caches<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
+    let _npub = match crate::account_manager::get_current_account() {
+        Ok(n) => n,
+        Err(_) => return Ok(()), // No account selected, skip
+    };
+    
+    let conn = crate::account_manager::get_db_connection(handle)?;
+    
+    // Load all chat ID mappings
+    {
+        let mut stmt = conn.prepare("SELECT chat_identifier, id FROM chats")
+            .map_err(|e| format!("Failed to prepare chat query: {}", e))?;
+        
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }).map_err(|e| format!("Failed to query chats: {}", e))?;
+        
+        let mut cache = CHAT_ID_CACHE.write().unwrap();
+        cache.clear();
+        
+        for row in rows {
+            let (identifier, id) = row.map_err(|e| format!("Failed to read chat row: {}", e))?;
+            cache.insert(identifier, id);
+        }
+    }
+    
+    // Load all user ID mappings
+    {
+        let mut stmt = conn.prepare("SELECT npub, id FROM profiles")
+            .map_err(|e| format!("Failed to prepare profile query: {}", e))?;
+        
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }).map_err(|e| format!("Failed to query profiles: {}", e))?;
+        
+        let mut cache = USER_ID_CACHE.write().unwrap();
+        cache.clear();
+        
+        for row in rows {
+            let (npub, id) = row.map_err(|e| format!("Failed to read profile row: {}", e))?;
+            cache.insert(npub, id);
+        }
+    }
+    
+    // Return connection to pool
+    crate::account_manager::return_db_connection(conn);
+    
+    Ok(())
+}
+
+/// Clear ID caches (useful when switching accounts)
+pub fn clear_id_caches() {
+    CHAT_ID_CACHE.write().unwrap().clear();
+    USER_ID_CACHE.write().unwrap().clear();
 }
 
 impl From<&Chat> for SlimChatDB {
@@ -46,107 +225,234 @@ impl SlimChatDB {
 
 /// Get all chats from the database
 pub async fn get_all_chats<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimChatDB>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        // SQL mode
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        let mut stmt = conn.prepare("SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted FROM chats ORDER BY created_at DESC")
+            .map_err(|e| format!("Failed to prepare statement: {}", e))?;
+        
+        let rows = stmt.query_map([], |row| {
+            let participants_json: String = row.get(2)?;
+            let participants: Vec<String> = serde_json::from_str(&participants_json).unwrap_or_default();
+            
+            let metadata_json: String = row.get(5)?;
+            let metadata: crate::ChatMetadata = serde_json::from_str(&metadata_json).unwrap_or_default();
+            
+            let chat_type_int: i32 = row.get(1)?;
+            let chat_type = crate::ChatType::from_i32(chat_type_int);
+            
+            Ok(SlimChatDB {
+                id: row.get(0)?,  // chat_identifier (the semantic ID)
+                chat_type,
+                participants,
+                last_read: row.get(3)?,
+                created_at: row.get::<_, i64>(4)? as u64,
+                metadata,
+                muted: row.get::<_, i32>(6)? != 0,
+            })
+        })
+        .map_err(|e| format!("Failed to query chats: {}", e))?;
+        
+        let chats: Vec<SlimChatDB> = rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect chats: {}", e))?;
+        
+        drop(stmt); // Explicitly drop stmt before returning connection
+        crate::account_manager::return_db_connection(conn);
+        return Ok(chats);
+    }
+    
+    // Fallback to Store mode
     let store = get_store(handle);
     
-    // Get the encrypted chats
     let encrypted: String = match store.get("chats") {
         Some(value) if value.is_string() => value.as_str().unwrap().to_string(),
-        _ => return Ok(vec![]), // No chats or wrong format
+        _ => return Ok(vec![]),
     };
     
-    // Decrypt
     let json = internal_decrypt(encrypted, None).await
         .map_err(|e| format!("Failed to decrypt chats: {:?}", e))?;
     
-    // Deserialize
     let slim_chats: Vec<SlimChatDB> = serde_json::from_str(&json)
         .map_err(|e| format!("Failed to deserialize chats: {}", e))?;
     
     Ok(slim_chats)
 }
 
-/// Save all chats to the database
-async fn save_all_chats<R: Runtime>(handle: &AppHandle<R>, chats: Vec<SlimChatDB>) -> Result<(), String> {
-    let store = get_store(handle);
-    
-    // Serialize to JSON
-    let json = serde_json::to_string(&chats)
-        .map_err(|e| format!("Failed to serialize chats: {}", e))?;
-    
-    // Encrypt the entire array
-    let encrypted = internal_encrypt(json, None).await;
-    
-    // Store in the DB
-    store.set("chats".to_string(), serde_json::json!(encrypted));
-    
-    Ok(())
-}
-
 /// Save a single chat to the database
 pub async fn save_chat<R: Runtime>(handle: AppHandle<R>, chat: &Chat) -> Result<(), String> {
-    // Get current chats
-    let mut chats = get_all_chats(&handle).await?;
-    
-    // Convert the input chat to slim chat
-    let new_slim_chat = SlimChatDB::from(chat);
-    let chat_id = new_slim_chat.id.clone();
-    
-    // Find and replace the chat if it exists, or add it
-    if let Some(pos) = chats.iter().position(|c| c.id == chat_id) {
-        chats[pos] = new_slim_chat;
-    } else {
-        chats.push(new_slim_chat);
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        // SQL mode - use UPSERT to avoid CASCADE delete
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        let slim_chat = SlimChatDB::from(chat);
+        let chat_identifier = &slim_chat.id;
+        
+        let chat_type_int = slim_chat.chat_type.to_i32();
+        let participants_json = serde_json::to_string(&slim_chat.participants)
+            .unwrap_or_else(|_| "[]".to_string());
+        let metadata_json = serde_json::to_string(&slim_chat.metadata)
+            .unwrap_or_else(|_| "{}".to_string());
+        
+        // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering CASCADE delete
+        conn.execute(
+            "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(chat_identifier) DO UPDATE SET
+                chat_type = excluded.chat_type,
+                participants = excluded.participants,
+                last_read = excluded.last_read,
+                metadata = excluded.metadata,
+                muted = excluded.muted",
+            rusqlite::params![
+                chat_identifier,
+                chat_type_int,
+                participants_json,
+                slim_chat.last_read,
+                slim_chat.created_at as i64,
+                metadata_json,
+                slim_chat.muted as i32,
+            ],
+        ).map_err(|e| format!("Failed to upsert chat: {}", e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
     }
     
-    // Save all chats
-    save_all_chats(&handle, chats).await
+    // After migration, all users have SQL accounts
+    // This Store fallback is unreachable
+    Err("No SQL account found - migration required".to_string())
 }
 
 /// Delete a chat and all its messages from the database
 pub async fn delete_chat<R: Runtime>(handle: AppHandle<R>, chat_id: &str) -> Result<(), String> {
-    let store = get_store(&handle);
-    
-    // 1. Remove chat from the chats list
-    let mut chats = get_all_chats(&handle).await?;
-    let original_count = chats.len();
-    chats.retain(|c| c.id != chat_id);
-    
-    if chats.len() < original_count {
-        save_all_chats(&handle, chats).await?;
-        println!("[DB] Removed chat from chats list: {}", chat_id);
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        // SQL mode - DELETE with CASCADE (messages auto-deleted)
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        conn.execute(
+            "DELETE FROM chats WHERE id = ?1",
+            rusqlite::params![chat_id],
+        ).map_err(|e| format!("Failed to delete chat: {}", e))?;
+        
+        println!("[DB] Deleted chat and messages from SQL: {}", chat_id);
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
     }
     
-    // 2. Delete the chat's messages
-    let messages_key = format!("chat_messages_{}", chat_id);
-    store.delete(messages_key);
-    
-    // 3. Force save to persist deletions immediately
-    store.save().map_err(|e| format!("Failed to save store after chat deletion: {}", e))?;
-    
-    println!("[DB] Deleted chat and messages from storage: {}", chat_id);
-    Ok(())
+    // After migration, all users have SQL accounts
+    // This Store fallback is unreachable
+    Err("No SQL account found - migration required".to_string())
 }
 
 /// Get all messages for a specific chat
 pub async fn get_chat_messages<R: Runtime>(handle: &AppHandle<R>, chat_id: &str) -> Result<Vec<Message>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        // SQL mode
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        // Get integer chat ID from identifier
+        let chat_int_id: i64 = conn.query_row(
+            "SELECT id FROM chats WHERE chat_identifier = ?1",
+            rusqlite::params![chat_id],
+            |row| row.get(0)
+        ).map_err(|e| format!("Chat not found: {}", e))?;
+        
+        // Collect all data from database first, then drop statement before async operations
+        let messages = {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.content_encrypted, m.replied_to, m.preview_metadata, m.attachments, m.reactions, m.at, m.mine, p.npub
+                 FROM messages m
+                 LEFT JOIN profiles p ON m.user_id = p.id
+                 WHERE m.chat_id = ? ORDER BY m.at"
+            ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
+            
+            let rows = stmt.query_map([chat_int_id], |row| {
+                let content_encrypted: String = row.get(1)?;
+                let attachments_json: String = row.get(4)?;
+                let reactions_json: String = row.get(5)?;
+                let preview_json: Option<String> = row.get(3)?;
+                
+                // Decrypt content (async operation - we'll need to handle this differently)
+                // For now, store encrypted and decrypt in a second pass
+                Ok((
+                    row.get::<_, String>(0)?, // id
+                    content_encrypted,
+                    row.get::<_, String>(2)?, // replied_to
+                    preview_json,
+                    attachments_json,
+                    reactions_json,
+                    row.get::<_, i64>(6)? as u64, // at
+                    row.get::<_, i32>(7)? != 0, // mine
+                    row.get::<_, Option<String>>(8)?, // npub (from profiles table via JOIN)
+                ))
+            })
+            .map_err(|e| format!("Failed to query messages: {}", e))?;
+            
+            // Collect immediately to consume the iterator while stmt is still alive
+            let result: Result<Vec<_>, _> = rows.collect();
+            result.map_err(|e| format!("Failed to collect messages: {}", e))?
+        }; // stmt is dropped here before async operations
+        
+        // Return connection to pool before async operations
+        crate::account_manager::return_db_connection(conn);
+        
+        // Decrypt content for each message (now safe to await)
+        let mut result = Vec::new();
+        for (id, content_encrypted, replied_to, preview_json, attachments_json, reactions_json, at, mine, npub) in messages {
+            // Decrypt content
+            let content = internal_decrypt(content_encrypted, None).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string());
+            
+            let attachments: Vec<crate::Attachment> = serde_json::from_str(&attachments_json).unwrap_or_default();
+            let reactions: Vec<crate::Reaction> = serde_json::from_str(&reactions_json).unwrap_or_default();
+            let preview_metadata = preview_json.and_then(|p| serde_json::from_str(&p).ok());
+            
+            result.push(Message {
+                id,
+                content,
+                replied_to,
+                preview_metadata,
+                attachments,
+                reactions,
+                at,
+                pending: false,
+                failed: false,
+                mine,
+                npub,
+            });
+        }
+        
+        return Ok(result);
+    }
+    
+    // Fallback to Store mode
     let store = get_store(handle);
     
-    // Get the messages map for this chat
     let messages_key = format!("chat_messages_{}", chat_id);
     let messages: HashMap<std::string::String, std::string::String> = match store.get(&messages_key) {
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|e| format!("Failed to deserialize chat messages: {}", e))?,
-        None => return Ok(vec![]), // No messages stored for this chat
+        Some(value) => {
+            let msg_map: HashMap<std::string::String, std::string::String> = serde_json::from_value(value.clone())
+                .map_err(|e| format!("Failed to deserialize chat messages: {}", e))?;
+            println!("[DB DEBUG] Storage key '{}' contains {} encrypted messages", messages_key, msg_map.len());
+            msg_map
+        },
+        None => {
+            println!("[DB DEBUG] Storage key '{}' NOT FOUND - no messages for this chat", messages_key);
+            return Ok(vec![]);
+        }
     };
     
     let mut result = Vec::with_capacity(messages.len());
     
-    // Process each message
     for (_, encrypted) in messages.iter() {
-        // Decrypt
         match internal_decrypt(encrypted.clone(), None).await {
             Ok(json) => {
-                // Deserialize
                 match serde_json::from_str::<SlimMessage>(&json) {
                     Ok(slim) => {
                         let message = slim.to_message();
@@ -163,264 +469,500 @@ pub async fn get_chat_messages<R: Runtime>(handle: &AppHandle<R>, chat_id: &str)
         }
     }
     
-    // Sort messages by timestamp
     result.sort_by(|a, b| a.at.cmp(&b.at));
     
     Ok(result)
 }
+/// Save a single message to the database (efficient for incremental updates)
+pub async fn save_message<R: Runtime>(
+    handle: AppHandle<R>,
+    chat_id: &str,
+    message: &Message
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(npub) = crate::account_manager::get_current_account() {
+        // SQL mode - single message upsert
+        let _db_path = crate::account_manager::get_database_path(&handle, &npub)?;
+        
+        // Encrypt the message content
+        let encrypted_content = internal_encrypt(message.content.clone(), None).await;
+        
+        let attachments_json = serde_json::to_string(&message.attachments)
+            .unwrap_or_else(|_| "[]".to_string());
+        let reactions_json = serde_json::to_string(&message.reactions)
+            .unwrap_or_else(|_| "[]".to_string());
+        let preview_json = message.preview_metadata.as_ref()
+            .and_then(|p| serde_json::to_string(p).ok());
+        
+        // Get database connection
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        // Get or create integer chat ID
+        let chat_int_id = get_or_create_chat_id(&handle, chat_id)?;
+        
+        // Get or create integer user ID from npub
+        let user_int_id = if let Some(ref npub_str) = message.npub {
+            get_or_create_user_id(&handle, npub_str)?
+        } else {
+            None
+        };
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                message.id,
+                chat_int_id,
+                encrypted_content,
+                message.replied_to,
+                preview_json,
+                attachments_json,
+                reactions_json,
+                message.at as i64,
+                message.mine as i32,
+                user_int_id,
+            ],
+        ).map_err(|e| format!("Failed to insert message {}: {}", message.id, e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        
+        return Ok(());
+    }
+    
+    // After migration, all users have SQL accounts
+    // This Store fallback is unreachable since save_chat_message requires get_current_account() to succeed
+    Err("No SQL account found - migration required".to_string())
+}
 
-/// Save messages for a specific chat
+/// Save multiple messages for a specific chat (batch operation with transaction)
+///
+/// Note: This performs UPSERT operations - it only inserts/updates the provided messages,
+/// it does NOT delete other messages in the chat. This is safe for incremental updates.
 pub async fn save_chat_messages<R: Runtime>(
     handle: AppHandle<R>,
     chat_id: &str,
     messages: &[Message]
 ) -> Result<(), String> {
-    let store = get_store(&handle);
-    
-    // Create a map of message ID to encrypted message
-    let mut messages_map: HashMap<String, String> = HashMap::new();
-    
-    // Process all messages
-    for message in messages {
-        // Convert to slim message (contact field is not needed for chat messages)
-        let slim_message = SlimMessage {
-            id: message.id.clone(),
-            content: message.content.clone(),
-            replied_to: message.replied_to.clone(),
-            preview_metadata: message.preview_metadata.clone(),
-            attachments: message.attachments.clone(),
-            reactions: message.reactions.clone(),
-            at: message.at,
-            mine: message.mine,
-            contact: String::new(), // Not used for chat messages
-            npub: message.npub.clone(),
-        };
-        
-        // Serialize to JSON
-        let json = serde_json::to_string(&slim_message)
-            .map_err(|e| format!("Failed to serialize chat message: {}", e))?;
-        
-        // Encrypt the JSON
-        let encrypted = internal_encrypt(json, None).await;
-        
-        // Add to the map
-        messages_map.insert(message.id.clone(), encrypted);
+    // Skip if no messages to save
+    if messages.is_empty() {
+        return Ok(());
     }
     
-    // Save to the DB with chat-specific key
-    let messages_key = format!("chat_messages_{}", chat_id);
-    store.set(messages_key, serde_json::json!(messages_map));
-    
-    Ok(())
-}
-
-/// Migrate existing profile-based messages to chat-based storage
-/// This function should be called during app initialization to migrate old data
-///
-/// Migration scenarios tested:
-/// 1. Profile-only last_read: When a profile has last_read but no chat exists, the chat will be created with that last_read value
-/// 2. Both set: When both profile and chat have last_read values, the profile value overwrites the chat value (since this is a one-time migration)
-/// 3. Null/empty values: When profile.last_read is empty, chat.last_read remains unchanged
-/// 4. No matching profile: When a chat is created for a profile that doesn't exist, chat.last_read remains unchanged
-pub async fn migrate_profile_messages_to_chats<R: Runtime>(
-    handle: &AppHandle<R>,
-    profile_messages: Vec<(Message, String)> // (message, profile_id)
-) -> Result<Vec<Chat>, String> {
-    // Load all profiles to access their last_read values for migration
-    let profiles_result = crate::db::get_all_profiles(handle).await;
-    let profiles = match profiles_result {
-        Ok(profiles) => profiles,
-        Err(e) => {
-            eprintln!("Warning: Failed to load profiles for last_read migration: {}", e);
-            Vec::new() // Continue with empty profiles if loading fails
-        }
-    };
-    let profile_map: std::collections::HashMap<String, crate::db::SlimProfile> =
-        profiles.into_iter().map(|p| (p.id.clone(), p)).collect();
-    
-    let mut chats: HashMap<String, Chat> = HashMap::new();
-    let total_messages = profile_messages.len();
-    
-    // Emit initial progress
-    handle.emit("progress_operation", serde_json::json!({
-        "type": "progress",
-        "current": 0,
-        "total": total_messages,
-        "message": "Migrating chats"
-    })).unwrap();
-    
-    // Group messages by chat ID (create DM chats for each profile)
-    for (index, (message, profile_id)) in profile_messages.into_iter().enumerate() {
-        // Get or create chat
-        let chat = chats.entry(profile_id.clone()).or_insert_with(|| {
-            Chat::new_dm(profile_id.clone())
-        });
-        
-        // Add message to chat
-        chat.internal_add_message(message);
-        
-        // Emit progress every 10 messages or on last message
-        if (index + 1) % 10 == 0 || index + 1 == total_messages {
-            handle.emit("progress_operation", serde_json::json!({
-                "type": "progress",
-                "current": index + 1,
-                "total": total_messages,
-                "message": "Migrating chats"
-            })).unwrap();
-        }
+    // For single message, use the optimized single-message function
+    if messages.len() == 1 {
+        return save_message(handle, chat_id, &messages[0]).await;
     }
     
-    // Apply last_read from profiles to chats
-    for (profile_id, chat) in chats.iter_mut() {
-        if let Some(profile) = profile_map.get(profile_id) {
-            if !profile.last_read().is_empty() {
-                chat.last_read = profile.last_read().to_string();
+    // Check if we have a current account (SQL mode)
+    if let Ok(npub) = crate::account_manager::get_current_account() {
+        let _db_path = crate::account_manager::get_database_path(&handle, &npub)?;
+        
+        // Get or create integer chat ID
+        let chat_int_id = get_or_create_chat_id(&handle, chat_id)?;
+        
+        
+        // Encrypt all messages first and get user IDs (async operations before database transaction)
+        let mut encrypted_messages = Vec::new();
+        for message in messages {
+            // Get or create user ID
+            let user_int_id = if let Some(ref npub_str) = message.npub {
+                get_or_create_user_id(&handle, npub_str)?
+            } else {
+                None
+            };
+            
+            let encrypted_content = internal_encrypt(message.content.clone(), None).await;
+            let attachments_json = serde_json::to_string(&message.attachments)
+                .unwrap_or_else(|_| "[]".to_string());
+            let reactions_json = serde_json::to_string(&message.reactions)
+                .unwrap_or_else(|_| "[]".to_string());
+            let preview_json = message.preview_metadata.as_ref()
+                .and_then(|p| serde_json::to_string(p).ok());
+            
+            encrypted_messages.push((
+                message.id.clone(),
+                encrypted_content,
+                message.replied_to.clone(),
+                preview_json,
+                attachments_json,
+                reactions_json,
+                message.at,
+                message.mine,
+                user_int_id,
+            ));
+        }
+        
+        // Now do all database operations synchronously
+        let mut conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        let tx = conn.transaction()
+            .map_err(|e| format!("Failed to start transaction: {}", e))?;
+        
+        // Use INSERT OR REPLACE to upsert individual messages (preserves other messages in the chat)
+        for (id, encrypted_content, replied_to, preview_json, attachments_json, reactions_json, at, mine, user_int_id) in encrypted_messages {
+            if let Err(e) = tx.execute(
+                "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    id,
+                    chat_int_id,
+                    encrypted_content,
+                    replied_to,
+                    preview_json,
+                    attachments_json,
+                    reactions_json,
+                    at as i64,
+                    mine as i32,
+                    user_int_id,
+                ],
+            ) {
+                eprintln!("Failed to insert message {} for chat {}: {}",
+                    &id[..8.min(id.len())], &chat_id[..8.min(chat_id.len())], e);
             }
         }
-    }
-    
-    // Convert to vector
-    let chat_vec: Vec<Chat> = chats.into_values().collect();
-    let total_chats = chat_vec.len();
-    
-    // Save all chats and their messages
-    for (index, chat) in chat_vec.iter().enumerate() {
-        save_chat(handle.clone(), chat).await?;
-        let all_messages = chat.messages.clone();
-        save_chat_messages(handle.clone(), &chat.id, &all_messages).await?;
         
-        // Emit progress for chat saving
-        handle.emit("progress_operation", serde_json::json!({
-            "type": "progress",
-            "current": index + 1,
-            "total": total_chats,
-            "message": "Saving chats"
-        })).unwrap();
-    }
-    
-    Ok(chat_vec)
-}
-
-/// Migration function to update database version and mark migration as complete
-pub async fn complete_migration<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
-    // Set database version to indicate migration is complete
-    // Version 2 indicates chat-based storage (v1 was profile-based storage)
-    crate::db::set_db_version(handle.clone(), 2).await?;
-    
-    // Clean up deprecated DB keys after successful migration
-    let store = get_store(&handle);
-    
-    // Delete the old messages key since they're now stored in chat-based format
-    store.delete("messages");
-    
-    // Save the store to persist the deletion
-    store.save().map_err(|e| format!("Failed to save store after cleanup: {}", e))?;
-    
-    Ok(())
-}
-
-/// Check if migration is needed
-pub async fn is_migration_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, String> {
-    // Check the database version - migration is needed if version is less than 2
-    match crate::db::get_db_version(handle.clone()) {
-        Ok(Some(version)) => {
-            // Migration is needed if version is less than 2 (chat-based storage version)
-            Ok(version < 2)
-        },
-        Ok(None) => {
-            // No version set - this is a new account or very old account needing migration
-            Ok(true)
-        },
-        Err(e) => Err(format!("Failed to get database version: {}", e))
-    }
-}
-
-// ================ MLS GROUP CHATS MIGRATION (Version 3) ================
-// This migration adds support for MLS (Message Layer Security) group chats
-// by initializing the required top-level JSON collections.
-//
-// Migration is forward-only for the MVP - no rollback support.
-// ========================================================================
-
-/// Migration to version 3: Initialize MLS group chat collections
-///
-/// This migration creates the foundational data structures for MLS group messaging:
-/// - mls_groups: Encrypted array storing group metadata
-/// - mls_keypackage_index: Plaintext index for key package management
-/// - mls_event_cursors: Plaintext cursors for event deduplication
-///
-/// Note: This is a forward-only migration. Rollback is intentionally unsupported for MVP.
-pub async fn migrate_to_v3_mls_group_chats<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
-    println!("Starting MLS group chats migration (v3)...");
-    
-    let store = get_store(&handle);
-    
-    // Initialize mls_groups collection
-    // This stores group metadata encrypted at rest (consistent with profiles/chats pattern)
-    // Each group object will contain: group_id, creator_pubkey, name, avatar_ref,
-    // created_at, updated_at. The entire array is encrypted as a single unit.
-    if store.get("mls_groups").is_none() {
-        println!("Initializing mls_groups collection...");
-        let empty_groups = vec![] as Vec<serde_json::Value>;
-        let json = serde_json::to_string(&empty_groups)
-            .map_err(|e| format!("Failed to serialize empty mls_groups: {}", e))?;
+        let result = match tx.commit() {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                eprintln!("Failed to commit transaction for chat {}: {}",
+                    &chat_id[..8.min(chat_id.len())], e);
+                Err(format!("Failed to commit transaction: {}", e))
+            }
+        };
         
-        // Encrypt the empty array (following the same pattern as profiles/chats)
-        let encrypted = internal_encrypt(json, None).await;
-        store.set("mls_groups".to_string(), serde_json::json!(encrypted));
-        println!("Created encrypted mls_groups collection");
-    } else {
-        println!("mls_groups already exists, skipping initialization");
+        crate::account_manager::return_db_connection(conn);
+        return result;
     }
     
-    // Initialize mls_keypackage_index collection
-    // This stores key package references in plaintext (not sensitive per MLS spec)
-    // Used for efficient lookup and deduplication of key packages
-    // Each entry will contain: owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at
-    if store.get("mls_keypackage_index").is_none() {
-        println!("Initializing mls_keypackage_index collection...");
-        let empty_index = vec![] as Vec<serde_json::Value>;
-        store.set("mls_keypackage_index".to_string(), serde_json::json!(empty_index));
-        println!("Created plaintext mls_keypackage_index collection");
-    } else {
-        println!("mls_keypackage_index already exists, skipping initialization");
-    }
-    
-    // Initialize mls_event_cursors collection
-    // This stores sync cursors in plaintext for efficiency
-    // Maps group_id -> { last_seen_event_id, last_seen_at }
-    // Used for event deduplication and efficient sync operations
-    if store.get("mls_event_cursors").is_none() {
-        println!("Initializing mls_event_cursors collection...");
-        let empty_cursors = HashMap::<String, serde_json::Value>::new();
-        store.set("mls_event_cursors".to_string(), serde_json::json!(empty_cursors));
-        println!("Created plaintext mls_event_cursors collection");
-    } else {
-        println!("mls_event_cursors already exists, skipping initialization");
-    }
-    
-    // Save the store to persist all changes
-    store.save().map_err(|e| format!("Failed to save store after MLS migration: {}", e))?;
-    
-    // Update the database version to 3
-    crate::db::set_db_version(handle.clone(), 3).await
-        .map_err(|e| format!("Failed to set database version to 3: {}", e))?;
-    
-    println!("MLS group chats migration (v3) completed successfully");
-    Ok(())
+    // After migration, all users have SQL accounts
+    // This Store fallback is unreachable
+    Err("No SQL account found - migration required".to_string())
 }
 
-/// Check if MLS migration (v3) is needed
-pub async fn is_mls_migration_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, String> {
-    match crate::db::get_db_version(handle.clone()) {
-        Ok(Some(version)) => {
-            // MLS migration is needed if version is less than 3
-            Ok(version < 3)
-        },
-        Ok(None) => {
-            // No version set - very old account, needs all migrations
-            Ok(true)
-        },
-        Err(e) => Err(format!("Failed to get database version: {}", e))
+/// Delete a single message from the database
+pub async fn delete_message<R: Runtime>(
+    handle: AppHandle<R>,
+    chat_id: &str,
+    message_id: &str
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        // SQL mode - single message delete
+        // Get connection once and reuse
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        // Get integer chat ID
+        let chat_int_id = get_or_create_chat_id(&handle, chat_id)?;
+        
+        conn.execute(
+            "DELETE FROM messages WHERE id = ?1 AND chat_id = ?2",
+            rusqlite::params![message_id, chat_int_id],
+        ).map_err(|e| format!("Failed to delete message: {}", e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
+    }
+    
+    // After migration, all users have SQL accounts
+    // This Store fallback is unreachable
+    Err("No SQL account found - migration required".to_string())
+}
+
+// ============================================================================
+// MLS Metadata SQL Functions
+// ============================================================================
+
+/// Save MLS groups to SQL database (plaintext columns)
+pub async fn save_mls_groups<R: Runtime>(
+    handle: AppHandle<R>,
+    groups: &[crate::mls::MlsGroupMetadata],
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        // Store each group in the mls_groups table (all fields as columns)
+        for group in groups {
+            conn.execute(
+                "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    group.group_id,
+                    group.engine_group_id,
+                    group.creator_pubkey,
+                    group.name,
+                    group.avatar_ref,
+                    group.created_at as i64,
+                    group.updated_at as i64,
+                    group.evicted as i32,
+                ],
+            ).map_err(|e| format!("Failed to save MLS group {}: {}", group.group_id, e))?;
+        }
+        
+        println!("[SQL] Saved {} MLS groups to mls_groups table", groups.len());
+        crate::account_manager::return_db_connection(conn);
+        Ok(())
+    } else {
+        // After migration, all users have SQL accounts
+        Err("No SQL account found - migration required".to_string())
+    }
+}
+
+/// Load MLS groups from SQL database (plaintext columns)
+pub async fn load_mls_groups<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<Vec<crate::mls::MlsGroupMetadata>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        // Load from mls_groups table
+        let mut stmt = conn.prepare(
+            "SELECT group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted FROM mls_groups"
+        ).map_err(|e| format!("Failed to prepare query: {}", e))?;
+        
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::mls::MlsGroupMetadata {
+                group_id: row.get(0)?,
+                engine_group_id: row.get(1)?,
+                creator_pubkey: row.get(2)?,
+                name: row.get(3)?,
+                avatar_ref: row.get(4)?,
+                created_at: row.get::<_, i64>(5)? as u64,
+                updated_at: row.get::<_, i64>(6)? as u64,
+                evicted: row.get::<_, i32>(7)? != 0,
+            })
+        }).map_err(|e| format!("Failed to query mls_groups: {}", e))?;
+        
+        let groups: Vec<crate::mls::MlsGroupMetadata> = rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect groups: {}", e))?;
+        
+        drop(stmt);
+        crate::account_manager::return_db_connection(conn);
+        Ok(groups)
+    } else {
+        // Fallback to Store
+        let store = get_store(handle);
+        let encrypted_opt = store.get("mls_groups")
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        
+        if let Some(enc) = encrypted_opt {
+            let json = internal_decrypt(enc, None).await
+                .map_err(|_| "Failed to decrypt MLS groups".to_string())?;
+            let groups: Vec<crate::mls::MlsGroupMetadata> = serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to deserialize MLS groups: {}", e))?;
+            Ok(groups)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Save MLS keypackage index to SQL database (plaintext)
+pub async fn save_mls_keypackages<R: Runtime>(
+    handle: AppHandle<R>,
+    packages: &[serde_json::Value],
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        // Clear existing keypackages
+        conn.execute("DELETE FROM mls_keypackages", [])
+            .map_err(|e| format!("Failed to clear MLS keypackages: {}", e))?;
+        
+        // Insert new keypackages
+        for pkg in packages {
+            let owner_pubkey = pkg.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or("");
+            let device_id = pkg.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+            let keypackage_ref = pkg.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or("");
+            let fetched_at = pkg.get("fetched_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            let expires_at = pkg.get("expires_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            
+            conn.execute(
+                "INSERT INTO mls_keypackages (owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![owner_pubkey, device_id, keypackage_ref, fetched_at as i64, expires_at as i64],
+            ).map_err(|e| format!("Failed to insert MLS keypackage: {}", e))?;
+        }
+        
+        println!("[SQL] Saved {} MLS keypackages", packages.len());
+        crate::account_manager::return_db_connection(conn);
+        Ok(())
+    } else {
+        // After migration, all users have SQL accounts
+        Err("No SQL account found - migration required".to_string())
+    }
+}
+
+/// Load MLS keypackage index from SQL database (plaintext)
+pub async fn load_mls_keypackages<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<Vec<serde_json::Value>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        let mut stmt = conn.prepare(
+            "SELECT owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at FROM mls_keypackages"
+        ).map_err(|e| format!("Failed to prepare MLS keypackages query: {}", e))?;
+        
+        let rows = stmt.query_map([], |row| {
+            let fetched_at: i64 = row.get(3)?;
+            let expires_at: i64 = row.get(4)?;
+            Ok(serde_json::json!({
+                "owner_pubkey": row.get::<_, String>(0)?,
+                "device_id": row.get::<_, String>(1)?,
+                "keypackage_ref": row.get::<_, String>(2)?,
+                "fetched_at": fetched_at as u64,
+                "expires_at": expires_at as u64,
+            }))
+        }).map_err(|e| format!("Failed to query MLS keypackages: {}", e))?;
+        
+        let packages: Vec<serde_json::Value> = rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect MLS keypackages: {}", e))?;
+        
+        drop(stmt);
+        crate::account_manager::return_db_connection(conn);
+        Ok(packages)
+    } else {
+        // SQL is empty, check Store for migration
+        let store = get_store(handle);
+        let packages: Vec<serde_json::Value> = store.get("mls_keypackage_index")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        
+        // Migrate to SQL if we found data in Store
+        if !packages.is_empty() {
+            println!("[MLS Migration] Migrating {} keypackages from Store to SQL", packages.len());
+            let _ = save_mls_keypackages(handle.clone(), &packages).await;
+        }
+        
+        Ok(packages)
+    }
+}
+
+/// Save MLS event cursors to SQL database (plaintext)
+pub async fn save_mls_event_cursors<R: Runtime>(
+    handle: AppHandle<R>,
+    cursors: &HashMap<String, crate::mls::EventCursor>,
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        for (group_id, cursor) in cursors {
+            conn.execute(
+                "INSERT OR REPLACE INTO mls_event_cursors (group_id, last_seen_event_id, last_seen_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![group_id, &cursor.last_seen_event_id, cursor.last_seen_at as i64],
+            ).map_err(|e| format!("Failed to save MLS event cursor: {}", e))?;
+        }
+        
+        crate::account_manager::return_db_connection(conn);
+        Ok(())
+    } else {
+        // After migration, all users have SQL accounts
+        Err("No SQL account found - migration required".to_string())
+    }
+}
+
+/// Load MLS event cursors from SQL database (plaintext)
+pub async fn load_mls_event_cursors<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<HashMap<String, crate::mls::EventCursor>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        let mut stmt = conn.prepare(
+            "SELECT group_id, last_seen_event_id, last_seen_at FROM mls_event_cursors"
+        ).map_err(|e| format!("Failed to prepare MLS event cursors query: {}", e))?;
+        
+        let rows = stmt.query_map([], |row| {
+            let group_id: String = row.get(0)?;
+            let last_seen_at: i64 = row.get(2)?;
+            let cursor = crate::mls::EventCursor {
+                last_seen_event_id: row.get(1)?,
+                last_seen_at: last_seen_at as u64,
+            };
+            Ok((group_id, cursor))
+        }).map_err(|e| format!("Failed to query MLS event cursors: {}", e))?;
+        
+        let cursors: HashMap<String, crate::mls::EventCursor> = rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|e| format!("Failed to collect MLS event cursors: {}", e))?;
+        
+        drop(stmt);
+        crate::account_manager::return_db_connection(conn);
+        Ok(cursors)
+    } else {
+        // SQL is empty, check Store for migration
+        let store = get_store(handle);
+        let cursors: HashMap<String, crate::mls::EventCursor> = store.get("mls_event_cursors")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        
+        // Migrate to SQL if we found data in Store
+        if !cursors.is_empty() {
+            println!("[MLS Migration] Migrating {} event cursors from Store to SQL", cursors.len());
+            let _ = save_mls_event_cursors(handle.clone(), &cursors).await;
+        }
+        
+        Ok(cursors)
+    }
+}
+
+/// Save MLS device ID to SQL database (plaintext)
+pub async fn save_mls_device_id<R: Runtime>(
+    handle: AppHandle<R>,
+    device_id: &str,
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_device_id', ?1)",
+            rusqlite::params![device_id],
+        ).map_err(|e| format!("Failed to save MLS device ID to SQL: {}", e))?;
+        
+        println!("[SQL] Saved MLS device ID");
+        crate::account_manager::return_db_connection(conn);
+        Ok(())
+    } else {
+        // After migration, all users have SQL accounts
+        Err("No SQL account found - migration required".to_string())
+    }
+}
+
+/// Load MLS device ID from SQL database (plaintext)
+pub async fn load_mls_device_id<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<Option<String>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        let device_id: Option<String> = conn.query_row(
+            "SELECT value FROM settings WHERE key = 'mls_device_id'",
+            [],
+            |row| row.get(0)
+        ).ok();
+        
+        crate::account_manager::return_db_connection(conn);
+        Ok(device_id)
+    } else {
+        // SQL is empty, check Store for migration
+        let store = get_store(handle);
+        let device_id = store.get("mls_device_id")
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        
+        // Migrate to SQL if we found data in Store
+        if let Some(ref id) = device_id {
+            println!("[MLS Migration] Migrating device_id from Store to SQL");
+            let _ = save_mls_device_id(handle.clone(), id).await;
+        }
+        
+        Ok(device_id)
     }
 }

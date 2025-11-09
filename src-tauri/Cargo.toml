@@ -58,6 +58,7 @@ cpal = "0.16.0"
 hound = "3.5.1"
 rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

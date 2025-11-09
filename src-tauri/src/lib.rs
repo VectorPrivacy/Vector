@@ -13,12 +13,16 @@ mod crypto;
 mod db;
 use db::SlimProfile;
 
+mod account_manager;
+
 mod mls;
 pub use mls::MlsService;
 
 
 mod db_migration;
 use db_migration::save_chat_messages;
+
+mod db_sql_migration;
 
 mod voice;
 use voice::AudioRecorder;
@@ -369,6 +373,30 @@ lazy_static! {
     static ref STATE: Mutex<ChatState> = Mutex::new(ChatState::new());
 }
 
+/// Perform Store-to-SQL migration
+/// This command is called by the frontend when migration is needed
+#[tauri::command]
+async fn perform_database_migration<R: Runtime>(
+    handle: AppHandle<R>
+) -> Result<(), String> {
+    // Perform the migration (no password needed - uses decrypted key from Nostr client)
+    db_sql_migration::migrate_store_to_sql(handle.clone()).await?;
+    
+    // Auto-select the first account after migration
+    if let Ok(Some(npub)) = account_manager::auto_select_account(&handle) {
+        println!("[Migration] Auto-selected account after migration: {}", npub);
+    } else {
+        println!("[Migration] Warning: No account found after migration");
+    }
+    
+    // After successful migration, trigger fetch_messages to load the new database
+    tauri::async_runtime::spawn(async move {
+        fetch_messages(handle, true, None).await;
+    });
+    
+    Ok(())
+}
+
 #[tauri::command]
 async fn fetch_messages<R: Runtime>(
     handle: AppHandle<R>,
@@ -417,7 +445,37 @@ async fn fetch_messages<R: Runtime>(
         let mut state = STATE.lock().await;
         
         if init {
+            // Check if Store-to-SQL migration is needed
+            if db_sql_migration::is_sql_migration_needed(&handle).await.unwrap_or(false) {
+                // Migration is needed - this will be triggered by the frontend
+                // The frontend should call a migration command with the user's password
+                // For now, we'll emit a special event to notify the frontend
+                handle.emit("migration_needed", serde_json::json!({
+                    "message": "Database upgrade required. Please enter your password to continue."
+                })).ok();
+                
+                // Don't proceed with normal initialization until migration is complete
+                // The frontend will call the migration command, which will then call fetch_messages again
+                return;
+            }
+            
+            // Set current account for SQL mode if profile database exists
+            // This must be done BEFORE loading chats/messages so SQL mode is active
+            let signer = client.signer().await.unwrap();
+            let my_public_key = signer.get_public_key().await.unwrap();
+            let npub = my_public_key.to_bech32().unwrap();
+            
+            let app_data = handle.path().app_local_data_dir().ok();
+            if let Some(data_dir) = app_data {
+                let profile_db = data_dir.join(&npub).join("vector.db");
+                if profile_db.exists() {
+                    let _ = crate::account_manager::set_current_account(npub.clone());
+                    println!("[Startup] Set current account for SQL mode: {}", npub);
+                }
+            }
+            
             // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
+            let mut needs_integrity_check = false;
             if state.profiles.len() == 1 {
                 let profiles = db::get_all_profiles(&handle).await.unwrap();
                 // Load our Profile Cache into the state
@@ -427,20 +485,8 @@ async fn fetch_messages<R: Runtime>(
                 let slim_chats_result = db_migration::get_all_chats(&handle).await;
                 if let Ok(slim_chats) = slim_chats_result {
                     // Load MLS groups to check for evicted status
-                    // Read groups data directly from store to avoid Send issues with MLS service
-                    let mls_groups: Option<Vec<mls::MlsGroupMetadata>> = {
-                        let store = db::get_store(&handle);
-                        let enc_opt = store.get("mls_groups").and_then(|v| v.as_str().map(|s| s.to_string()));
-                        if let Some(enc) = enc_opt {
-                            if let Ok(json) = crypto::internal_decrypt(enc, None).await {
-                                serde_json::from_str(&json).ok()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
+                    let mls_groups: Option<Vec<mls::MlsGroupMetadata>> =
+                        db_migration::load_mls_groups(&handle).await.ok();
                     
                     // Convert slim chats to full chats and load their messages
                     for slim_chat in slim_chats {
@@ -462,8 +508,12 @@ async fn fetch_messages<R: Runtime>(
                         // Load messages for this chat
                         let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
                         if let Ok(messages) = messages_result {
-                            // Add all messages to the chat
+                            // Add all messages to the chat and check for downloaded attachments
                             for message in messages {
+                                // Check if this message has downloaded attachments (for integrity check)
+                                if !needs_integrity_check && message.attachments.iter().any(|att| att.downloaded) {
+                                    needs_integrity_check = true;
+                                }
                                 chat.internal_add_message(message);
                             }
                         } else {
@@ -489,111 +539,8 @@ async fn fetch_messages<R: Runtime>(
                     }
                 } else {
                     eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
-                    // Fall back to old profile-based message loading for migration
-                    let msgs = db::old_get_all_messages(&handle).await.unwrap();
-                    for (msg, npub) in msgs {
-                        // Create chat if it doesn't exist and add message
-                        state.add_message_to_participant(&npub, msg);
-                    }
                 }
             }
-
-            // Run database migrations
-            if let Err(e) = db::run_migrations(handle.clone()).await {
-                eprintln!("Failed to run database migrations: {}", e);
-                // Emit error event if needed
-                handle.emit("progress_operation", serde_json::json!({
-                    "type": "error",
-                    "message": format!("Database migration error: {}", e)
-                })).unwrap();
-            }
-
-            // If we've just migrated to v2 and no chats are in memory yet,
-            // reload chats/messages from DB before any init_finished emit
-            if db::get_db_version(handle.clone()).unwrap_or(None).unwrap_or(0) >= 2 && state.chats.is_empty() {
-                let slim_chats_result = db_migration::get_all_chats(&handle).await;
-                if let Ok(slim_chats) = slim_chats_result {
-                    // Load MLS groups to check for evicted status
-                    // Read groups data directly from store to avoid Send issues with MLS service
-                    let mls_groups: Option<Vec<mls::MlsGroupMetadata>> = {
-                        let store = db::get_store(&handle);
-                        let enc_opt = store.get("mls_groups").and_then(|v| v.as_str().map(|s| s.to_string()));
-                        if let Some(enc) = enc_opt {
-                            if let Ok(json) = crypto::internal_decrypt(enc, None).await {
-                                serde_json::from_str(&json).ok()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
-                    
-                    for slim_chat in slim_chats {
-                        let mut chat = slim_chat.to_chat();
-
-                        // Skip MLS group chats that are marked as evicted
-                        // MLS group chat IDs are just the group_id (no prefix)
-                        if chat.chat_type == ChatType::MlsGroup {
-                            if let Some(ref groups) = mls_groups {
-                                if let Some(group) = groups.iter().find(|g| g.group_id.as_str() == chat.id()) {
-                                    if group.evicted {
-                                        println!("[Startup] Skipping evicted MLS group chat: {}", chat.id());
-                                        continue; // Skip this chat
-                                    }
-                                }
-                            }
-                        }
-
-                        // Load messages for this chat
-                        let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
-                        if let Ok(messages) = messages_result {
-                            for message in messages {
-                                chat.internal_add_message(message);
-                            }
-                        } else {
-                            eprintln!("Failed to load messages for chat {}: {:?}", chat.id(), messages_result);
-                        }
-
-                        // Ensure profiles exist for chat participants
-                        for participant in chat.participants() {
-                            if state.get_profile(participant).is_none() {
-                                let mut profile = Profile::new();
-                                profile.id = participant.clone();
-                                profile.mine = false;
-                                state.profiles.push(profile);
-                            }
-                        }
-
-                        // Add chat
-                        state.chats.push(chat);
-                    }
-                    // Keep chats sorted by last message time
-                    state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
-                } else {
-                    eprintln!("Failed to load chats after migration: {:?}", slim_chats_result);
-                }
-            }
-
-            // Check if we need to migrate timestamps from seconds to milliseconds
-            // Run timestamp migration without dropping lock
-            match migrate_unix_to_millisecond_timestamps(&handle).await {
-                Ok(count) => {
-                    if count > 0 {
-                        println!("Migrated {} message timestamps", count);
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Failed to migrate timestamps: {}", e);
-                }
-            }
-
-            // Check if filesystem integrity check is needed
-            let needs_integrity_check = state.chats.iter().any(|chat|
-                chat.messages.iter().any(|msg|
-                    msg.attachments.iter().any(|att| att.downloaded)
-                )
-            );
             
             if needs_integrity_check {
                 // Clean up empty file attachments first
@@ -601,6 +548,11 @@ async fn fetch_messages<R: Runtime>(
                 
                 // Check integrity without dropping state
                 check_attachment_filesystem_integrity(&handle, &mut state).await;
+                
+                // Preload ID caches for maximum performance
+                if let Err(e) = db_migration::preload_id_caches(&handle).await {
+                    eprintln!("[Cache] Failed to preload ID caches: {}", e);
+                }
                 
                 // Send the state to our frontend to signal finalised init with a full state
                 handle.emit("init_finished", serde_json::json!({
@@ -610,6 +562,11 @@ async fn fetch_messages<R: Runtime>(
             } else {
                 // Even if no integrity check needed, still clean up empty files
                 cleanup_empty_file_attachments(&handle, &mut state).await;
+                
+                // Preload ID caches for maximum performance
+                if let Err(e) = db_migration::preload_id_caches(&handle).await {
+                    eprintln!("[Cache] Failed to preload ID caches: {}", e);
+                }
                 
                 // No integrity check needed, send init immediately
                 handle.emit("init_finished", serde_json::json!({
@@ -852,6 +809,23 @@ async fn fetch_messages<R: Runtime>(
 
         if relay_url.is_none() {
             handle.emit("sync_finished", ()).unwrap();
+            
+            // Now that regular sync is complete and chats are loaded, sync MLS groups
+            // This ensures chat data is in memory before MLS tries to sync participants
+            let handle_clone = handle.clone();
+            tokio::task::spawn(async move {
+                // Small delay to ensure init_finished has been processed
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Err(e) = sync_mls_groups_now(None).await {
+                    eprintln!("[MLS] Post-sync MLS group sync failed: {}", e);
+                }
+                
+                // After MLS sync completes, check if weekly VACUUM is needed
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Err(e) = db_sql_migration::check_and_vacuum_if_needed(&handle_clone).await {
+                    eprintln!("[Maintenance] Weekly VACUUM check failed: {}", e);
+                }
+            });
         }
     }
 }
@@ -1001,10 +975,8 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
             // Since we're iterating over existing indices, we know the chat exists
             let chat = &state.chats[chat_idx];
             let chat_id = chat.id().clone();
-            
-            // CRITICAL FIX: Save ALL messages from the chat, not just the updated ones
-            // The updated_messages only contains messages with attachments that were checked
-            // Saving only those would DELETE all text messages!
+
+            // Save
             let all_messages = &chat.messages;
             if let Err(e) = save_chat_messages(handle.clone(), &chat_id, all_messages).await {
                 eprintln!("Failed to update messages after filesystem check: {}", e);
@@ -1024,52 +996,6 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
         }
     }
 }
-
-/// Migrates Unix timestamps (in seconds) to millisecond timestamps
-/// Returns the number of messages that were updated
-async fn migrate_unix_to_millisecond_timestamps<R: Runtime>(
-    handle: &AppHandle<R>
-) -> Result<u32, Box<dyn std::error::Error>> {
-    // Get all chats from database
-    let slim_chats = db_migration::get_all_chats(handle).await?;
-    
-    // Define threshold - timestamps below this are likely in seconds
-    // Using year 2000 (946684800000 ms) as a reasonable cutoff
-    const MILLISECOND_THRESHOLD: u64 = 946684800000;
-    
-    let mut updated_count = 0;
-    
-    // Process each chat and its messages
-    for slim_chat in slim_chats {
-        let chat_id = slim_chat.id.clone();
-        let mut messages = db_migration::get_chat_messages(handle, &chat_id).await.unwrap_or_default();
-        let mut chat_updated = false;
-        
-        // Check each message for timestamp migration
-        for message in &mut messages {
-            // Check if timestamp appears to be in seconds (too small to be milliseconds)
-            if message.at < MILLISECOND_THRESHOLD {
-                // Convert seconds to milliseconds
-                let old_timestamp = message.at;
-                message.at = old_timestamp * 1000;
-                updated_count += 1;
-                chat_updated = true;
-            }
-        }
-        
-        // Save the messages back if any were updated
-        if chat_updated {
-            let all_messages = messages;
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &all_messages).await {
-                eprintln!("Failed to save updated messages in timestamp migration: {}", e);
-            }
-        }
-    }
-    
-    Ok(updated_count as u32)
-}
-
-
 
 #[tauri::command]
 async fn start_typing(receiver: String) -> bool {
@@ -1241,11 +1167,19 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     .unwrap_or(false);
 
                     if processed {
-                        // Notify UI so invites list can refresh via list_pending_mls_welcomes()
-                        if let Some(app) = TAURI_APP.get() {
-                            let _ = app.emit("mls_invite_received", serde_json::json!({
-                                "wrapper_event_id": wrapper_id.to_hex()
-                            }));
+                        // Only notify UI after initial sync is complete
+                        // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
+                        let should_emit = {
+                            let state = STATE.lock().await;
+                            state.sync_mode == SyncMode::Finished || !state.is_syncing
+                        };
+                        
+                        if should_emit {
+                            if let Some(app) = TAURI_APP.get() {
+                                let _ = app.emit("mls_invite_received", serde_json::json!({
+                                    "wrapper_event_id": wrapper_id.to_hex()
+                                }));
+                            }
                         }
                         return true;
                     } else {
@@ -1374,14 +1308,10 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
             })).unwrap();
         }
 
-        // Save the chat/messages to DB (chat_id = contact npub for DMs)
+        // Save the new message to DB (chat_id = contact npub for DMs)
         if let Some(handle) = TAURI_APP.get() {
-            // Get all messages for this chat and save them
-            let all_messages = {
-                let state = STATE.lock().await;
-                state.get_chat(contact).map(|chat| chat.messages.clone()).unwrap_or_default()
-            };
-            let _ = save_chat_messages(handle.clone(), contact, &all_messages).await;
+            // Only save the single new message (efficient!)
+            let _ = db_migration::save_message(handle.clone(), contact, &msg).await;
         }
         // Ensure OS badge is updated immediately after accepting the message
         if let Some(handle) = TAURI_APP.get() {
@@ -1468,14 +1398,10 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
             })).unwrap();
         }
 
-        // Save the chat/messages to DB (chat_id = contact npub for DMs)
+        // Save the new message to DB (chat_id = contact npub for DMs)
         if let Some(handle) = TAURI_APP.get() {
-            // Get all messages for this chat and save them
-            let all_messages = {
-                let state = STATE.lock().await;
-                state.get_chat(contact).map(|chat| chat.messages.clone()).unwrap_or_default()
-            };
-            let _ = save_chat_messages(handle.clone(), contact, &all_messages).await;
+            // Only save the single new message (efficient!)
+            let _ = db_migration::save_message(handle.clone(), contact, &msg).await;
         }
         // Ensure OS badge is updated immediately after accepting the attachment
         if let Some(handle) = TAURI_APP.get() {
@@ -1511,15 +1437,19 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
         (reaction_added, chat_id_for_save)
     };
 
-    // Save all messages for the chat with the new reaction to our DB (outside of state lock)
+    // Save the updated message with the new reaction to our DB (outside of state lock)
     if let Some(chat_id) = chat_id_for_save {
         if let Some(handle) = TAURI_APP.get() {
-            // Get all messages for this chat
-            let all_messages = {
+            // Get only the message that was updated
+            let updated_message = {
                 let state = STATE.lock().await;
-                state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
+                state.find_message(&reaction.reference_id)
+                    .map(|(_, msg)| msg.clone())
             };
-            let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
+            
+            if let Some(msg) = updated_message {
+                let _ = db_migration::save_message(handle.clone(), &chat_id, &msg).await;
+            }
         }
     }
 
@@ -1619,27 +1549,10 @@ async fn notifs() -> Result<bool, String> {
                     if let Some(group_wire_id) = group_wire_id_opt {
                         // Check if we are a member of this group (metadata check) without constructing MLS engine
                         let handle = TAURI_APP.get().unwrap().clone();
-                        // Read encrypted "mls_groups" without holding store across await
-                        let enc_opt: Option<String> = {
-                            let store = db::get_store(&handle);
-                            match store.get("mls_groups") {
-                                Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
-                                _ => None,
-                            }
-                        };
-                        // Decrypt after store is dropped
-                        let is_member: bool = if let Some(enc) = enc_opt {
-                            match crypto::internal_decrypt(enc, None).await {
-                                Ok(json) => {
-                                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                                        arr.iter().any(|g| {
-                                            g.get("group_id").and_then(|s| s.as_str()) == Some(group_wire_id.as_str()) ||
-                                            g.get("engine_group_id").and_then(|s| s.as_str()) == Some(group_wire_id.as_str())
-                                        })
-                                    } else { false }
-                                }
-                                Err(_) => false,
-                            }
+                        let is_member: bool = if let Ok(groups) = db_migration::load_mls_groups(&handle).await {
+                            groups.iter().any(|g| {
+                                g.group_id == group_wire_id || g.engine_group_id == group_wire_id
+                            })
                         } else { false };
 
                         // Not a member - ignore this group message
@@ -1890,9 +1803,9 @@ async fn notifs() -> Result<bool, String> {
                                                                         };
                                                                         
                                                                         if let Some(chat) = chat_to_save {
-                                                                            use crate::db_migration::{save_chat, save_chat_messages};
+                                                                            use crate::db_migration::save_chat;
                                                                             let _ = save_chat(handle.clone(), &chat).await;
-                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &chat.messages).await;
+                                                                            let _ = db_migration::save_message(handle.clone(), &group_id_for_persist, &message).await;
                                                                         }
                                                                     }
                                                                     Some(message)
@@ -1921,15 +1834,19 @@ async fn notifs() -> Result<bool, String> {
                                                                     (added, chat_id_for_save)
                                                                 };
                                                                 
-                                                                // Save to database immediately (like DM reactions)
+                                                                // Save the updated message to database immediately (like DM reactions)
                                                                 if was_added {
                                                                     if let Some(chat_id) = chat_id_for_save {
                                                                         if let Some(handle) = TAURI_APP.get() {
-                                                                            let all_messages = {
+                                                                            let updated_message = {
                                                                                 let state = crate::STATE.lock().await;
-                                                                                state.get_chat(&chat_id).map(|chat| chat.messages.clone()).unwrap_or_default()
+                                                                                state.find_message(&reaction.reference_id)
+                                                                                    .map(|(_, msg)| msg.clone())
                                                                             };
-                                                                            let _ = save_chat_messages(handle.clone(), &chat_id, &all_messages).await;
+                                                                            
+                                                                            if let Some(msg) = updated_message {
+                                                                                let _ = db_migration::save_message(handle.clone(), &chat_id, &msg).await;
+                                                                            }
                                                                         }
                                                                     }
                                                                 }
@@ -2725,13 +2642,18 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
 
                 // Persist updated message/attachment metadata to the database
                 if let Some(handle) = TAURI_APP.get() {
-                    // Grab all messages for this chat and save them.
-                    let all_messages = {
-                        state.get_chat(&npub).map(|chat| chat.messages.clone()).unwrap_or_default()
+                    // Find and save only the updated message
+                    let updated_message = {
+                        state.get_chat(&npub)
+                            .and_then(|chat| chat.messages.iter().find(|m| m.id == msg_id))
+                            .cloned()
                     };
                     // Drop the STATE lock before performing async I/O
                     drop(state);
-                    let _ = save_chat_messages(handle.clone(), &npub, &all_messages).await;
+                    
+                    if let Some(msg) = updated_message {
+                        let _ = db_migration::save_message(handle.clone(), &npub, &msg).await;
+                    }
                 }
             }
             
@@ -2798,6 +2720,36 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     profile.id = npub.clone();
     profile.mine = true;
     STATE.lock().await.profiles.push(profile);
+
+    // Initialize profile database and set as current account
+    if let Some(handle) = TAURI_APP.get() {
+        let app_data = handle.path().app_local_data_dir().ok();
+        if let Some(data_dir) = app_data {
+            let profile_db = data_dir.join(&npub).join("vector.db");
+            if profile_db.exists() {
+                // Existing account - just set as current
+                let _ = crate::account_manager::set_current_account(npub.clone());
+                println!("[Login] Set current account for SQL mode: {}", npub);
+            } else {
+                // Check if Store-to-SQL migration is needed before creating new database
+                let migration_needed = db_sql_migration::is_sql_migration_needed(handle).await.unwrap_or(false);
+                if migration_needed {
+                    println!("[Login] Store migration needed - database will be created during migration");
+                    // Don't create database yet - migration will handle it
+                    // Just return the keys and let fetch_messages trigger the migration
+                } else {
+                    // New account - initialize database and set as current
+                    if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
+                        eprintln!("[Login] Failed to initialize profile database: {}", e);
+                    } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
+                        eprintln!("[Login] Failed to set current account: {}", e);
+                    } else {
+                        println!("[Login] Initialized new profile database and set current account: {}", npub);
+                    }
+                }
+            }
+        }
+    }
 
     // Return our npub to the frontend client
     Ok(LoginKeyPair {
@@ -2881,6 +2833,13 @@ async fn encrypt(input: String, password: Option<String>) -> String {
     tokio::spawn(async move {
         // Brief delay to allow encryption key to be set
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        
+        // Skip if no account selected (migration pending)
+        if crate::account_manager::get_current_account().is_err() {
+            println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
+            return;
+        }
+        
         println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
         match bootstrap_mls_device_keypackage().await {
             Ok(info) => {
@@ -2907,6 +2866,13 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
         tokio::spawn(async move {
             // brief delay to allow any post-login setup to settle
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            
+            // Skip if no account selected (migration pending)
+            if crate::account_manager::get_current_account().is_err() {
+                println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
+                return;
+            }
+            
             println!("[MLS] Ensuring persistent device KeyPackage...");
             match bootstrap_mls_device_keypackage().await {
                 Ok(info) => {
@@ -2916,18 +2882,6 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
                 }
                 Err(e) => eprintln!("[MLS] Device KeyPackage bootstrap failed: {}", e),
             }
-        });
-
-        // Non-blocking post-decrypt MLS sync for joined groups (run in blocking thread to avoid Send constraints)
-        tokio::task::spawn_blocking(move || {
-            // Allow keypackage publish/smoke test to start first
-            std::thread::sleep(std::time::Duration::from_millis(800));
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                if let Err(e) = sync_mls_groups_now(None).await {
-                    eprintln!("[MLS] Post-decrypt sync failed: {}", e);
-                }
-            });
         });
     }
 
@@ -3001,8 +2955,14 @@ async fn logout<R: Runtime>(handle: AppHandle<R>) {
     // Lock the state to ensure nothing is added to the DB before restart
     let _guard = STATE.lock().await;
 
-    // Erase the Database completely for a clean logout
-    db::nuke(handle.clone()).unwrap();
+    // Delete the current account's profile directory (SQL database)
+    if let Ok(npub) = account_manager::get_current_account() {
+        if let Ok(profile_dir) = account_manager::get_profile_directory(&handle, &npub) {
+            if profile_dir.exists() {
+                let _ = std::fs::remove_dir_all(&profile_dir);
+            }
+        }
+    }
 
     // Delete the downloads folder (vector folder in Downloads or Documents on iOS)
     let base_directory = if cfg!(target_os = "ios") {
@@ -3052,6 +3012,11 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     profile.id = npub.clone();
     profile.mine = true;
     STATE.lock().await.profiles.push(profile);
+
+    // Initialize the profile database and set as current account
+    let handle = TAURI_APP.get().ok_or("App not initialized")?;
+    account_manager::init_profile_database(handle, &npub).await?;
+    account_manager::set_current_account(npub.clone())?;
 
     // Save the seed in memory, ready for post-pin-setup encryption
     let _ = MNEMONIC_SEED.set(mnemonic_string);
@@ -3244,7 +3209,7 @@ async fn get_or_create_invite_code() -> Result<String, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
     
     // Check if we already have a stored invite code
-    if let Ok(Some(existing_code)) = db::get_invite_code(handle.clone()) {
+    if let Ok(Some(existing_code)) = db::get_sql_setting(handle.clone(), "invite_code".to_string()) {
         return Ok(existing_code);
     }
     
@@ -3274,7 +3239,7 @@ async fn get_or_create_invite_code() -> Result<String, String> {
             if let Some(r_tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
                 if let Some(code) = r_tag.content() {
                     // Store it locally
-                    db::set_invite_code(handle.clone(), code.to_string())
+                    db::set_sql_setting(handle.clone(), "invite_code".to_string(), code.to_string())
                         .map_err(|e| e.to_string())?;
                     return Ok(code.to_string());
                 }
@@ -3297,7 +3262,7 @@ async fn get_or_create_invite_code() -> Result<String, String> {
     client.send_event_to([TRUSTED_RELAY], &event).await.map_err(|e| e.to_string())?;
     
     // Store locally
-    db::set_invite_code(handle.clone(), new_code.clone())
+    db::set_sql_setting(handle.clone(), "invite_code".to_string(), new_code.clone())
         .map_err(|e| e.to_string())?;
     
     Ok(new_code)
@@ -3469,21 +3434,18 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
 
-    // Ensure a persistent device_id exists (store access scoped before awaits)
-    let device_id: String = {
-        let store = db::get_store(&handle);
-        match store.get("mls_device_id") {
-            Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
-            _ => {
-                let id: String = thread_rng()
-                    .sample_iter(&Alphanumeric)
-                    .take(12)
-                    .map(char::from)
-                    .collect::<String>()
-                    .to_lowercase();
-                store.set("mls_device_id".to_string(), serde_json::json!(id.clone()));
-                id
-            }
+    // Ensure a persistent device_id exists
+    let device_id: String = match db_migration::load_mls_device_id(&handle).await {
+        Ok(Some(id)) => id,
+        _ => {
+            let id: String = thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(12)
+                .map(char::from)
+                .collect::<String>()
+                .to_lowercase();
+            let _ = db_migration::save_mls_device_id(handle.clone(), &id).await;
+            id
         }
     };
 
@@ -3494,11 +3456,7 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
 
     // Load existing keypackage index and verify it exists on relay before returning cached
     let cached_kp_ref: Option<String> = {
-        let store = db::get_store(&handle);
-        let index: Vec<serde_json::Value> = match store.get("mls_keypackage_index") {
-            Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
 
         index.iter().find(|entry| {
             entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
@@ -3564,13 +3522,9 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
         .await
         .map_err(|e| e.to_string())?;
 
-    // Upsert into mls_keypackage_index (re-acquire store after awaits)
+    // Upsert into mls_keypackage_index
     {
-        let store = db::get_store(&handle);
-        let mut index: Vec<serde_json::Value> = match store.get("mls_keypackage_index") {
-            Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let mut index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
         let now = Timestamp::now().as_u64();
         index.push(serde_json::json!({
             "owner_pubkey": owner_pubkey_b32,
@@ -3579,7 +3533,7 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
             "fetched_at": now,
             "expires_at": 0u64
         }));
-        store.set("mls_keypackage_index".to_string(), serde_json::json!(index));
+        let _ = db_migration::save_mls_keypackages(handle.clone(), &index).await;
     }
 
     Ok(serde_json::json!({
@@ -3719,44 +3673,23 @@ async fn mls_create_group_simple(name: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .as_secs();
 
-    // Read encrypted groups from store WITHOUT awaiting while holding the store
-    let enc_opt: Option<String> = {
-        let store = db::get_store(&handle);
-        match store.get("mls_groups") {
-            Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
-            _ => None,
-        }
-    };
-
-    // Decrypt (await) after store is dropped
-    let mut groups: Vec<serde_json::Value> = if let Some(enc) = enc_opt {
-        match crypto::internal_decrypt(enc, None).await {
-            Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
+    // Load existing groups
+    let mut groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
 
     // Append new metadata entry
-    groups.push(serde_json::json!({
-        "group_id": group_id,
-        "creator_pubkey": creator_pubkey_b32,
-        "name": name,
-        "avatar_ref": serde_json::Value::Null,
-        "created_at": now_secs,
-        "updated_at": now_secs
-    }));
+    groups.push(mls::MlsGroupMetadata {
+        group_id: group_id.clone(),
+        engine_group_id: String::new(),
+        creator_pubkey: creator_pubkey_b32,
+        name,
+        avatar_ref: None,
+        created_at: now_secs,
+        updated_at: now_secs,
+        evicted: false,
+    });
 
-    // Encrypt with await
-    let json = serde_json::to_string(&groups).map_err(|e| e.to_string())?;
-    let encrypted = crypto::internal_encrypt(json, None).await;
-
-    // Write back to store after await (re-acquire store)
-    {
-        let store = db::get_store(&handle);
-        store.set("mls_groups".to_string(), serde_json::json!(encrypted));
-    }
+    // Save groups to SQL/store
+    let _ = db_migration::save_mls_groups(handle.clone(), &groups).await;
 
     Ok(group_id)
 }
@@ -3766,23 +3699,11 @@ async fn mls_send_group_message_simple(group_id: String, text: String) -> Result
     // Minimal: validate group exists via JSON store, then return placeholder message_id
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
 
-    // Load and decrypt groups
-    let store = db::get_store(&handle);
-    let groups: Vec<serde_json::Value> = if let Some(v) = store.get("mls_groups") {
-        if let Some(enc) = v.as_str() {
-            match crypto::internal_decrypt(enc.to_string(), None).await {
-                Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json).unwrap_or_default(),
-                Err(_) => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
+    // Load groups
+    let groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
 
     // Validate group exists
-    let exists = groups.iter().any(|g| g.get("group_id").and_then(|v| v.as_str()) == Some(group_id.as_str()));
+    let exists = groups.iter().any(|g| g.group_id == group_id);
     if !exists {
         return Err("Group not found".to_string());
     }
@@ -3907,26 +3828,18 @@ async fn sync_mls_groups_now(
                     .await
                     .map_err(|e| e.to_string())
             } else {
-                // Multi-group sync: read encrypted "mls_groups", iterate group_ids, and sync each
-                let store = db::get_store(&handle);
-                let enc_opt = match store.get("mls_groups") {
-                    Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
-                    _ => None,
-                };
-
-                let group_ids: Vec<String> = if let Some(enc) = enc_opt {
-                    match crypto::internal_decrypt(enc, None).await {
-                        Ok(json) => {
-                            let groups: Vec<mls::MlsGroupMetadata> = serde_json::from_str(&json).unwrap_or_default();
-                            groups.into_iter()
-                                .filter(|g| !g.evicted) // Skip evicted groups
-                                .map(|g| g.group_id)
-                                .collect()
-                        }
-                        Err(_) => Vec::new(),
+                // Multi-group sync: load MLS groups from SQL and sync each
+                let group_ids: Vec<String> = match db_migration::load_mls_groups(&handle).await {
+                    Ok(groups) => {
+                        groups.into_iter()
+                            .filter(|g| !g.evicted) // Skip evicted groups
+                            .map(|g| g.group_id)
+                            .collect()
                     }
-                } else {
-                    Vec::new()
+                    Err(e) => {
+                        eprintln!("Failed to load MLS groups: {}", e);
+                        Vec::new()
+                    }
                 };
 
                 let mut total_processed: u32 = 0;
@@ -4256,32 +4169,15 @@ async fn process_mls_event(
 
 #[tauri::command]
 async fn list_mls_groups() -> Result<Vec<String>, String> {
-    // Read and decrypt "mls_groups" and return group_id list
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-
-    // Read encrypted value from store without awaiting while holding the store
-    let enc_opt: Option<String> = {
-        let store = db::get_store(&handle);
-        match store.get("mls_groups") {
-            Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
-            _ => None,
+    match db_migration::load_mls_groups(&handle).await {
+        Ok(groups) => {
+            let ids = groups.into_iter()
+                .map(|g| g.group_id)
+                .collect();
+            Ok(ids)
         }
-    };
-
-    if let Some(enc) = enc_opt {
-        match crypto::internal_decrypt(enc, None).await {
-            Ok(json) => {
-                let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
-                let ids = arr
-                    .into_iter()
-                    .filter_map(|v| v.get("group_id").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                    .collect::<Vec<String>>();
-                Ok(ids)
-            }
-            Err(e) => Err(format!("Failed to decrypt mls_groups: {:?}", e)),
-        }
-    } else {
-        Ok(Vec::new())
+        Err(e) => Err(format!("Failed to load MLS groups: {}", e)),
     }
 }
 
@@ -4308,117 +4204,60 @@ async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
         // Use current runtime to drive our small async decrypt step
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            // Read encrypted value from store without awaiting while holding the store
-            let enc_opt: Option<String> = {
-                let store = db::get_store(&handle);
-                match store.get("mls_groups") {
-                    Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
-                    _ => None,
-                }
+            // Load groups from SQL/store
+            let groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
+
+            // Try to open persistent MLS engine for computing member counts
+            // This block must avoid awaits while engine is in scope
+            let maybe_engine = match MlsService::new_persistent(&handle) {
+                Ok(svc) => svc.engine().ok(),
+                Err(_) => None,
             };
 
-            if let Some(enc) = enc_opt {
-                // Decrypt after releasing the store reference
-                match crypto::internal_decrypt(enc, None).await {
-                    Ok(json) => {
-                        // Parse as generic JSON to be resilient to legacy entries
-                        let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
+            // Needed to decode engine group ids
+            use mdk_core::prelude::GroupId;
 
-                        // Try to open persistent MLS engine for computing member counts
-                        // This block must avoid awaits while engine is in scope
-                        let maybe_engine = match MlsService::new_persistent(&handle) {
-                            Ok(svc) => svc.engine().ok(),
-                            Err(_) => None,
-                        };
-
-                        // Needed to decode engine group ids
-                        use mdk_core::prelude::GroupId;
-
-                        // Build enriched infos with member_count computed from engine (fallback to 0 on any failure)
-                        let infos = arr
-                            .into_iter()
-                            .filter_map(|v| {
-                                // Skip evicted groups
-                                let evicted = v
-                                    .get("evicted")
-                                    .and_then(|b| b.as_bool())
-                                    .unwrap_or(false);
-                                
-                                if evicted {
-                                    return None;
-                                }
-
-                                let group_id = v
-                                    .get("group_id")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-
-                                let engine_group_id = v
-                                    .get("engine_group_id")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-
-                                let name = v
-                                    .get("name")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-
-                                let avatar_ref = v
-                                    .get("avatar_ref")
-                                    .and_then(|s| s.as_str())
-                                    .map(|s| s.to_string());
-
-                                let created_at = v
-                                    .get("created_at")
-                                    .and_then(|n| n.as_u64())
-                                    .unwrap_or(0);
-
-                                let updated_at = v
-                                    .get("updated_at")
-                                    .and_then(|n| n.as_u64())
-                                    .unwrap_or(created_at);
-
-                                // Prefer engine_group_id for engine lookup; fallback to wire group_id
-                                let engine_id_hex = if !engine_group_id.is_empty() {
-                                    engine_group_id.clone()
-                                } else {
-                                    group_id.clone()
-                                };
-
-                                // Default to 0 members if engine not available or lookup fails
-                                let mut member_count: u32 = 0;
-
-                                if let Some(engine) = &maybe_engine {
-                                    if let Ok(bytes) = hex::decode(&engine_id_hex) {
-                                        let gid = GroupId::from_slice(&bytes);
-                                        if let Ok(pks) = engine.get_members(&gid) {
-                                            member_count = pks.len() as u32;
-                                        }
-                                    }
-                                }
-
-                                Some(MlsGroupInfo {
-                                    group_id,
-                                    engine_group_id,
-                                    name,
-                                    avatar_ref,
-                                    created_at,
-                                    updated_at,
-                                    member_count,
-                                })
-                            })
-                            .collect::<Vec<MlsGroupInfo>>();
-
-                        Ok(infos)
+            // Build enriched infos with member_count computed from engine (fallback to 0 on any failure)
+            let infos = groups
+                .into_iter()
+                .filter_map(|g| {
+                    // Skip evicted groups
+                    if g.evicted {
+                        return None;
                     }
-                    Err(e) => Err(format!("Failed to decrypt mls_groups: {:?}", e)),
-                }
-            } else {
-                Ok(Vec::new())
-            }
+
+                    // Prefer engine_group_id for engine lookup; fallback to wire group_id
+                    let engine_id_hex = if !g.engine_group_id.is_empty() {
+                        g.engine_group_id.clone()
+                    } else {
+                        g.group_id.clone()
+                    };
+
+                    // Default to 0 members if engine not available or lookup fails
+                    let mut member_count: u32 = 0;
+
+                    if let Some(engine) = &maybe_engine {
+                        if let Ok(bytes) = hex::decode(&engine_id_hex) {
+                            let gid = GroupId::from_slice(&bytes);
+                            if let Ok(pks) = engine.get_members(&gid) {
+                                member_count = pks.len() as u32;
+                            }
+                        }
+                    }
+
+                    Some(MlsGroupInfo {
+                        group_id: g.group_id,
+                        engine_group_id: g.engine_group_id,
+                        name: g.name,
+                        avatar_ref: g.avatar_ref,
+                        created_at: g.created_at,
+                        updated_at: g.updated_at,
+                        member_count,
+                    })
+                })
+                .collect::<Vec<MlsGroupInfo>>();
+
+            Ok(infos)
         })
     })
     .await
@@ -4605,13 +4444,9 @@ async fn refresh_keypackages_for_contact(
 
     // Update local plaintext index after network await
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    let store = db::get_store(&handle);
 
     // Load existing index
-    let mut index: Vec<serde_json::Value> = match store.get("mls_keypackage_index") {
-        Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
-        None => Vec::new(),
-    };
+    let mut index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
 
     // Remove any existing entries for this owner+device_id to avoid duplicates
     for new_entry in &new_entries {
@@ -4626,7 +4461,7 @@ async fn refresh_keypackages_for_contact(
 
     // Append new entries and persist
     index.extend(new_entries.into_iter());
-    store.set("mls_keypackage_index".to_string(), serde_json::json!(index));
+    let _ = db_migration::save_mls_keypackages(handle.clone(), &index).await;
 
     Ok(results)
 }
@@ -4709,14 +4544,25 @@ pub fn run() {
                 }
             });
 
-            // Startup log: persistent MLS device_id if present
+            // Auto-select account on startup if one exists but isn't selected
             {
-                let store = db::get_store(&handle);
-                if let Some(v) = store.get("mls_device_id") {
-                    if let Some(id) = v.as_str() {
-                        println!("[MLS] Found persistent mls_device_id at startup: {}", id);
+                let handle_clone = handle.clone();
+                if let Ok(Some(_npub)) = account_manager::auto_select_account(&handle_clone) {
+                    // Clean up old Store files on 2nd boot (SQL database exists = migration complete)
+                    if let Err(e) = db_sql_migration::cleanup_old_store_files(&handle_clone) {
+                        eprintln!("[Cleanup] Failed to remove old Store files: {}", e);
                     }
                 }
+            }
+
+            // Startup log: persistent MLS device_id if present
+            {
+                let handle_clone = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(Some(id)) = db_migration::load_mls_device_id(&handle_clone).await {
+                        println!("[MLS] Found persistent mls_device_id at startup: {}", id);
+                    }
+                });
             }
 
             // Set as our accessible static app handle
@@ -4730,27 +4576,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            db::get_db,
-            db::get_db_version,
-            db::set_db_version,
             db::get_theme,
-            db::set_theme,
-            db::get_whisper_auto_translate,
-            db::set_whisper_auto_translate,
-            db::get_whisper_auto_transcribe,
-            db::set_whisper_auto_transcribe,
-            db::get_whisper_model_name,
-            db::set_whisper_model_name,
             db::get_pkey,
             db::set_pkey,
             db::get_seed,
             db::set_seed,
-            db::get_web_previews,
-            db::set_web_previews,
-            db::get_strip_tracking,
-            db::set_strip_tracking,
-            db::get_send_typing_indicators,
-            db::set_send_typing_indicators,
+            db::get_sql_setting,
+            db::set_sql_setting,
             db::remove_setting,
             profile::load_profile,
             profile::update_profile,
@@ -4766,6 +4598,7 @@ pub fn run() {
             message::react_to_message,
             message::fetch_msg_metadata,
             fetch_messages,
+            perform_database_migration,
             deep_rescan,
             is_scanning,
             get_chat_messages,
@@ -4792,8 +4625,6 @@ pub fn run() {
             accept_invite_code,
             get_invited_users,
             check_fawkes_badge,
-            db::get_invite_code,
-            db::set_invite_code,
             export_keys,
             bootstrap_mls_device_keypackage,
             // Simple MLS command wrappers for console/manual testing:
@@ -4823,6 +4654,11 @@ pub fn run() {
             queue_chat_profiles_sync,
             refresh_profile_now,
             sync_all_profiles,
+            // Account manager commands
+            account_manager::get_current_account,
+            account_manager::list_all_accounts,
+            account_manager::check_any_account_exists,
+            account_manager::switch_account,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

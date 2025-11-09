@@ -729,6 +729,16 @@ let chatOpenTimestamp = 0;
  * Synchronise all messages from the backend
  */
 async function init() {
+    // Check if account is selected (skip if migration pending)
+    try {
+        await invoke("get_current_account");
+    } catch (e) {
+        console.log('[Init] No account selected - migration may be pending, triggering fetch_messages to check');
+        // Call fetch_messages anyway - it will detect migration and trigger it
+        await invoke("fetch_messages", { init: true });
+        return;
+    }
+    
     // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
     await invoke("fetch_messages", { init: true });
 
@@ -2268,6 +2278,20 @@ async function login() {
             }
         });
 
+        // Setup database migration listener
+        await listen('migration_needed', async (evt) => {
+            console.log('Database migration needed - starting automatically');
+            try {
+                // Trigger migration
+                await invoke('perform_database_migration');
+                console.log('Migration completed successfully');
+            } catch (error) {
+                console.error('Migration failed:', error);
+                domLoginEncryptTitle.textContent = `Migration failed: ${error}`;
+                domLoginEncryptTitle.style.color = 'red';
+            }
+        }, { once: true });
+
         // Setup a Rust Listener for the backend's init finish
         await listen('init_finished', (evt) => {
             // The backend now sends both profiles (without messages) and chats (with messages)
@@ -2759,8 +2783,17 @@ function openEncryptionFlow(pkey, fUnlock = false) {
         // If index < 0 (e.g., backspace from the first input), focus remains on the current (first) input.
     }
 
+    /** Flag to prevent multiple PIN submissions */
+    let pinProcessing = false;
+
     /** Handles the logic once all PIN digits have been entered. */
     async function handleFullPinEntered() {
+        // Prevent multiple submissions
+        if (pinProcessing) {
+            return;
+        }
+        pinProcessing = true;
+        
         const currentPinString = strPinCurrent.join('');
 
         if (strPinLast.length === 0) { // Initial PIN entry (for decryption or first step of new encryption)
@@ -2774,11 +2807,13 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                 } catch (e) {
                     updateStatusMessage(INCORRECT_PIN_MSG);
                     resetPinDisplay(true, false); // Keep error message, reset input fields
+                    pinProcessing = false; // Reset flag on error to allow retry
                 }
             } else { // First PIN entry for new encryption
                 strPinLast = [...strPinCurrent]; // Store the entered PIN
                 updateStatusMessage(RE_ENTER_PROMPT);
                 resetPinDisplay(true, false); // Keep "Re-enter" message, reset input fields
+                pinProcessing = false; // Reset flag to allow second PIN entry
             }
         } else { // Second PIN entry (confirmation for new encryption)
             const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
@@ -2790,6 +2825,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                 updateStatusMessage(MISMATCH_PIN_MSG);
                 strPinLast = []; // Clear the stored first PIN, requiring user to start over
                 resetPinDisplay(true, true); // Reset inputs and revert title from error to the initial prompt
+                pinProcessing = false; // Reset flag on mismatch to allow retry
             }
         }
     }
@@ -5130,15 +5166,15 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
-    // Immediately load and apply theme settings
+    // Immediately load and apply theme settings (visual only, don't save)
     const strTheme = await invoke('get_theme');
     if (strTheme) {
-        await setTheme(strTheme);
+        applyTheme(strTheme);
     }
 
-    // If a local encrypted key exists, boot up the decryption UI
-    if (await hasKey()) {
-        // Private Key is available, login screen!
+    // If a local account exists, boot up the decryption UI
+    if (await hasAccount()) {
+        // Account is available, login screen!
         openEncryptionFlow(null, true);
     }
 

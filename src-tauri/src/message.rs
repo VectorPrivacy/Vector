@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
-use crate::db_migration::{save_chat, save_chat_messages};
+use crate::db_migration::save_chat;
 use crate::net;
 use crate::STATE;
 use crate::util::{self, calculate_file_hash};
@@ -179,10 +179,9 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
                 })).unwrap();
                 
                 // Save the failed message to our DB
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
-                }
+                let message_to_save = message.clone();
+                drop(state); // Release lock before async DB operation
+                let _ = crate::db_migration::save_message(handle.clone(), receiver, &message_to_save).await;
                 break;
             }
         }
@@ -624,10 +623,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                 // Save the message to our DB
                 let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat(handle.clone(), chat).await;
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                let message_to_save = sent_msg.clone();
+                let chat_to_save = state.get_chat(&receiver).cloned();
+                drop(state); // Release lock before async DB operations
+                
+                if let Some(chat) = chat_to_save {
+                    let _ = save_chat(handle.clone(), &chat).await;
+                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
                 }
                 return Ok(true);
             }
@@ -723,10 +725,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                 // Save the message to our DB
                 let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat(handle.clone(), chat).await;
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                let message_to_save = sent_msg.clone();
+                let chat_to_save = state.get_chat(&receiver).cloned();
+                drop(state); // Release lock before async DB operations
+                
+                if let Some(chat) = chat_to_save {
+                    let _ = save_chat(handle.clone(), &chat).await;
+                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
                 }
                 return Ok(true);
             }
@@ -751,10 +756,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                 // Save the message to our DB
                 let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat(handle.clone(), chat).await;
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                let message_to_save = sent_ish_msg.clone();
+                let chat_to_save = state.get_chat(&receiver).cloned();
+                drop(state); // Release lock before async DB operations
+                
+                if let Some(chat) = chat_to_save {
+                    let _ = save_chat(handle.clone(), &chat).await;
+                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
                 }
                 return Ok(true);
             }
@@ -975,10 +983,13 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                     let was_added = msg.add_reaction(reaction, Some(&chat_id));
                     
                     if was_added {
-                        // Save to database
+                        // Save the updated message to database
                         if let Some(handle) = TAURI_APP.get() {
-                            let all_messages = chat.messages.clone();
-                            let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                            let updated_message = msg.clone();
+                            let chat_id = chat.id.clone();
+                            drop(state); // Release lock before async operation
+                            let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &updated_message).await;
+                            return Ok(true);
                         }
                     }
                     
@@ -1015,10 +1026,13 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                     let was_added = msg.add_reaction(reaction, Some(&chat_id));
                     
                     if was_added {
-                        // Save to database
+                        // Save the updated message to database
                         if let Some(handle) = TAURI_APP.get() {
-                            let all_messages = chat.messages.clone();
-                            let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                            let updated_message = msg.clone();
+                            let chat_id_clone = chat.id.clone();
+                            drop(state); // Release lock before async operation
+                            let _ = crate::db_migration::save_message(handle.clone(), &chat_id_clone, &updated_message).await;
+                            return Ok(true);
                         }
                     }
                     
@@ -1078,11 +1092,10 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
                         "chat_id": &chat_id
                     })).unwrap();
 
-                    // Save the new Metadata to the DB
-                    if let Some(chat) = state.get_chat(&chat_id) {
-                        let all_messages = chat.messages.clone();
-                        let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
-                    }
+                    // Save the updated message with metadata to the DB
+                    let message_to_save = msg.clone();
+                    drop(state); // Release lock before async DB operation
+                    let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &message_to_save).await;
                     return true;
                 }
             }

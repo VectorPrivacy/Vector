@@ -4,26 +4,12 @@ use tauri_plugin_store::StoreBuilder;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use crate::{Profile, Status, Attachment, Message, Reaction};
 use crate::net::SiteMetadata;
 use crate::crypto::{internal_encrypt, internal_decrypt};
-use crate::db_migration;
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct VectorDB {
-    pub db_version: Option<u64>,
-    pub theme: Option<String>,
-    pub pkey: Option<String>,
-    pub seed: Option<String>,
-    pub invite_code: Option<String>,
-}
 
 const DB_PATH: &str = "vector.json";
-
-/// Latest database version
-pub const LATEST_DB_VERSION: u64 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -39,15 +25,10 @@ pub struct SlimProfile {
     about: String,
     website: String,
     nip05: String,
-    /// Deprecated: Moved to Chat.last_read. This field is only kept for migration purposes.
-    /// Follow-up plan to drop this field:
-    /// 1. In the next release, stop using this field in the migration process
-    /// 2. In a subsequent release, remove this field from the struct and all related code
-    last_read: String,
     status: Status,
     muted: bool,
     bot: bool,
-    // Omitting: messages, last_updated, typing_until, mine
+    // Omitting: messages, last_updated, mine
 }
 
 impl Default for SlimProfile {
@@ -64,7 +45,6 @@ impl Default for SlimProfile {
             about: String::new(),
             website: String::new(),
             nip05: String::new(),
-            last_read: String::new(),
             status: Status::new(),
             muted: false,
             bot: false,
@@ -86,7 +66,6 @@ impl From<&Profile> for SlimProfile {
             about: profile.about.clone(),
             website: profile.website.clone(),
             nip05: profile.nip05.clone(),
-            last_read: profile.last_read.clone(),
             status: profile.status.clone(),
             muted: profile.muted,
             bot: profile.bot,
@@ -109,24 +88,57 @@ impl SlimProfile {
             about: self.about.clone(),
             website: self.website.clone(),
             nip05: self.nip05.clone(),
-            last_read: self.last_read.clone(),
             status: self.status.clone(),
             last_updated: 0,      // Default value
-            typing_until: 0,      // Default value
             mine: false,          // Default value
             muted: self.muted,
             bot: self.bot,
         }
     }
-    
-    // Getter for last_read field
-    pub fn last_read(&self) -> &str {
-        &self.last_read
-    }
 }
 
 // Function to get all profiles
 pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        // SQL mode - read from database
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot FROM profiles")
+            .map_err(|e| format!("Failed to prepare statement: {}", e))?;
+        
+        let profiles = stmt.query_map([], |row| {
+            Ok(SlimProfile {
+                id: row.get(0)?,  // npub column
+                name: row.get(1)?,
+                display_name: row.get(2)?,
+                nickname: row.get(3)?,
+                lud06: row.get(4)?,
+                lud16: row.get(5)?,
+                banner: row.get(6)?,
+                avatar: row.get(7)?,
+                about: row.get(8)?,
+                website: row.get(9)?,
+                nip05: row.get(10)?,
+                status: crate::Status {
+                    title: row.get(11)?,
+                    purpose: String::new(), // Not stored separately
+                    url: row.get(12)?,
+                },
+                muted: row.get::<_, i32>(13)? != 0,
+                bot: row.get::<_, i32>(14)? != 0,
+            })
+        })
+        .map_err(|e| format!("Failed to query profiles: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect profiles: {}", e))?;
+        
+        drop(stmt); // Explicitly drop stmt before returning connection
+        crate::account_manager::return_db_connection(conn);
+        return Ok(profiles);
+    }
+    
+    // Fallback to Store mode (for backward compatibility during transition)
     let store = get_store(handle);
     
     // Get the encrypted profiles
@@ -146,42 +158,58 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
     Ok(slim_profiles)
 }
 
-// Function to save all profiles
-async fn save_all_profiles<R: Runtime>(handle: &AppHandle<R>, profiles: Vec<SlimProfile>) -> Result<(), String> {
-    let store = get_store(handle);
-    
-    // Serialize to JSON
-    let json = serde_json::to_string(&profiles)
-        .map_err(|e| format!("Failed to serialize profiles: {}", e))?;
-    
-    // Encrypt the entire array
-    let encrypted = internal_encrypt(json, None).await;
-    
-    // Store in the DB
-    store.set("profiles".to_string(), serde_json::json!(encrypted));
-    
-    Ok(())
-}
 
 // Public command to set a profile
 #[command]
 pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> Result<(), String> {
-    // Get current profiles
-    let mut profiles = get_all_profiles(&handle).await?;
-    
-    // Convert the input profile to slim profile
-    let new_slim_profile = SlimProfile::from(&profile);
-    let profile_id = new_slim_profile.id.clone();
-    
-    // Find and replace the profile if it exists, or add it
-    if let Some(pos) = profiles.iter().position(|p| p.id == profile_id) {
-        profiles[pos] = new_slim_profile;
-    } else {
-        profiles.push(new_slim_profile);
+    // Try SQL first if account is selected
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        conn.execute(
+            "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(npub) DO UPDATE SET
+                name = excluded.name,
+                display_name = excluded.display_name,
+                nickname = excluded.nickname,
+                lud06 = excluded.lud06,
+                lud16 = excluded.lud16,
+                banner = excluded.banner,
+                avatar = excluded.avatar,
+                about = excluded.about,
+                website = excluded.website,
+                nip05 = excluded.nip05,
+                status_content = excluded.status_content,
+                status_url = excluded.status_url,
+                muted = excluded.muted,
+                bot = excluded.bot",
+            rusqlite::params![
+                profile.id,  // This is the npub
+                profile.name,
+                profile.display_name,
+                profile.nickname,
+                profile.lud06,
+                profile.lud16,
+                profile.banner,
+                profile.avatar,
+                profile.about,
+                profile.website,
+                profile.nip05,
+                profile.status.title,
+                profile.status.url,
+                profile.muted as i32,
+                profile.bot as i32,
+            ],
+        ).map_err(|e| format!("Failed to insert profile: {}", e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
     }
-    
-    // Save all profiles
-    save_all_profiles(&handle, profiles).await
+
+    // During migration, profiles are being loaded but account isn't selected yet
+    // Just skip saving to Store since migration will handle it
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -233,11 +261,6 @@ impl SlimMessage {
             npub: self.npub.clone(),
         }
     }
-    
-    // Get the contact ID
-    pub fn contact(&self) -> &str {
-        &self.contact
-    }
 }
 
 pub fn get_store<R: Runtime>(handle: &AppHandle<R>) -> Arc<tauri_plugin_store::Store<R>> {
@@ -247,71 +270,15 @@ pub fn get_store<R: Runtime>(handle: &AppHandle<R>) -> Arc<tauri_plugin_store::S
         .unwrap()
 }
 
-#[command]
-pub fn get_db<R: Runtime>(handle: AppHandle<R>) -> Result<VectorDB, String> {
-    let store = get_store(&handle);
-
-    // Grab the DB version - giving us backwards-compat awareness and the ability to upgrade previous formats
-    let db_version = match store.get("dbver") {
-        Some(value) if value.is_number() => Some(value.as_number().unwrap().as_u64().unwrap()),
-        _ => None,
-    };
-
-    // Extract optional fields
-    let theme = match store.get("theme") {
-        Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
-        _ => None,
-    };
-    
-    let pkey = match store.get("pkey") {
-        Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
-        _ => None,
-    };
-    
-    let seed = match store.get("seed") {
-        Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
-        _ => None,
-    };
-    
-    let invite_code = match store.get("invite_code") {
-        Some(value) if value.is_string() => Some(value.as_str().unwrap().to_string()),
-        _ => None,
-    };
-    
-    Ok(VectorDB {
-        db_version,
-        theme,
-        pkey,
-        seed,
-        invite_code,
-    })
-}
-
-#[command]
-pub async fn set_db_version<R: Runtime>(handle: AppHandle<R>, version: u64) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("dbver".to_string(), serde_json::json!(version));
-    Ok(())
-}
-
-#[command]
-pub fn get_db_version<R: Runtime>(handle: AppHandle<R>) -> Result<Option<u64>, String> {
-    let store = get_store(&handle);
-    match store.get("dbver") {
-        Some(value) if value.is_number() => Ok(value.as_number().unwrap().as_u64()),
-        _ => Ok(None),
-    }
-}
-
-#[command]
-pub fn set_theme<R: Runtime>(handle: AppHandle<R>, theme: String) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("theme".to_string(), serde_json::json!(theme));
-    Ok(())
-}
 
 #[command]
 pub fn get_theme<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
+    // Try SQL first
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        return get_sql_setting(handle.clone(), "theme".to_string());
+    }
+    
+    // Fallback to Store (pre-login)
     let store = get_store(&handle);
     match store.get("theme") {
         Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
@@ -320,62 +287,44 @@ pub fn get_theme<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Str
 }
 
 #[command]
-pub fn set_whisper_auto_translate<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("whisper_auto_translate".to_string(), serde_json::json!(to));
-    Ok(())
-}
-
-#[command]
-pub fn get_whisper_auto_translate<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
-    let store = get_store(&handle);
-    match store.get("whisper_auto_translate") {
-        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
-        _ => Ok(None),
-    }
-}
-
-#[command]
-pub fn set_whisper_auto_transcribe<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("whisper_auto_transcribe".to_string(), serde_json::json!(to));
-    Ok(())
-}
-
-#[command]
-pub fn get_whisper_auto_transcribe<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
-    let store = get_store(&handle);
-    match store.get("whisper_auto_transcribe") {
-        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
-        _ => Ok(None),
-    }
-}
-
-#[command]
-pub fn set_whisper_model_name<R: Runtime>(handle: AppHandle<R>, name: String) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("whisper_model_name".to_string(), serde_json::json!(name));
-    Ok(())
-}
-
-#[command]
-pub fn get_whisper_model_name<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
-    let store = get_store(&handle);
-    match store.get("whisper_model_name") {
-        Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
-        _ => Ok(None),
-    }
-}
-
-#[command]
 pub fn set_pkey<R: Runtime>(handle: AppHandle<R>, pkey: String) -> Result<(), String> {
+    // Try SQL first if account is selected
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["pkey", pkey],
+        ).map_err(|e| format!("Failed to insert pkey: {}", e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
+    }
+    
+    // Fallback to Store (migration pending - user is re-encrypting with new PIN)
     let store = get_store(&handle);
-    store.set("pkey".to_string(), serde_json::json!(pkey));
+    store.set("pkey", serde_json::json!(pkey));
+    store.save().map_err(|e| format!("Failed to save pkey to Store: {}", e))?;
     Ok(())
 }
 
 #[command]
 pub fn get_pkey<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        let result: Option<String> = conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params!["pkey"],
+            |row| row.get(0)
+        ).ok();
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(result);
+    }
+    
+    // Fallback to Store (pre-login)
     let store = get_store(&handle);
     match store.get("pkey") {
         Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
@@ -385,20 +334,48 @@ pub fn get_pkey<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Stri
 
 #[command]
 pub async fn set_seed<R: Runtime>(handle: AppHandle<R>, seed: String) -> Result<(), String> {
-    let store = get_store(&handle);
-    // Encrypt the seed phrase before storing it
     let encrypted_seed = internal_encrypt(seed, None).await;
-    store.set("seed".to_string(), serde_json::json!(encrypted_seed));
+    
+    let conn = crate::account_manager::get_db_connection(&handle)?;
+    
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["seed", encrypted_seed],
+    ).map_err(|e| format!("Failed to insert seed: {}", e))?;
+    
+    crate::account_manager::return_db_connection(conn);
     Ok(())
 }
 
 #[command]
 pub async fn get_seed<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
+    // Try SQL first
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        let encrypted_seed: Option<String> = conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params!["seed"],
+            |row| row.get(0)
+        ).ok();
+        
+        crate::account_manager::return_db_connection(conn);
+        
+        if let Some(encrypted) = encrypted_seed {
+            match internal_decrypt(encrypted, None).await {
+                Ok(decrypted) => return Ok(Some(decrypted)),
+                Err(_) => return Err("Failed to decrypt seed phrase".to_string()),
+            }
+        }
+        
+        return Ok(None);
+    }
+    
+    // Fallback to Store (pre-login)
     let store = get_store(&handle);
     match store.get("seed") {
         Some(value) if value.is_string() => {
             let encrypted_seed = value.as_str().unwrap().to_string();
-            // Decrypt the seed phrase
             match internal_decrypt(encrypted_seed, None).await {
                 Ok(decrypted) => Ok(Some(decrypted)),
                 Err(_) => Err("Failed to decrypt seed phrase".to_string()),
@@ -408,214 +385,51 @@ pub async fn get_seed<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>
     }
 }
 
+/// Set a setting value in SQL database
 #[command]
-pub fn set_invite_code<R: Runtime>(handle: AppHandle<R>, code: String) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("invite_code".to_string(), serde_json::json!(code));
+pub fn set_sql_setting<R: Runtime>(handle: AppHandle<R>, key: String, value: String) -> Result<(), String> {
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![&key, &value],
+        ).map_err(|e| format!("Failed to set setting: {}", e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
+    }
     Ok(())
 }
 
+/// Get a setting value from SQL database
 #[command]
-pub fn get_invite_code<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, String> {
-    let store = get_store(&handle);
-    match store.get("invite_code") {
-        Some(value) if value.is_string() => Ok(Some(value.as_str().unwrap().to_string())),
-        _ => Ok(None),
+pub fn get_sql_setting<R: Runtime>(handle: AppHandle<R>, key: String) -> Result<Option<String>, String> {
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        let result: Option<String> = conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params![&key],
+            |row| row.get(0)
+        ).ok();
+        
+        crate::account_manager::return_db_connection(conn);
+        return Ok(result);
     }
+    Ok(None)
 }
 
-#[command]
-pub fn get_web_previews<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
-    let store = get_store(&handle);
-    match store.get("web_previews") {
-        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
-        _ => Ok(None),
-    }
-}
-
-#[command]
-pub fn set_web_previews<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("web_previews".to_string(), serde_json::json!(to));
-    Ok(())
-}
-
-#[command]
-pub fn get_strip_tracking<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
-    let store = get_store(&handle);
-    match store.get("strip_tracking") {
-        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
-        _ => Ok(None),
-    }
-}
-
-#[command]
-pub fn set_strip_tracking<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("strip_tracking".to_string(), serde_json::json!(to));
-    Ok(())
-}
-
-#[command]
-pub fn get_send_typing_indicators<R: Runtime>(handle: AppHandle<R>) -> Result<Option<bool>, String> {
-    let store = get_store(&handle);
-    match store.get("send_typing_indicators") {
-        Some(value) if value.is_boolean() => Ok(Some(value.as_bool().unwrap())),
-        _ => Ok(None),
-    }
-}
-
-#[command]
-pub fn set_send_typing_indicators<R: Runtime>(handle: AppHandle<R>, to: bool) -> Result<(), String> {
-    let store = get_store(&handle);
-    store.set("send_typing_indicators".to_string(), serde_json::json!(to));
-    Ok(())
-}
 
 #[command]
 pub fn remove_setting<R: Runtime>(handle: AppHandle<R>, key: String) -> Result<bool, String> {
-    let store = get_store(&handle);
-    let deleted = store.delete(&key);
-    Ok(deleted)
-}
-
-pub fn nuke<R: Runtime>(handle: AppHandle<R>) -> Result<(), tauri_plugin_store::Error>{
-    let store = get_store(&handle);
-    store.clear();
-
-    // We explicitly save to ensure the automated debounce isn't missed in case of immediate shutdown
-    store.save()
-}
-
-// OLD MESSAGE FUNCTIONS - ONLY FOR READING DURING MIGRATION
-// DO NOT USE FOR NEW WRITES - USE THE CHAT-BASED SYSTEM IN db_migration.rs
-
-pub async fn old_get_all_messages<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<(Message, String)>, String> {
-    let store = get_store(handle);
+    let conn = crate::account_manager::get_db_connection(&handle)?;
     
-    // Get the messages map
-    let messages: HashMap<String, String> = match store.get("messages") {
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|e| format!("Failed to deserialize messages map: {}", e))?,
-        None => return Ok(vec![]), // No messages stored
-    };
+    let rows_affected = conn.execute(
+        "DELETE FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+    ).map_err(|e| format!("Failed to delete setting: {}", e))?;
     
-    let mut result = Vec::with_capacity(messages.len());
-    
-    // Process each message
-    for (_, encrypted) in messages.iter() {
-        // Decrypt
-        match internal_decrypt(encrypted.clone(), None).await {
-            Ok(json) => {
-                // Deserialize
-                match serde_json::from_str::<SlimMessage>(&json) {
-                    Ok(slim) => {
-                        // Extract the contact ID and message
-                        let contact_id = slim.contact().to_string();
-                        let message = slim.to_message();
-                        
-                        // Store both pieces of information
-                        result.push((message, contact_id));
-                    },
-                    Err(e) => {
-                        eprintln!("Error deserializing message: {}", e);
-                        // Continue processing other messages
-                    }
-                }
-            },
-            Err(_) => {
-                eprintln!("Error decrypting message...");
-                // Continue processing other messages
-            }
-        }
-    }
-    
-    Ok(result)
-}
-
-/// Run database migrations sequentially from current version to LATEST_DB_VERSION
-/// This function ensures migrations are applied in order and the dbver is updated after each
-pub async fn run_migrations<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
-    let current_version = get_db_version(handle.clone())?.unwrap_or(1); // Default to 1 if not set
-    println!("Current database version: {}", current_version);
-    
-    // If already at or above latest version, nothing to do
-    if current_version >= LATEST_DB_VERSION {
-        return Ok(());
-    }
-    
-    println!("Database needs migration from version {} to {}", current_version, LATEST_DB_VERSION);
-    
-    // Run migrations sequentially
-    // Since LATEST_DB_VERSION is 2, we only need to handle version 2 migration
-    if current_version < 2 {
-        println!("Starting migration to version 2...");
-        // Migration from profile-based to chat-based storage (version 2)
-        // This is the main migration that was previously handled in lib.rs
-        if db_migration::is_migration_needed(&handle).await.unwrap_or(true) {
-            println!("Migration is needed. Fetching profile messages...");
-            // Get all existing messages from the old profile-based storage
-            let profile_messages = old_get_all_messages(&handle).await.unwrap_or_else(|e| {
-                eprintln!("Failed to get profile messages for migration: {}", e);
-                Vec::new()
-            });
-            println!("Found {} profile messages to migrate.", profile_messages.len());
-            
-            if !profile_messages.is_empty() {
-                println!("Migrating {} messages from profile-based to chat-based storage...", profile_messages.len());
-                
-                // Perform the migration
-                match db_migration::migrate_profile_messages_to_chats(&handle, profile_messages).await {
-                    Ok(chats) => {
-                        println!("Successfully migrated {} chats", chats.len());
-                    },
-                    Err(e) => {
-                        return Err(format!("Failed to migrate chats for version 2: {}", e));
-                    }
-                }
-            } else {
-                println!("No profile messages to migrate.");
-            }
-            
-            println!("Marking migration as complete...");
-            // Mark migration as complete
-            db_migration::complete_migration(handle.clone()).await
-                .map_err(|e| format!("Failed to complete migration to version 2: {}", e))?;
-            println!("Migration to version 2 marked as complete.");
-        } else {
-            println!("Migration to version 2 is not needed according to is_migration_needed().");
-        }
-        
-        println!("Updating database version to 2...");
-        // Update database version after successful migration
-        set_db_version(handle.clone(), 2).await
-            .map_err(|e| format!("Failed to set database version to 2: {}", e))?;
-        println!("Database version successfully updated to 2.");
-    }
-    
-    // Run migration to version 3 (MLS group chats)
-    if current_version < 3 {
-        println!("Starting migration to version 3 (MLS group chats)...");
-        
-        // Check if MLS migration is needed
-        if db_migration::is_mls_migration_needed(&handle).await.unwrap_or(true) {
-            println!("MLS migration is needed. Initializing MLS collections...");
-            
-            // Run the MLS migration
-            db_migration::migrate_to_v3_mls_group_chats(handle.clone()).await
-                .map_err(|e| format!("Failed to migrate to version 3 (MLS): {}", e))?;
-            
-            println!("MLS migration to version 3 completed successfully.");
-        } else {
-            println!("MLS migration to version 3 is not needed according to is_mls_migration_needed().");
-            
-            // Still update the version if somehow we're at version 2 but MLS check says not needed
-            set_db_version(handle.clone(), 3).await
-                .map_err(|e| format!("Failed to set database version to 3: {}", e))?;
-            println!("Database version updated to 3.");
-        }
-    }
-    
-    println!("Database migrations completed successfully.");
-    Ok(())
+    crate::account_manager::return_db_connection(conn);
+    Ok(rows_affected > 0)
 }

@@ -23,14 +23,8 @@ pub struct Profile {
     pub about: String,
     pub website: String,
     pub nip05: String,
-    /// Deprecated: Moved to Chat.last_read. This field is only kept for migration purposes.
-    /// Follow-up plan to drop this field:
-    /// 1. In the next release, stop using this field in the migration process
-    /// 2. In a subsequent release, remove this field from the struct and all related code
-    pub last_read: String,
     pub status: Status,
     pub last_updated: u64,
-    pub typing_until: u64,
     pub mine: bool,
     pub muted: bool,
     pub bot: bool,
@@ -56,10 +50,8 @@ impl Profile {
             about: String::new(),
             website: String::new(),
             nip05: String::new(),
-            last_read: String::new(),
             status: Status::new(),
             last_updated: 0,
-            typing_until: 0,
             mine: false,
             muted: false,
             bot: false,
