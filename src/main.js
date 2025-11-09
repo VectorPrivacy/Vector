@@ -1054,38 +1054,66 @@ function updateChatHeaderSubtext(chat) {
     }
 }
 
+// Store a hash of the last rendered state to detect actual changes
+let lastChatlistStateHash = '';
+
+/**
+ * Generate a hash representing the current state of all chats
+ */
+function generateChatlistStateHash() {
+    // Build a simple array of state values (faster than creating objects)
+    const states = [];
+    
+    // Add invite IDs first
+    for (const inv of arrMLSInvites) {
+        states.push(inv.id || inv.welcome_event_id || inv.group_id);
+    }
+    
+    // Add chat states
+    for (const chat of arrChats) {
+        const isGroup = chat.chat_type === 'MlsGroup';
+        const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+        const cLastMsg = chat.messages[chat.messages.length - 1];
+        const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
+        const activeTypers = chat.active_typers || [];
+        
+        // Push values directly (faster than creating object)
+        states.push(
+            nUnread,
+            activeTypers.length,
+            cLastMsg?.id,
+            cLastMsg?.pending,
+            profile?.nickname || profile?.name,
+            profile?.avatar,
+            chat.muted
+        );
+    }
+    
+    return JSON.stringify(states);
+}
+
 /**
  * A "thread" function dedicated to rendering the Chat UI in real-time
  */
 function renderChatlist() {
     if (fInit) return;
 
-    // Check if the order of chats has changed, including invites
-    const currentOrder = Array.from(domChatList.children).map(el => el.id.replace('chatlist-', '').replace('invite-', ''));
-    const expectedOrder = [...arrMLSInvites.map(inv => `invite-${inv.id || inv.welcome_event_id || inv.group_id}`), ...arrChats.map(chat => chat.id)];
-    const orderChanged = JSON.stringify(currentOrder) !== JSON.stringify(expectedOrder);
+    // Generate a hash of the current RENDERABLE state
+    const currentStateHash = generateChatlistStateHash();
 
-    // If the order of the chatlist changes (i.e: new message), prep a fragment to re-render the full list in one sweep
+    // If the renderable state hasn't changed, skip rendering entirely
+    if (currentStateHash === lastChatlistStateHash) return;
+    lastChatlistStateHash = currentStateHash;
+
+    // Prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
     
     // Render invites first (at the top of the chat list)
     for (const invite of arrMLSInvites) {
-        try {
-            const divInvite = renderInviteItem(invite);
-            if (orderChanged) {
-                fragment.appendChild(divInvite);
-            } else {
-                const inviteId = `invite-${invite.id || invite.welcome_event_id || invite.group_id}`;
-                const domExistingInvite = document.getElementById(inviteId);
-                if (domExistingInvite) {
-                    domExistingInvite.replaceWith(divInvite);
-                }
-            }
-        } catch (err) {
-            console.warn('Failed to render MLS invite', invite, err);
-        }
+        const divInvite = renderInviteItem(invite);
+        fragment.appendChild(divInvite);
     }
-    
+
     // Then render regular chats
     for (const chat of arrChats) {
         // For groups, we show them even if they have no messages yet
@@ -1095,38 +1123,28 @@ function renderChatlist() {
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
 
-        // If the chat order changed; append to fragment instead of directly to the DOM for full list re-render efficiency
         const divContact = renderChat(chat);
-        if (orderChanged) {
-            fragment.appendChild(divContact);
-        } else {
-            // The order hasn't changed, so it's more efficient to replace the existing elements
-            const domExistingContact = document.getElementById(`chatlist-${chat.id}`);
-            domExistingContact.replaceWith(divContact);
-            // Note: we don't check if domExistingContact exists now, as it should be guarenteed by the very first orderChanged check
-        }
+        fragment.appendChild(divContact);
     }
 
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
     if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
 
-    // Add all elements at once for performance
-    if (orderChanged) {
-        // Nuke the existing list
-        while (domChatList.firstChild) {
-            domChatList.removeChild(domChatList.firstChild);
-        }
-        // Append our new fragment
-        domChatList.appendChild(fragment);
-
-        // Add a fade-in
-        const divFade = document.createElement('div');
-        divFade.classList.add(`fadeout-bottom`);
-        divFade.style.bottom = `65px`;
-        domChatList.appendChild(divFade);
+    // Nuke the existing list
+    while (domChatList.firstChild) {
+        domChatList.removeChild(domChatList.firstChild);
     }
     
-    // Update the back button notification dot when chatlist changes
+    // Append our new fragment
+    domChatList.appendChild(fragment);
+
+    // Add a fade-in
+    const divFade = document.createElement('div');
+    divFade.classList.add(`fadeout-bottom`);
+    divFade.style.bottom = `65px`;
+    domChatList.appendChild(divFade);
+    
+    // Update the back button notification
     updateChatBackNotification();
 }
 
@@ -1233,7 +1251,7 @@ function renderChat(chat) {
     const divContact = document.createElement('div');
     if (nUnread) divContact.style.borderColor = '#59fcb3';
     divContact.classList.add('chatlist-contact');
-    divContact.id = chat.id;
+    divContact.id = `chatlist-${chat.id}`;
 
     // The Username + Message Preview container
     const divPreviewContainer = document.createElement('div');
@@ -5646,7 +5664,9 @@ document.addEventListener('click', (e) => {
             return;
         }
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
-        return openChat(strID);
+        // Strip the 'chatlist-' prefix if present
+        const chatId = strID.replace('chatlist-', '');
+        return openChat(chatId);
     }
 
     // If we're clicking an Attachment Download button, request the download
