@@ -15,7 +15,7 @@ use nostr_sdk::prelude::*;
 /// 3. No npub* profile directories with vector.db exist (migration hasn't been done yet)
 pub async fn is_sql_migration_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, String> {
     // Check if vector.json exists
-    let app_data = handle.path().app_local_data_dir()
+    let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     
     let vector_json_path = app_data.join("vector.json");
@@ -118,7 +118,7 @@ pub async fn migrate_store_to_sql<R: Runtime>(
         "message": "Reading existing data..."
     })).map_err(|e| format!("Failed to emit progress: {}", e))?;
     
-    let app_data = handle.path().app_local_data_dir()
+    let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     
     let vector_json_path = app_data.join("vector.json");
@@ -328,7 +328,7 @@ async fn migrate_profiles<R: Runtime>(
 /// - vector.json (old Store database)
 /// - mls/ directory (old MLS data, now in npub*/mls/)
 pub fn cleanup_old_store_files<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
-    let app_data = handle.path().app_local_data_dir()
+    let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     
     let mut cleaned_files = Vec::new();

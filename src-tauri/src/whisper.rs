@@ -370,7 +370,9 @@ pub fn resample_audio(path: &Path, target_rate: u32) -> Result<Vec<f32>, Box<dyn
 /// # Returns
 /// * `bool` - true if the model is already downloaded, false otherwise
 pub fn is_model_downloaded<R: Runtime>(handle: &AppHandle<R>, model_name: &str) -> bool {
-    // Get models directory in app data directory
+    // Note: Whisper models use app_local_data_dir (AppData\Local on Windows)
+    // while user data uses app_data_dir (AppData\Roaming). This is intentional
+    // as large AI models are better suited to Local (cache-like) storage.
     let models_dir = handle.path().app_local_data_dir().unwrap().join("whisper");
     
     // Construct model path

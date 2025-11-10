@@ -465,7 +465,7 @@ async fn fetch_messages<R: Runtime>(
             let my_public_key = signer.get_public_key().await.unwrap();
             let npub = my_public_key.to_bech32().unwrap();
             
-            let app_data = handle.path().app_local_data_dir().ok();
+            let app_data = handle.path().app_data_dir().ok();
             if let Some(data_dir) = app_data {
                 let profile_db = data_dir.join(&npub).join("vector.db");
                 if profile_db.exists() {

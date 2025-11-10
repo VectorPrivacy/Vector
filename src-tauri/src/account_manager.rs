@@ -120,7 +120,7 @@ pub fn get_profile_directory<R: Runtime>(
     handle: &AppHandle<R>,
     npub: &str
 ) -> Result<PathBuf, String> {
-    let app_data = handle.path().app_local_data_dir()
+    let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     
     // Validate npub format
@@ -175,7 +175,7 @@ pub fn get_mls_directory<R: Runtime>(
 /// 
 /// Returns: Vec of full npubs
 pub fn list_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, String> {
-    let app_data = handle.path().app_local_data_dir()
+    let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     
     let mut accounts = Vec::new();
@@ -199,7 +199,7 @@ pub fn list_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, S
 /// Check if a Store-based account exists (vector.json) with a valid pkey
 /// This is used to detect accounts that need migration
 pub fn has_store_account<R: Runtime>(handle: &AppHandle<R>) -> bool {
-    if let Ok(app_data) = handle.path().app_local_data_dir() {
+    if let Ok(app_data) = handle.path().app_data_dir() {
         let vector_json = app_data.join("vector.json");
         if vector_json.exists() {
             // Check if the Store has a pkey (encrypted private key)
@@ -210,7 +210,6 @@ pub fn has_store_account<R: Runtime>(handle: &AppHandle<R>) -> bool {
                     return true;
                 }
             }
-            println!("[Account Manager] Found vector.json but no pkey - not a valid account");
         }
     }
     false
