@@ -773,10 +773,6 @@ async function init() {
                 // Clear the array if we haven't received an update in 35 seconds
                 // (30s expiry + 5s grace period for network delays)
                 if (!chat.last_typing_update || now - chat.last_typing_update > 35) {
-                    // Only log for groups
-                    if (chat.chat_type === 'MlsGroup') {
-                        console.log('[TYPING] ⏰ Clearing expired typing indicators for group:', chat.id.substring(0, 16));
-                    }
                     chat.active_typers = [];
                     
                     // If this is the open chat, refresh the display
@@ -2375,6 +2371,9 @@ async function login() {
                     domChatNewGroup.onclick = openCreateGroup;
                     domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
                 }
+
+                // Adjust the Chat List sizes to prevent mismatches
+                adjustSize();
 
                 // Setup a subscription for new websocket messages
                 invoke("notifs");
