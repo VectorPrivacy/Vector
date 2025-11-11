@@ -3013,13 +3013,12 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     profile.mine = true;
     STATE.lock().await.profiles.push(profile);
 
-    // Initialize the profile database and set as current account
-    let handle = TAURI_APP.get().ok_or("App not initialized")?;
-    account_manager::init_profile_database(handle, &npub).await?;
-    account_manager::set_current_account(npub.clone())?;
-
     // Save the seed in memory, ready for post-pin-setup encryption
     let _ = MNEMONIC_SEED.set(mnemonic_string);
+
+    // Store npub temporarily - database will be created when set_pkey is called (after user sets PIN)
+    // This prevents creating "dead accounts" if user quits before setting a PIN
+    account_manager::set_pending_account(npub.clone())?;
 
     // Return the keypair in the same format as the login function
     Ok(LoginKeyPair {

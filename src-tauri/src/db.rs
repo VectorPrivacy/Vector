@@ -287,7 +287,24 @@ pub fn get_theme<R: Runtime>(handle: AppHandle<R>) -> Result<Option<String>, Str
 }
 
 #[command]
-pub fn set_pkey<R: Runtime>(handle: AppHandle<R>, pkey: String) -> Result<(), String> {
+pub async fn set_pkey<R: Runtime>(handle: AppHandle<R>, pkey: String) -> Result<(), String> {
+    // Check if there's a pending account (new account creation flow)
+    if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
+        // Initialize database for the pending account
+        crate::account_manager::init_profile_database(&handle, &npub).await?;
+        crate::account_manager::set_current_account(npub.clone())?;
+        crate::account_manager::clear_pending_account()?;
+        
+        // Now save the pkey to the newly created database
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["pkey", pkey],
+        ).map_err(|e| format!("Failed to insert pkey: {}", e))?;
+        crate::account_manager::return_db_connection(conn);
+        return Ok(());
+    }
+    
     // Try SQL first if account is selected
     if let Ok(_npub) = crate::account_manager::get_current_account() {
         let conn = crate::account_manager::get_db_connection(&handle)?;
