@@ -163,6 +163,10 @@
   mask-image: url("./icons/send.svg");
 }
 
+.icon-message {
+  mask-image: url("./icons/message.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;

@@ -39,6 +39,7 @@ const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
+const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileId = document.getElementById('profile-id');
 
