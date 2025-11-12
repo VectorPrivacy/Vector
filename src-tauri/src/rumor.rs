@@ -387,21 +387,19 @@ async fn process_app_specific(
             .map_err(|e| format!("System time error: {}", e))?
             .as_secs();
         
-        // Accept typing indicators that:
-        // 1. Haven't expired yet (expiry > current)
-        // 2. Expire within 60 seconds (to account for network latency and clock skew)
-        if expiry_timestamp > current_timestamp && expiry_timestamp <= current_timestamp + 60 {
-            // Valid typing indicator
-            let profile_id = rumor.pubkey.to_bech32()
-                .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
-            
-            return Ok(RumorProcessingResult::TypingIndicator {
-                profile_id,
-                until: expiry_timestamp,
-            });
-        } else {
+        // Reject expired or future-dated typing indicators (more than 30 sec in the future)
+        if expiry_timestamp <= current_timestamp || expiry_timestamp > current_timestamp + 30 {
             return Ok(RumorProcessingResult::Ignored);
         }
+        
+        // Valid typing indicator (not expired and within reasonable time window)
+        let profile_id = rumor.pubkey.to_bech32()
+            .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
+        
+        return Ok(RumorProcessingResult::TypingIndicator {
+            profile_id,
+            until: expiry_timestamp,
+        });
     }
     
     // Unknown application-specific data

@@ -1379,14 +1379,6 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
         
         (added, typers)
     };
-    
-    // Emit typing update to clear the indicator on frontend
-    if let Some(handle) = TAURI_APP.get() {
-        let _ = handle.emit("typing-update", serde_json::json!({
-            "conversation_id": contact,
-            "typers": active_typers
-        }));
-    }
 
     // If accepted in-state: commit to the DB and emit to the frontend
     if was_msg_added_to_state {
@@ -1687,14 +1679,6 @@ async fn notifs() -> Result<bool, String> {
                                                                     show_notification_generic(notification);
                                                                 }
                                                                 
-                                                                // Emit typing update to clear the indicator on frontend
-                                                                if let Some(handle) = TAURI_APP.get() {
-                                                                    let _ = handle.emit("typing-update", serde_json::json!({
-                                                                        "conversation_id": group_id_for_persist,
-                                                                        "typers": active_typers
-                                                                    }));
-                                                                }
-                                                                
                                                                 // Save to database if message was added
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
@@ -1783,14 +1767,6 @@ async fn notifs() -> Result<bool, String> {
                                                                     let notification = NotificationData::group_message(sender_name, group_name, content);
                                                                     
                                                                     show_notification_generic(notification);
-                                                                }
-                                                                
-                                                                // Emit typing update to clear the indicator on frontend
-                                                                if let Some(handle) = TAURI_APP.get() {
-                                                                    let _ = handle.emit("typing-update", serde_json::json!({
-                                                                        "conversation_id": group_id_for_persist,
-                                                                        "typers": active_typers
-                                                                    }));
                                                                 }
                                                                 
                                                                 // Save to database if message was added
@@ -3672,11 +3648,8 @@ async fn mls_create_group_simple(name: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .as_secs();
 
-    // Load existing groups
-    let mut groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
-
     // Append new metadata entry
-    groups.push(mls::MlsGroupMetadata {
+    let new_group = mls::MlsGroupMetadata {
         group_id: group_id.clone(),
         engine_group_id: String::new(),
         creator_pubkey: creator_pubkey_b32,
@@ -3685,10 +3658,10 @@ async fn mls_create_group_simple(name: String) -> Result<String, String> {
         created_at: now_secs,
         updated_at: now_secs,
         evicted: false,
-    });
+    };
 
-    // Save groups to SQL/store
-    let _ = db_migration::save_mls_groups(handle.clone(), &groups).await;
+    // Save only the new group to SQL/store (more efficient)
+    let _ = db_migration::save_mls_group(handle.clone(), &new_group).await;
 
     Ok(group_id)
 }
@@ -4053,7 +4026,8 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|e| e.to_string())?
                         .as_secs();
-                    mls.write_groups(&groups).await.map_err(|e| e.to_string())?;
+                    // Update only the specific group instead of all groups
+                    crate::db_migration::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
                 } else {
                     println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
                 }
@@ -4075,8 +4049,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                     evicted: false,                           // Accepting a welcome means we're joining, not evicted
                 };
                 
-                groups.push(metadata.clone());
-                mls.write_groups(&groups).await.map_err(|e| e.to_string())?;
+                crate::db_migration::save_mls_group(handle.clone(), &metadata).await.map_err(|e| e.to_string())?;
                 
                 // Create the Chat in STATE with metadata and save to disk
                 {

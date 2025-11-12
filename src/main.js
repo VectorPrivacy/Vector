@@ -985,7 +985,6 @@ function updateChatHeaderSubtext(chat) {
     
     const isGroup = chat.chat_type === 'MlsGroup';
     const fNotes = chat.id === strPubkey;
-    
     if (fNotes) {
         domChatContactStatus.textContent = 'Encrypted Notes to Self';
         domChatContactStatus.classList.remove('text-gradient');
@@ -1584,51 +1583,55 @@ async function setupRustListeners() {
         // Find or create the group chat
         const chat = getOrCreateChat(group_id, 'MlsGroup');
         
-        // Message is now a full Message object from unified storage!
-        // It already has the correct format with attachments, reactions, etc.
-        const newMessage = {
-            id: message.id,
-            content: message.content,
-            replied_to: message.replied_to || null,
-            preview_metadata: message.preview_metadata || null,
-            attachments: message.attachments || [],
-            reactions: message.reactions || [],
-            at: message.at, // Already in milliseconds
-            pending: message.pending || false,
-            failed: message.failed || false,
-            mine: message.mine,
-            npub: message.npub || null // Sender's npub for group chats
-        };
-        
         // Check for duplicates
-        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
+        const existingMsg = chat.messages.find(m => m.id === message.id);
         if (existingMsg) {
-            console.log('Duplicate message detected (already in memory):', newMessage.id);
+            console.log('Duplicate message detected (already in memory):', message.id);
             return;
         }
         
         // Clear typing indicator for the sender when they send a message
-        if (!newMessage.mine && chat.active_typers && message.sender_npub) {
-            // Remove the sender from active typers
-            chat.active_typers = chat.active_typers.filter(npub => npub !== message.sender_npub);
-            console.log('[TYPING] 💬 Cleared typing indicator after group message from:', message.sender_npub.substring(0, 16));
-            
-            // If this is the open chat, refresh the display
-            if (strOpenChat === group_id) {
-                openChat(group_id);
-            }
+        if (!message.mine && chat.active_typers) {
+            // For group chats, use npub if available; for DMs, use sender identifier
+            chat.active_typers = chat.active_typers.filter(npub => npub !== message.npub);
         }
         
-        // Add message to chat
-        chat.messages.push(newMessage);
+        // Find the correct position to insert the message based on timestamp (efficient binary search)
+        const messages = chat.messages;
         
-        // Sort messages by time
-        chat.messages.sort((a, b) => a.at - b.at);
+        // Check if the array is empty or the new message is newer than the newest message
+        if (messages.length === 0 || message.at > messages[messages.length - 1].at) {
+            // Insert at the end (newest)
+            messages.push(message);
+        }
+        // Check if the new message is older than the oldest message
+        else if (message.at < messages[0].at) {
+            // Insert at the beginning (oldest)
+            messages.unshift(message);
+        }
+        // Otherwise, find the correct position in the middle using binary search
+        else {
+            // Binary search for better performance with large message arrays
+            let low = 0;
+            let high = messages.length - 1;
+            
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2);
+                
+                if (messages[mid].at < message.at) {
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            
+            // Insert the message at the correct position (low is now the index where it should go)
+            messages.splice(low, 0, message);
+        }
         
         // If this group has the open chat, update it
         if (strOpenChat === group_id) {
-            console.log('Updating open group chat with new message, pending:', newMessage.pending);
-            updateChat(chat, [newMessage]);
+            updateChat(chat, [message]);
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
@@ -1984,33 +1987,21 @@ async function setupRustListeners() {
     // Listen for typing indicator updates (both DMs and Groups)
     await listen('typing-update', (evt) => {
         const { conversation_id, typers } = evt.payload;
-        
+
         // Find the chat (could be DM or group)
         const chat = arrChats.find(c => c.id === conversation_id);
         if (!chat) return;
-        
-        // Only log for groups
-        const isGroup = chat.chat_type === 'MlsGroup';
-        if (isGroup) {
-            console.log('[TYPING] 📥 Frontend received typing-update:', { conversation_id: conversation_id.substring(0, 16), typers });
-        }
-        
+
         // Store the typers array and update timestamp
         chat.active_typers = typers || [];
         chat.last_typing_update = Date.now() / 1000;
-        
-        if (isGroup) {
-            console.log('[TYPING] 💾 Updated chat.active_typers:', { chat_id: chat.id.substring(0, 16), active_typers: chat.active_typers });
-        }
-        
+
         // If this chat is currently open, update the chat header subtext
         if (strOpenChat === conversation_id) {
-            if (isGroup) console.log('[TYPING] 🔄 Updating chat header subtext');
             updateChatHeaderSubtext(chat);
         }
-        
+
         // Update the chat list preview
-        if (isGroup) console.log('[TYPING] 🔄 Refreshing chat list');
         renderChatlist();
     });
 
@@ -2029,13 +2020,7 @@ async function setupRustListeners() {
         // Clear typing indicator for the sender when they send a message
         if (!newMessage.mine && chat.active_typers) {
             // Remove the sender from active typers
-            const senderNpub = evt.payload.chat_id;
-            chat.active_typers = chat.active_typers.filter(npub => npub !== senderNpub);
-            
-            // If this is the open chat, refresh the display
-            if (strOpenChat === evt.payload.chat_id) {
-                openChat(evt.payload.chat_id);
-            }
+            chat.active_typers = chat.active_typers.filter(npub => npub !== evt.payload.chat_id);
         }
 
         // Find the correct position to insert the message based on timestamp
@@ -2089,7 +2074,7 @@ async function setupRustListeners() {
         }
 
         // Render the Chat List
-        renderChatlist();
+        if (!strOpenChat) renderChatlist();
     });
 
     // Listen for existing message updates
@@ -2120,7 +2105,7 @@ async function setupRustListeners() {
         }
 
         // Render the Chat List
-        renderChatlist();
+        if (!strOpenChat) renderChatlist();
     });
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
@@ -2612,6 +2597,9 @@ function renderProfileTab(cProfile) {
         domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
         domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
         domProfileOptionMute.onclick = () => invoke('toggle_muted', { npub: cProfile.id });
+
+        // Setup Message option
+        domProfileOptionMessage.onclick = () => openChat(cProfile.id);
 
         // Setup Nickname option
         domProfileOptionNickname.onclick = async () => {

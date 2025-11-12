@@ -708,6 +708,40 @@ pub async fn save_mls_groups<R: Runtime>(
     }
 }
 
+/// Save a single MLS group to SQL database (plaintext columns) - more efficient for adding new groups
+pub async fn save_mls_group<R: Runtime>(
+    handle: AppHandle<R>,
+    group: &crate::mls::MlsGroupMetadata,
+) -> Result<(), String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        
+        // Insert or replace a single group
+        conn.execute(
+            "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                group.group_id,
+                group.engine_group_id,
+                group.creator_pubkey,
+                group.name,
+                group.avatar_ref,
+                group.created_at as i64,
+                group.updated_at as i64,
+                group.evicted as i32,
+            ],
+        ).map_err(|e| format!("Failed to save MLS group {}: {}", group.group_id, e))?;
+        
+        println!("[SQL] Saved 1 MLS group to mls_groups table");
+        crate::account_manager::return_db_connection(conn);
+        Ok(())
+    } else {
+        // After migration, all users have SQL accounts
+        Err("No SQL account found - migration required".to_string())
+    }
+}
+
 /// Load MLS groups from SQL database (plaintext columns)
 pub async fn load_mls_groups<R: Runtime>(
     handle: &AppHandle<R>,

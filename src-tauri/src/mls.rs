@@ -1760,37 +1760,41 @@ impl MlsService {
     /// Clean up an evicted group (mark as evicted, remove from STATE, delete from DB)
     /// This can be called from both sync and live subscription handlers
     pub async fn cleanup_evicted_group(&self, group_id: &str) -> Result<(), MlsError> {
-        // 1. Mark group as evicted in metadata
-        let mut groups = self.read_groups().await.unwrap_or_default();
-        let mut marked = false;
-        for group in &mut groups {
+        // 1. Find and mark the specific group as evicted in metadata
+        let groups = self.read_groups().await.unwrap_or_default();
+        let mut marked_group: Option<crate::mls::MlsGroupMetadata> = None;
+        
+        for group in &groups {
             if group.group_id == group_id || group.engine_group_id == group_id {
-                group.evicted = true;
-                marked = true;
+                let mut updated_group = group.clone();
+                updated_group.evicted = true;
+                marked_group = Some(updated_group);
                 break;
             }
         }
         
-        if marked {
-            if let Err(e) = self.write_groups(&groups).await {
+        // 2. If we found the group, update only that specific group
+        if let Some(group_to_update) = marked_group {
+            let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
+            if let Err(e) = crate::db_migration::save_mls_group(handle, &group_to_update).await {
                 eprintln!("[MLS] Failed to mark group as evicted: {}", e);
             }
         }
         
-        // 2. Remove from in-memory STATE
+        // 3. Remove from in-memory STATE
         {
             let mut state = STATE.lock().await;
             state.chats.retain(|c| c.id() != group_id);
         }
         
-        // 3. Delete from database
+        // 4. Delete from database
         if let Some(handle) = TAURI_APP.get() {
             if let Err(e) = crate::db_migration::delete_chat(handle.clone(), group_id).await {
                 eprintln!("[MLS] Failed to delete chat from storage: {}", e);
             }
         }
         
-        // 4. Emit event to frontend
+        // 5. Emit event to frontend
         if let Some(handle) = TAURI_APP.get() {
             if let Err(e) = handle.emit("mls_group_left", serde_json::json!({
                 "group_id": group_id
