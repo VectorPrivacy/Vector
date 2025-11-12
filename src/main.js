@@ -755,13 +755,9 @@ async function init() {
 
     // Run a very slow loop to update dynamic elements, like "last message time"
     setInterval(() => {
-        // If the chatlist is open: re-render to update timestamps
-        if (domChats.style.display !== 'none') renderChatlist();
-
-        // If the chat is open; run a 'soft' render
-        if (strOpenChat) {
-            const chat = arrChats.find(c => c.id === strOpenChat);
-            if (chat) updateChat(chat, []);
+        // If the chatlist is open: update timestamps
+        if (domChats.style.display !== 'none') {
+            updateChatlistTimestamps();
         }
     }, 30000);
 
@@ -771,14 +767,13 @@ async function init() {
         const now = Date.now() / 1000;
         arrChats.forEach(chat => {
             if (chat.active_typers && chat.active_typers.length > 0) {
-                // Clear the array if we haven't received an update in 35 seconds
-                // (30s expiry + 5s grace period for network delays)
-                if (!chat.last_typing_update || now - chat.last_typing_update > 35) {
+                // Clear the array if we haven't received an update in 30 seconds
+                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
                     chat.active_typers = [];
                     
                     // If this is the open chat, refresh the display
                     if (strOpenChat === chat.id) {
-                        openChat(chat.id);
+                        updateChatHeaderSubtext(chat);
                     }
                     
                     // Refresh chat list
@@ -1482,6 +1477,71 @@ function countUnreadMessages(chat) {
  * Update the notification dot on the chat back button
  * Shows the dot if there are unread messages in OTHER chats (not the currently open one) OR unanswered invites
  */
+function updateChatlistTimestamps() {
+    // Get all chatlist items that are currently displayed
+    const chatListItems = document.querySelectorAll('.chatlist-contact');
+    
+    // For each chat item, find and update the timestamp and status
+    chatListItems.forEach(item => {
+        // Extract chat ID from the item's ID (format: chatlist-{chatId})
+        const chatId = item.id.substring(8);
+        
+        // Find the corresponding chat in our array
+        const chat = arrChats.find(c => c.id === chatId);
+        
+        if (chat && chat.messages.length > 0) {
+            // Get the last message timestamp
+            const lastMessage = chat.messages[chat.messages.length - 1];
+            
+            // Skip updating if the message is older than 1 day (for performance)
+            if (lastMessage.at < Date.now() - 86400000) return;
+            
+            // Find the timestamp element in this chat item
+            const timestampElement = item.querySelector('.chatlist-contact-timestamp');
+            
+            if (timestampElement) {
+                // Update the timestamp text using timeAgo function
+                timestampElement.textContent = timeAgo(lastMessage.at);
+            }
+            
+            // Update status indicator if needed (for DMs only)
+            const avatarContainer = item.querySelector('.avatar-status-icon')?.parentElement;
+            if (avatarContainer && chat.chat_type !== 'MlsGroup') {
+                // Remove existing status icon if present
+                const existingStatusIcon = avatarContainer.querySelector('.avatar-status-icon');
+                if (existingStatusIcon) {
+                    existingStatusIcon.remove();
+                }
+                
+                // Add new status icon based on last message time
+                const divStatusIcon = document.createElement('div');
+                divStatusIcon.classList.add('avatar-status-icon');
+                
+                // Find the last message from the contact (not from the user)
+                let cLastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        cLastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                
+                if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
+                    // set the divStatusIcon .backgroundColor to green (online)
+                    divStatusIcon.style.backgroundColor = '#59fcb3';
+                    avatarContainer.appendChild(divStatusIcon);
+                }
+                else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
+                    // set to orange (away)
+                    divStatusIcon.style.backgroundColor = '#fce459';
+                    avatarContainer.appendChild(divStatusIcon);
+                }
+                // offline... don't show status icon at all (no need to append the divStatusIcon)
+            }
+        }
+    });
+}
+
 function updateChatBackNotification() {
     if (!domChatBackNotificationDot) return;
     
