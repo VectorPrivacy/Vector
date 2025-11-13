@@ -188,6 +188,11 @@ body {
   margin: 0;
 }
 
+::selection {
+  background-color: rgba(255, 255, 255, 0.225);
+  color: #ffffff;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   background-color: transparent;
