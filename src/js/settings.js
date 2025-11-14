@@ -594,6 +594,8 @@ async function setTheme(theme = 'vector', mode = 'dark') {
 // Apply Theme changes in real-time
 domSettingsThemeSelect.onchange = async (evt) => {
     await setTheme(evt.target.value);
+    // Refresh storage section after theme change to update colors
+    initStorageSection();
 };
 
 // Listen for Logout clicks
@@ -666,6 +668,347 @@ let fStripTrackingEnabled = true;
 let fSendTypingIndicators = true;
 
 /**
+ * Get storage information from the backend
+ */
+async function getStorageInfo() {
+    try {
+        const storageData = await invoke('get_storage_info');
+        return storageData;
+    } catch (error) {
+        console.error('Failed to get storage info:', error);
+        return null;
+    }
+}
+
+/**
+ * Clear storage by deleting all files in the Vector directory
+ */
+async function clearStorage() {
+    const clearStorageBtn = document.getElementById('clear-storage-btn');
+    if (clearStorageBtn.disabled) return;
+
+    const confirmClear = await popupConfirm(
+        'Clear Storage?',
+        'This will delete all downloaded and sent files from Vector. This action cannot be undone.',
+        false,
+        '',
+        'vector_warning.svg'
+    );
+    
+    if (!confirmClear) return;
+    
+    let strPrevText = clearStorageBtn.textContent;
+    try {
+        clearStorageBtn.disabled = true;
+        clearStorageBtn.textContent = 'Clearing...';
+        await invoke('clear_storage');
+        clearStorageBtn.textContent = strPrevText;
+        clearStorageBtn.disabled = false;
+        return true;
+    } catch (error) {
+        clearStorageBtn.textContent = strPrevText;
+        clearStorageBtn.disabled = false;
+        console.error('Failed to clear storage:', error);
+        await popupConfirm('Clear Failed', `Could not clear storage: ${error.message}`, true, '', 'vector_warning.svg');
+        return false;
+    }
+}
+
+/**
+ * Initialize the Storage section in settings
+ */
+async function initStorageSection() {
+    // Get and display storage info
+    const storageInfo = await getStorageInfo();
+    if (storageInfo) {
+        // Update storage summary with formatted total size
+        const storageSummary = document.getElementById('storage-summary');
+        if (storageSummary) {
+            if (storageInfo.total_bytes === 0) {
+                storageSummary.textContent = "A breakdown of Vector's storage use.";
+            } else {
+                storageSummary.textContent = `A breakdown of Vector's ${storageInfo.total_formatted} in files.`;
+            }
+        }
+        
+        // Render file type distribution bar
+        renderFileTypeDistribution(storageInfo.type_distribution, storageInfo.file_count);
+    }
+}
+
+function renderFileTypeDistribution(typeDistribution, totalBytes) {
+    const storageBar = document.getElementById('storage-bar');
+    if (!storageBar) return;
+    
+    // Clear existing segments and tooltips
+    storageBar.innerHTML = '';
+    
+    // Remove any existing tooltip if it exists
+    const existingTooltip = document.getElementById('storage-tooltip');
+    if (existingTooltip) {
+        existingTooltip.remove();
+    }
+    
+    // Handle case when there are no files
+    if (totalBytes === 0) {
+        storageBar.innerHTML = '<div style="width: 100%; height: 100%; background-color: #333; display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;">No Storage Used</div>';
+        return;
+    }
+    
+    // Create tooltip element
+    const tooltip = document.createElement('div');
+    tooltip.id = 'storage-tooltip';
+    tooltip.style.position = 'absolute';
+    tooltip.style.backgroundColor = '#333';
+    tooltip.style.color = 'white';
+    tooltip.style.padding = '8px 12px';
+    tooltip.style.borderRadius = '6px';
+    tooltip.style.fontSize = '12px';
+    tooltip.style.pointerEvents = 'none';
+    tooltip.style.opacity = '0';
+    tooltip.style.display = 'none';
+    tooltip.style.transition = 'opacity 0.2s ease';
+    tooltip.style.zIndex = '1000';
+    tooltip.style.whiteSpace = 'nowrap';
+    tooltip.style.boxShadow = '0 2px 10px rgba(0, 0, 0, 0.3)';
+    document.body.appendChild(tooltip);
+    
+    // Define file type categories with their extensions
+    const categories = [
+        {
+            name: 'Images',
+            extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg']
+        },
+        {
+            name: 'Video',
+            extensions: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', '3gp', 'ogg', 'webm']
+        }
+    ];
+    
+    // Calculate sizes for each category
+    const categorySizes = categories.map(category => {
+        let size = 0;
+        for (const ext of category.extensions) {
+            if (typeDistribution[ext]) {
+                size += typeDistribution[ext];
+            }
+        }
+        return { name: category.name, size: size };
+    });
+    
+    // Calculate size for other files
+    let otherSize = 0;
+    for (const ext in typeDistribution) {
+        let isCategorized = false;
+        for (const category of categories) {
+            if (category.extensions.includes(ext)) {
+                isCategorized = true;
+                break;
+            }
+        }
+        if (!isCategorized) {
+            otherSize += typeDistribution[ext];
+        }
+    }
+    
+    // Create segments array with all categories and sort by size (descending)
+    const segments = [];
+    for (const category of categorySizes) {
+        if (category.size > 0) {
+            segments.push({
+                name: category.name,
+                size: category.size
+            });
+        }
+    }
+    
+    // Add "Other" if there are any uncategorized files
+    if (otherSize > 0) {
+        segments.push({
+            name: 'Other',
+            size: otherSize
+        });
+    }
+    
+    // Sort segments by size (largest first)
+    segments.sort((a, b) => b.size - a.size);
+    
+    // Get primary color from theme
+    const root = document.documentElement;
+    const primaryColor = getComputedStyle(root).getPropertyValue('--icon-color-primary').trim();
+    
+    // Create segments in the bar
+    for (const segmentData of segments) {
+        const size = Number(segmentData.size);
+        // Use sum of all typeDistribution values as total, since totalBytes is incorrect
+        const total = Object.values(typeDistribution).reduce((sum, val) => sum + Number(val), 0);
+        const percentage = (size / total) * 100;
+        // Convert hex to RGB and set opacity based on percentage
+        const rgbColor = hexToRgb(primaryColor);
+        const opacity = percentage / 100;
+        // Round to 2 decimal places to avoid floating point precision issues
+        const roundedPercentage = Math.round(percentage * 100) / 100;
+        const segment = document.createElement('div');
+        segment.style.width = `${roundedPercentage}%`;
+        segment.style.flexShrink = '0';
+        segment.style.boxSizing = 'border-box';
+        // Ensure minimum opacity of 1% for visibility
+        const preciseOpacity = Math.max(0.01, opacity);
+        // Set background color using CSS variable and opacity
+        // Apply opacity directly to background using existing primaryColor and rgbColor
+        const backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, ${preciseOpacity})`;
+        segment.style.backgroundColor = backgroundColor;
+        // Set position relative to enable absolute positioning of child elements
+        segment.style.position = 'relative';
+        
+        // Add text label if percentage is greater than 20%
+        if (roundedPercentage > 20) {
+            const label = document.createElement('div');
+            label.textContent = `${segmentData.name} (${roundedPercentage.toFixed(0)}%)`;
+            label.style.position = 'absolute';
+            label.style.top = '50%';
+            label.style.left = '50%';
+            label.style.transform = 'translate(-50%, -50%)';
+            label.style.color = 'white';
+            label.style.textAlign = 'center';
+            label.style.fontWeight = 'bold';
+            label.style.fontSize = '12px';
+            label.style.fontFamily = 'Arial, sans-serif';
+            label.style.whiteSpace = 'nowrap';
+            label.style.cursor = 'default';
+            segment.appendChild(label);
+        }
+        
+        segment.dataset.type = segmentData.name;
+        segment.dataset.size = segmentData.size;
+        
+        segment.addEventListener('mouseenter', (e) => {
+            const tooltip = document.getElementById('storage-tooltip');
+            if (tooltip) {
+                // Format size in human-readable format
+                const formattedSize = `${segmentData.name} - ${formatBytes(segmentData.size)}`;
+                tooltip.textContent = formattedSize;
+                tooltip.style.display = 'block';
+                tooltip.style.opacity = '1';
+                
+                // Position tooltip above the cursor with edge detection
+                const tooltipWidth = tooltip.offsetWidth;
+                const tooltipHeight = tooltip.offsetHeight;
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+                
+                // Calculate tooltip position based on cursor position
+                let leftPos = e.clientX + window.scrollX;
+                let topPos = e.clientY + window.scrollY - tooltipHeight - 10;
+                
+                // Check if tooltip would overflow right edge
+                if (leftPos + tooltipWidth > viewportWidth) {
+                    // Position tooltip to the left of cursor
+                    leftPos = e.clientX + window.scrollX - tooltipWidth;
+                }
+                
+                // Check if tooltip would overflow left edge
+                if (leftPos < 0) {
+                    leftPos = 10;
+                }
+                
+                // Check if tooltip would overflow bottom edge
+                if (topPos + tooltipHeight > viewportHeight) {
+                    // Position tooltip above cursor
+                    topPos = e.clientY + window.scrollY + 10;
+                }
+                
+                // Ensure tooltip doesn't go off top edge
+                if (topPos < 0) {
+                    topPos = 10;
+                }
+                
+                tooltip.style.left = `${leftPos}px`;
+                tooltip.style.top = `${topPos}px`;
+            }
+        });
+        
+        segment.addEventListener('mouseleave', () => {
+            const tooltip = document.getElementById('storage-tooltip');
+            if (tooltip) {
+                tooltip.style.opacity = '0';
+                setTimeout(() => {
+                    if (tooltip.style.opacity === '0') {
+                        tooltip.style.display = 'none';
+                    }
+                }, 200);
+            }
+        });
+        
+        storageBar.appendChild(segment);
+    }
+    
+    // If no files or all segments are empty, ensure the bar is filled
+    if (totalBytes === 0 || segments.length === 0) {
+        const segment = document.createElement('div');
+        segment.style.flex = '1';
+        // Use primary color with very low opacity for empty state
+        const rgbColor = hexToRgb(primaryColor);
+        segment.style.backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, 0.1)`;
+        segment.dataset.type = 'NONE';
+        segment.dataset.size = 0;
+        
+        segment.addEventListener('mouseenter', (e) => {
+            const tooltip = document.getElementById('storage-tooltip');
+            if (tooltip) {
+                tooltip.textContent = 'No files found';
+                tooltip.style.opacity = '1';
+                
+                // Position tooltip above the segment with edge detection
+                const rect = e.target.getBoundingClientRect();
+                const tooltipWidth = tooltip.offsetWidth;
+                const viewportWidth = window.innerWidth;
+                
+                // Calculate tooltip position
+                let leftPos = rect.left + window.scrollX;
+                
+                // Check if tooltip would overflow right edge
+                if (leftPos + tooltipWidth > viewportWidth) {
+                    // Position tooltip to the left of the segment
+                    leftPos = rect.right + window.scrollX - tooltipWidth;
+                }
+                
+                // Ensure tooltip doesn't go off left edge
+                if (leftPos < 0) {
+                    leftPos = 0;
+                }
+                
+                tooltip.style.left = `${leftPos}px`;
+                tooltip.style.top = `${rect.top + window.scrollY - 30}px`;
+            }
+        });
+        
+        segment.addEventListener('mouseleave', () => {
+            const tooltip = document.getElementById('storage-tooltip');
+            if (tooltip) {
+                tooltip.style.opacity = '0';
+            }
+        });
+        
+        storageBar.appendChild(segment);
+    }
+    
+    // Helper function to convert hex color to RGB
+    function hexToRgb(hex) {
+        // Remove # if present
+        hex = hex.replace('#', '');
+        
+        // Parse hex to RGB
+        const bigint = parseInt(hex, 16);
+        return {
+            r: (bigint >> 16) & 255,
+            g: (bigint >> 8) & 255,
+            b: bigint & 255
+        };
+    }
+}
+
+/**
  * Initialize settings on app start
  */
 async function initSettings() {
@@ -695,5 +1038,12 @@ async function initSettings() {
     sendTypingToggle.addEventListener('change', async (e) => {
         fSendTypingIndicators = e.target.checked;
         await saveSendTypingIndicators(e.target.checked);
+    });
+
+    // Set up clear storage button
+    const clearStorageBtn = document.getElementById('clear-storage-btn');
+    clearStorageBtn.addEventListener('click', async () => {
+        const success = await clearStorage();
+        if (success) initStorageSection();
     });
 }

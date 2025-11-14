@@ -32,7 +32,7 @@ mod net;
 mod blossom;
 
 mod util;
-use util::{get_file_type_description, calculate_file_hash};
+use util::{get_file_type_description, calculate_file_hash, format_bytes};
 
 #[cfg(target_os = "android")]
 mod android {
@@ -940,6 +940,7 @@ async fn check_attachment_filesystem_integrity<R: Runtime>(
                         // File is missing, set downloaded to false
                         attachment.downloaded = false;
                         message_updated = true;
+                        attachment.path = String::new();
                     }
                 }
             }
@@ -2619,17 +2620,22 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                 // Persist updated message/attachment metadata to the database
                 if let Some(handle) = TAURI_APP.get() {
                     // Find and save only the updated message
+                    let updated_chat = state.get_chat(&npub).unwrap();
                     let updated_message = {
-                        state.get_chat(&npub)
-                            .and_then(|chat| chat.messages.iter().find(|m| m.id == msg_id))
-                            .cloned()
-                    };
+                        updated_chat.messages.iter().find(|m| m.id == msg_id).cloned()
+                    }.unwrap();
+
+                    // Update the frontend state
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": &updated_message.id,
+                        "message": updated_message.clone(),
+                        "chat_id": updated_chat.id()
+                    })).unwrap();
+
                     // Drop the STATE lock before performing async I/O
                     drop(state);
-                    
-                    if let Some(msg) = updated_message {
-                        let _ = db_migration::save_message(handle.clone(), &npub, &msg).await;
-                    }
+
+                    let _ = db_migration::save_message(handle.clone(), &npub, &updated_message).await;
                 }
             }
             
@@ -3295,6 +3301,146 @@ async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     
     // Return the inviter's npub so the frontend can initiate a chat
     Ok(inviter_npub)
+}
+
+/// Get storage information for the Vector directory
+#[tauri::command]
+async fn get_storage_info() -> Result<serde_json::Value, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
+    
+    // Determine the base directory (Downloads on most platforms, Documents on iOS)
+    let base_directory = if cfg!(target_os = "ios") {
+        tauri::path::BaseDirectory::Document
+    } else {
+        tauri::path::BaseDirectory::Download
+    };
+    
+    // Resolve the vector directory path
+    let vector_dir = handle.path().resolve("vector", base_directory)
+        .map_err(|e| format!("Failed to resolve vector directory: {}", e))?;
+    
+    // Check if directory exists
+    if !vector_dir.exists() {
+        return Ok(serde_json::json!({
+            "path": vector_dir.to_string_lossy().to_string(),
+            "total_bytes": 0,
+            "file_count": 0,
+            "type_distribution": {}
+        }));
+    }
+    
+    // Calculate total size and file count
+    let mut total_bytes = 0;
+    let mut file_count = 0;
+    
+    // Track file type distribution by size
+    let mut type_distribution = std::collections::HashMap::new();
+    
+    // Walk through all files in the directory
+    if let Ok(entries) = std::fs::read_dir(&vector_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_file() {
+                    let file_size = metadata.len();
+                    total_bytes += file_size;
+                    file_count += 1;
+                    
+                    // Get file extension
+                    if let Some(extension) = entry.file_name().to_string_lossy().split('.').last() {
+                        let extension = extension.to_lowercase();
+                        *type_distribution.entry(extension).or_insert(0) += file_size;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Return storage information with type distribution
+    Ok(serde_json::json!({
+        "path": vector_dir.to_string_lossy().to_string(),
+        "total_bytes": total_bytes,
+        "file_count": file_count,
+        "total_formatted": format_bytes(total_bytes),
+        "type_distribution": type_distribution
+    }))
+}
+
+/// Clear all downloaded attachments from messages and return freed storage space
+#[tauri::command]
+async fn clear_storage() -> Result<serde_json::Value, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
+    
+    // First, get the total storage size before clearing
+    let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
+    let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
+    
+    // Lock the state to access all chats and messages
+    let mut state = STATE.lock().await;
+    
+    // Track which chats have been updated to avoid duplicate saves
+    let mut updated_chats = std::collections::HashSet::new();
+    
+    // Process each chat to clear attachment metadata in messages
+    for chat in &mut state.chats {
+        let mut messages_to_update = Vec::new();
+        
+        // Iterate through all messages in this chat
+        for message in &mut chat.messages {
+            let mut attachment_updated = false;
+            
+            // Iterate through all attachments and reset their properties
+            for attachment in &mut message.attachments {
+                if attachment.downloaded || !attachment.path.is_empty() {
+                    // Delete the file, if it exists
+                    if std::fs::exists(&attachment.path).unwrap_or(false) {
+                        let _ = std::fs::remove_file(&attachment.path);
+                    }
+                    // Reset attachment properties
+                    attachment.downloaded = false;
+                    attachment.downloading = false;
+                    attachment.path = String::new();
+                    attachment_updated = true;
+                }
+            }
+            
+            // If any attachment was updated, add to messages to update
+            if attachment_updated {
+                messages_to_update.push(message.clone());
+            }
+        }
+        
+        // If we have messages to update, save them to the database
+        if !messages_to_update.is_empty() {
+            // Save updated messages to database
+            db_migration::save_chat_messages(handle.clone(), chat.id(), &messages_to_update).await
+                .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat.id(), e))?;
+            
+            // Emit message_update events for each updated message
+            for message in &messages_to_update {
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &message.id,
+                    "message": message,
+                    "chat_id": chat.id()
+                })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat.id(), e))?;
+            }
+            
+            updated_chats.insert(chat.id().to_string());
+        }
+    }
+    
+    // Get storage info after clearing to calculate freed space
+    let storage_info_after = get_storage_info().await.map_err(|e| format!("Failed to get storage info after clearing: {}", e))?;
+    let total_bytes_after = storage_info_after["total_bytes"].as_u64().unwrap_or(0);
+    
+    // Calculate freed space
+    let freed_bytes = total_bytes_before.saturating_sub(total_bytes_after);
+    
+    // Return the freed storage information
+    Ok(serde_json::json!({
+        "freed_bytes": freed_bytes,
+        "freed_formatted": format_bytes(freed_bytes),
+        "updated_chats": updated_chats.len()
+    }))
 }
 
 /// Get the count of unique users who accepted invites from a given npub
@@ -4597,6 +4743,8 @@ pub fn run() {
             accept_invite_code,
             get_invited_users,
             check_fawkes_badge,
+            get_storage_info,
+            clear_storage,
             export_keys,
             bootstrap_mls_device_keypackage,
             // Simple MLS command wrappers for console/manual testing:

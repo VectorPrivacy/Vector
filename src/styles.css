@@ -2245,6 +2245,48 @@ select:disabled:hover {
   margin-top: 50px;
 }
 
+@media (max-height: 300px) {
+  .login-logo {
+    display: none;
+  }
+
+  .login-subtext {
+    display: none;
+  }
+}
+
+@media (max-height: 500px) {
+  .login-logo {
+    margin-top: 0px;
+  }
+
+  #login-start {
+    bottom: 10px !important;
+  }
+
+  .chat-new-center-content .chat-new-icon,
+  .chat-new-center-content .chat-new-subtitle,
+  .chat-new-center-content .divider {
+    display: none;
+  }
+}
+
+@media (max-height: 600px) {
+  .login-logo {
+    width: 43vh;
+  }
+  
+  .login-credits {
+    display: none;
+  }
+}
+
+#login-start {
+  position: absolute;
+  width: 100%;
+  bottom: 0;
+}
+
 .login-subtext {
   margin-top: 5px;
 }

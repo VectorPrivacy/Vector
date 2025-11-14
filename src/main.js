@@ -5089,6 +5089,9 @@ function openSettings() {
     domGroupOverview.style.display = 'none';
     previousChatBeforeProfile = ""; // Clear when navigating away
 
+    // Update the Storage Breakdown
+    initStorageSection();
+
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
     if (updateDot && updateDot.style.display !== 'none') {
