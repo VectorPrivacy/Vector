@@ -1,222 +1,454 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
-    <link rel="stylesheet" href="/highlight-github-dark.min.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Vector</title>
-    <script src="/main.js" defer></script>
-    <script src="/js/chat-scroll.js" defer></script>
-    <script src="/js/settings.js" defer></script>
-    <script src="/js/misc.js" defer></script>
-    <script src="/js/db.js" defer></script>
-    <script src="/js/voice.js" defer></script>
-    <script src="/js/updater.js" defer></script>
-    <script src="/js/previewer.js" defer></script>
-    <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
-    <!-- DOMPurify - HTML sanitization -->
-    <script src="/js/dompurify.min.js"></script>
-    <!-- Highlight.js - Syntax highlighting for code blocks -->
-    <script src="/js/highlight.min.js"></script>
-    <!-- Marked.js - Modern markdown parser (local copy) -->
-    <script src="/js/marked.min.js"></script>
-    <script src="/js/markdown.js"></script>
-    <script src="/js/emoji.js"></script>
-    <script src="/js/payments.js"></script>
-    <!-- OS-specific code (how should we handle this better? runtime injection?) -->
-    <script src="/js/platforms/android.js"></script>
-    <!-- Minified Libraries -->
-    <script src="/js/twemoji.min.js"></script>
-  </head>
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="styles.css" />
+  <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
+  <link rel="stylesheet" href="/highlight-github-dark.min.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Vector</title>
+  <script src="/main.js" defer></script>
+  <script src="/js/chat-scroll.js" defer></script>
+  <script src="/js/settings.js" defer></script>
+  <script src="/js/misc.js" defer></script>
+  <script src="/js/db.js" defer></script>
+  <script src="/js/voice.js" defer></script>
+  <script src="/js/updater.js" defer></script>
+  <script src="/js/previewer.js" defer></script>
+  <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
+  <!-- DOMPurify - HTML sanitization -->
+  <script src="/js/dompurify.min.js"></script>
+  <!-- Highlight.js - Syntax highlighting for code blocks -->
+  <script src="/js/highlight.min.js"></script>
+  <!-- Marked.js - Modern markdown parser (local copy) -->
+  <script src="/js/marked.min.js"></script>
+  <script src="/js/markdown.js"></script>
+  <script src="/js/emoji.js"></script>
+  <script src="/js/payments.js"></script>
+  <!-- OS-specific code (how should we handle this better? runtime injection?) -->
+  <script src="/js/platforms/android.js"></script>
+  <!-- Minified Libraries -->
+  <script src="/js/twemoji.min.js"></script>
+</head>
 
-  <body>
-    <div id="popup-container" class="popup-container">
-      <center id="popup" class="popup" style="display: none;">
-        <div class="popup-content">
-          <img id="popupIcon" src="./icons/vector_warning.svg" style="height: 100px;">
-          <h2 id="popupTitle"></h2>
-          <p id="popupSubtext"><br><i style="opacity: 0.5"></i></p>
+<body>
+  <div id="popup-container" class="popup-container">
+    <center id="popup" class="popup" style="display: none;">
+      <div class="popup-content">
+        <img id="popupIcon" src="./icons/vector_warning.svg" style="height: 100px;">
+        <h2 id="popupTitle"></h2>
+        <p id="popupSubtext"><br><i style="opacity: 0.5"></i></p>
 
-          <input id="popupInput">
-          <hr class="divider">
+        <input id="popupInput">
+        <hr class="divider">
+      </div>
+      <div class="popup-buttons">
+        <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
+      </div>
+    </center>
+  </div>
+
+  <main class="container">
+    <!-- The Global emoji picker popup -->
+    <div class="emoji-picker" tabindex="-1">
+      <div class="emoji-search-container">
+        <input id="emoji-search-input" placeholder="Search...">
+        <span class="emoji-search-icon icon icon-search"></span>
+      </div>
+      <div class="emoji-picker-content">
+        <div class="emoji-sidebar">
+          <button class="emoji-category-btn active" data-category="recents">
+            <span class="icon icon-clock"></span>
+          </button>
+          <button class="emoji-category-btn" data-category="favorites">
+            <span class="icon icon-star"></span>
+          </button>
+          <button class="emoji-category-btn" data-category="all">
+            <span class="icon icon-smile-face"></span>
+          </button>
         </div>
-        <div class="popup-buttons">
-          <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
+        <div class="emoji-main">
+          <div class="emoji-section" id="emoji-recents">
+            <div class="emoji-section-header">
+              <span class="section-icon icon icon-clock"></span>
+              <span class="header-text">Recently Used</span>
+              <span class="icon icon-chevron-down"></span>
+            </div>
+            <div class="emoji-grid" id="emoji-recents-grid"></div>
+          </div>
+          <div class="emoji-section" id="emoji-favorites">
+            <div class="emoji-section-header">
+              <span class="section-icon icon icon-star"></span>
+              <span class="header-text">Favorites</span>
+              <span class="icon icon-chevron-down"></span>
+            </div>
+            <div class="emoji-grid" id="emoji-favorites-grid"></div>
+          </div>
+          <div class="emoji-section" id="emoji-all">
+            <div class="emoji-section-header">
+              <span class="section-icon icon icon-smile-face"></span>
+              <span class="header-text">Emojis</span>
+              <span class="icon icon-chevron-down"></span>
+            </div>
+            <div class="emoji-grid" id="emoji-all-grid"></div>
+          </div>
         </div>
-      </center>
+      </div>
     </div>
 
-    <main class="container">
-<!-- The Global emoji picker popup -->
-<div class="emoji-picker" tabindex="-1">
-  <div class="emoji-search-container">
-    <input id="emoji-search-input" placeholder="Search...">
-    <span class="emoji-search-icon icon icon-search"></span>
-  </div>
-  <div class="emoji-picker-content">
-    <div class="emoji-sidebar">
-      <button class="emoji-category-btn active" data-category="recents">
-        <span class="icon icon-clock"></span>
-      </button>
-      <button class="emoji-category-btn" data-category="favorites">
-        <span class="icon icon-star"></span>
-      </button>
-      <button class="emoji-category-btn" data-category="all">
-        <span class="icon icon-smile-face"></span>
-      </button>
-    </div>
-    <div class="emoji-main">
-      <div class="emoji-section" id="emoji-recents">
-        <div class="emoji-section-header">
-          <span class="section-icon icon icon-clock"></span>
-          <span class="header-text">Recently Used</span>
-          <span class="icon icon-chevron-down"></span>
+    <!-- Left Panel -->
+    <div class="left-panel">
+      <!-- Profile View -->
+      <div id="profile" class="chats" style="display: none;">
+        <div style="height: 60px; background-color: #161616;">
+          <div id="profile-back-btn" class="btn nav-back-btn">
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+          </div>
+          <div>
+            <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
+            <span id="profile-status" class="cutoff chat-contact-status btn"></span>
+          </div>
         </div>
-        <div class="emoji-grid" id="emoji-recents-grid"></div>
-      </div>
-      <div class="emoji-section" id="emoji-favorites">
-        <div class="emoji-section-header">
-          <span class="section-icon icon icon-star"></span>
-          <span class="header-text">Favorites</span>
-          <span class="icon icon-chevron-down"></span>
+        <div style="position: relative;">
+          <img id="profile-banner" class="profile-banner">
+          <div class="profile-banner-edit btn">
+            <span class="icon icon-edit"></span>
+          </div>
+          <div class="profile-avatar-container">
+            <img id="profile-avatar" class="profile-avatar">
+            <div class="profile-avatar-edit btn">
+              <span class="icon icon-plus-circle"></span>
+            </div>
+          </div>
         </div>
-        <div class="emoji-grid" id="emoji-favorites-grid"></div>
-      </div>
-      <div class="emoji-section" id="emoji-all">
-        <div class="emoji-section-header">
-          <span class="section-icon icon icon-smile-face"></span>
-          <span class="header-text">Emojis</span>
-          <span class="icon icon-chevron-down"></span>
+        <div style="padding-bottom: 75px;">
+          <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
+          <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
+          <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites"
+              src="./icons/vector_badge_hex_placeholder.svg" class="btn"
+              style="height: 30px; width: 30px; display: none;"></div>
+          <span id="profile-description" class="chat-contact-status"
+            style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+          <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor"
+            style="display: none; margin-top: 10px;"></textarea>
+          <div id="profile-option-list" class="profile-options">
+            <div id="profile-option-mute" class="btn profile-option">
+              <span class="icon icon-volume-mute navbar-icon"></span>
+              <p class="navbar-text">Mute</p>
+            </div>
+            <div id="profile-option-nickname" class="btn profile-option">
+              <span class="icon icon-edit-user navbar-icon"></span>
+              <p class="navbar-text">Rename</p>
+            </div>
+          </div>
+          <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
+            <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
+          </div>
+          <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
+            <span id="profile-npub" class="profile-npub"></span>
+            <button id="profile-npub-copy" class="btn profile-npub-copy">
+              <span class="icon icon-copy"></span>
+            </button>
+          </div>
+          <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
+          <span id="profile-id" style="display: none;"></span>
         </div>
-        <div class="emoji-grid" id="emoji-all-grid"></div>
       </div>
-    </div>
-  </div>
-</div>
 
-<div id="profile" class="chats" style="display: none;">
-  <div style="height: 60px; background-color: #161616;">
-    <div id="profile-back-btn" class="btn nav-back-btn">
-      <span class="icon icon-chevron-double-left nav-icon"></span>
-    </div>
-    <div>
-      <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
-      <span id="profile-status" class="cutoff chat-contact-status btn"></span>
-    </div>
-  </div>
-  <div style="position: relative;">
-    <img id="profile-banner" class="profile-banner">
-    <div class="profile-banner-edit btn">
-      <span class="icon icon-edit"></span>
-    </div>
-    <div class="profile-avatar-container">
-      <img id="profile-avatar" class="profile-avatar">
-      <div class="profile-avatar-edit btn">
-        <span class="icon icon-plus-circle"></span>
+      <!-- Group Overview -->
+      <div id="group-overview" class="chats" style="display: none;">
+        <div style="height: 60px; background-color: #161616;">
+          <div id="group-overview-back-btn" class="btn nav-back-btn">
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+          </div>
+          <div>
+            <h3 id="group-overview-name" class="chat-contact-with-status btn"></h3>
+            <span id="group-overview-status" class="cutoff chat-contact-status btn"></span>
+          </div>
+        </div>
+        <div
+          style="position: relative; margin-top: 25px; text-align: center; width: 100px; height: 100px; margin-left: auto; margin-right: auto;">
+          <span id="group-overview-avatar" class="icon icon-chat-circle"
+            style="width: 100px; height: 100px; border-radius: initial; display: inline-block;"></span>
+        </div>
+        <div style="padding-bottom: 75px;">
+          <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn"></h3>
+          <span id="group-overview-description" class="chat-contact-status"
+            style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+          <div style="margin-top: 40px; width: 90%; margin-left: auto; margin-right: auto;">
+            <div style="display: flex; justify-content: center; margin-bottom: 10px;">
+              <button id="group-invite-member-btn" class="btn accept-btn btn-bounce"
+                style="background-color: transparent; display: flex; align-items: center; gap: 6px;">
+                <span class="icon icon-add-user"
+                  style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
+                <span style="color: white;">Invite Member</span>
+              </button>
+              <button id="group-leave-btn" class="btn cancel-btn btn-bounce"
+                style="background-color: transparent; display: none; align-items: center; gap: 6px;">
+                <span class="icon icon-trash"
+                  style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-danger);"></span>
+                <span style="color: var(--color-danger);">Leave Group</span>
+              </button>
+            </div>
+            <div class="emoji-search-container" style="padding: 10px 0px;">
+              <span class="emoji-search-icon icon icon-search"
+                style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
+              <input id="group-member-search-input" placeholder="Search members..."
+                style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
+            </div>
+            <div id="group-overview-members"
+              style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
+              <!-- Members will be rendered here dynamically -->
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
-  <div style="padding-bottom: 75px;">
-    <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
-    <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
-    <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"></div>
-    <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-    <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
-    <div id="profile-option-list" class="profile-options">
-      <div id="profile-option-mute" class="btn profile-option">
-        <span class="icon icon-volume-mute navbar-icon"></span>
-        <p class="navbar-text">Mute</p>
-      </div>
-      <div id="profile-option-nickname" class="btn profile-option">
-        <span class="icon icon-edit-user navbar-icon"></span>
-        <p class="navbar-text">Rename</p>
-      </div>
-    </div>
-    <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
-      <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
-    </div>
-    <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
-      <span id="profile-npub" class="profile-npub"></span>
-      <button id="profile-npub-copy" class="btn profile-npub-copy">
-        <span class="icon icon-copy"></span>
-      </button>
-    </div>
-    <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
-    <span id="profile-id" style="display: none;"></span>
-  </div>
-</div>
 
-<div id="group-overview" class="chats" style="display: none;">
-  <div style="height: 60px; background-color: #161616;">
-    <div id="group-overview-back-btn" class="btn nav-back-btn">
-      <span class="icon icon-chevron-double-left nav-icon"></span>
-    </div>
-    <div>
-      <h3 id="group-overview-name" class="chat-contact-with-status btn"></h3>
-      <span id="group-overview-status" class="cutoff chat-contact-status btn"></span>
-    </div>
-  </div>
-  <div style="position: relative; margin-top: 25px; text-align: center; width: 100px; height: 100px; margin-left: auto; margin-right: auto;">
-    <span id="group-overview-avatar" class="icon icon-chat-circle" style="width: 100px; height: 100px; border-radius: initial; display: inline-block;"></span>
-  </div>
-  <div style="padding-bottom: 75px;">
-    <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn"></h3>
-    <span id="group-overview-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-    <div style="margin-top: 40px; width: 90%; margin-left: auto; margin-right: auto;">
-      <div style="display: flex; justify-content: center; margin-bottom: 10px;">
-        <button id="group-invite-member-btn" class="btn accept-btn btn-bounce" style="background-color: transparent; display: flex; align-items: center; gap: 6px;">
-          <span class="icon icon-add-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
-          <span style="color: white;">Invite Member</span>
-        </button>
-        <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="background-color: transparent; display: none; align-items: center; gap: 6px;">
-          <span class="icon icon-trash" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-danger);"></span>
-          <span style="color: var(--color-danger);">Leave Group</span>
-        </button>
-      </div>
-      <div class="emoji-search-container" style="padding: 10px 0px;">
-        <span class="emoji-search-icon icon icon-search" style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
-        <input id="group-member-search-input" placeholder="Search members..." style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
-      </div>
-      <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
-        <!-- Members will be rendered here dynamically -->
-      </div>
-    </div>
-  </div>
-</div>
-
+      <!-- Chat List -->
       <div id="chats" class="chats">
         <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">
           <span class="icon icon-bookmark nav-icon"></span>
         </div>
         <div id="account" class="account" style="display: none;"></div>
         <div id="sync-line" class="sync-line"></div>
-        
+
         <!-- MLS Group Invites Section (hidden by default) -->
         <div id="mls-invites-section" class="mls-invites-section" style="display: none; margin: 10px 15px 20px;">
           <div id="mls-invites-container" style="max-height: 145px; overflow-y: auto;">
             <!-- Invites will be rendered here dynamically -->
           </div>
         </div>
-        
+
         <!-- New Chat Buttons -->
         <div style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
           <button id="new-chat-btn" class="new-chat-btn btn" style="width: 50%; margin-right: 5px; display: none;">
             <span class="icon icon-new-msg"></span>
             <span style="width: 100%">New Chat</span>
           </button>
-          <button id="create-group-btn" class="new-chat-btn btn" style="width: 50%; margin-left: 5px; margin-right: 10px; display: none;">
+          <button id="create-group-btn" class="new-chat-btn btn"
+            style="width: 50%; margin-left: 5px; margin-right: 10px; display: none;">
             <span class="icon icon-chat-circle"></span>
             <span style="width: 100%">Group Chat</span>
           </button>
         </div>
-        
+
         <div id="chat-list">
-          
+          <!-- Chat list will be populated dynamically -->
         </div>
       </div>
 
+      <!-- Settings -->
+      <div id="settings" style="display: none;">
+        <h2 style="margin-top: 40px">Choose your Theme</h2>
+        <select id="theme-select">
+          <option value="vector">Vector</option>
+          <option value="chatstr">Chatstr</option>
+        </select>
+
+        <!-- Voice Settings Section -->
+        <div id="settings-voice" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Voice Settings</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span>
+                <span id="whisper-auto-translate-info" class="icon icon-info btn"
+                  style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto
+                Translate</span>
+              <input type="checkbox" id="auto-translate-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span>
+                <span id="whisper-auto-transcribe-info" class="icon icon-info btn"
+                  style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto
+                Transcribe</span>
+              <input type="checkbox" id="auto-transcribe-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group" style="margin-top: 30px;">
+            <label for="whisper-model">Whisper Model</label>
+            <span id="whisper-model-info" class="icon icon-info btn"
+              style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+            <div class="model-select-container">
+              <select id="whisper-model" class="form-control" style="margin-top: 10px;"></select>
+              <button id="delete-model" class="btn-delete-model" title="Delete selected model">
+                <span class="icon-trash"></span>
+              </button>
+            </div>
+            <div id="model-status" class="model-status"></div>
+          </div>
+          <div class="form-group">
+            <button id="download-model" class="btn btn-primary">Download Selected Model</button>
+            <div class="download-progress-container" style="display: none;">
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill"></div>
+                <div class="progress-bar-glow"></div>
+                <div class="progress-text">0%</div>
+              </div>
+              <div class="progress-pulse"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Privacy Settings Section -->
+        <div id="settings-privacy" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Privacy</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="privacy-web-previews-info" class="icon icon-info btn"
+                  style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Display
+                Web Previews</span>
+              <input type="checkbox" id="privacy-web-previews-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="privacy-strip-tracking-info" class="icon icon-info btn"
+                  style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Strip
+                tracking markers from links</span>
+              <input type="checkbox" id="privacy-strip-tracking-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="privacy-send-typing-info" class="icon icon-info btn"
+                  style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Send
+                typing indicators</span>
+              <input type="checkbox" id="privacy-send-typing-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Network Settings Section -->
+        <div id="settings-network" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Network</h2>
+          <div id="network-list" class="network-list">
+            <!-- Relay list will be dynamically populated here -->
+          </div>
+        </div>
+
+        <!-- Updates Section -->
+        <div id="settings-updates" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Updates</h2>
+          <div class="update-info">
+            <p style="opacity: 0.7;">Current Version: <span id="current-version">Loading...</span></p>
+            <p id="new-version-display" style="display: none;">New Version: <span id="new-version"></span></p>
+
+            <!-- Changelog -->
+            <div id="update-changelog" style="display: none; margin-top: 20px; margin-bottom: 20px;">
+              <h3 style="font-size: 16px; margin-bottom: 10px;">What's New:</h3>
+              <div id="changelog-content"></div>
+            </div>
+
+            <button id="check-updates-btn" class="btn accept-btn btn-bounce">Check for Updates</button>
+            <p id="update-status-text" style="display: none; margin-top: 10px;"></p>
+
+            <!-- Progress bar for downloads -->
+            <div id="update-progress-container" style="display: none; margin-top: 20px;">
+              <div class="progress-bar-track">
+                <div id="update-progress-bar" class="progress-bar-fill"></div>
+                <div class="progress-text" id="update-progress-text">0%</div>
+              </div>
+            </div>
+
+            <!-- Action buttons -->
+            <button id="restart-update-btn" class="btn"
+              style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart
+              Now</button>
+          </div>
+          <hr class="divider settings-divider">
+        </div>
+
+        <img src="./icons/aggro-glitch.gif">
+        <h2 class="danger-title">Dangerzone</h2>
+        <button id="deep-rescan-btn" class="logout-btn">Deep Rescan</button>
+        <button id="export-account-btn" class="logout-btn">Export Account</button>
+        <button id="logout-btn" class="logout-btn">Logout</button>
+      </div>
+
+      <!-- Invites -->
+      <div id="invites" style="display: none;">
+        <div class="invites-container">
+          <div class="invites-header">
+            <span class="icon icon-gift invites-main-icon"></span>
+            <h1 class="invites-title">Invite Code</h1>
+          </div>
+
+          <div class="invites-content">
+            <p class="invites-description">
+              Invite friends to Vector and unlock exclusive badges, earn additional rewards, and help grow the
+              community!
+            </p>
+
+            <div class="invite-code-section">
+              <h3 class="invite-code-label">Your Invite Code</h3>
+              <div class="invite-code-container">
+                <span id="invite-code" class="invite-code">Loading...</span>
+                <button id="invite-code-copy" class="btn invite-code-copy-btn">
+                  <span class="icon icon-copy"></span>
+                </button>
+              </div>
+
+              <p class="invite-code-hint">Share this invite code with friends.</p>
+            </div>
+            <a id="invite-code-twitter" class="invite-code-twitter-link" title="Post on Twitter (X)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+              </svg>
+              Share on Twitter (X)
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Navigation Bar -->
+      <div id="navbar" class="row navbar" style="display: none;">
+        <div id="profile-btn" class="btn navbar-btn navbar-btn-inactive">
+          <span class="icon icon-user-circle navbar-icon"></span>
+          <p class="navbar-text">Profile</p>
+        </div>
+        <div id="chat-btn" class="btn navbar-btn">
+          <span class="icon icon-chats navbar-icon"></span>
+          <p class="navbar-text">Chat</p>
+        </div>
+        <div id="settings-btn" class="btn navbar-btn navbar-btn-inactive">
+          <span class="icon icon-settings navbar-icon"></span>
+          <p class="navbar-text">Settings</p>
+          <span id="settings-update-dot" class="update-notification-dot" style="display: none;"></span>
+        </div>
+        <div id="invites-btn" class="btn navbar-btn navbar-btn-inactive" style="display: none;">
+          <span class="icon icon-gift navbar-icon"></span>
+          <p class="navbar-text">Invites</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Panel -->
+    <div class="right-panel">
+      <!-- Hello Screen -->
+      <div class="hello-screen">
+        <h1 class="hello-title">Hello!</h1>
+        <p class="hello-subtitle">Select a conversation or start a new chat to begin messaging.</p>
+      </div>
+
+      <!-- Chat View -->
       <div id="chat" class="chat" style="display: none;">
         <div id="chat-back-btn" class="btn nav-back-btn">
           <span class="icon icon-chevron-double-left nav-icon"></span>
@@ -226,9 +458,10 @@
         <span class="cutoff chat-contact-status" id="chat-contact-status"></span>
         <div id="msg-top-fade" class="fadeout-top-msgs"></div>
         <div id="chat-messages" class="chat-messages">
-
+          <!-- Messages will be populated dynamically -->
         </div>
-        <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span></button>
+        <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span
+            class="icon icon-chevron-down"></span></button>
 
         <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
@@ -239,495 +472,171 @@
             <button id="chat-input-voice"><span class="icon icon-mic-on"></span></button>
             <button id="chat-input-send" style="display: none;"><span class="icon icon-send"></span></button>
           </div>
-          <div class="emoji-main">
-            <div class="emoji-section" id="emoji-recents">
-              <div class="emoji-section-header">
-                <span class="section-icon icon icon-clock"></span>
-                <span class="header-text">Recently Used</span>
-                <span class="icon icon-chevron-down"></span>
-              </div>
-              <div class="emoji-grid" id="emoji-recents-grid"></div>
-            </div>
-            <div class="emoji-section" id="emoji-favorites">
-              <div class="emoji-section-header">
-                <span class="section-icon icon icon-star"></span>
-                <span class="header-text">Favorites</span>
-                <span class="icon icon-chevron-down"></span>
-              </div>
-              <div class="emoji-grid" id="emoji-favorites-grid"></div>
-            </div>
-            <div class="emoji-section" id="emoji-all">
-              <div class="emoji-section-header">
-                <span class="section-icon icon icon-smile-face"></span>
-                <span class="header-text">Emojis</span>
-                <span class="icon icon-chevron-down"></span>
-              </div>
-              <div class="emoji-grid" id="emoji-all-grid"></div>
-            </div>
+        </div>
+        <div id="voice-progress-container" class="voice-progress-container" style="display: none;">
+          <div class="voice-progress-bar">
+            <div class="voice-progress-fill"></div>
+            <div class="voice-progress-text">Setting up voice transcription...</div>
           </div>
         </div>
       </div>
 
-      <!-- Left Panel -->
-      <div class="left-panel">
-        <!-- Profile View -->
-        <div id="profile" class="chats" style="display: none;">
-          <div style="height: 60px; background-color: #161616;">
-            <div id="profile-back-btn" class="btn nav-back-btn">
-              <span class="icon icon-chevron-double-left nav-icon"></span>
-            </div>
-            <div>
-              <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
-              <span id="profile-status" class="cutoff chat-contact-status btn"></span>
-            </div>
-          </div>
-          <div style="position: relative;">
-            <img id="profile-banner" class="profile-banner">
-            <div class="profile-banner-edit btn">
-              <span class="icon icon-edit"></span>
-            </div>
-            <div class="profile-avatar-container">
-              <img id="profile-avatar" class="profile-avatar">
-              <div class="profile-avatar-edit btn">
-                <span class="icon icon-plus-circle"></span>
-              </div>
-            </div>
-          </div>
-          <div style="padding-bottom: 75px;">
-            <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
-            <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
-            <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"></div>
-            <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-            <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
-            <div id="profile-option-list" class="profile-options">
-              <div id="profile-option-mute" class="btn profile-option">
-                <span class="icon icon-volume-mute navbar-icon"></span>
-                <p class="navbar-text">Mute</p>
-              </div>
-              <div id="profile-option-nickname" class="btn profile-option">
-                <span class="icon icon-edit-user navbar-icon"></span>
-                <p class="navbar-text">Rename</p>
-              </div>
-            </div>
-            <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
-              <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
-            </div>
-            <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
-              <span id="profile-npub" class="profile-npub"></span>
-              <button id="profile-npub-copy" class="btn profile-npub-copy">
-                <span class="icon icon-copy"></span>
-              </button>
-            </div>
-            <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
-            <span id="profile-id" style="display: none;"></span>
-          </div>
-        </div>
-
-        <!-- Chat List -->
-        <div id="chats" class="chats">
-          <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="display: none;">
-            <span class="icon icon-bookmark nav-icon"></span>
-          </div>
-          <div id="account" class="account" style="display: none;"></div>
-          <div id="sync-status-container" class="sync-status-container" style="display: none;">
-            <p id="sync-status" class="text-gradient"></p>
-          </div>
-          
-          <!-- MLS Group Invites Section (hidden by default) -->
-          <div id="mls-invites-section" class="mls-invites-section" style="display: none; margin: 10px 15px 20px;">
-            <div id="mls-invites-container" style="max-height: 145px; overflow-y: auto;">
-              <!-- Invites will be rendered here dynamically -->
-            </div>
-          </div>
-          
-          <!-- New Chat Buttons -->
-          <div style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
-            <button id="new-chat-btn" class="new-chat-btn btn" style="width: 50%; margin-right: 5px; display: none;">
-              <span class="icon icon-new-msg"></span>
-              <span style="width: 100%">New Chat</span>
-            </button>
-            <button id="create-group-btn" class="new-chat-btn btn" style="width: 50%; margin-left: 5px; margin-right: 10px; display: none;">
-              <span class="icon icon-chat-circle"></span>
-              <span style="width: 100%">Group Chat</span>
-            </button>
-          </div>
-          
-          <div id="chat-list">
-            
-          </div>
-        </div>
-
-        <!-- Settings -->
-        <div id="settings" style="display: none;">
-          <h2 style="margin-top: 40px">Choose your Theme</h2>
-          <select id="theme-select">
-            <option value="vector">Vector</option>
-            <option value="chatstr">Chatstr</option>
-          </select>
-
-          <!-- Voice Settings Section -->
-          <div id="settings-voice" class="settings-section" style="display: none;">
-          <hr class="divider settings-divider">
-          <h2>Voice Settings</h2>
-
-           <div class="form-group">
-            <label class="toggle-container">
-              <span><span id="privacy-strip-tracking-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Prevent URL tracking</span>
-              <input type="checkbox" id="privacy-strip-tracking-toggle" checked>
-              <span class="neon-toggle"></span>
-            </label>
-          </div>
-          
-           <div class="form-group">
-            <label class="toggle-container">
-              <span>
-              <span id="whisper-auto-transcribe-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto Transcribe</span>
-              <input type="checkbox" id="auto-transcribe-toggle">
-              <span class="neon-toggle"></span>
-            </label>
-          </div>
-
-          <div class="form-group" style="margin-top: 30px;">
-            <label for="whisper-model">Whisper Model</label>
-            <span id="whisper-model-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
-            <div class="model-select-container">
-            <select id="whisper-model" class="form-control" style="margin-top: 10px;"></select>
-            <button id="delete-model" class="btn-delete-model" title="Delete selected model">
-            <span class="icon-trash"></span>
-            </button>
-            </div>
-            <div id="model-status" class="model-status"></div>
-          </div>
-          <div class="form-group">
-            <button id="download-model" class="btn btn-primary">Download Selected Model</button>
-            <div class="download-progress-container" style="display: none;">
-            <div class="progress-bar-track">
-            <div class="progress-bar-fill"></div>
-            <div class="progress-bar-glow"></div>
-            <div class="progress-text">0%</div>
-            </div>
-            <div class="progress-pulse"></div>
-            </div>
-          </div>
-        </div>
-
-          <!-- Privacy Settings Section -->
-          <div id="settings-privacy" class="settings-section">
-            <hr class="divider settings-divider">
-            <h2>Privacy</h2>
-            
-            <div class="form-group">
-              <label class="toggle-container">
-                <span><span id="privacy-web-previews-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Display Web Previews</span>
-                <input type="checkbox" id="privacy-web-previews-toggle" checked>
-                <span class="neon-toggle"></span>
-              </label>
-            </div>
-            
-            <div class="form-group">
-              <label class="toggle-container">
-                <span><span id="privacy-strip-tracking-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Strip tracking markers from links</span>
-                <input type="checkbox" id="privacy-strip-tracking-toggle" checked>
-                <span class="neon-toggle"></span>
-              </label>
-            </div>
-            
-            <div class="form-group">
-              <label class="toggle-container">
-                <span><span id="privacy-send-typing-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Send typing indicators</span>
-                <input type="checkbox" id="privacy-send-typing-toggle" checked>
-                <span class="neon-toggle"></span>
-              </label>
-            </div>
-          </div>
-
-          <!-- Network Settings Section -->
-          <div id="settings-network" class="settings-section">
-            <hr class="divider settings-divider">
-            <h2>Network</h2>
-            <div id="network-list" class="network-list">
-              <!-- Relay list will be dynamically populated here -->
-            </div>
-          </div>
-
-          <!-- Updates Section -->
-          <div id="settings-updates" class="settings-section">
-            <hr class="divider settings-divider">
-            <h2>Updates</h2>
-            <div class="update-info">
-              <p style="opacity: 0.7;">Current Version: <span id="current-version">Loading...</span></p>
-              <p id="new-version-display" style="display: none;">New Version: <span id="new-version"></span></p>
-              
-              <!-- Changelog -->
-              <div id="update-changelog" style="display: none; margin-top: 20px; margin-bottom: 20px;">
-                <h3 style="font-size: 16px; margin-bottom: 10px;">What's New:</h3>
-                <div id="changelog-content"></div>
-              </div>
-              
-              <button id="check-updates-btn" class="btn accept-btn btn-bounce">Check for Updates</button>
-              <p id="update-status-text" style="display: none; margin-top: 10px;"></p>
-              
-              <!-- Progress bar for downloads -->
-              <div id="update-progress-container" style="display: none; margin-top: 20px;">
-                <div class="progress-bar-track">
-                  <div id="update-progress-bar" class="progress-bar-fill"></div>
-                  <div class="progress-text" id="update-progress-text">0%</div>
-                </div>
-              </div>
-              
-              <!-- Action buttons -->
-              <button id="restart-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart Now</button>
-            </div>
-            <hr class="divider settings-divider">
-          </div>
-
-          <img src="./icons/aggro-glitch.gif">
-          <h2 class="danger-title">Dangerzone</h2>
-          <button id="deep-rescan-btn" class="logout-btn">Deep Rescan</button>
-          <button id="export-account-btn" class="logout-btn">Export Account</button>
-          <button id="logout-btn" class="logout-btn">Logout</button>
-        </div>
-
-        <!-- Invites -->
-        <div id="invites" style="display: none;">
-          <div class="invites-container">
-            <div class="invites-header">
-              <span class="icon icon-gift invites-main-icon"></span>
-              <h1 class="invites-title">Invite Code</h1>
-            </div>
-            
-            <div class="invites-content">
-              <p class="invites-description">
-                Invite friends to Vector and unlock exclusive badges, earn additional rewards, and help grow the community!
-              </p>
-              
-              <div class="invite-code-section">
-                <h3 class="invite-code-label">Your Invite Code</h3>
-                <div class="invite-code-container">
-                  <span id="invite-code" class="invite-code">Loading...</span>
-                  <button id="invite-code-copy" class="btn invite-code-copy-btn">
-                    <span class="icon icon-copy"></span>
-                  </button>
-                </div>
-                
-                <p class="invite-code-hint">Share this invite code with friends.</p>
-              </div>
-              <a id="invite-code-twitter" class="invite-code-twitter-link" title="Post on Twitter (X)">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-                </svg>
-                Share on Twitter (X)
-              </a>
-            </div>
-          </div>
-        </div>
-
-        <!-- Navigation Bar -->
-        <div id="navbar" class="row navbar" style="display: none;">
-          <div id="profile-btn" class="btn navbar-btn navbar-btn-inactive">
-            <span class="icon icon-user-circle navbar-icon"></span>
-            <p class="navbar-text">Profile</p>
-          </div>
-          <div id="chat-btn" class="btn navbar-btn">
-            <span class="icon icon-chats navbar-icon"></span>
-            <p class="navbar-text">Chat</p>
-          </div>
-          <div id="settings-btn" class="btn navbar-btn navbar-btn-inactive">
-            <span class="icon icon-settings navbar-icon"></span>
-            <p class="navbar-text">Settings</p>
-            <span id="settings-update-dot" class="update-notification-dot" style="display: none;"></span>
-          </div>
-          <div id="invites-btn" class="btn navbar-btn navbar-btn-inactive" style="display: none;">
-            <span class="icon icon-gift navbar-icon"></span>
-            <p class="navbar-text">Invites</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Right Panel -->
-      <div class="right-panel">
-        <!-- Hello Screen -->
-      <div class="hello-screen">
-      <h1 class="hello-title">Hello!</h1>
-      <p class="hello-subtitle">Select a conversation or start a new chat to begin messaging.</p>
-      </div>
-
-        <!-- Chat View -->
-        <div id="chat" class="chat" style="display: none;">
-          <div id="chat-back-btn" class="btn nav-back-btn">
+      <!-- New Chat View -->
+      <div id="chat-new" style="display: none;">
+        <div class="chat-new-header">
+          <div id="chat-new-back-text-btn" class="btn chat-new-back-text-btn">
             <span class="icon icon-chevron-double-left nav-icon"></span>
-          </div>
-          <h3 id="chat-contact"></h3>
-          <span class="cutoff chat-contact-status" id="chat-contact-status"></span>
-          <div id="msg-top-fade" class="fadeout-top-msgs"></div>
-          <div id="chat-messages" class="chat-messages">
-
-          </div>
-          <button id="chat-scroll-return" class="corner-float scroll-return-btn"><span class="icon icon-chevron-down"></span></button>
-
-          <div class="row input-box" id="chat-box">
-            <div class="row chat-input-container">
-              <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
-              <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
-              <textarea id="chat-input" placeholder="Enter message..."></textarea>
-              <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>
-              <button id="chat-input-voice"><span class="icon icon-mic-on"></span></button>
-              <button id="chat-input-send" style="display: none;"><span class="icon icon-send"></span></button>
-            </div>
-          </div>
-          <div id="voice-progress-container" class="voice-progress-container" style="display: none;">
-            <div class="voice-progress-bar">
-              <div class="voice-progress-fill"></div>
-              <div class="voice-progress-text">Setting up voice transcription...</div>
-            </div>
+            <p class="chat-new-back-text">Back</p>
           </div>
         </div>
-
-        <!-- New Chat View -->
-        <div id="chat-new" style="display: none;">
-          <div class="chat-new-header">
-            <div id="chat-new-back-text-btn" class="btn chat-new-back-text-btn">
-              <span class="icon icon-chevron-double-left nav-icon"></span>
-              <p class="chat-new-back-text">Back</p>
-            </div>
+        <center class="chat-new-content">
+          <h2 class="chat-new-title">My nPub Key</h2>
+          <hr class="divider chat-new-divider">
+          <div class="profile-npub-container" style="justify-content: center; margin-top: 10px;">
+            <span class="chat-new-npub" id="share-npub"></span>
+            <button id="chat-new-npub-copy" class="btn profile-npub-copy">
+              <span class="icon icon-copy"></span>
+            </button>
           </div>
-          <center class="chat-new-content">
-            <h2 class="chat-new-title">My nPub Key</h2>
-            <hr class="divider chat-new-divider">
-            <div class="profile-npub-container" style="justify-content: center; margin-top: 10px;">
-              <span class="chat-new-npub" id="share-npub"></span>
-              <button id="chat-new-npub-copy" class="btn profile-npub-copy">
-                <span class="icon icon-copy"></span>
-              </button>
-            </div>
-          </center>
-          <center class="chat-new-center-content">
-            <span class="icon icon-add-user chat-new-icon"></span>
-            <h2 class="chat-new-subtitle">Start a New Chat</h2>
-            <hr class="divider chat-new-subtitle-divider">
-            <div class="chat-new-content">
-              <span class="chat-new-description">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
-            </div>
-          </center>
-          <div class="row input-box chat-new-input-box">
-            <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container chat-new-input">
-            <span id="chat-new-btn" class="icon icon-add-user btn chat-new-add-btn"></span>
+        </center>
+        <center class="chat-new-center-content">
+          <span class="icon icon-add-user chat-new-icon"></span>
+          <h2 class="chat-new-subtitle">Start a New Chat</h2>
+          <hr class="divider chat-new-subtitle-divider">
+          <div class="chat-new-content">
+            <span class="chat-new-description">Use your friend's 'nPub' key to begin a conversation with them. Enter it
+              below and click the + button.</span>
           </div>
-        </div>
-
-        <!-- Create Group View -->
-        <div id="create-group" style="display: none; overflow-x: hidden;">
-          <div class="chat-new-header">
-            <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
-              <span class="icon icon-chevron-double-left nav-icon"></span>
-              <p class="chat-new-back-text">Back</p>
-            </div>
-          </div>
-
-          <center class="chat-new-content">
-            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
-            <hr class="divider chat-new-divider">
-            <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
-              <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
-            </div>
-          </center>
-
-          <center class="chat-new-center-content" style="position: static; padding: 0 15px; box-sizing: border-box; width: 100%;">
-            <h2 class="chat-new-subtitle">Select Members</h2>
-            <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
-            <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input" style="width: 75%" />
-              <div id="create-group-list" style="margin-top: 10px; max-height: 150px; overflow-y: auto; width: 100%; box-sizing: border-box;"></div>
-            </div>
-          </center>
-
-          <div style="display: flex; gap: 10px; padding: 15px; justify-content: center;">
-            <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
-            <button id="create-group-cancel-btn" class="btn logout-btn">Cancel</button>
-          </div>
-
-          <center>
-            <p id="create-group-status" class="chat-contact-status" style="display: none; opacity: 0.8;"></p>
-          </center>
+        </center>
+        <div class="row input-box chat-new-input-box">
+          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container chat-new-input">
+          <span id="chat-new-btn" class="icon icon-add-user btn chat-new-add-btn"></span>
         </div>
       </div>
 
-      <!-- Member Panel -->
-      <div class="member-panel">
-        <div class="member-header">
-          <div class="member-count" id="member-count">0 members</div>
+      <!-- Create Group View -->
+      <div id="create-group" style="display: none; overflow-x: hidden;">
+        <div class="chat-new-header">
+          <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+            <p class="chat-new-back-text">Back</p>
+          </div>
         </div>
-        <div class="member-list" id="member-list">
-          <!-- Members will be populated here -->
+
+        <center class="chat-new-content">
+          <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon"
+              style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create
+            Group</h2>
+          <hr class="divider chat-new-divider">
+          <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+            <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
+          </div>
+        </center>
+
+        <center class="chat-new-center-content"
+          style="position: static; padding: 0 15px; box-sizing: border-box; width: 100%;">
+          <h2 class="chat-new-subtitle">Select Members</h2>
+          <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
+          <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
+            <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input"
+              style="width: 75%" />
+            <div id="create-group-list"
+              style="margin-top: 10px; max-height: 150px; overflow-y: auto; width: 100%; box-sizing: border-box;"></div>
+          </div>
+        </center>
+
+        <div style="display: flex; gap: 10px; padding: 15px; justify-content: center;">
+          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
+          <button id="create-group-cancel-btn" class="btn logout-btn">Cancel</button>
+        </div>
+
+        <center>
+          <p id="create-group-status" class="chat-contact-status" style="display: none; opacity: 0.8;"></p>
+        </center>
+      </div>
+    </div>
+
+    <!-- Member Panel -->
+    <div class="member-panel">
+      <div class="member-header">
+        <div class="member-count" id="member-count">0 members</div>
+      </div>
+      <div class="member-list" id="member-list">
+        <!-- Members will be populated here -->
+      </div>
+    </div>
+
+    <!-- Login Form -->
+    <div id="login-form" class="fadein-anim">
+      <div class="login-container">
+        <img src="./icons/vector-logo.svg" class="login-logo">
+        <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
+
+        <div id="login-start" class="login-buttons">
+          <button id="start-account-creation-btn" class="login-create-btn">Create Account</button>
+          <br>
+          <button id="start-login-btn" class="login-login-btn">Login</button>
+          <br>
+          <img src="./icons/by-formlesslabs.svg" class="login-credits">
+        </div>
+
+        <div id="login-import" class="login-import-container" style="display: none;">
+          <img src="./icons/by-formlesslabs.svg" class="login-credits">
+          <div class="row input-box login-input-container">
+            <input type="password" class="login-input" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
+            <svg id="login-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none"
+              xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </div>
+        </div>
+
+        <div id="login-invite" class="login-invite-container" style="display: none;">
+          <div class="login-invite-header">
+            <h3 class="login-invite-title">Enter Invite Code</h3>
+          </div>
+          <p class="login-invite-description">Enter your invite code to join Vector Beta</p>
+          <div class="row input-box login-input-container">
+            <input type="text" class="login-input" id="invite-input" placeholder="Invite code..." />
+            <button id="invite-btn" class="btn login-btn">
+              <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path
+                  d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div id="login-welcome" class="login-welcome-container" style="display: none;">
+          <div class="login-welcome-content">
+            <span class="icon icon-vector-check login-welcome-icon"></span>
+            <h1 class="login-welcome-title" style="font-size: 20px; margin-bottom: 4px; color: #33db98;">Welcome to</h1>
+            <h1 class="login-welcome-title">Vector Beta!</h1>
+            <p class="login-welcome-subtitle">Congratulations! You're now part of the exclusive Vector Beta community.
+            </p>
+            <p class="login-welcome-footer">Setting up your account...</p>
+          </div>
+        </div>
+
+        <div id="login-encrypt" class="login-encrypt-container" style="display: none;">
+          <div class="login-encrypt-header">
+            <img src="./icons/lock.svg" class="login-lock-icon">
+            <h3 id="login-encrypt-title" class="login-encrypt-title">Choose an Encryption Pin</h3>
+          </div>
+          <div id="login-encrypt-pins" class="row pin-row input-box">
+            <input type="password" inputmode="numeric" maxlength="1" id="pin-0">
+            <input type="password" inputmode="numeric" maxlength="1" id="pin-1">
+            <input type="password" inputmode="numeric" maxlength="1" id="pin-2">
+            <input type="password" inputmode="numeric" maxlength="1" id="pin-3">
+            <input type="password" inputmode="numeric" maxlength="1" id="pin-4">
+            <input type="password" inputmode="numeric" maxlength="1" id="pin-5">
+          </div>
         </div>
       </div>
-
-<!-- Login Form -->
-<div id="login-form" class="fadein-anim">
-  <div class="login-container">
-    <img src="./icons/vector-logo.svg" class="login-logo">
-    <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
-    
-    <div id="login-start" class="login-buttons">
-      <button id="start-account-creation-btn" class="login-create-btn">Create Account</button>
-      <br>
-      <button id="start-login-btn" class="login-login-btn">Login</button>
-      <br>
-      <img src="./icons/by-formlesslabs.svg" class="login-credits">
     </div>
-    
-    <div id="login-import" class="login-import-container" style="display: none;">
-      <img src="./icons/by-formlesslabs.svg" class="login-credits">
-      <div class="row input-box login-input-container">
-        <input type="password" class="login-input" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
-        <svg id="login-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-    </div>
-    
-    <div id="login-invite" class="login-invite-container" style="display: none;">
-      <div class="login-invite-header">
-        <h3 class="login-invite-title">Enter Invite Code</h3>
-      </div>
-      <p class="login-invite-description">Enter your invite code to join Vector Beta</p>
-      <div class="row input-box login-input-container">
-        <input type="text" class="login-input" id="invite-input" placeholder="Invite code..." />
-        <button id="invite-btn" class="btn login-btn">
-          <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-      </div>
-    </div>
-    
-    <div id="login-welcome" class="login-welcome-container" style="display: none;">
-      <div class="login-welcome-content">
-        <span class="icon icon-vector-check login-welcome-icon"></span>
-        <h1 class="login-welcome-title" style="font-size: 20px; margin-bottom: 4px; color: #33db98;">Welcome to</h1>
-        <h1 class="login-welcome-title">Vector Beta!</h1>
-        <p class="login-welcome-subtitle">Congratulations! You're now part of the exclusive Vector Beta community.</p>
-        <p class="login-welcome-footer">Setting up your account...</p>
-      </div>
-    </div>
-    
-    <div id="login-encrypt" class="login-encrypt-container" style="display: none;">
-      <div class="login-encrypt-header">
-        <img src="./icons/lock.svg" class="login-lock-icon">
-        <h3 id="login-encrypt-title" class="login-encrypt-title">Choose an Encryption Pin</h3>
-      </div>
-      <div id="login-encrypt-pins" class="row pin-row input-box">
-        <input type="password" inputmode="numeric" maxlength="1" id="pin-0">
-        <input type="password" inputmode="numeric" maxlength="1" id="pin-1">
-        <input type="password" inputmode="numeric" maxlength="1" id="pin-2">
-        <input type="password" inputmode="numeric" maxlength="1" id="pin-3">
-        <input type="password" inputmode="numeric" maxlength="1" id="pin-4">
-        <input type="password" inputmode="numeric" maxlength="1" id="pin-5">
-      </div>
-    </div>
-  </div>
-</div>
-
-    </main>
-  </body>
+  </main>
+</body>
 </html>
