@@ -6292,11 +6292,26 @@ openChat = function(contact) {
 function setupEncryptedNotesButton() {
   const notesBtn = document.getElementById('chat-bookmarks-btn');
   if (notesBtn) {
-    notesBtn.onclick = openEncryptedNotes;
+    // Remove any existing click handlers to prevent duplicates
+    notesBtn.onclick = null;
+    notesBtn.addEventListener('click', handleEncryptedNotesClick);
     
     // Simple visibility management
     updateEncryptedNotesButton();
   }
+}
+
+function handleEncryptedNotesClick() {
+    // Store current state before opening notes
+    if (strOpenChat !== strPubkey) { // Only store if we're not already in notes
+        window.previousStateBeforeNotes = {
+            type: window.isViewingProfileInChat ? 'profile' : 'chat',
+            profile: window.isViewingProfileInChat ? getProfile(strOpenChat) : null,
+            chatId: strOpenChat
+        };
+    }
+    
+    openEncryptedNotes();
 }
 
 // Simple function to show/hide notes button
@@ -6325,7 +6340,38 @@ function updateEncryptedNotesButton() {
 }
 
 function openEncryptedNotes() {
-  openChat(strPubkey);
+    // If we're already in notes and there's a previous state, go back
+    if (strOpenChat === strPubkey && window.previousStateBeforeNotes) {
+        returnToPreviousState();
+        return;
+    }
+    
+    // Otherwise open notes
+    openChat(strPubkey);
+}
+
+function returnToPreviousState() {
+    if (!window.previousStateBeforeNotes) {
+        // If no previous state, show hello screen
+        showHelloScreen();
+        return;
+    }
+    
+    const previous = window.previousStateBeforeNotes;
+    
+    if (previous.type === 'profile' && previous.profile) {
+        // Return to profile view
+        showProfileInChatArea(previous.profile);
+    } else if (previous.type === 'chat' && previous.chatId) {
+        // Return to chat
+        openChat(previous.chatId);
+    } else {
+        // Fallback to hello screen
+        showHelloScreen();
+    }
+    
+    // Clear the previous state
+    window.previousStateBeforeNotes = null;
 }
 
 // Function to show profile in chat area
@@ -6334,6 +6380,9 @@ function showProfileInChatArea(profile) {
     
     // Render the profile first
     renderProfileTab(profile);
+    
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
     
     // Hide ALL chat interface elements completely
     const chatInterface = document.querySelector('.chat-interface');
@@ -6452,6 +6501,13 @@ function showProfileInChatArea(profile) {
     
     // Store that we're viewing profile in chat context
     window.isViewingProfileInChat = true;
+    
+    // Store the previous state so we can return to it
+    window.previousStateBeforeNotes = {
+        type: 'profile',
+        profile: profile,
+        chatId: strOpenChat
+    };
 }
 
 // Function to close profile and return to chat
@@ -6541,6 +6597,9 @@ function closeProfileInChatArea() {
         mainContainer.appendChild(domProfile);
     }
     
+    // IMPORTANT: Ensure navbar remains visible
+    domNavbar.style.display = '';
+    
     setTimeout(() => {
         if (domChatMessages) domChatMessages.style.display = 'flex';
         if (domChatMessageBox) domChatMessageBox.style.display = 'flex';
@@ -6559,7 +6618,11 @@ function setupProfileBackButton() {
         if (window.isViewingProfileInChat) {
           // If viewing profile in chat, return to chat
           closeProfileInChatArea();
+        } else if (strOpenChat === strPubkey && window.previousStateBeforeNotes) {
+          // If in notes with previous state, return to that state
+          returnToPreviousState();
         } else if (strOpenChat === strPubkey) {
+          // If in notes without previous state, go to hello screen
           closeChat();
         } else {
           openChatlist();
