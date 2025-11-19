@@ -811,10 +811,11 @@ body {
   display: block;
   max-width: 60%;
   font-weight: bold;
-  margin-top: 8px;
+  margin-top: 12px; 
   margin-bottom: 0;
   margin-left: auto;
   margin-right: auto;
+  padding-bottom: 12px; 
 }
 
 .chat-contact {
@@ -845,6 +846,7 @@ body {
   min-height: 25px;
   margin-left: auto;
   margin-right: auto;
+  padding-bottom: 0; 
 }
 
 .chat-contact-status .emoji {
@@ -3564,9 +3566,7 @@ hr {
     border-right: 1px solid rgba(255, 255, 255, 0.1);
     background-color: #060606;
     position: relative;
-    /* FIXED: Ensure left panel content starts from top */
     justify-content: flex-start;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden;
   }
 
@@ -3644,7 +3644,6 @@ hr {
     padding: 0 !important;
     margin: 0 !important;
     width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3654,7 +3653,6 @@ hr {
     min-height: auto !important;
     height: auto !important;
     width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3675,18 +3673,6 @@ hr {
     margin: 0 !important;
     position: relative;
     width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
-    overflow-x: hidden !important;
-  }
-
-  .account {
-    padding: 10px 15px !important;
-    margin: 0 !important;
-    min-height: auto !important;
-    /* FIXED: Remove any top margin that might be pushing it down */
-    margin-bottom: 10px !important;
-    width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3705,7 +3691,6 @@ hr {
     padding-left: 15px !important;
     padding-right: 15px !important;
     width: auto !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3717,7 +3702,6 @@ hr {
     width: auto !important;
     display: flex !important;
     justify-content: center !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3725,7 +3709,6 @@ hr {
     width: 50% !important;
     margin-left: 5px !important;
     margin-right: 5px !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow: hidden !important;
   }
 
@@ -3754,7 +3737,6 @@ hr {
     padding: 0 !important;
     margin: 0 !important;
     width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3783,7 +3765,6 @@ hr {
     flex: 1;
     overflow-y: auto;
     padding: 8px 8px 0 8px;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden;
   }
 
@@ -3842,7 +3823,6 @@ hr {
     margin: 0 !important;
     padding: 0 !important;
     width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3855,10 +3835,8 @@ hr {
   .chats {
     padding: 0 !important;
     margin: 0 !important;
-    /* FIXED: Force content to top but maintain proper width */
     align-items: stretch !important;
     width: 100% !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3868,7 +3846,6 @@ hr {
     margin-left: 15px !important;
     margin-right: 15px !important;
     width: auto !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow-x: hidden !important;
   }
 
@@ -3876,7 +3853,6 @@ hr {
     width: auto !important;
     margin-left: 0 !important;
     margin-right: 0 !important;
-    /* FIXED: Prevent horizontal scroll */
     overflow: hidden !important;
   }
 

@@ -5925,6 +5925,9 @@ function initWidescreenLayout() {
   
   if (isWidescreen) {
     document.body.classList.add('widescreen');
+
+    // IMPORTANT: Always show navbar in widescreen
+    domNavbar.style.display = '';
     
     // Initialize with proper state
     if (!strOpenChat) {
@@ -5937,6 +5940,9 @@ function initWidescreenLayout() {
         loadMemberPanel();
       }
     }
+
+    // Ensure notes button is visible
+    updateEncryptedNotesButton();
     
     // Hide duplicate elements
     document.querySelectorAll('.duplicate-fix').forEach(el => el.remove());
@@ -6211,7 +6217,7 @@ function createMemberItem(profile, npub) {
   return memberItem;
 }
 
-// Modified openChat function for proper widescreen behavior
+// Modified openChat function to preserve navbar in widescreen
 const originalOpenChat = openChat;
 openChat = function(contact) {
   // Clear any auto-scroll timer
@@ -6233,6 +6239,9 @@ openChat = function(contact) {
     // Widescreen behavior
     navbarSelect('chat-btn');
     
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
+    
     // Get the chat
     const chat = arrChats.find(c => c.id === contact);
     const isGroup = chat?.chat_type === 'MlsGroup';
@@ -6243,7 +6252,7 @@ openChat = function(contact) {
       refreshGroupMemberCount(contact); 
     }
 
-    // Hide notes button when opening any chat
+    // Update notes button (should remain visible in widescreen)
     updateEncryptedNotesButton();
     
     // Hide hello screen and show chat in right panel
@@ -6295,12 +6304,23 @@ function updateEncryptedNotesButton() {
   const notesBtn = document.getElementById('chat-bookmarks-btn');
   if (!notesBtn) return;
   
-  // Hide notes button when ANY chat is open (including notes)
-  // Show it only when no chat is open (chat list view)
-  if (strOpenChat) {
-    notesBtn.style.display = 'none';
-  } else {
+  // In widescreen, always show the notes button in the left panel
+  if (isWidescreen) {
     notesBtn.style.display = 'flex';
+    
+    // Position it properly in widescreen
+    notesBtn.style.position = 'absolute';
+    notesBtn.style.top = '28px';
+    notesBtn.style.right = '23px';
+    notesBtn.style.bottom = 'auto';
+    notesBtn.style.left = 'auto';
+  } else {
+    // Mobile behavior: hide when chat is open, show when in chat list
+    if (strOpenChat) {
+      notesBtn.style.display = 'none';
+    } else {
+      notesBtn.style.display = 'flex';
+    }
   }
 }
 
@@ -6592,7 +6612,7 @@ closeChat = async function() {
     strOpenChat = "";
     nLastTypingIndicator = 0;
 
-    // Show notes button when closing chat 
+    // Update notes button (should remain visible in widescreen)
     updateEncryptedNotesButton();
 
     // Cancel any ongoing replies or selections
@@ -6611,6 +6631,9 @@ closeChat = async function() {
     // Hide member panel
     hideMemberPanel();
 
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
+
     // Update chat list
     renderChatlist();
 
@@ -6625,10 +6648,16 @@ function openChatlist() {
   if (isWidescreen) {
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
+    domProfile.classList.remove('active');
     domSettings.style.display = 'none';
+    domSettings.classList.remove('active');
     domInvites.style.display = 'none';
+    domInvites.classList.remove('active');
     domChats.style.display = '';
     domChats.classList.add('active');
+
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
 
     // Show hello screen in right panel
     showHelloScreen();
