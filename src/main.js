@@ -1077,13 +1077,15 @@ function updateChatHeaderSubtext(chat) {
     if (fNotes) {
         domChatContactStatus.textContent = 'Encrypted Notes to Self';
         domChatContactStatus.classList.remove('text-gradient');
+        domChatContact.onclick = null;
+        domChatContact.classList.remove('btn');
     } else if (isGroup) {
-        // Check for typing indicators in groups
+        // Group chat typing indicators and member count
         const activeTypers = chat.active_typers || [];
         const fIsTyping = activeTypers.length > 0;
         
         if (fIsTyping) {
-            // Display typing indicator with Discord-style multi-user support
+            // Display typing indicator
             if (activeTypers.length === 1) {
                 const typer = getProfile(activeTypers[0]);
                 const name = typer?.nickname || typer?.name || 'Someone';
@@ -1118,8 +1120,15 @@ function updateChatHeaderSubtext(chat) {
             }
             domChatContactStatus.classList.remove('text-gradient');
         }
+        
+        // Group name click opens group overview
+        domChatContact.onclick = () => {
+            closeChat();
+            openGroupOverview(chat);
+        };
+        domChatContact.classList.add('btn');
     } else {
-        // Check for typing indicators in DMs (using chat.active_typers)
+        // DM chat - check for typing indicators
         const activeTypers = chat.active_typers || [];
         const fIsTyping = activeTypers.length > 0;
         
@@ -1135,18 +1144,22 @@ function updateChatHeaderSubtext(chat) {
             domChatContactStatus.classList.remove('text-gradient');
             twemojify(domChatContactStatus);
         }
+        
         const profile = getProfile(chat.id);
-domChatContact.onclick = () => {
-    if (isWidescreen && strOpenChat === chat.id) {
-        // In widescreen, show profile in the chat area
-        showProfileInChatArea(profile);
-    } else {
-        // Mobile behavior - open profile tab
-        closeChat();
-        openProfile(profile);
-    }
-};
-domChatContact.classList.add('btn');
+        
+        // FIXED: Proper click handler for profile in widescreen
+        domChatContact.onclick = () => {
+            if (isWidescreen && strOpenChat === chat.id) {
+                console.log('Opening profile in chat area for:', profile?.id);
+                // In widescreen, show profile in the chat area
+                showProfileInChatArea(profile);
+            } else {
+                // Mobile behavior - open profile tab
+                closeChat();
+                openProfile(profile);
+            }
+        };
+        domChatContact.classList.add('btn');
     }
 }
 
@@ -6297,70 +6310,87 @@ function openEncryptedNotes() {
 
 // Function to show profile in chat area
 function showProfileInChatArea(profile) {
-  if (!profile || !isWidescreen) return;
-  
-  // Render the profile
-  renderProfileTab(profile);
-  
-  // Hide messages and show profile in chat area
-  domChatMessages.style.display = 'none';
-  domChatMessageBox.style.display = 'none';
-  
-  // Position profile in chat area
-  const chatContainer = document.getElementById('chat');
-  if (!chatContainer.contains(domProfile)) {
-    chatContainer.appendChild(domProfile);
-  }
-  
-  // Style for chat area display - use flexbox for proper layout
-  domProfile.style.display = '';
-  domProfile.style.position = 'relative';
-  domProfile.style.top = '0';
-  domProfile.style.margin = '0';
-  domProfile.style.maxWidth = 'none';
-  domProfile.style.width = ''; 
-  domProfile.style.overflowY = 'auto';
-  domProfile.style.maxHeight = 'calc(100vh - 80px)'; 
-  domProfile.style.padding = '20px';
-  domProfile.style.flex = '1'; 
-  domProfile.style.minWidth = '0'; 
-  
-  domProfileBackBtn.onclick = () => {
-    closeProfileInChatArea();
-  };
-  domProfileBackBtn.style.display = '';
-  
-  // Store that we're viewing profile in chat context
-  window.isViewingProfileInChat = true;
+    if (!profile || !isWidescreen) return;
+    
+    console.log('Showing profile in chat area:', profile.id);
+    
+    // Render the profile first
+    renderProfileTab(profile);
+    
+    // Hide messages and show profile in chat area
+    domChatMessages.style.display = 'none';
+    domChatMessageBox.style.display = 'none';
+    
+    // Get the chat container
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) {
+        console.error('Chat container not found');
+        return;
+    }
+    
+    // Ensure profile is in the correct container
+    if (!chatContainer.contains(domProfile)) {
+        console.log('Moving profile to chat container');
+        chatContainer.appendChild(domProfile);
+    }
+    
+    // Reset any conflicting styles first
+    domProfile.style.cssText = '';
+    
+    // Apply chat area specific styles
+    domProfile.style.display = 'block';
+    domProfile.style.position = 'absolute';
+    domProfile.style.top = '0';
+    domProfile.style.left = '0'; 
+    domProfile.style.right = '0';
+    domProfile.style.bottom = '0';
+    domProfile.style.width = '100%';
+    domProfile.style.height = '100%';
+    domProfile.style.overflowY = 'auto';
+    domProfile.style.overflowX = 'hidden';
+    domProfile.style.padding = '20px';
+    domProfile.style.boxSizing = 'border-box';
+    domProfile.style.backgroundColor = '#0a0a0a';
+    domProfile.style.zIndex = '10'; // Ensure it's above other elements
+    
+    // Make sure back button is visible and functional
+    if (domProfileBackBtn) {
+        domProfileBackBtn.style.display = 'block';
+        domProfileBackBtn.onclick = () => {
+            closeProfileInChatArea();
+        };
+    }
+    
+    // Store that we're viewing profile in chat context
+    window.isViewingProfileInChat = true;
+    
+    console.log('Profile should now be visible in chat area');
 }
 
 // Function to close profile and return to chat
 function closeProfileInChatArea() {
-  // Hide profile
-  domProfile.style.display = 'none';
-  
-  // Reset styles
-  domProfile.style.position = '';
-  domProfile.style.top = '';
-  domProfile.style.margin = '';
-  domProfile.style.maxWidth = '';
-  domProfile.style.width = '';
-  domProfile.style.overflowY = '';
-  domProfile.style.maxHeight = '';
-  domProfile.style.padding = '';
-  domProfile.style.flex = '';
-  
-  // Show messages and input box
-  domChatMessages.style.display = '';
-  domChatMessageBox.style.display = '';
-  
-  const mainContainer = document.getElementById('popup-container');
-  if (mainContainer && !mainContainer.contains(domProfile)) {
-    mainContainer.appendChild(domProfile);
-  }
-  
-  // Clear the profile viewing state
-  window.isViewingProfileInChat = false;
+    console.log('Closing profile in chat area');
+    
+    // Hide profile
+    domProfile.style.display = 'none';
+    
+    // Reset all inline styles
+    domProfile.style.cssText = '';
+    
+    // Show messages and input box
+    domChatMessages.style.display = '';
+    domChatMessageBox.style.display = '';
+    
+    // Move profile back to main container
+    const mainContainer = document.getElementById('popup-container');
+    if (mainContainer && !mainContainer.contains(domProfile)) {
+        mainContainer.appendChild(domProfile);
+    }
+    
+    // Clear the profile viewing state
+    window.isViewingProfileInChat = false;
+    
+    console.log('Profile closed, chat restored');
 }
 
 // Back button handling for profile view
