@@ -6312,14 +6312,27 @@ function openEncryptedNotes() {
 function showProfileInChatArea(profile) {
     if (!profile || !isWidescreen) return;
     
-    console.log('Showing profile in chat area:', profile.id);
-    
     // Render the profile first
     renderProfileTab(profile);
     
-    // Hide messages and show profile in chat area
-    domChatMessages.style.display = 'none';
-    domChatMessageBox.style.display = 'none';
+    // Hide ALL chat interface elements completely
+    const chatInterface = document.querySelector('.chat-interface');
+    if (chatInterface) {
+        chatInterface.style.display = 'none';
+        chatInterface.style.visibility = 'hidden'; 
+        chatInterface.style.opacity = '0';
+    }
+    
+    // Also hide individual elements with multiple methods to prevent artifacts
+    [domChatMessages, domChatMessageBox, domChatContact, domChatContactStatus].forEach(element => {
+        if (element) {
+            element.style.display = 'none';
+            element.style.visibility = 'hidden';
+            element.style.opacity = '0';
+            element.style.height = '0';
+            element.style.overflow = 'hidden';
+        }
+    });
     
     // Get the chat container
     const chatContainer = document.getElementById('chat');
@@ -6327,6 +6340,15 @@ function showProfileInChatArea(profile) {
         console.error('Chat container not found');
         return;
     }
+    
+    // Completely clear any chat content that might be visible
+    chatContainer.style.background = 'var(--bg-color)';
+    chatContainer.style.overflow = 'hidden';
+    
+    // Remove any potential borders or outlines from chat container
+    chatContainer.style.border = 'none';
+    chatContainer.style.outline = 'none';
+    chatContainer.style.boxShadow = 'none';
     
     // Ensure profile is in the correct container
     if (!chatContainer.contains(domProfile)) {
@@ -6337,49 +6359,161 @@ function showProfileInChatArea(profile) {
     // Reset any conflicting styles first
     domProfile.style.cssText = '';
     
-    // Apply chat area specific styles
+    // Apply chat area specific styles - make profile take full space
     domProfile.style.display = 'block';
-    domProfile.style.position = 'absolute';
-    domProfile.style.top = '0';
-    domProfile.style.left = '0'; 
-    domProfile.style.right = '0';
-    domProfile.style.bottom = '0';
+    domProfile.style.position = 'relative';
     domProfile.style.width = '100%';
     domProfile.style.height = '100%';
-    domProfile.style.overflowY = 'auto';
-    domProfile.style.overflowX = 'hidden';
-    domProfile.style.padding = '20px';
-    domProfile.style.boxSizing = 'border-box';
-    domProfile.style.backgroundColor = '#0a0a0a';
-    domProfile.style.zIndex = '10'; // Ensure it's above other elements
+    domProfile.style.overflow = 'auto';
+    domProfile.style.background = 'var(--bg-color)';
+    domProfile.style.zIndex = '100'; 
     
-    // Make sure back button is visible and functional
+    // Ensure the profile content has proper styling
+    const profileContent = domProfile.querySelector('.profile-content');
+    if (profileContent) {
+        profileContent.style.padding = '0';
+        profileContent.style.margin = '0';
+        profileContent.style.height = '100%';
+        profileContent.style.overflow = 'auto';
+        profileContent.style.background = 'var(--bg-color)';
+    }
+    
+    // Ensure banner has proper styling
+    if (domProfileBanner) {
+        domProfileBanner.style.marginTop = '0';
+        domProfileBanner.style.height = 'auto';
+        domProfileBanner.style.minHeight = '50px';
+        domProfileBanner.style.border = 'none';
+    }
+    
     if (domProfileBackBtn) {
-        domProfileBackBtn.style.display = 'block';
+        if (domProfile.contains(domProfileBackBtn)) {
+            domProfileBackBtn.remove();
+        }
+        chatContainer.appendChild(domProfileBackBtn);
+        
+        // Use fixed positioning with proper calculation
+        domProfileBackBtn.style.display = 'flex';
+        domProfileBackBtn.style.position = 'fixed';
+        domProfileBackBtn.style.top = '20px';
+        domProfileBackBtn.style.zIndex = '1000';
+        domProfileBackBtn.style.borderRadius = '50%';
+        domProfileBackBtn.style.width = '40px';
+        domProfileBackBtn.style.height = '40px';
+        domProfileBackBtn.style.alignItems = 'center';
+        domProfileBackBtn.style.justifyContent = 'center';
         domProfileBackBtn.onclick = () => {
             closeProfileInChatArea();
         };
     }
     
+    // Hide the member panel toggle when viewing profile
+    const panelToggle = document.querySelector('.panel-toggle');
+    if (panelToggle) {
+        panelToggle.style.display = 'none';
+    }
+    
+    // Hide member panel if it was open
+    const memberPanel = document.querySelector('.member-panel');
+    if (memberPanel) {
+        memberPanel.style.display = 'none';
+    }
+    
+    // Force a reflow and ensure no visual artifacts remain
+    setTimeout(() => {
+        // Double-check that all chat elements are completely hidden
+        [domChatMessages, domChatMessageBox, domChatContact, domChatContactStatus].forEach(element => {
+            if (element) {
+                element.style.display = 'none';
+                element.style.visibility = 'hidden';
+            }
+        });
+    }, 10);
+    
     // Store that we're viewing profile in chat context
     window.isViewingProfileInChat = true;
-    
-    console.log('Profile should now be visible in chat area');
 }
 
 // Function to close profile and return to chat
 function closeProfileInChatArea() {
-    console.log('Closing profile in chat area');
-    
-    // Hide profile
     domProfile.style.display = 'none';
-    
-    // Reset all inline styles
     domProfile.style.cssText = '';
     
-    // Show messages and input box
-    domChatMessages.style.display = '';
-    domChatMessageBox.style.display = '';
+    // Reset profile content styles
+    const profileContent = domProfile.querySelector('.profile-content');
+    if (profileContent) {
+        profileContent.style.cssText = '';
+    }
+    
+    // Reset banner styles
+    if (domProfileBanner) {
+        domProfileBanner.style.cssText = '';
+    }
+    
+    if (domProfileBackBtn) {
+        const chatContainer = document.getElementById('chat');
+        if (chatContainer && chatContainer.contains(domProfileBackBtn)) {
+            domProfileBackBtn.remove();
+        }
+        domProfile.appendChild(domProfileBackBtn);
+        
+        // Reset back button styles
+        domProfileBackBtn.style.cssText = '';
+        domProfileBackBtn.style.display = 'none'; 
+    }
+    
+    // Reset chat container styles
+    const chatContainer = document.getElementById('chat');
+    if (chatContainer) {
+        chatContainer.style.cssText = ''; 
+    }
+    
+    // Show ALL chat interface elements properly
+    const chatInterface = document.querySelector('.chat-interface');
+    if (chatInterface) {
+        chatInterface.style.display = 'block';
+        chatInterface.style.visibility = 'visible';
+        chatInterface.style.opacity = '1';
+    }
+    
+    // Show individual elements with proper display values
+    if (domChatMessages) {
+        domChatMessages.style.display = 'flex';
+        domChatMessages.style.visibility = 'visible';
+        domChatMessages.style.opacity = '1';
+        domChatMessages.style.height = '';
+        domChatMessages.style.overflow = '';
+    }
+    
+    if (domChatMessageBox) {
+        domChatMessageBox.style.display = 'flex';
+        domChatMessageBox.style.visibility = 'visible';
+        domChatMessageBox.style.opacity = '1';
+        domChatMessageBox.style.height = '';
+        domChatMessageBox.style.overflow = '';
+    }
+    
+    if (domChatContact) {
+        domChatContact.style.display = 'flex'; 
+        domChatContact.style.visibility = 'visible';
+        domChatContact.style.opacity = '1';
+        domChatContact.style.height = '';
+        domChatContact.style.overflow = '';
+    }
+    
+    if (domChatContactStatus) {
+        domChatContactStatus.style.display = 'block'; 
+        domChatContactStatus.style.visibility = 'visible';
+        domChatContactStatus.style.opacity = '1';
+        domChatContactStatus.style.height = '';
+        domChatContactStatus.style.overflow = '';
+    }
+    
+    // Show member panel toggle again 
+    const panelToggle = document.querySelector('.panel-toggle');
+    if (panelToggle && strOpenChat !== strPubkey) {
+        panelToggle.style.display = 'flex';
+    }
     
     // Move profile back to main container
     const mainContainer = document.getElementById('popup-container');
@@ -6387,10 +6521,14 @@ function closeProfileInChatArea() {
         mainContainer.appendChild(domProfile);
     }
     
+    setTimeout(() => {
+        if (domChatMessages) domChatMessages.style.display = 'flex';
+        if (domChatMessageBox) domChatMessageBox.style.display = 'flex';
+        if (domChatContact) domChatContact.style.display = 'flex';
+    }, 10);
+    
     // Clear the profile viewing state
     window.isViewingProfileInChat = false;
-    
-    console.log('Profile closed, chat restored');
 }
 
 // Back button handling for profile view
