@@ -127,6 +127,10 @@
   mask-image: url("./icons/cancel.svg");
 }
 
+.icon-x {
+  mask-image: url("./icons/x.svg");
+}
+
 .icon-chat-circle {
   mask-image: url("./icons/chat-circle.svg");
 }
@@ -167,6 +171,10 @@
   mask-image: url("./icons/chevron-double-right.svg");
 }
 
+.icon-message {
+  mask-image: url("./icons/message.svg");
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -186,6 +194,11 @@
 
 body {
   margin: 0;
+}
+
+::selection {
+  background-color: rgba(255, 255, 255, 0.225);
+  color: #ffffff;
 }
 
 ::-webkit-scrollbar {
@@ -292,6 +305,15 @@ body {
   top: 0;
   left: 0;
   pointer-events: none;
+  background-color: rgba(0, 0, 0, 0);
+  transition: background-color 0.2s ease;
+}
+
+.popup-container.active {
+  pointer-events: auto;
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .popup {
@@ -309,12 +331,14 @@ body {
   max-height: 90vh;
   display: flex;
   flex-direction: column;
+  margin-left: 10px;
+  margin-right: 10px;
 }
 
 .popup-content {
   overflow-y: auto;
   max-height: calc(90vh - 150px);
-  margin-bottom: 20px;
+  margin-bottom: 10px;
   padding: 5px;
   word-break: keep-all;
 }
@@ -328,6 +352,13 @@ body {
 }
 
 .text-gradient {
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
+}
+
+.text-gradient-green {
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -968,7 +999,7 @@ body {
   font-size: 15px;
   color: rgba(255, 255, 255, 1);
   text-align: center;
-  max-width: 100px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1104,13 +1135,23 @@ body {
   border-radius: 14px;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
-  padding: 5px 5px 0px 5px;
+  padding: 5px;
 }
 
 .msg-preview-container span {
   padding: 5px;
   font-weight: 400;
   display: block;
+}
+
+.msg-preview-description {
+  opacity: 0.8;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background-color: rgba(0, 0, 0, 0.65);
+  padding: 7px 10px !important;
+  border-radius: 0 0 14px 14px;
 }
 
 .msg-preview-img {
@@ -2043,8 +2084,15 @@ select:disabled:hover {
 }
 
 .popup-cancel-btn {
-  opacity: 0.8;
   margin-left: 10px;
+  backdrop-filter: none;
+  border-color: #ff2ea9;
+  background-color: #161616;
+}
+
+#popupConfirm {
+  background-color: #58fcb3;
+  color: black;
 }
 
 .nav-icon {
@@ -2255,6 +2303,48 @@ select:disabled:hover {
 .login-logo {
   width: 260px;
   margin-top: 50px;
+}
+
+@media (max-height: 300px) {
+  .login-logo {
+    display: none;
+  }
+
+  .login-subtext {
+    display: none;
+  }
+}
+
+@media (max-height: 500px) {
+  .login-logo {
+    margin-top: 0px;
+  }
+
+  #login-start {
+    bottom: 10px !important;
+  }
+
+  .chat-new-center-content .chat-new-icon,
+  .chat-new-center-content .chat-new-subtitle,
+  .chat-new-center-content .divider {
+    display: none;
+  }
+}
+
+@media (max-height: 600px) {
+  .login-logo {
+    width: 43vh;
+  }
+  
+  .login-credits {
+    display: none;
+  }
+}
+
+#login-start {
+  position: absolute;
+  width: 100%;
+  bottom: 0;
 }
 
 .login-subtext {
@@ -3114,45 +3204,64 @@ select:disabled:hover {
 }
 
 /* MLS Group Invite Styles */
-.mls-invite-item {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(89, 252, 179, 0.2);
-  border-radius: 12px;
-  padding: 15px;
-  margin-bottom: 10px;
-  transition: all 0.3s ease;
+.chatlist-invite {
+  cursor: default !important;
+  background-color: rgba(255, 255, 255, 0.05);
 }
 
-.mls-invite-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(89, 252, 179, 0.4);
+.chatlist-invite .chatlist-contact-preview h4 {
+  color: rgba(255, 255, 255, 1);
 }
 
-.mls-invite-item h4 {
-  margin: 0 0 8px 0;
-  color: #59fcb3;
-  font-size: 16px;
+.chatlist-invite .chatlist-contact-preview p {
+  color: rgba(255, 255, 255, 0.85);
 }
 
-.mls-invite-item p {
-  margin: 0 0 12px 0;
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 14px;
-}
-
-.invite-actions {
+.invite-action-buttons {
   display: flex;
-  gap: 10px;
-  justify-content: center; /* center buttons horizontally */
+  flex-direction: row;
+  gap: 8px;
+  margin-top: auto;
+  margin-bottom: auto;
+  margin-left: auto;
+  padding-right: 10px;
 }
 
-.invite-actions button {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
+.invite-action-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: transparent;
   cursor: pointer;
-  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  padding: 0;
+}
+
+.invite-accept-btn {
+  border: 2px solid #59fcb3;
+}
+
+.invite-decline-btn {
+  border: 2px solid #ff2ea9;
+}
+
+.invite-action-btn:hover {
+  transform: scale(1.1);
+}
+
+.invite-action-btn:active {
+  transform: scale(0.95);
+}
+
+.invite-accept-btn:hover {
+  background: rgba(89, 252, 179, 0.2);
+}
+
+.invite-decline-btn:hover {
+  background: rgba(255, 46, 169, 0.2);
 }
 
 .btn-small {
@@ -3886,5 +3995,80 @@ hr {
   
   .member-panel {
     display: none !important;
+  }
+}
+
+/* Spoilers */
+.spoiler-wrapper {
+  display: inline;
+}
+
+.spoiler {
+  position: relative;
+  display: inline;
+  cursor: pointer;
+  padding: 2px 4px;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: 3px;
+  /* Ensure backgrounds clone across line breaks */
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Blurred, glassy cover effect - animated gradient shows through the blur */
+.spoiler:not(.revealed) {
+  background: linear-gradient(to right, #01ff96, #04110d, #00ff96);
+  background-size: 200% 200%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* Add glow effect */
+  text-shadow: 0 0 14px rgba(89, 252, 179, 0.7);
+  filter: blur(4px);
+  -webkit-filter: blur(4px);
+  /* Dark background for matte glass effect */
+  background-color: rgba(0, 0, 0, 0.35);
+  /* Fast gradient animation - constant speed */
+  animation: spoilerGradientShift 4s linear infinite;
+}
+
+/* Gradient position animation - seamless loop */
+@keyframes spoilerGradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+/* Revealed state - normal text, selectable, stays revealed */
+.spoiler.revealed {
+  color: inherit;
+  background: transparent;
+  cursor: text;
+  filter: none;
+  -webkit-filter: none;
+  text-shadow: none;
+  user-select: text;
+  -webkit-user-select: text;
+  animation: spoilerReveal 0.3s ease-out;
+}
+
+/* Smooth reveal animation */
+@keyframes spoilerReveal {
+  0% {
+    filter: blur(4px);
+    -webkit-filter: blur(4px);
+    color: rgba(89, 252, 179, 0.7);
+    text-shadow: 0 0 16px rgba(89, 252, 179, 0.6);
+  }
+  100% {
+    filter: blur(0px);
+    -webkit-filter: blur(0px);
+    color: inherit;
+    text-shadow: none;
   }
 }

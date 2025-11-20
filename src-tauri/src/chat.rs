@@ -211,6 +211,25 @@ pub enum ChatType {
     // Future types can be added here
 }
 
+impl ChatType {
+    /// Convert ChatType to integer for database storage
+    /// 0 = DirectMessage, 1 = MlsGroup
+    pub fn to_i32(&self) -> i32 {
+        match self {
+            ChatType::DirectMessage => 0,
+            ChatType::MlsGroup => 1,
+        }
+    }
+    
+    /// Convert integer from database to ChatType
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            1 => ChatType::MlsGroup,
+            _ => ChatType::DirectMessage, // Default to DM for safety
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ChatMetadata {
     pub custom_fields: HashMap<String, String>, // For extensibility

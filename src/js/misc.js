@@ -1,11 +1,10 @@
 /**
- * Generate a consistent Gradient Avatar from an npub
- * @param {string} npub - The npub to generate an avatar for
- * @param {string} username - A username to display initials from
+ * Generate a placeholder avatar
+ * @param {boolean} isGroup - Whether this is a group chat avatar
  * @param {number} limitSizeTo - An optional pixel width/height to lock the avatar to
  */
-function pubkeyToAvatar(npub, username, limitSizeTo = null) {
-    // Otherwise, display their Gradient Avatar
+function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
+    // Create avatar container with the appropriate placeholder SVG
     const divAvatar = document.createElement('div');
     divAvatar.classList.add('placeholder-avatar');
     if (limitSizeTo) {
@@ -15,44 +14,13 @@ function pubkeyToAvatar(npub, username, limitSizeTo = null) {
         divAvatar.style.maxWidth = limitSizeTo + 'px';
     }
 
-    // Convert the last three chars of their npub in to RGB HEX as a placeholder avatar
-    const strLastChars = npub.slice(-3).padEnd(3, 'a');
-    const rHex = strLastChars[0].charCodeAt(0).toString(16).padStart(2, '0');
-    const gHex = strLastChars[1].charCodeAt(0).toString(16).padStart(2, '0');
-    const bHex = strLastChars[2].charCodeAt(0).toString(16).padStart(2, '0');
-
-    // Create a gradient for it using Vector Green and their personalised HEX
-    divAvatar.style.background = `linear-gradient(-40deg, #${rHex}${gHex}${bHex}, 75%, #59fcb3)`;
-
-    // If a username is given, extract Initials or First Letter to be added on-top
-    if (username) {
-        const spanInitials = document.createElement('span');
-        const initials = getNameInitials(username) || username[0].toUpperCase();
-        spanInitials.textContent = initials;
-        
-        // Scale font size based on avatar size and number of characters
-        if (limitSizeTo) {
-            // For 35px avatars (chat UI): use smaller font
-            // For 50px avatars (chat list): use larger font
-            // Scale down further for 3-character initials
-            const baseFontSize = limitSizeTo * 0.4; // 40% of avatar size
-            const scaleFactor = initials.length === 3 ? 0.85 : 1; // Reduce by 15% for 3 chars
-            spanInitials.style.fontSize = `${baseFontSize * scaleFactor}px`;
-        }
-        
-        divAvatar.appendChild(spanInitials);
-    }
+    // Use the appropriate placeholder SVG based on chat type
+    divAvatar.style.backgroundImage = `url("${isGroup ? 'icons/group-placeholder.svg' : 'icons/user-placeholder.svg'}")`;
+    divAvatar.style.backgroundSize = 'cover';
+    divAvatar.style.backgroundPosition = 'center';
 
     return divAvatar;
 }
-
-/**
- * Extract up to three initials from a name, for example: "JSKitty" -> "JSK"
- * or "Michael Jackson" -> "MJ".
- * @param {string} str - A username to extract name initials from
- * @returns {string} - Up to three initials
- */
-const getNameInitials = str => (str.match(/[A-Z]/g) || []).slice(0, 3).join('');
 
 /**
  * Show a popup dialog to confirm an action.
@@ -62,15 +30,21 @@ const getNameInitials = str => (str.match(/[A-Z]/g) || []).slice(0, 3).join('');
  * @param {Boolean} fNotice - If this is a Notice or an Interactive Dialog.
  * @param {String} strInputPlaceholder - If specified, renders a text input with a custom placeholder, and returns a string instead of a boolean.
  * @param {String} strIcon - If specified, an icon to be displayed above the popup.
+ * @param {String} strTitleClass - If specified, a CSS class to be added to the title element (e.g., 'text-gradient').
  * @return {Promise<Boolean>} - The Promise will resolve to 'true' if confirm button was clicked, otherwise 'false'.
  */
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '') {
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '') {
     // Display the popup and render the UI
     domPopup.style.display = '';
     domPopupIcon.src = './icons/' + strIcon;
     domPopupIcon.style.display = strIcon ? '' : 'none';
     domPopupTitle.innerText = strTitle;
+    // Clear any previous classes and add the new one if specified
+    domPopupTitle.className = strTitleClass;
     domPopupSubtext.innerHTML = strSubtext;
+
+    // Show the backdrop by adding the active class
+    domApp.classList.add('active');
 
     // Adjust the 'Confirm' button if this is only a notice
     domPopupConfirmBtn.innerText = fNotice ? 'Okay!' : 'Confirm';
@@ -92,6 +66,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
         domPopupCancelBtn.removeEventListener('click', onCancelClick);
         domPopup.style.display = 'none';
+        domApp.classList.remove('active');
         resolve(strInputPlaceholder ? domPopupInput.value : true);
     };
 
@@ -100,6 +75,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         domPopupConfirmBtn.removeEventListener('click', onConfirmClick);
         domPopupCancelBtn.removeEventListener('click', onCancelClick);
         domPopup.style.display = 'none';
+        domApp.classList.remove('active');
         resolve(false);
     };
 
@@ -748,7 +724,7 @@ function cleanTrackingFromUrl(urlString) {
     if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
       const youtubeTrackingParams = [
         'feature', 'si', 'app', 'kw', 'annotation_id', 'src_vid',
-        'ab_channel', 'start_radio', 'rv'
+        'ab_channel', 'start_radio', 'rv', 'pp'
       ];
       youtubeTrackingParams.forEach(param => url.searchParams.delete(param));
     }
@@ -805,8 +781,18 @@ function cleanTrackingFromUrl(urlString) {
       linkedinTrackingParams.forEach(param => url.searchParams.delete(param));
     }
     
+    // Vimeo-specific
+    else if (hostname.includes('vimeo.com')) {
+      const vimeoTrackingParams = ['share', 'fl', 'fe'];
+      vimeoTrackingParams.forEach(param => url.searchParams.delete(param));
+    }
+    
     // Remove common tracking parameters from all URLs
-    commonTrackingParams.forEach(param => url.searchParams.delete(param));
+    // Exception: YouTube uses 't' for timestamps, so skip it for YouTube URLs
+    commonTrackingParams.forEach(param => {
+      if ((hostname.includes('youtube.com') || hostname.includes('youtu.be')) && param === 't') return;
+      url.searchParams.delete(param);
+    });
     
     return url.toString();
   } catch (e) {

@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
-use crate::db_migration::{save_chat, save_chat_messages};
+use crate::db_migration::save_chat;
 use crate::net;
 use crate::STATE;
 use crate::util::{self, calculate_file_hash};
@@ -179,10 +179,9 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
                 })).unwrap();
                 
                 // Save the failed message to our DB
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
-                }
+                let message_to_save = message.clone();
+                drop(state); // Release lock before async DB operation
+                let _ = crate::db_migration::save_message(handle.clone(), receiver, &message_to_save).await;
                 break;
             }
         }
@@ -283,9 +282,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         // Calculate the file hash first (before encryption)
         let file_hash = calculate_file_hash(&attached_file.bytes);
+        
+        // The SHA-256 hash of an empty file - we should never reuse this
+        const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
         // Check for existing attachment with same hash across all profiles BEFORE encrypting
-        let existing_attachment = {
+        // BUT: Never reuse empty file hashes - always force a new upload
+        let existing_attachment = if file_hash == EMPTY_FILE_HASH {
+            None
+        } else {
             let state = STATE.lock().await;
             let mut found_attachment: Option<(String, Attachment)> = None;
             
@@ -318,12 +323,29 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             found_attachment
         };
 
-        // Only encrypt if we don't have an existing attachment (optimization)
-        let (params, enc_file) = if existing_attachment.is_some() {
+        // Determine if we need to encrypt based on whether we'll reuse an existing attachment
+        let will_reuse_existing = if let Some((_, ref existing)) = existing_attachment {
+            // Check if URL contains empty hash - never reuse those
+            const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            if existing.url.contains(EMPTY_FILE_HASH) {
+                false
+            } else {
+                // Check if URL is live
+                match net::check_url_live(&existing.url).await {
+                    Ok(is_live) => is_live,
+                    Err(_) => false
+                }
+            }
+        } else {
+            false
+        };
+
+        // Only encrypt if we won't reuse an existing attachment
+        let (params, enc_file) = if will_reuse_existing {
             // Skip encryption for duplicate files - we'll reuse existing encryption params
             (crypto::EncryptionParams { key: String::new(), nonce: String::new() }, Vec::new())
         } else {
-            // Encrypt the attachment only if it's a new file
+            // Encrypt the attachment - either it's new or the existing URL is dead
             let params = crypto::generate_encryption_params();
             let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
             (params, enc_file)
@@ -409,10 +431,18 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // Check if we found an existing attachment with the same hash
         let mut should_upload = true;
         let attachment_rumor = if let Some((_found_profile_id, existing_attachment)) = existing_attachment {
-            // Verify the URL is still live before reusing
-            let url_is_live = match net::check_url_live(&existing_attachment.url).await {
-                Ok(is_live) => is_live,
-                Err(_) => false // Treat errors as dead URL
+            // Never reuse URLs with the empty file hash
+            const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            let is_empty_hash = existing_attachment.url.contains(EMPTY_FILE_HASH);
+            
+            // Verify the URL is still live before reusing (but skip if it's an empty hash)
+            let url_is_live = if is_empty_hash {
+                false
+            } else {
+                match net::check_url_live(&existing_attachment.url).await {
+                    Ok(is_live) => is_live,
+                    Err(_) => false // Treat errors as dead URL
+                }
             };
             
             if url_is_live {
@@ -593,10 +623,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                 // Save the message to our DB
                 let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat(handle.clone(), chat).await;
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                let message_to_save = sent_msg.clone();
+                let chat_to_save = state.get_chat(&receiver).cloned();
+                drop(state); // Release lock before async DB operations
+                
+                if let Some(chat) = chat_to_save {
+                    let _ = save_chat(handle.clone(), &chat).await;
+                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
                 }
                 return Ok(true);
             }
@@ -692,10 +725,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                 // Save the message to our DB
                 let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat(handle.clone(), chat).await;
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                let message_to_save = sent_msg.clone();
+                let chat_to_save = state.get_chat(&receiver).cloned();
+                drop(state); // Release lock before async DB operations
+                
+                if let Some(chat) = chat_to_save {
+                    let _ = save_chat(handle.clone(), &chat).await;
+                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
                 }
                 return Ok(true);
             }
@@ -720,10 +756,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
                 // Save the message to our DB
                 let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&receiver) {
-                    let _ = save_chat(handle.clone(), chat).await;
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                let message_to_save = sent_ish_msg.clone();
+                let chat_to_save = state.get_chat(&receiver).cloned();
+                drop(state); // Release lock before async DB operations
+                
+                if let Some(chat) = chat_to_save {
+                    let _ = save_chat(handle.clone(), &chat).await;
+                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
                 }
                 return Ok(true);
             }
@@ -830,9 +869,21 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
+            let path = std::path::Path::new(&file_path);
+            
+            // Check if file exists first
+            if !path.exists() {
+                return Err(format!("File does not exist: {}", file_path));
+            }
+            
             // Read file bytes
             let bytes = std::fs::read(&file_path)
                 .map_err(|e| format!("Failed to read file: {}", e))?;
+            
+            // Check if file is empty
+            if bytes.is_empty() {
+                return Err(format!("File is empty (0 bytes): {}", file_path));
+            }
 
             // Extract extension from filepath
             let extension = file_path
@@ -874,70 +925,6 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
-#[tauri::command]
-pub async fn react(reference_id: String, npub: String, emoji: String) -> Result<bool, ()> {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Prepare the EventID and Pubkeys for rumor building
-    let reference_event = EventId::from_hex(reference_id.as_str()).unwrap();
-    let receiver_pubkey = PublicKey::from_bech32(npub.as_str()).unwrap();
-
-    // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
-
-    // Build our NIP-25 Reaction rumor
-    let rumor = EventBuilder::reaction_extended(
-        reference_event,
-        receiver_pubkey,
-        Some(Kind::PrivateDirectMessage),
-        &emoji,
-    )
-    .build(my_public_key);
-    let rumor_id = rumor.id.unwrap();
-
-    // Send reaction to the real receiver
-    client
-        .gift_wrap(&receiver_pubkey, rumor.clone(), [])
-        .await
-        .unwrap();
-
-    // Send reaction to our own public key, to allow for recovering
-    match client.gift_wrap(&my_public_key, rumor, []).await {
-        Ok(_) => {
-            // And add our reaction locally
-            let reaction = Reaction {
-                id: rumor_id.to_hex(),
-                reference_id: reference_id.clone(),
-                author_id: my_public_key.to_hex(),
-                emoji,
-            };
-
-            // Commit it to our local state
-            let mut state = STATE.lock().await;
-            let msg = state.chats.iter_mut()
-                .find(|chat| chat.has_participant(&npub))
-                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == reference_id))
-                .unwrap();
-            let chat_id = npub.clone();
-            let was_reaction_added_to_state = msg.add_reaction(reaction, Some(&chat_id));
-            if was_reaction_added_to_state {
-                // Save the message's reaction to our DB
-                let handle = TAURI_APP.get().unwrap();
-                if let Some(chat) = state.get_chat(&npub) {
-                    let all_messages = chat.messages.clone();
-                    let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
-                }
-            }
-            return Ok(was_reaction_added_to_state);
-        }
-        Err(e) => {
-            eprintln!("Error: {:?}", e);
-            return Ok(false);
-        }
-    }
-}
-
 /// Protocol-agnostic reaction function that works for both DMs and Group Chats
 #[tauri::command]
 pub async fn react_to_message(reference_id: String, chat_id: String, emoji: String) -> Result<bool, String> {
@@ -956,8 +943,61 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
     
     match chat_type {
         ChatType::DirectMessage => {
-            // For DMs, use the existing DM reaction logic
-            react(reference_id, chat_id, emoji).await.map_err(|_| "DM reaction failed".to_string())
+            // For DMs, send gift-wrapped reaction
+            let reference_event = EventId::from_hex(&reference_id).map_err(|e| e.to_string())?;
+            let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
+            
+            // Build NIP-25 Reaction rumor
+            let rumor = EventBuilder::reaction_extended(
+                reference_event,
+                receiver_pubkey,
+                Some(Kind::PrivateDirectMessage),
+                &emoji,
+            )
+            .build(my_public_key);
+            let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
+            
+            // Send reaction to the receiver
+            client
+                .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+                .await
+                .map_err(|e| e.to_string())?;
+            
+            // Send reaction to ourselves for recovery
+            client
+                .gift_wrap(&my_public_key, rumor, [])
+                .await
+                .map_err(|e| e.to_string())?;
+            
+            // Add reaction to local state
+            let reaction = Reaction {
+                id: rumor_id,
+                reference_id: reference_id.clone(),
+                author_id: my_public_key.to_hex(),
+                emoji,
+            };
+            
+            let mut state = STATE.lock().await;
+            if let Some(chat) = state.chats.iter_mut().find(|c| c.has_participant(&chat_id)) {
+                if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == reference_id) {
+                    let was_added = msg.add_reaction(reaction, Some(&chat_id));
+                    
+                    if was_added {
+                        // Save the updated message to database
+                        if let Some(handle) = TAURI_APP.get() {
+                            let updated_message = msg.clone();
+                            let chat_id = chat.id.clone();
+                            drop(state); // Release lock before async operation
+                            let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &updated_message).await;
+                            return Ok(true);
+                        }
+                    }
+                    
+                    return Ok(was_added);
+                }
+            }
+            
+            Ok(false)
         }
         ChatType::MlsGroup => {
             // For group chats, send reaction through MLS
@@ -986,10 +1026,13 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                     let was_added = msg.add_reaction(reaction, Some(&chat_id));
                     
                     if was_added {
-                        // Save to database
+                        // Save the updated message to database
                         if let Some(handle) = TAURI_APP.get() {
-                            let all_messages = chat.messages.clone();
-                            let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
+                            let updated_message = msg.clone();
+                            let chat_id_clone = chat.id.clone();
+                            drop(state); // Release lock before async operation
+                            let _ = crate::db_migration::save_message(handle.clone(), &chat_id_clone, &updated_message).await;
+                            return Ok(true);
                         }
                     }
                     
@@ -1049,11 +1092,10 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
                         "chat_id": &chat_id
                     })).unwrap();
 
-                    // Save the new Metadata to the DB
-                    if let Some(chat) = state.get_chat(&chat_id) {
-                        let all_messages = chat.messages.clone();
-                        let _ = save_chat_messages(handle.clone(), &chat.id, &all_messages).await;
-                    }
+                    // Save the updated message with metadata to the DB
+                    let message_to_save = msg.clone();
+                    drop(state); // Release lock before async DB operation
+                    let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &message_to_save).await;
                     return true;
                 }
             }

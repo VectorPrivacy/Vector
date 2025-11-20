@@ -113,23 +113,41 @@ function initializeMarked() {
             }
         }
 
-        const classes = ['hljs'];
-        if (lang) {
-            classes.push(`language-${encodeAttr(lang)}`);
-        }
-
-        // Store the raw code in a data attribute for copying
+        // Store the raw code in data attribute for post-processing
         const encodedRaw = encodeAttr(raw);
+        const codeClasses = ['hljs'];
+        if (lang) {
+            codeClasses.push(`language-${encodeAttr(lang)}`);
+        }
         
-        return `<div class="code-block-wrapper">
-            <button class="code-copy-btn" data-code="${encodedRaw}" title="Copy code">
-                <span class="icon icon-copy"></span>
-            </button>
-            <pre><code class="${classes.join(' ')}">${highlighted}</code></pre>
+        return `<div class="code-block-wrapper" data-raw-code="${encodedRaw}">
+            <pre><code class="${codeClasses.join(' ')}">${highlighted}</code></pre>
         </div>`;
     };
 
-    marked.use({ tokenizer, renderer });
+    // Spoiler extension: ||spoiler text||
+    const spoilerExtension = {
+        name: 'spoiler',
+        level: 'inline',
+        start(src) {
+            return src.match(/\|\|/)?.index;
+        },
+        tokenizer(src) {
+            const match = src.match(/^\|\|([^|]+)\|\|/);
+            if (match) {
+                return {
+                    type: 'spoiler',
+                    raw: match[0],
+                    text: match[1]
+                };
+            }
+        },
+        renderer(token) {
+            return `<span><span data-spoiler-text="${encodeAttr(token.text)}">${encodeAttr(token.text)}</span></span>`;
+        }
+    };
+
+    marked.use({ tokenizer, renderer, extensions: [spoilerExtension] });
 }
 
 /**
@@ -242,15 +260,6 @@ function removeParagraphTags(html) {
         }
     });
 
-    // Add spacing after blockquotes if they're followed by other content
-    const blockquotes = temp.querySelectorAll('blockquote');
-    blockquotes.forEach((bq) => {
-        const nextSibling = bq.nextElementSibling;
-        if (nextSibling) {
-            const br = document.createElement('br');
-            bq.after(br);
-        }
-    });
 
     // Fix numbered list continuity across interrupting elements
     // When lists are separated by code blocks, set the 'start' attribute to continue numbering
@@ -298,23 +307,114 @@ function parseMarkdown(md) {
 
 
     const SAFE_TAGS = [
-        'abbr', 'b', 'blockquote', 'br', 'button', 'code', 'del', 'details', 'div', 'em', 'h1', 'h2', 'h3', 'h4',
+        'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em', 'h1', 'h2', 'h3', 'h4',
         'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's', 'span', 'strong', 'sub',
         'summary', 'sup', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'u', 'ul'
     ];
 
     const SAFE_ATTRS = [
-        'class', 'aria-label', 'aria-hidden', 'open', 'data-code', 'title', 'start'
+        'class', 'aria-label', 'aria-hidden', 'open', 'data-raw-code', 'data-language', 'title', 'start', 'data-spoiler-text'
     ];
+
+    // Whitelist of allowed class prefixes (for highlight.js and our own classes)
+    const ALLOWED_CLASS_PREFIXES = ['hljs', 'language-'];
+    const ALLOWED_CLASSES = ['code-block-wrapper', 'markdown-paragraph', 'spoiler-wrapper', 'spoiler', 'revealed'];
+
+    // Create a one-time hook for this sanitization call
+    DOMPurify.removeAllHooks();
+    DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+        if (node.hasAttribute('class')) {
+            const classes = node.getAttribute('class').split(/\s+/).filter(Boolean);
+            const validClasses = classes.filter(cls => {
+                // Allow exact matches
+                if (ALLOWED_CLASSES.includes(cls)) return true;
+                // Allow prefix matches (hljs-*, language-*)
+                return ALLOWED_CLASS_PREFIXES.some(prefix => cls.startsWith(prefix));
+            });
+            
+            if (validClasses.length > 0) {
+                node.setAttribute('class', validClasses.join(' '));
+            } else {
+                node.removeAttribute('class');
+            }
+        }
+    });
 
     const sanitized = DOMPurify.sanitize(rendered, {
         ALLOWED_TAGS: SAFE_TAGS,
         ALLOWED_ATTR: SAFE_ATTRS,
-        FORBID_TAGS: ['style', 'script'],
-        FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onmouseout', 'onfocus', 'onblur']
+        FORBID_TAGS: ['style', 'script', 'form', 'input', 'button'],
+        FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onmouseout', 'onfocus', 'onblur'],
+        ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
     });
 
-    return removeParagraphTags(sanitized);
+    // Clean up the hook after use
+    DOMPurify.removeAllHooks();
+
+    const withoutParagraphs = removeParagraphTags(sanitized);
+    const withClasses = addClassesToMarkdownElements(withoutParagraphs);
+    return addCopyButtonsToCodeBlocks(withClasses);
+}
+
+/**
+ * Add copy buttons to code blocks after sanitization
+ * This is done post-sanitization to prevent button injection attacks
+ * @private
+ */
+function addCopyButtonsToCodeBlocks(html) {
+    if (!html) return html;
+    
+    const temp = document.createElement('div');
+    temp.innerHTML = html;
+    
+    const codeWrappers = temp.querySelectorAll('.code-block-wrapper[data-raw-code]');
+    codeWrappers.forEach((wrapper) => {
+        const rawCode = wrapper.getAttribute('data-raw-code');
+        if (!rawCode) return;
+        
+        // Create the copy button (safely, outside of user-controlled content)
+        const button = document.createElement('button');
+        button.className = 'code-copy-btn';
+        button.setAttribute('data-code', rawCode);
+        button.setAttribute('title', 'Copy code');
+        
+        const icon = document.createElement('span');
+        icon.className = 'icon icon-copy';
+        button.appendChild(icon);
+        
+        // Insert button as first child
+        wrapper.insertBefore(button, wrapper.firstChild);
+        
+        // Remove the data attribute as it's no longer needed
+        wrapper.removeAttribute('data-raw-code');
+    });
+    
+    return temp.innerHTML;
+}
+
+/**
+ * Add classes to markdown elements after sanitization
+ * This prevents class injection while allowing our own styling
+ * @private
+ */
+function addClassesToMarkdownElements(html) {
+    if (!html) return html;
+    
+    const temp = document.createElement('div');
+    temp.innerHTML = html;
+    
+    // Add classes to spoiler elements (identified by data-spoiler-text attribute)
+    temp.querySelectorAll('span[data-spoiler-text]').forEach(el => {
+        // Add spoiler class to the element itself
+        el.classList.add('spoiler');
+        
+        // Ensure parent span has spoiler-wrapper class
+        if (el.parentElement && el.parentElement.tagName === 'SPAN') {
+            el.parentElement.classList.add('spoiler-wrapper');
+        }
+    });
+    
+    return temp.innerHTML;
 }
 
 /**
@@ -346,6 +446,20 @@ document.addEventListener('click', (e) => {
     }).catch(err => {
         console.error('Failed to copy code:', err);
     });
+});
+
+/**
+ * Set up event delegation for spoiler reveals
+ * Click to reveal spoiler (stays revealed, doesn't toggle back)
+ */
+document.addEventListener('click', (e) => {
+    const spoiler = e.target.closest('.spoiler');
+    if (!spoiler) return;
+    
+    // Only reveal if not already revealed
+    if (!spoiler.classList.contains('revealed')) {
+        spoiler.classList.add('revealed');
+    }
 });
 
 // Initialize marked when the script loads (if it's already available)

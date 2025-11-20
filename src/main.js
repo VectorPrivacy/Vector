@@ -34,10 +34,12 @@ let domProfileAvatar = document.getElementById('profile-avatar');
 const domProfileNameSecondary = document.getElementById('profile-secondary-name');
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
 const domProfileBadgeInvite = document.getElementById('profile-badge-invites');
+const domProfileBadgeFawkes = document.getElementById('profile-badge-fawkes');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
+const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileId = document.getElementById('profile-id');
 
@@ -357,7 +359,7 @@ picker.addEventListener('click', (e) => {
 
                     const divMessage = document.getElementById(cMsg.id);
                     divMessage.querySelector(`.msg-extras span`).replaceWith(spanReaction);
-                    invoke('react', { referenceId: strCurrentReactionReference, npub: strReceiverPubkey, emoji: cEmoji.emoji });
+                    invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
                 }
             } else {
                 // Add to message input
@@ -728,6 +730,16 @@ let chatOpenTimestamp = 0;
  * Synchronise all messages from the backend
  */
 async function init() {
+    // Check if account is selected (skip if migration pending)
+    try {
+        await invoke("get_current_account");
+    } catch (e) {
+        console.log('[Init] No account selected - migration may be pending, triggering fetch_messages to check');
+        // Call fetch_messages anyway - it will detect migration and trigger it
+        await invoke("fetch_messages", { init: true });
+        return;
+    }
+    
     // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
     await invoke("fetch_messages", { init: true });
 
@@ -743,13 +755,9 @@ async function init() {
 
     // Run a very slow loop to update dynamic elements, like "last message time"
     setInterval(() => {
-        // If the chatlist is open: re-render to update timestamps
-        if (domChats.style.display !== 'none') renderChatlist();
-
-        // If the chat is open; run a 'soft' render
-        if (strOpenChat) {
-            const chat = arrChats.find(c => c.id === strOpenChat);
-            if (chat) updateChat(chat, []);
+        // If the chatlist is open: update timestamps
+        if (domChats.style.display !== 'none') {
+            updateChatlistTimestamps();
         }
     }, 30000);
 
@@ -759,18 +767,13 @@ async function init() {
         const now = Date.now() / 1000;
         arrChats.forEach(chat => {
             if (chat.active_typers && chat.active_typers.length > 0) {
-                // Clear the array if we haven't received an update in 35 seconds
-                // (30s expiry + 5s grace period for network delays)
-                if (!chat.last_typing_update || now - chat.last_typing_update > 35) {
-                    // Only log for groups
-                    if (chat.chat_type === 'MlsGroup') {
-                        console.log('[TYPING] ⏰ Clearing expired typing indicators for group:', chat.id.substring(0, 16));
-                    }
+                // Clear the array if we haven't received an update in 30 seconds
+                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
                     chat.active_typers = [];
                     
                     // If this is the open chat, refresh the display
                     if (strOpenChat === chat.id) {
-                        openChat(chat.id);
+                        updateChatHeaderSubtext(chat);
                     }
                     
                     // Refresh chat list
@@ -914,106 +917,11 @@ async function loadMLSInvites() {
         const welcomes = Array.isArray(raw) ? raw : (raw?.welcomes || raw?.items || []);
         arrMLSInvites = (welcomes || []).filter(Boolean);
 
-
-        // Render the invites UI
-        renderMLSInvites();
+        // Make sure to notify if there's pending invites
+        updateChatBackNotification();
     } catch (e) {
         console.error('Failed to load MLS invites:', e);
-        // Ensure the section hides on error
-        const invitesSection = document.getElementById('mls-invites-section');
-        if (invitesSection) invitesSection.style.display = 'none';
-        // Recompute layout after invites section visibility change
-        adjustSize();
     }
-}
-
-/**
- * Render MLS invites in the chat tab
- */
-function renderMLSInvites() {
-    const invitesSection = document.getElementById('mls-invites-section');
-    const invitesContainer = document.getElementById('mls-invites-container');
-    if (!invitesSection || !invitesContainer) return;
-
-    // Clear existing content
-    invitesContainer.innerHTML = '';
-
-    // Hide section if no invites
-    const count = Array.isArray(arrMLSInvites) ? arrMLSInvites.length : 0;
-    if (!count) {
-        invitesSection.style.display = 'none';
-        // Recompute layout since invites section visibility changed
-        adjustSize();
-        return;
-    }
-
-    // Show section if there are invites
-    invitesSection.style.display = '';
-
-    // Render each invite safely (avoid exceptions on missing fields)
-    for (const invite of arrMLSInvites) {
-        try {
-            const divInvite = document.createElement('div');
-            divInvite.classList.add('mls-invite-item');
-
-            const groupId = invite.group_id || invite.id || '';
-            const groupName =
-                invite.group_name ||
-                invite.name ||
-                (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
-
-            // Backend returns 'welcomer' as npub string
-            const welcomerNpub = invite.welcomer || '';
-
-            // Get display name from profile (nickname > name > npub prefix)
-            let welcomerDisplay = 'Unknown';
-            if (welcomerNpub) {
-                const welcomerProfile = getProfile(welcomerNpub);
-                welcomerDisplay = welcomerProfile?.nickname ||
-                                 welcomerProfile?.name ||
-                                 welcomerNpub.substring(0, 16) + '...';
-            }
-
-            const memberCount =
-                (invite.member_count ??
-                    (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
-
-            // Group name
-            const h4Name = document.createElement('h4');
-            h4Name.textContent = groupName;
-            divInvite.appendChild(h4Name);
-
-            // Inviter info
-            const pInfo = document.createElement('p');
-            pInfo.textContent = `Invited by ${welcomerDisplay} • ${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
-            divInvite.appendChild(pInfo);
-
-            // Action buttons
-            const divActions = document.createElement('div');
-            divActions.classList.add('invite-actions');
-
-            const btnAccept = document.createElement('button');
-            btnAccept.classList.add('btn', 'btn-bounce', 'accept-btn');
-            btnAccept.textContent = 'Accept';
-            btnAccept.onclick = () => acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
-
-            const btnDecline = document.createElement('button');
-            btnDecline.classList.add('btn', 'btn-bounce', 'logout-btn');
-            btnDecline.textContent = 'Decline';
-            btnDecline.onclick = () => declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
-
-            divActions.appendChild(btnAccept);
-            divActions.appendChild(btnDecline);
-            divInvite.appendChild(divActions);
-
-            invitesContainer.appendChild(divInvite);
-        } catch (err) {
-            console.warn('Failed to render MLS invite', invite, err);
-        }
-    }
-
-    // After rendering invites, recompute layout to avoid oversized chat list
-    adjustSize();
 }
 
 /**
@@ -1048,7 +956,9 @@ async function acceptMLSInvite(welcomeEventId) {
 function declineMLSInvite(welcomeEventId) {
     // Remove from UI; next backend fetch will exclude if server persisted dismissal
     arrMLSInvites = arrMLSInvites.filter(i => i.id !== welcomeEventId);
-    renderMLSInvites();
+
+    // Make sure to notify if there's still pending invites, or remove the notification
+    updateChatBackNotification();
 
     // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
     adjustSize();
@@ -1058,10 +968,8 @@ function declineMLSInvite(welcomeEventId) {
  * A "thread" function dedicated to refreshing Profile data in the background
  */
 async function fetchProfiles() {
-    // Poll for changes in profiles
-    for (const profile of arrProfiles) {
-        await invoke("load_profile", { npub: profile.id });
-    }
+    // Use the new profile sync system
+    await invoke("sync_all_profiles");
 }
 
 /**
@@ -1073,7 +981,6 @@ function updateChatHeaderSubtext(chat) {
     
     const isGroup = chat.chat_type === 'MlsGroup';
     const fNotes = chat.id === strPubkey;
-    
     if (fNotes) {
         domChatContactStatus.textContent = 'Encrypted Notes to Self';
         domChatContactStatus.classList.remove('text-gradient');
@@ -1163,18 +1070,67 @@ function updateChatHeaderSubtext(chat) {
     }
 }
 
+// Store a hash of the last rendered state to detect actual changes
+let lastChatlistStateHash = '';
+
+/**
+ * Generate a hash representing the current state of all chats
+ */
+function generateChatlistStateHash() {
+    // Build a simple array of state values (faster than creating objects)
+    const states = [];
+    
+    // Add invite IDs first
+    for (const inv of arrMLSInvites) {
+        states.push(inv.id || inv.welcome_event_id || inv.group_id);
+    }
+    
+    // Add chat states
+    for (const chat of arrChats) {
+        const isGroup = chat.chat_type === 'MlsGroup';
+        const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
+        const cLastMsg = chat.messages[chat.messages.length - 1];
+        const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
+        const activeTypers = chat.active_typers || [];
+        
+        // Push values directly (faster than creating object)
+        states.push(
+            nUnread,
+            activeTypers.length,
+            cLastMsg?.id,
+            cLastMsg?.pending,
+            profile?.nickname || profile?.name,
+            profile?.avatar,
+            chat.muted
+        );
+    }
+    
+    return JSON.stringify(states);
+}
+
 /**
  * A "thread" function dedicated to rendering the Chat UI in real-time
  */
 function renderChatlist() {
     if (fInit) return;
 
-    // Check if the order of chats has changed
-    const currentOrder = Array.from(domChatList.children).map(el => el.id.replace('chatlist-', ''));
-    const orderChanged = JSON.stringify(currentOrder) !== JSON.stringify(arrChats.map(chat => chat.id));
+    // Generate a hash of the current RENDERABLE state
+    const currentStateHash = generateChatlistStateHash();
 
-    // If the order of the chatlist changes (i.e: new message), prep a fragment to re-render the full list in one sweep
+    // If the renderable state hasn't changed, skip rendering entirely
+    if (currentStateHash === lastChatlistStateHash) return;
+    lastChatlistStateHash = currentStateHash;
+
+    // Prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
+    
+    // Render invites first (at the top of the chat list)
+    for (const invite of arrMLSInvites) {
+        const divInvite = renderInviteItem(invite);
+        fragment.appendChild(divInvite);
+    }
+
+    // Then render regular chats
     for (const chat of arrChats) {
         // For groups, we show them even if they have no messages yet
         // For DMs, we only show them if they have messages
@@ -1183,39 +1139,115 @@ function renderChatlist() {
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
 
-        // If the chat order changed; append to fragment instead of directly to the DOM for full list re-render efficiency
         const divContact = renderChat(chat);
-        if (orderChanged) {
-            fragment.appendChild(divContact);
-        } else {
-            // The order hasn't changed, so it's more efficient to replace the existing elements
-            const domExistingContact = document.getElementById(`chatlist-${chat.id}`);
-            domExistingContact.replaceWith(divContact);
-            // Note: we don't check if domExistingContact exists now, as it should be guarenteed by the very first orderChanged check
-        }
+        fragment.appendChild(divContact);
     }
 
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
     if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
 
-    // Add all elements at once for performance
-    if (orderChanged) {
-        // Nuke the existing list
-        while (domChatList.firstChild) {
-            domChatList.removeChild(domChatList.firstChild);
-        }
-        // Append our new fragment
-        domChatList.appendChild(fragment);
-
-        // Add a fade-in
-        const divFade = document.createElement('div');
-        divFade.classList.add(`fadeout-bottom`);
-        divFade.style.bottom = `65px`;
-        domChatList.appendChild(divFade);
+    // Nuke the existing list
+    while (domChatList.firstChild) {
+        domChatList.removeChild(domChatList.firstChild);
     }
     
-    // Update the back button notification dot when chatlist changes
+    // Append our new fragment
+    domChatList.appendChild(fragment);
+
+    // Add a fade-in
+    const divFade = document.createElement('div');
+    divFade.classList.add(`fadeout-bottom`);
+    divFade.style.bottom = `65px`;
+    domChatList.appendChild(divFade);
+    
+    // Update the back button notification
     updateChatBackNotification();
+}
+
+/**
+ * Render an MLS invite as a chat-like item
+ * @param {MLSWelcome} invite - The invite we're rendering
+ */
+function renderInviteItem(invite) {
+    const groupId = invite.group_id || invite.id || '';
+    const groupName =
+        invite.group_name ||
+        invite.name ||
+        (groupId ? `Group ${String(groupId).substring(0, 8)}...` : 'Unnamed Group');
+
+    const memberCount =
+        (invite.member_count ??
+            (Array.isArray(invite.members) ? invite.members.length : invite.memberCount)) || 0;
+
+    // Create the invite container styled like a chat item
+    const divInvite = document.createElement('div');
+    divInvite.classList.add('chatlist-contact', 'chatlist-invite');
+    divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
+    divInvite.style.borderColor = '#59fcb3';
+
+    // Avatar container with group placeholder
+    const divAvatarContainer = document.createElement('div');
+    divAvatarContainer.style.position = 'relative';
+    divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+    divInvite.appendChild(divAvatarContainer);
+
+    // Preview container with group name and member count
+    const divPreviewContainer = document.createElement('div');
+    divPreviewContainer.classList.add('chatlist-contact-preview');
+
+    // Group name
+    const h4Name = document.createElement('h4');
+    h4Name.textContent = groupName;
+    h4Name.classList.add('cutoff');
+    divPreviewContainer.appendChild(h4Name);
+
+    // Member count as subtext
+    const pMemberCount = document.createElement('p');
+    pMemberCount.classList.add('cutoff');
+    pMemberCount.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
+    divPreviewContainer.appendChild(pMemberCount);
+
+    divInvite.appendChild(divPreviewContainer);
+
+    // Action buttons container (replaces timestamp area)
+    const divActions = document.createElement('div');
+    divActions.classList.add('invite-action-buttons');
+
+    // Accept button (green check)
+    const btnAccept = document.createElement('button');
+    btnAccept.classList.add('invite-action-btn', 'invite-accept-btn');
+    btnAccept.title = 'Accept Invite';
+    btnAccept.onclick = (e) => {
+        e.stopPropagation();
+        acceptMLSInvite(invite.id || invite.welcome_event_id || groupId);
+    };
+    const acceptIcon = document.createElement('span');
+    acceptIcon.classList.add('icon', 'icon-check');
+    acceptIcon.style.width = '16px';
+    acceptIcon.style.height = '16px';
+    acceptIcon.style.backgroundColor = '#59fcb3';
+    btnAccept.appendChild(acceptIcon);
+
+    // Decline button (danger color X)
+    const btnDecline = document.createElement('button');
+    btnDecline.classList.add('invite-action-btn', 'invite-decline-btn');
+    btnDecline.title = 'Decline Invite';
+    btnDecline.onclick = (e) => {
+        e.stopPropagation();
+        declineMLSInvite(invite.id || invite.welcome_event_id || groupId);
+    };
+    const declineIcon = document.createElement('span');
+    declineIcon.classList.add('icon', 'icon-x');
+    declineIcon.style.width = '16px';
+    declineIcon.style.height = '16px';
+    declineIcon.style.backgroundColor = '#ff2ea9';
+    btnDecline.appendChild(declineIcon);
+
+    divActions.appendChild(btnAccept);
+    divActions.appendChild(btnDecline);
+    divInvite.appendChild(divActions);
+
+    return divInvite;
 }
 
 /**
@@ -1235,7 +1267,7 @@ function renderChat(chat) {
     const divContact = document.createElement('div');
     if (nUnread) divContact.style.borderColor = '#59fcb3';
     divContact.classList.add('chatlist-contact');
-    divContact.id = chat.id;
+    divContact.id = `chatlist-${chat.id}`;
 
     // The Username + Message Preview container
     const divPreviewContainer = document.createElement('div');
@@ -1246,51 +1278,44 @@ function renderChat(chat) {
     divAvatarContainer.style.position = `relative`;
     
     if (isGroup) {
-        // For groups, show a group icon or placeholder
-        const groupIcon = document.createElement('div');
-        groupIcon.style.width = '50px';
-        groupIcon.style.height = '50px';
-        groupIcon.style.borderRadius = '50%';
-        groupIcon.style.backgroundColor = '#444';
-        groupIcon.style.display = 'flex';
-        groupIcon.style.alignItems = 'center';
-        groupIcon.style.justifyContent = 'center';
-        groupIcon.innerHTML = '<span class="icon icon-chats" style="color: #fff;"></span>';
-        divAvatarContainer.appendChild(groupIcon);
+        // For groups, show the group placeholder SVG
+        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
     } else if (profile?.avatar) {
         const imgAvatar = document.createElement('img');
         imgAvatar.src = profile?.avatar;
         divAvatarContainer.appendChild(imgAvatar);
     } else {
-        // Otherwise, generate a Gradient Avatar
-        divAvatarContainer.appendChild(pubkeyToAvatar(profile?.id || chat.id, profile?.nickname || profile?.name, 50));
+        // Otherwise, generate a placeholder avatar
+        divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
     // TODO: currently, we "emulate" the status; messages in the last 5m are "online", messages in the last 30m are "away", otherwise; offline.
-    const divStatusIcon = document.createElement('div');
-    divStatusIcon.classList.add('avatar-status-icon');
-    
-    // Find the last message from the contact (not from the user)
-    let cLastContactMsg = null;
-    for (let i = chat.messages.length - 1; i >= 0; i--) {
-        if (!chat.messages[i].mine) {
-            cLastContactMsg = chat.messages[i];
-            break;
+    if (!isGroup) {
+        const divStatusIcon = document.createElement('div');
+        divStatusIcon.classList.add('avatar-status-icon');
+        
+        // Find the last message from the contact (not from the user)
+        let cLastContactMsg = null;
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            if (!chat.messages[i].mine) {
+                cLastContactMsg = chat.messages[i];
+                break;
+            }
         }
+        
+        if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
+            // set the divStatusIcon .backgroundColor to green (online)
+            divStatusIcon.style.backgroundColor = '#59fcb3';
+            divAvatarContainer.appendChild(divStatusIcon);
+        }
+        else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
+            // set to orange (away)
+            divStatusIcon.style.backgroundColor = '#fce459';
+            divAvatarContainer.appendChild(divStatusIcon);
+        }
+        // offline... don't show status icon at all (no need to append the divStatusIcon)
     }
-    
-    if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
-        // set the divStatusIcon .backgroundColor to green (online)
-        divStatusIcon.style.backgroundColor = '#59fcb3';
-        divAvatarContainer.appendChild(divStatusIcon);
-    }
-    else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
-        // set to orange (away)
-        divStatusIcon.style.backgroundColor = '#fce459';
-        divAvatarContainer.appendChild(divStatusIcon);
-    }
-    // offline... don't show status icon at all (no need to append the divStatusIcon)
     
     divContact.appendChild(divAvatarContainer);
 
@@ -1475,8 +1500,73 @@ function countUnreadMessages(chat) {
 
 /**
  * Update the notification dot on the chat back button
- * Shows the dot if there are unread messages in OTHER chats (not the currently open one)
+ * Shows the dot if there are unread messages in OTHER chats (not the currently open one) OR unanswered invites
  */
+function updateChatlistTimestamps() {
+    // Get all chatlist items that are currently displayed
+    const chatListItems = document.querySelectorAll('.chatlist-contact');
+    
+    // For each chat item, find and update the timestamp and status
+    chatListItems.forEach(item => {
+        // Extract chat ID from the item's ID (format: chatlist-{chatId})
+        const chatId = item.id.substring(8);
+        
+        // Find the corresponding chat in our array
+        const chat = arrChats.find(c => c.id === chatId);
+        
+        if (chat && chat.messages.length > 0) {
+            // Get the last message timestamp
+            const lastMessage = chat.messages[chat.messages.length - 1];
+            
+            // Skip updating if the message is older than 1 day (for performance)
+            if (lastMessage.at < Date.now() - 86400000) return;
+            
+            // Find the timestamp element in this chat item
+            const timestampElement = item.querySelector('.chatlist-contact-timestamp');
+            
+            if (timestampElement) {
+                // Update the timestamp text using timeAgo function
+                timestampElement.textContent = timeAgo(lastMessage.at);
+            }
+            
+            // Update status indicator if needed (for DMs only)
+            const avatarContainer = item.querySelector('.avatar-status-icon')?.parentElement;
+            if (avatarContainer && chat.chat_type !== 'MlsGroup') {
+                // Remove existing status icon if present
+                const existingStatusIcon = avatarContainer.querySelector('.avatar-status-icon');
+                if (existingStatusIcon) {
+                    existingStatusIcon.remove();
+                }
+                
+                // Add new status icon based on last message time
+                const divStatusIcon = document.createElement('div');
+                divStatusIcon.classList.add('avatar-status-icon');
+                
+                // Find the last message from the contact (not from the user)
+                let cLastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        cLastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                
+                if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
+                    // set the divStatusIcon .backgroundColor to green (online)
+                    divStatusIcon.style.backgroundColor = '#59fcb3';
+                    avatarContainer.appendChild(divStatusIcon);
+                }
+                else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
+                    // set to orange (away)
+                    divStatusIcon.style.backgroundColor = '#fce459';
+                    avatarContainer.appendChild(divStatusIcon);
+                }
+                // offline... don't show status icon at all (no need to append the divStatusIcon)
+            }
+        }
+    });
+}
+
 function updateChatBackNotification() {
     if (!domChatBackNotificationDot) return;
     
@@ -1485,6 +1575,9 @@ function updateChatBackNotification() {
         domChatBackNotificationDot.style.display = 'none';
         return;
     }
+    
+    // Check if there are any unanswered MLS invites
+    const hasUnansweredInvites = arrMLSInvites.length > 0;
     
     // Check if any OTHER chat has unread messages
     const hasOtherUnreads = arrChats.some(chat => {
@@ -1508,8 +1601,8 @@ function updateChatBackNotification() {
         return countUnreadMessages(chat) > 0;
     });
     
-    // Show or hide the notification dot
-    domChatBackNotificationDot.style.display = hasOtherUnreads ? '' : 'none';
+    // Show or hide the notification dot (show if there are unread messages OR unanswered invites)
+    domChatBackNotificationDot.style.display = (hasOtherUnreads || hasUnansweredInvites) ? '' : 'none';
 }
 
 /**
@@ -1576,51 +1669,55 @@ async function setupRustListeners() {
         // Find or create the group chat
         const chat = getOrCreateChat(group_id, 'MlsGroup');
         
-        // Message is now a full Message object from unified storage!
-        // It already has the correct format with attachments, reactions, etc.
-        const newMessage = {
-            id: message.id,
-            content: message.content,
-            replied_to: message.replied_to || null,
-            preview_metadata: message.preview_metadata || null,
-            attachments: message.attachments || [],
-            reactions: message.reactions || [],
-            at: message.at, // Already in milliseconds
-            pending: message.pending || false,
-            failed: message.failed || false,
-            mine: message.mine,
-            npub: message.npub || null // Sender's npub for group chats
-        };
-        
         // Check for duplicates
-        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
+        const existingMsg = chat.messages.find(m => m.id === message.id);
         if (existingMsg) {
-            console.log('Duplicate message detected (already in memory):', newMessage.id);
+            console.log('Duplicate message detected (already in memory):', message.id);
             return;
         }
         
         // Clear typing indicator for the sender when they send a message
-        if (!newMessage.mine && chat.active_typers && message.sender_npub) {
-            // Remove the sender from active typers
-            chat.active_typers = chat.active_typers.filter(npub => npub !== message.sender_npub);
-            console.log('[TYPING] 💬 Cleared typing indicator after group message from:', message.sender_npub.substring(0, 16));
-            
-            // If this is the open chat, refresh the display
-            if (strOpenChat === group_id) {
-                openChat(group_id);
-            }
+        if (!message.mine && chat.active_typers) {
+            // For group chats, use npub if available; for DMs, use sender identifier
+            chat.active_typers = chat.active_typers.filter(npub => npub !== message.npub);
         }
         
-        // Add message to chat
-        chat.messages.push(newMessage);
+        // Find the correct position to insert the message based on timestamp (efficient binary search)
+        const messages = chat.messages;
         
-        // Sort messages by time
-        chat.messages.sort((a, b) => a.at - b.at);
+        // Check if the array is empty or the new message is newer than the newest message
+        if (messages.length === 0 || message.at > messages[messages.length - 1].at) {
+            // Insert at the end (newest)
+            messages.push(message);
+        }
+        // Check if the new message is older than the oldest message
+        else if (message.at < messages[0].at) {
+            // Insert at the beginning (oldest)
+            messages.unshift(message);
+        }
+        // Otherwise, find the correct position in the middle using binary search
+        else {
+            // Binary search for better performance with large message arrays
+            let low = 0;
+            let high = messages.length - 1;
+            
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2);
+                
+                if (messages[mid].at < message.at) {
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            
+            // Insert the message at the correct position (low is now the index where it should go)
+            messages.splice(low, 0, message);
+        }
         
         // If this group has the open chat, update it
         if (strOpenChat === group_id) {
-            console.log('Updating open group chat with new message, pending:', newMessage.pending);
-            updateChat(chat, [newMessage]);
+            updateChat(chat, [message]);
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
@@ -1976,33 +2073,21 @@ async function setupRustListeners() {
     // Listen for typing indicator updates (both DMs and Groups)
     await listen('typing-update', (evt) => {
         const { conversation_id, typers } = evt.payload;
-        
+
         // Find the chat (could be DM or group)
         const chat = arrChats.find(c => c.id === conversation_id);
         if (!chat) return;
-        
-        // Only log for groups
-        const isGroup = chat.chat_type === 'MlsGroup';
-        if (isGroup) {
-            console.log('[TYPING] 📥 Frontend received typing-update:', { conversation_id: conversation_id.substring(0, 16), typers });
-        }
-        
+
         // Store the typers array and update timestamp
         chat.active_typers = typers || [];
         chat.last_typing_update = Date.now() / 1000;
-        
-        if (isGroup) {
-            console.log('[TYPING] 💾 Updated chat.active_typers:', { chat_id: chat.id.substring(0, 16), active_typers: chat.active_typers });
-        }
-        
+
         // If this chat is currently open, update the chat header subtext
         if (strOpenChat === conversation_id) {
-            if (isGroup) console.log('[TYPING] 🔄 Updating chat header subtext');
             updateChatHeaderSubtext(chat);
         }
-        
+
         // Update the chat list preview
-        if (isGroup) console.log('[TYPING] 🔄 Refreshing chat list');
         renderChatlist();
     });
 
@@ -2021,13 +2106,7 @@ async function setupRustListeners() {
         // Clear typing indicator for the sender when they send a message
         if (!newMessage.mine && chat.active_typers) {
             // Remove the sender from active typers
-            const senderNpub = evt.payload.chat_id;
-            chat.active_typers = chat.active_typers.filter(npub => npub !== senderNpub);
-            
-            // If this is the open chat, refresh the display
-            if (strOpenChat === evt.payload.chat_id) {
-                openChat(evt.payload.chat_id);
-            }
+            chat.active_typers = chat.active_typers.filter(npub => npub !== evt.payload.chat_id);
         }
 
         // Find the correct position to insert the message based on timestamp
@@ -2081,7 +2160,7 @@ async function setupRustListeners() {
         }
 
         // Render the Chat List
-        renderChatlist();
+        if (!strOpenChat) renderChatlist();
     });
 
     // Listen for existing message updates
@@ -2112,7 +2191,7 @@ async function setupRustListeners() {
         }
 
         // Render the Chat List
-        renderChatlist();
+        if (!strOpenChat) renderChatlist();
     });
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
@@ -2295,6 +2374,20 @@ async function login() {
             }
         });
 
+        // Setup database migration listener
+        await listen('migration_needed', async (evt) => {
+            console.log('Database migration needed - starting automatically');
+            try {
+                // Trigger migration
+                await invoke('perform_database_migration');
+                console.log('Migration completed successfully');
+            } catch (error) {
+                console.error('Migration failed:', error);
+                domLoginEncryptTitle.textContent = `Migration failed: ${error}`;
+                domLoginEncryptTitle.style.color = 'red';
+            }
+        }, { once: true });
+
         // Setup a Rust Listener for the backend's init finish
         await listen('init_finished', (evt) => {
             // The backend now sends both profiles (without messages) and chats (with messages)
@@ -2350,6 +2443,9 @@ async function login() {
                     domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
                 }
 
+                // Adjust the Chat List sizes to prevent mismatches
+                adjustSize();
+
                 // Setup a subscription for new websocket messages
                 invoke("notifs");
 
@@ -2395,8 +2491,8 @@ function renderCurrentProfile(cProfile) {
         domAvatar = document.createElement('img');
         domAvatar.src = cProfile.avatar;
     } else {
-        // Display our Gradient Avatar
-        domAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 50);
+        // Display our placeholder avatar
+        domAvatar = createPlaceholderAvatar(false, 50);
     }
     domAvatar.classList.add('btn');
     domAvatar.onclick = () => openProfile();
@@ -2486,7 +2582,7 @@ function renderProfileTab(cProfile) {
         }
         domProfileAvatar.src = cProfile.avatar;
     } else {
-        const newAvatar = pubkeyToAvatar(strPubkey, cProfile?.nickname || cProfile?.name, 175);
+        const newAvatar = createPlaceholderAvatar(false, 175);
         domProfileAvatar.replaceWith(newAvatar);
         domProfileAvatar = newAvatar;
     }
@@ -2508,8 +2604,19 @@ function renderProfileTab(cProfile) {
         if (count > 0) {
             domProfileBadgeInvite.style.display = '';
             domProfileBadgeInvite.onclick = () => {
-                popupConfirm('Vector Beta Inviter', `${cProfile.mine ? 'You' : 'They' } have invited <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
+                popupConfirm('Vector Beta Inviter', `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, true, '', 'vector_badge_placeholder.svg');
             }
+        }
+    }).catch(e => {});
+
+    // Guy Fawkes Day Badge (5th November 2025 - Vector v0.2 Open Beta)
+    domProfileBadgeFawkes.style.display = 'none';
+    invoke("check_fawkes_badge", { npub: cProfile.id }).then(hasBadge => {
+        if (hasBadge) {
+            domProfileBadgeFawkes.style.display = '';
+            domProfileBadgeFawkes.onclick = () => {
+                popupConfirm('V for Vector Badge', `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`, true, '', 'fawkes_mask.svg');
+            };
         }
     }).catch(e => {});
 
@@ -2585,6 +2692,9 @@ function renderProfileTab(cProfile) {
         domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
         domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
         domProfileOptionMute.onclick = () => invoke('toggle_muted', { npub: cProfile.id });
+
+        // Setup Message option
+        domProfileOptionMessage.onclick = () => openChat(cProfile.id);
 
         // Setup Nickname option
         domProfileOptionNickname.onclick = async () => {
@@ -2784,8 +2894,17 @@ function openEncryptionFlow(pkey, fUnlock = false) {
         // If index < 0 (e.g., backspace from the first input), focus remains on the current (first) input.
     }
 
+    /** Flag to prevent multiple PIN submissions */
+    let pinProcessing = false;
+
     /** Handles the logic once all PIN digits have been entered. */
     async function handleFullPinEntered() {
+        // Prevent multiple submissions
+        if (pinProcessing) {
+            return;
+        }
+        pinProcessing = true;
+        
         const currentPinString = strPinCurrent.join('');
 
         if (strPinLast.length === 0) { // Initial PIN entry (for decryption or first step of new encryption)
@@ -2799,11 +2918,13 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                 } catch (e) {
                     updateStatusMessage(INCORRECT_PIN_MSG);
                     resetPinDisplay(true, false); // Keep error message, reset input fields
+                    pinProcessing = false; // Reset flag on error to allow retry
                 }
             } else { // First PIN entry for new encryption
                 strPinLast = [...strPinCurrent]; // Store the entered PIN
                 updateStatusMessage(RE_ENTER_PROMPT);
                 resetPinDisplay(true, false); // Keep "Re-enter" message, reset input fields
+                pinProcessing = false; // Reset flag to allow second PIN entry
             }
         } else { // Second PIN entry (confirmation for new encryption)
             const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
@@ -2815,6 +2936,7 @@ function openEncryptionFlow(pkey, fUnlock = false) {
                 updateStatusMessage(MISMATCH_PIN_MSG);
                 strPinLast = []; // Clear the stored first PIN, requiring user to start over
                 resetPinDisplay(true, true); // Reset inputs and revert title from error to the initial prompt
+                pinProcessing = false; // Reset flag on mismatch to allow retry
             }
         }
     }
@@ -2910,6 +3032,14 @@ let strCurrentReplyReference = "";
  * @param {boolean} fClicked - Whether the chat was opened manually or not
  */
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
+    // Queue profiles for this chat
+    if (chat) {
+        await invoke("queue_chat_profiles_sync", {
+            chatId: chat.id,
+            isOpening: true
+        });
+    }
+    
     // Check if this is a group chat
     const isGroup = chat?.chat_type === 'MlsGroup';
 
@@ -3232,6 +3362,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // For group chats, use msg.npub; for DMs, use sender
             const otherFullId = msg.npub || sender?.id || '';
             const authorProfile = sender || (otherFullId ? getProfile(otherFullId) : null);
+            
+            // If no profile exists, queue for immediate fetch
+            if (!authorProfile && otherFullId) {
+                invoke("queue_profile_sync", {
+                    npub: otherFullId,
+                    priority: "critical",
+                    forceRefresh: false
+                });
+            }
+            
             if (authorProfile?.avatar) {
                 const imgAvatar = document.createElement('img');
                 imgAvatar.classList.add('avatar', 'btn');
@@ -3244,8 +3384,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 avatarEl = imgAvatar;
             } else {
                 // Provide a deterministic placeholder when no avatar URL is available
-                const displayName = authorProfile?.nickname || authorProfile?.name || '';
-                const placeholder = pubkeyToAvatar(otherFullId, displayName, 35);
+                const placeholder = createPlaceholderAvatar(false, 35);
                 // Ensure visual sizing and interactivity match real avatars
                 placeholder.classList.add('avatar', 'btn');
                 // Only wire profile click if we have an identifiable user
@@ -3800,11 +3939,29 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
     // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
     if (!msg.pending && !msg.failed && fWebPreviewsEnabled) {
-        if (msg.preview_metadata?.og_image) {
+        // Check if we have metadata with either an image OR a title/description
+        const hasMetadata = msg.preview_metadata && (
+            msg.preview_metadata.og_image ||
+            msg.preview_metadata.og_title ||
+            msg.preview_metadata.title ||
+            msg.preview_metadata.og_description ||
+            msg.preview_metadata.description
+        );
+        
+        if (hasMetadata) {
             // Setup the Preview container
             const divPrevContainer = document.createElement('div');
             divPrevContainer.classList.add('msg-preview-container', 'btn');
             divPrevContainer.setAttribute('url', msg.preview_metadata.og_url || msg.preview_metadata.domain);
+
+            // Check if we have both description and image
+            const description = msg.preview_metadata.og_description || msg.preview_metadata.description;
+            const hasImage = !!msg.preview_metadata.og_image;
+            
+            // If we have both description and image, set bottom padding to 0
+            if (description && hasImage) {
+                divPrevContainer.style.paddingBottom = '0';
+            }
 
             // Setup the Favicon
             const imgFavicon = document.createElement('img');
@@ -3821,23 +3978,56 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // Add the title (prefixed with the Favicon)
             const spanPreviewTitle = document.createElement('span');
             spanPreviewTitle.appendChild(imgFavicon);
-            const spanText = document.createTextNode(msg.preview_metadata.title || msg.preview_metadata.og_title);
+            const spanText = document.createTextNode(msg.preview_metadata.title || msg.preview_metadata.og_title || 'Link Preview');
             spanPreviewTitle.appendChild(spanText);
             divPrevContainer.appendChild(spanPreviewTitle);
 
-            // Load the Preview image
-            const imgPreview = document.createElement('img');
-            imgPreview.classList.add('msg-preview-img');
-            imgPreview.src = msg.preview_metadata.og_image;
-            // Auto-scroll the chat to correct against container resizes
-            imgPreview.addEventListener('load', () => {
-                if (proceduralScrollState.isLoadingOlderMessages) {
-                    correctScrollForMediaLoad();
-                } else {
-                    softChatScroll();
+            // Add description if available (especially useful for Twitter/X posts)
+            if (description) {
+                const spanDescription = document.createElement('span');
+                spanDescription.classList.add('msg-preview-description');
+                
+                // Safely render text with line breaks by manually creating text nodes and <br> elements
+                // Split by <br> tags first (from Twitter HTML), then by \n (from other sources)
+                const parts = description.split(/<br\s*\/?>/i);
+                parts.forEach((part, index) => {
+                    // For each part, split by \n and add text nodes with <br> between them
+                    const subParts = part.split('\n');
+                    subParts.forEach((subPart, subIndex) => {
+                        if (subPart) {
+                            spanDescription.appendChild(document.createTextNode(subPart));
+                        }
+                        if (subIndex < subParts.length - 1) {
+                            spanDescription.appendChild(document.createElement('br'));
+                        }
+                    });
+                    if (index < parts.length - 1) {
+                        spanDescription.appendChild(document.createElement('br'));
+                    }
+                });
+                
+                // If there's an image, remove border radius so description sits flush
+                if (hasImage) {
+                    spanDescription.style.borderRadius = '0';
                 }
-            }, { once: true });
-            divPrevContainer.appendChild(imgPreview);
+                divPrevContainer.appendChild(spanDescription);
+            }
+
+            // Load the Preview image if available
+            if (hasImage) {
+                const imgPreview = document.createElement('img');
+                imgPreview.classList.add('msg-preview-img');
+                imgPreview.src = msg.preview_metadata.og_image;
+                // Auto-scroll the chat to correct against container resizes
+                imgPreview.addEventListener('load', () => {
+                    if (proceduralScrollState.isLoadingOlderMessages) {
+                        correctScrollForMediaLoad();
+                    } else {
+                        softChatScroll();
+                    }
+                }, { once: true });
+                divPrevContainer.appendChild(imgPreview);
+            }
 
             // Render the Preview
             pMessage.appendChild(divPrevContainer);
@@ -4050,6 +4240,16 @@ function openChat(contact) {
     const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    
+    // Queue profile sync for DMs (on-demand refresh when opening)
+    if (!isGroup && contact) {
+        invoke('queue_profile_sync', {
+            npub: contact,
+            priority: 'high',
+            forceRefresh: false
+        }).catch(err => console.error('Failed to queue DM profile sync:', err));
+    }
+    
     if (isGroup) { refreshGroupMemberCount(contact); }
 
     // Clear any existing auto-scroll timer
@@ -4208,7 +4408,12 @@ async function closeChat() {
  * Open the Expanded Profile view, optionally with a non-default profile
  * @param {Profile} cProfile - An optional profile to render
  */
-function openProfile(cProfile) {
+async function openProfile(cProfile) {
+    // Force immediate refresh when user views profile
+    if (cProfile && cProfile.id) {
+        await invoke("refresh_profile_now", { npub: cProfile.id });
+    }
+    
     navbarSelect('profile-btn');
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
@@ -4416,7 +4621,7 @@ async function renderGroupOverview(chat) {
                 avatar.style.borderRadius = '50%';
                 avatar.style.objectFit = 'cover';
             } else {
-                avatar = pubkeyToAvatar(member, memberProfile?.nickname || memberProfile?.name, 25);
+                avatar = createPlaceholderAvatar(false, 25);
             }
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
@@ -4774,7 +4979,7 @@ async function openInviteMemberToGroup(chat) {
                 avatar.style.borderRadius = '50%';
                 avatar.style.objectFit = 'cover';
             } else {
-                avatar = pubkeyToAvatar(contact.id, name, 25);
+                avatar = createPlaceholderAvatar(false, 25);
             }
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
@@ -4917,6 +5122,9 @@ function openSettings() {
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
     previousChatBeforeProfile = ""; // Clear when navigating away
+
+    // Update the Storage Breakdown
+    initStorageSection();
 
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
@@ -5072,15 +5280,15 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
-    // Immediately load and apply theme settings
+    // Immediately load and apply theme settings (visual only, don't save)
     const strTheme = await invoke('get_theme');
     if (strTheme) {
-        await setTheme(strTheme);
+        applyTheme(strTheme);
     }
 
-    // If a local encrypted key exists, boot up the decryption UI
-    if (await hasKey()) {
-        // Private Key is available, login screen!
+    // If a local account exists, boot up the decryption UI
+    if (await hasAccount()) {
+        // Account is available, login screen!
         openEncryptionFlow(null, true);
     }
 
@@ -5550,8 +5758,14 @@ document.addEventListener('click', (e) => {
     const cg = document.getElementById('create-group');
     const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
     if (!inCreateGroup && (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact"))) {
+        // Don't open chat if clicking on an invite item
+        if (e.target.classList.contains("chatlist-invite") || e.target.closest(".chatlist-invite")) {
+            return;
+        }
         const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
-        return openChat(strID);
+        // Strip the 'chatlist-' prefix if present
+        const chatId = strID.replace('chatlist-', '');
+        return openChat(chatId);
     }
 
     // If we're clicking an Attachment Download button, request the download
@@ -5657,7 +5871,7 @@ function renderCreateGroupList(filterText = '') {
             img.src = p.avatar;
             avatarContainer.appendChild(img);
         } else {
-            avatarContainer.appendChild(pubkeyToAvatar(p.id, name, 50));
+            avatarContainer.appendChild(createPlaceholderAvatar(false, 50));
         }
         row.appendChild(avatarContainer);
 

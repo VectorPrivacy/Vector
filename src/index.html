@@ -95,63 +95,63 @@
         </div>
       </div>
     </div>
-
-    <!-- Left Panel -->
-    <div class="left-panel">
-      <!-- Profile View -->
-      <div id="profile" class="chats" style="display: none;">
-        <div style="height: 60px; background-color: #161616;">
-          <div id="profile-back-btn" class="btn nav-back-btn">
-            <span class="icon icon-chevron-double-left nav-icon"></span>
-          </div>
-          <div>
-            <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
-            <span id="profile-status" class="cutoff chat-contact-status btn"></span>
+    
+    <!-- Profile View -->
+    <div id="profile" class="chats" style="display: none;">
+      <div style="height: 60px; background-color: #161616;">
+        <div id="profile-back-btn" class="btn nav-back-btn">
+          <span class="icon icon-chevron-double-left nav-icon"></span>
+        </div>
+        <div>
+          <h3 id="profile-name" class="chat-contact-with-status btn"></h3>
+          <span id="profile-status" class="cutoff chat-contact-status btn"></span>
+        </div>
+      </div>
+      <div style="position: relative;">
+        <img id="profile-banner" class="profile-banner">
+        <div class="profile-banner-edit btn">
+          <span class="icon icon-edit"></span>
+        </div>
+        <div class="profile-avatar-container">
+          <img id="profile-avatar" class="profile-avatar">
+          <div class="profile-avatar-edit btn">
+            <span class="icon icon-plus-circle"></span>
           </div>
         </div>
-        <div style="position: relative;">
-          <img id="profile-banner" class="profile-banner">
-          <div class="profile-banner-edit btn">
-            <span class="icon icon-edit"></span>
+      </div>
+      <div style="padding-bottom: 75px;">
+        <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
+        <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
+        <div id="profile-badges" style="margin-top: 5px;">
+            <img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;">
+            <img id="profile-badge-fawkes" src="./icons/fawkes_mask.svg" class="btn" style="height: 30px; width: 30px; margin-left: 2px; display: none;">
+        </div>
+        <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+        <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
+        <div id="profile-option-list" class="profile-options">
+          <div id="profile-option-mute" class="btn profile-option">
+            <span class="icon icon-volume-mute navbar-icon"></span>
+            <p class="navbar-text">Mute</p>
           </div>
-          <div class="profile-avatar-container">
-            <img id="profile-avatar" class="profile-avatar">
-            <div class="profile-avatar-edit btn">
-              <span class="icon icon-plus-circle"></span>
-            </div>
+          <div id="profile-option-message" class="btn profile-option">
+            <span class="icon icon-message navbar-icon"></span>
+            <p class="navbar-text">Message</p>
+          </div>
+          <div id="profile-option-nickname" class="btn profile-option">
+            <span class="icon icon-edit-user navbar-icon"></span>
+            <p class="navbar-text">Rename</p>
           </div>
         </div>
-        <div style="padding-bottom: 75px;">
-          <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
-          <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
-          <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites"
-              src="./icons/vector_badge_hex_placeholder.svg" class="btn"
-              style="height: 30px; width: 30px; display: none;"></div>
-          <span id="profile-description" class="chat-contact-status"
-            style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-          <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor"
-            style="display: none; margin-top: 10px;"></textarea>
-          <div id="profile-option-list" class="profile-options">
-            <div id="profile-option-mute" class="btn profile-option">
-              <span class="icon icon-volume-mute navbar-icon"></span>
-              <p class="navbar-text">Mute</p>
-            </div>
-            <div id="profile-option-nickname" class="btn profile-option">
-              <span class="icon icon-edit-user navbar-icon"></span>
-              <p class="navbar-text">Rename</p>
-            </div>
-          </div>
-          <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
+        <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
             <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
-          </div>
-          <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
-            <span id="profile-npub" class="profile-npub"></span>
-            <button id="profile-npub-copy" class="btn profile-npub-copy">
-              <span class="icon icon-copy"></span>
-            </button>
-          </div>
-          <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
-          <span id="profile-id" style="display: none;"></span>
+        </div>
+        <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
+          <span id="profile-npub" class="profile-npub"></span>
+          <button id="profile-npub-copy" class="btn profile-npub-copy">
+            <span class="icon icon-copy"></span>
+          </button>
+        </div>
+        <span id="profile-id" style="display: none;"></span>
         </div>
       </div>
 
@@ -211,13 +211,6 @@
         </div>
         <div id="account" class="account" style="display: none;"></div>
         <div id="sync-line" class="sync-line"></div>
-
-        <!-- MLS Group Invites Section (hidden by default) -->
-        <div id="mls-invites-section" class="mls-invites-section" style="display: none; margin: 10px 15px 20px;">
-          <div id="mls-invites-container" style="max-height: 145px; overflow-y: auto;">
-            <!-- Invites will be rendered here dynamically -->
-          </div>
-        </div>
 
         <!-- New Chat Buttons -->
         <div style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
@@ -342,6 +335,23 @@
           </div>
         </div>
 
+        <!-- Storage Section -->
+        <div id="settings-storage" class="settings-section">
+                  <hr class="divider settings-divider">
+                  <h2>Storage</h2>
+                  <div class="form-group">
+                    <p id="storage-summary">A breakdown of Vector's storage use.</p>
+                  </div>
+                  <div class="form-group">
+                    <div id="storage-bar-container" style="height: 20px; width: 100%; background-color: #333; border-radius: 10px; overflow: hidden; margin-top: 8px;">
+                      <div id="storage-bar" style="height: 100%; display: flex;"></div>
+                    </div>
+                  </div>
+                  <div class="form-group" style="margin-top: 15px;">
+                    <button id="clear-storage-btn" class="btn logout-btn">Clear Storage</button>
+                  </div>
+                </div>
+
         <!-- Updates Section -->
         <div id="settings-updates" class="settings-section">
           <hr class="divider settings-divider">
@@ -372,14 +382,16 @@
               style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart
               Now</button>
           </div>
-          <hr class="divider settings-divider">
         </div>
 
-        <img src="./icons/aggro-glitch.gif">
-        <h2 class="danger-title">Dangerzone</h2>
-        <button id="deep-rescan-btn" class="logout-btn">Deep Rescan</button>
-        <button id="export-account-btn" class="logout-btn">Export Account</button>
-        <button id="logout-btn" class="logout-btn">Logout</button>
+        <div class="settings-section">
+          <hr class="divider settings-divider">
+          <img src="./icons/aggro-glitch.gif">
+          <h2 class="danger-title">Dangerzone</h2>
+          <button id="deep-rescan-btn" class="logout-btn">Deep Rescan</button>
+          <button id="export-account-btn" class="logout-btn">Export Account</button>
+          <button id="logout-btn" class="logout-btn">Logout</button>
+        </div>
       </div>
 
       <!-- Invites -->

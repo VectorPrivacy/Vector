@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.2.0"
+version = "0.2.1"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -28,7 +28,7 @@ mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616
 mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616e9dfb4d2aa10f56044e58c" }
 mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616e9dfb4d2aa10f56044e58c" }
 bip39 = { version = "2.2.0", features = ["rand"] }
-tokio = { version = "1.48.0", features = ["sync"] }
+tokio = { version = "1.48.0", features = ["sync", "time"] }
 futures-util = "0.3.31"
 tauri = { version = "2.9.1", features = ["protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -58,6 +58,7 @@ cpal = "0.16.0"
 hound = "3.5.1"
 rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

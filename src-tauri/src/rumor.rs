@@ -203,6 +203,13 @@ async fn process_file_attachment(
     // Extract content storage URL
     let content_url = rumor.content.clone();
     
+    // Skip attachments with empty file hash - these are corrupted uploads
+    const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    if content_url.contains(EMPTY_FILE_HASH) {
+        eprintln!("Skipping attachment with empty file hash in URL: {}", content_url);
+        return Err("Attachment contains empty file hash - skipping".to_string());
+    }
+    
     // Extract image metadata if provided
     let img_meta: Option<ImageMetadata> = {
         let blurhash_opt = rumor.tags
@@ -360,7 +367,7 @@ async fn process_reaction(
 /// Currently handles typing indicators for real-time status updates.
 async fn process_app_specific(
     rumor: RumorEvent,
-    context: RumorContext,
+    _context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
     // Check if this is a typing indicator
     if is_typing_indicator(&rumor) {
@@ -380,40 +387,19 @@ async fn process_app_specific(
             .map_err(|e| format!("System time error: {}", e))?
             .as_secs();
         
-        // Accept typing indicators that:
-        // 1. Haven't expired yet (expiry > current)
-        // 2. Expire within 60 seconds (to account for network latency and clock skew)
-        if expiry_timestamp > current_timestamp && expiry_timestamp <= current_timestamp + 60 {
-            // Valid typing indicator
-            let profile_id = rumor.pubkey.to_bech32()
-                .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
-            
-            // Only log for MLS groups (not DMs)
-            if context.conversation_type == ConversationType::MlsGroup {
-                let sender_short: String = rumor.pubkey.to_hex().chars().take(8).collect();
-                let time_remaining = expiry_timestamp.saturating_sub(current_timestamp);
-                println!("[TYPING] 📥 Received typing indicator: sender={}, expires_in={}s, conversation={}",
-                    sender_short, time_remaining, context.conversation_id.chars().take(8).collect::<String>());
-            }
-            
-            return Ok(RumorProcessingResult::TypingIndicator {
-                profile_id,
-                until: expiry_timestamp,
-            });
-        } else {
-            // Only log rejections for MLS groups (not DMs)
-            if context.conversation_type == ConversationType::MlsGroup {
-                let sender_short: String = rumor.pubkey.to_hex().chars().take(8).collect();
-                let time_diff = if expiry_timestamp > current_timestamp {
-                    format!("+{}s (too far in future)", expiry_timestamp - current_timestamp)
-                } else {
-                    format!("-{}s (expired)", current_timestamp - expiry_timestamp)
-                };
-                println!("[TYPING] ⏰ Ignored invalid typing indicator: sender={}, time_diff={}",
-                    sender_short, time_diff);
-            }
+        // Reject expired or future-dated typing indicators (more than 30 sec in the future)
+        if expiry_timestamp <= current_timestamp || expiry_timestamp > current_timestamp + 30 {
             return Ok(RumorProcessingResult::Ignored);
         }
+        
+        // Valid typing indicator (not expired and within reasonable time window)
+        let profile_id = rumor.pubkey.to_bech32()
+            .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
+        
+        return Ok(RumorProcessingResult::TypingIndicator {
+            profile_id,
+            until: expiry_timestamp,
+        });
     }
     
     // Unknown application-specific data

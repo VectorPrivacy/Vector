@@ -176,9 +176,9 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
 }
 
 pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
-    // Verify minimum size requirements
+    // Verify minimum size requirements (need at least 16 bytes for the authentication tag)
     if encrypted_data.len() < 16 {
-        return Err(String::from("Invalid Input"));
+        return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", encrypted_data.len()));
     }
 
     // Decode key and nonce from hex

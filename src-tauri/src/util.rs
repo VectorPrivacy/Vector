@@ -311,6 +311,23 @@ pub fn get_file_type_description(extension: &str) -> String {
         .to_string()
 }
 
+/// Format bytes into human-readable format (KB, MB, GB)
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    
+    if bytes < KB as u64 {
+        format!("{} B", bytes)
+    } else if bytes < MB as u64 {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else if bytes < GB as u64 {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB)
+    }
+}
+
 /// Convert a byte slice to a hex string
 pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
     // Pre-allocate the exact size needed (2 hex chars per byte)
