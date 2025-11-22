@@ -3724,6 +3724,46 @@ hr {
     width: 100%;
   }
 
+  #create-group {
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+  
+  #create-group .chat-new-center-content {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+  
+  #create-group .chat-new-input-box {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+  
+  /* Improve create group form layout */
+  #create-group-name {
+    width: 75%;
+    margin: 0 auto;
+  }
+  
+  #create-group-filter {
+    width: 75%;
+    margin: 0 auto;
+  }
+  
+  #create-group-list {
+    width: 75%;
+    margin: 10px auto;
+  }
+  
+  #create-group-create-btn,
+  #create-group-cancel-btn {
+    min-width: 120px;
+  }
+  
   #chats, #profile, #settings, #invites {
     flex: 1;
     display: none;

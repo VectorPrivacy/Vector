@@ -6100,43 +6100,96 @@ function updateCreateGroupValidation(showInline = false) {
  * Open Create Group tab
  */
 function openCreateGroup() {
-    // Show panel
-    domCreateGroup.style.display = '';
-    // Hide others
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
-    domNavbar.style.display = 'none';
+    if (isWidescreen) {
+        // Widescreen behavior - show in right panel
+        navbarSelect('chat-btn');
 
-    // Reset state
-    arrSelectedGroupMembers = [];
-    fCreateGroupAttempt = false;
-    if (domCreateGroupName) domCreateGroupName.value = '';
-    if (domCreateGroupFilter) domCreateGroupFilter.value = '';
-    if (domCreateGroupStatus) {
-        domCreateGroupStatus.style.display = 'none';
-        domCreateGroupStatus.textContent = '';
+        // IMPORTANT: Keep navbar visible in widescreen
+        domNavbar.style.display = '';
+
+        // Hide hello screen and show create group in right panel
+        const helloScreen = document.querySelector('.hello-screen');
+        const createGroupElement = document.getElementById('create-group');
+
+        helloScreen.style.display = 'none';
+        helloScreen.classList.remove('active');
+
+        // Hide other chat views
+        document.querySelectorAll('#chat, #chat-new').forEach(el => {
+            el.style.display = 'none';
+            el.classList.remove('active');
+        });
+
+        // Show create group interface
+        createGroupElement.style.display = '';
+        createGroupElement.classList.add('active');
+
+        // Hide member panel
+        hideMemberPanel();
+
+        // Reset state
+        arrSelectedGroupMembers = [];
+        fCreateGroupAttempt = false;
+        if (domCreateGroupName) domCreateGroupName.value = '';
+        if (domCreateGroupFilter) domCreateGroupFilter.value = '';
+        if (domCreateGroupStatus) {
+            domCreateGroupStatus.style.display = 'none';
+            domCreateGroupStatus.textContent = '';
+        }
+
+        // Render list
+        renderCreateGroupList('');
+        updateCreateGroupValidation(false);
+
+        // Focus name
+        domCreateGroupName?.focus();
+    } else {
+        // Mobile behavior - original implementation
+        domCreateGroup.style.display = '';
+        //Hide others
+        domChats.style.display = 'none';
+        domChat.style.display = 'none';
+        domNavbar.style.display = 'none';
+
+        // Reset state
+        arrSelectedGroupMembers = [];
+        fCreateGroupAttempt = false;
+        if (domCreateGroupName) domCreateGroupName.value = '';
+        if (domCreateGroupFilter) domCreateGroupFilter.value = '';
+        if (domCreateGroupStatus) {
+            domCreateGroupStatus.style.display = 'none';
+            domCreateGroupStatus.textContent = '';
+        }
+
+        // Render list
+        renderCreateGroupList('');
+        updateCreateGroupValidation(false);
+
+        // Focus name
+        domCreateGroupName?.focus();
     }
-
-    // Render list
-    renderCreateGroupList('');
-    updateCreateGroupValidation(false);
-
-    // Focus name
-    domCreateGroupName?.focus();
 }
 
 /**
  * Close Create Group tab and go back to Chat list
  */
 async function closeCreateGroup() {
-    domCreateGroup.style.display = 'none';
+    if (isWidescreen) {
+        const createGroupElement = document.getElementById('create-group');
+        createGroupElement.style.display = 'none';
+        createGroupElement.classList.remove('active');
+
+        // Return to hello screen
+        showHelloScreen();
+    } else {
+        // Mobile behavior
+        domCreateGroup.style.display = 'none';
+        // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
+        domNavbar.style.display = '';
+        await openChatlist();
+    }
+  
     fCreateGroupAttempt = false;
-
-    // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
-    domNavbar.style.display = '';
-
-    // Navigate back to chat list
-    await openChatlist();
 
     // Adjust layout after UI visibility changes
     adjustSize();
