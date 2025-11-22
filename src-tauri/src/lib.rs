@@ -422,13 +422,13 @@ async fn fetch_messages<R: Runtime>(
             .until(now);
 
         // Fetch from specific relay only
-        let events = client
-            .fetch_events_from(vec![relay_url.unwrap()], filter, std::time::Duration::from_secs(30))
+        let mut events = client
+            .stream_events_from(vec![relay_url.unwrap()], filter, std::time::Duration::from_secs(30))
             .await
             .unwrap();
 
         // Process events without affecting global sync state
-        for event in events.into_iter() {
+        while let Some(event) = events.next().await {
             handle_event(event, false).await;
         }
         
@@ -676,31 +676,32 @@ async fn fetch_messages<R: Runtime>(
         .since(since_timestamp)
         .until(until_timestamp);
 
-    let events = if let Some(url) = &relay_url {
+    let mut event_stream = if let Some(url) = &relay_url {
         // Fetch from specific relay
         client
-            .fetch_events_from(vec![url], filter, std::time::Duration::from_secs(30))
+            .stream_events_from(vec![url], filter, std::time::Duration::from_secs(30))
             .await
             .unwrap()
     } else {
         // Fetch from all relays
         client
-            .fetch_events(filter, std::time::Duration::from_secs(60))
+            .stream_events(filter, std::time::Duration::from_secs(60))
             .await
             .unwrap()
     };
 
     // Count total events fetched (for DeepRescan) and new messages added (for other modes)
-    let total_events_count = events.len() as u16;
+    // We'll compute total count while iterating; placeholder will be set after loop
     let mut new_messages_count: u16 = 0;
-    for event in events.into_iter() {
+    while let Some(event) = event_stream.next().await {
         // Count the amount of accepted (new) events
         if handle_event(event, false).await {
             new_messages_count += 1;
         }
     }
 
-    // Process sync results and determine next steps
+    // After processing all events, total_events_count equals the number of processed events
+    let total_events_count = new_messages_count as u16;
     let should_continue = {
         let mut state = STATE.lock().await;
         let mut continue_sync = true;
@@ -3208,13 +3209,13 @@ async fn get_or_create_invite_code() -> Result<String, String> {
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
         .limit(100);
     
-    let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(10))
+    let mut events = client
+        .stream_events(filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
     // Look for existing invite events
-    for event in events {
+    while let Some(event) = events.next().await {
         if event.content == "vector_invite" {
             // Extract the r tag (invite code)
             if let Some(r_tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
@@ -3266,16 +3267,23 @@ async fn accept_invite_code(invite_code: String) -> Result<String, String> {
         .custom_tag(SingleLetterTag::lowercase(Alphabet::R), &invite_code)
         .limit(1);
     
-    let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(10))
+    
+    // Find the invite event
+    let mut events = client
+        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
-    // Find the invite event
-    let invite_event = events
-        .into_iter()
-        .find(|e| e.content == "vector_invite")
-        .ok_or("Invite code not found")?;
+    let invite_event = {
+        let mut found: Option<nostr_sdk::Event> = None;
+        while let Some(event) = events.next().await {
+            if event.content == "vector_invite" {
+                found = Some(event);
+                break;
+            }
+        }
+        found.ok_or("Invite code not found")?
+    };
     
     // Get the inviter's public key
     let inviter_pubkey = invite_event.pubkey;
@@ -3458,18 +3466,24 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
         .limit(100);
     
-    let events = client
-        .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+    let mut events = client
+        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
     // Find the invite event and extract the invite code
-    let invite_code = events
-        .iter()
-        .find(|e| e.content == "vector_invite")
-        .and_then(|e| e.tags.find(TagKind::Custom(Cow::Borrowed("r"))))
-        .and_then(|tag| tag.content())
-        .ok_or("No invite code found for this user")?;
+    let mut invite_code_opt = None;
+    while let Some(event) = events.next().await {
+        if event.content == "vector_invite" {
+            if let Some(tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
+                if let Some(content) = tag.content() {
+                    invite_code_opt = Some(content.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    let invite_code = invite_code_opt.ok_or("No invite code found for this user")?;
     
     // Now fetch all acceptance events for this invite code from the trusted relay
     let acceptance_filter = Filter::new()
@@ -3477,15 +3491,15 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), invite_code)
         .limit(1000); // Allow fetching many acceptances
     
-    let acceptance_events = client
-        .fetch_events_from(vec![TRUSTED_RELAY], acceptance_filter, std::time::Duration::from_secs(10))
+    let mut acceptance_events = client
+        .stream_events_from(vec![TRUSTED_RELAY], acceptance_filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
     // Filter for acceptance events that reference our inviter and collect unique acceptors
     let mut unique_acceptors = std::collections::HashSet::new();
     
-    for event in acceptance_events {
+    while let Some(event) = acceptance_events.next().await {
         if event.content == "vector_invite_accepted" {
             // Check if this acceptance references our inviter
             let references_inviter = event.tags
@@ -3527,13 +3541,13 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "fawkes_2025")
         .limit(10);
     
-    let events = client
-        .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+    let mut events = client
+        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
     // Check if they have a valid badge claim from the event period
-    for event in events {
+    while let Some(event) = events.next().await {
         if event.content == "fawkes_badge_claimed" {
             let timestamp = event.created_at.as_u64();
             // Verify the timestamp is within the valid event window
@@ -3597,14 +3611,14 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
                 .kind(Kind::MlsKeyPackage)
                 .limit(1);
             
-            match client.fetch_events_from(
+            match client.stream_events_from(
                 vec![TRUSTED_RELAY],
                 filter,
                 std::time::Duration::from_secs(5)
             ).await {
-                Ok(events) => {
+                Ok(mut events) => {
                     // Check if we got any events - if so, the cached KeyPackage exists on relay
-                    if events.iter().next().is_some() {
+                    if events.next().await.is_some() {
                         return Ok(serde_json::json!({
                             "device_id": device_id,
                             "owner_pubkey": owner_pubkey_b32,
@@ -4534,17 +4548,17 @@ async fn refresh_keypackages_for_contact(
         .limit(200);
 
     // Fetch from TRUSTED_RELAY with short timeout
-    let events = client
-        .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+    let mut events = client
+        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
     // Prepare results and index entries
     let owner_pubkey_b32 = contact_pubkey.to_bech32().map_err(|e| e.to_string())?;
-    let mut results: Vec<(String, String)> = Vec::with_capacity(events.len());
-    let mut new_entries: Vec<serde_json::Value> = Vec::with_capacity(events.len());
+    let mut results: Vec<(String, String)> = Vec::new();
+    let mut new_entries: Vec<serde_json::Value> = Vec::new();
 
-    for e in events {
+    while let Some(e) = events.next().await {
         // Use event id as synthetic device_id when not explicitly provided by remote
         let device_id = e.id.to_hex();
         let keypackage_ref = e.id.to_hex();
