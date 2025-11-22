@@ -2400,6 +2400,7 @@ async function login() {
                 domLogin.classList.remove('fadeout-anim');
                 domLoginInput.value = "";
                 domLogin.style.display = 'none';
+                updateEncryptedNotesButton();
                 domLoginEncrypt.style.display = 'none';
 
                 // Fade-in the navbar
@@ -6155,24 +6156,36 @@ function initWidescreenLayout() {
       }
     }
 
-    // Ensure notes button is visible
-    updateEncryptedNotesButton();
+    // Update notes button visibility based on login state
+    const loginForm = document.getElementById('login-form');
+    const isLoggedIn = loginForm && loginForm.style.display === 'none';
+    if (isLoggedIn) {
+      updateEncryptedNotesButton();
+    }
     
     // Hide duplicate elements
     document.querySelectorAll('.duplicate-fix').forEach(el => el.remove());
   } else {
     document.body.classList.remove('widescreen');
     hideMemberPanel();
+    
     // Ensure mobile view is clean
     document.querySelectorAll('.panel-toggle').forEach(toggle => {
       toggle.style.display = 'none';
     });
 
-    // Reset encrypted notes button positioning for mobile
+    // Reset encrypted notes button positioning for mobile AND update visibility
     if (domChatBookmarksBtn) {
       domChatBookmarksBtn.style.position = 'absolute';
       domChatBookmarksBtn.style.top = '28px';
       domChatBookmarksBtn.style.right = '23px';
+      
+      // Update visibility for mobile view
+      const loginForm = document.getElementById('login-form');
+      const isLoggedIn = loginForm && loginForm.style.display === 'none';
+      if (isLoggedIn) {
+        updateEncryptedNotesButton();
+      }
     }
   }
   
@@ -6533,22 +6546,35 @@ function updateEncryptedNotesButton() {
   const notesBtn = document.getElementById('chat-bookmarks-btn');
   if (!notesBtn) return;
   
-  // In widescreen, always show the notes button in the left panel
+  // Check if user is logged in by looking at login form visibility
+  const loginForm = document.getElementById('login-form');
+  const isLoggedIn = loginForm && loginForm.style.display === 'none';
+  
+  if (!isLoggedIn) {
+    // User is not logged in - hide bookmark button completely
+    notesBtn.style.display = 'none';
+    return;
+  }
+  
+  // User is logged in - handle visibility based on view
   if (isWidescreen) {
+    // Widescreen: always show when logged in
     notesBtn.style.display = 'flex';
     
     // Position it properly in widescreen
     notesBtn.style.position = 'absolute';
     notesBtn.style.top = '28px';
     notesBtn.style.right = '23px';
-    notesBtn.style.bottom = 'auto';
-    notesBtn.style.left = 'auto';
   } else {
-    // Mobile behavior: hide when chat is open, show when in chat list
+    // Mobile: only show when in chat list (no chat open)
     if (strOpenChat) {
       notesBtn.style.display = 'none';
     } else {
       notesBtn.style.display = 'flex';
+      // Reset positioning for mobile
+      notesBtn.style.position = '';
+      notesBtn.style.top = '';
+      notesBtn.style.right = '';
     }
   }
 }
