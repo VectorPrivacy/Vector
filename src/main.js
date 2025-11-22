@@ -7027,3 +7027,61 @@ window.addEventListener('resize', () => {
     }, 300);
   }, 100);
 });
+
+// Function to handle login state and UI visibility
+function updateUIVisibilityForLoginState(isLoggedIn) {
+  const loginForm = document.getElementById('login-form');
+  const navbar = document.getElementById('navbar');
+  const bookmarksBtn = document.getElementById('chat-bookmarks-btn');
+  
+  // Check if login form is currently visible/active
+  const isLoginActive = loginForm && 
+                       !loginForm.classList.contains('fadeout-anim') && 
+                       loginForm.style.display !== 'none';
+  
+  if (isLoginActive) {
+    // Login is active - hide navbar and bookmark
+    if (navbar) navbar.style.display = 'none';
+    if (bookmarksBtn) bookmarksBtn.style.display = 'none';
+  } else {
+    // Login is NOT active - user is logged in
+    if (isLoggedIn) {
+      if (window.innerWidth >= 1024) {
+        // Widescreen - show navbar and bookmarks
+        if (navbar) navbar.style.display = 'flex';
+        if (bookmarksBtn) bookmarksBtn.style.display = 'block';
+      } else {
+        // Mobile - show navbar, hide bookmarks (if that's your design)
+        if (navbar) navbar.style.display = 'flex';
+        if (bookmarksBtn) bookmarksBtn.style.display = 'block';
+      }
+    } else {
+      // Not logged in and login not active - hide everything
+      if (navbar) navbar.style.display = 'none';
+      if (bookmarksBtn) bookmarksBtn.style.display = 'none';
+    }
+  }
+}
+
+// Call this function when login state changes
+document.addEventListener('DOMContentLoaded', function() {
+  // Initial check - assuming not logged in
+  updateUIVisibilityForLoginState(false);
+  
+  // Check on resize
+  window.addEventListener('resize', function() {
+    // Check if we're logged in by looking for the navbar or other logged-in indicators
+    const isLoggedIn = document.getElementById('navbar').style.display !== 'none' || 
+                      document.body.classList.contains('logged-in');
+    updateUIVisibilityForLoginState(isLoggedIn);
+  });
+});
+
+// You'll need to call this when login completes
+function onLoginSuccess() {
+  updateUIVisibilityForLoginState(true);
+}
+
+function onLogout() {
+  updateUIVisibilityForLoginState(false);
+}
