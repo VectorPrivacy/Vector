@@ -984,13 +984,15 @@ function updateChatHeaderSubtext(chat) {
     if (fNotes) {
         domChatContactStatus.textContent = 'Encrypted Notes to Self';
         domChatContactStatus.classList.remove('text-gradient');
+        domChatContact.onclick = null;
+        domChatContact.classList.remove('btn');
     } else if (isGroup) {
-        // Check for typing indicators in groups
+        // Group chat typing indicators and member count
         const activeTypers = chat.active_typers || [];
         const fIsTyping = activeTypers.length > 0;
         
         if (fIsTyping) {
-            // Display typing indicator with Discord-style multi-user support
+            // Display typing indicator
             if (activeTypers.length === 1) {
                 const typer = getProfile(activeTypers[0]);
                 const name = typer?.nickname || typer?.name || 'Someone';
@@ -1025,8 +1027,15 @@ function updateChatHeaderSubtext(chat) {
             }
             domChatContactStatus.classList.remove('text-gradient');
         }
+        
+        // Group name click opens group overview
+        domChatContact.onclick = () => {
+            closeChat();
+            openGroupOverview(chat);
+        };
+        domChatContact.classList.add('btn');
     } else {
-        // Check for typing indicators in DMs (using chat.active_typers)
+        // DM chat - check for typing indicators
         const activeTypers = chat.active_typers || [];
         const fIsTyping = activeTypers.length > 0;
         
@@ -1042,6 +1051,22 @@ function updateChatHeaderSubtext(chat) {
             domChatContactStatus.classList.remove('text-gradient');
             twemojify(domChatContactStatus);
         }
+        
+        const profile = getProfile(chat.id);
+        
+        // FIXED: Proper click handler for profile in widescreen
+        domChatContact.onclick = () => {
+            if (isWidescreen && strOpenChat === chat.id) {
+                console.log('Opening profile in chat area for:', profile?.id);
+                // In widescreen, show profile in the chat area
+                showProfileInChatArea(profile);
+            } else {
+                // Mobile behavior - open profile tab
+                closeChat();
+                openProfile(profile);
+            }
+        };
+        domChatContact.classList.add('btn');
     }
 }
 
@@ -2375,6 +2400,7 @@ async function login() {
                 domLogin.classList.remove('fadeout-anim');
                 domLoginInput.value = "";
                 domLogin.style.display = 'none';
+                updateEncryptedNotesButton();
                 domLoginEncrypt.style.display = 'none';
 
                 // Fade-in the navbar
@@ -2499,6 +2525,15 @@ function renderCurrentProfile(cProfile) {
     /* Start Chat Tab */
     // Render our Share npub
     domShareNpub.textContent = strPubkey;
+
+    // In widescreen, ensure the encrypted notes button is properly positioned
+  if (isWidescreen && domChatBookmarksBtn) {
+    domChatBookmarksBtn.style.position = 'absolute';
+    domChatBookmarksBtn.style.top = '28px';
+    domChatBookmarksBtn.style.right = '23px';
+    domChatBookmarksBtn.style.bottom = 'auto';
+    domChatBookmarksBtn.style.left = 'auto';
+  }
 }
 
 /**
@@ -4284,13 +4319,126 @@ function openChat(contact) {
  * Open the dialog for starting a new chat
  */
 function openNewChat() {
-    // Display the UI
-    domChatNew.style.display = '';
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
+    if (isWidescreen) {
+        // Widescreen behavior - show in right panel
+        navbarSelect('chat-btn');
+        
+        // IMPORTANT: Keep navbar visible in widescreen
+        domNavbar.style.display = '';
+        
+        // Hide hello screen and show new chat in right panel
+        const helloScreen = document.querySelector('.hello-screen');
+        const chatNewElement = document.getElementById('chat-new');
+        
+        helloScreen.style.display = 'none';
+        helloScreen.classList.remove('active');
+        
+        // Hide other chat views
+        document.querySelectorAll('#chat, #create-group').forEach(el => {
+            el.style.display = 'none';
+            el.classList.remove('active');
+        });
+        
+        // Show new chat interface
+        chatNewElement.style.display = '';
+        chatNewElement.classList.add('active');
+        
+        // Hide member panel
+        hideMemberPanel();
+        
+        // Update notes button visibility
+        updateEncryptedNotesButton();
+        
+        // Focus the input field for better UX
+        setTimeout(() => {
+            const newChatInput = document.getElementById('chat-new-input');
+            if (newChatInput) {
+                newChatInput.focus();
+            }
+        }, 100);
+        
+    } else {
+        // Mobile behavior - original implementation
+        domChatNew.style.display = '';
+        domChats.style.display = 'none';
+        domChat.style.display = 'none';
+        domNavbar.style.display = 'none';
+    }
+}
 
-    // Hide the Navbar
-    domNavbar.style.display = 'none';
+function closeNewChat() {
+    if (isWidescreen) {
+        const chatNewElement = document.getElementById('chat-new');
+        chatNewElement.style.display = 'none';
+        chatNewElement.classList.remove('active');
+        
+        // Return to hello screen
+        showHelloScreen();
+    } else {
+        // Mobile behavior
+        domChatNew.style.display = 'none';
+        domNavbar.style.display = '';
+        openChatlist();
+    }
+}
+
+function setupNewChatBackButton() {
+    const newChatBackBtn = document.getElementById('chat-new-back-text-btn');
+    if (newChatBackBtn) {
+        // Remove any existing handlers to prevent duplicates
+        newChatBackBtn.onclick = null;
+        newChatBackBtn.addEventListener('click', () => {
+            if (isWidescreen) {
+                closeNewChat();
+            } else {
+                // Mobile behavior
+                domChatNew.style.display = 'none';
+                domNavbar.style.display = '';
+                openChatlist();
+            }
+        });
+    }
+}
+
+function setupNewChatInput() {
+    const newChatInput = document.getElementById('chat-new-input');
+    const newChatStartBtn = document.getElementById('chat-new-btn');
+
+    if (newChatInput && newChatStartBtn) {
+        // Remove any existing handlers
+        newChatInput.onkeydown = null;
+        newChatStartBtn.onclick = null;
+
+        // Unified handler for starting new chat
+        const startNewChat = () => {
+            const npub = newChatInput.value.trim();
+            if (npub) {
+                // Clear input
+                newChatInput.value = '';
+
+                if (isWidescreen) {
+                    // Close new chat interface and open the actual chat
+                    closeNewChat();
+                    openChat(npub);
+                } else {
+                    // Mobile behavior
+                    openChat(npub);
+                    domChatNew.style.display = 'none';
+                }
+            }
+        };
+
+        // Set up enter key
+        newChatInput.onkeydown = async (evt) => {
+            if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
+                evt.preventDefault();
+                startNewChat();
+            }
+        };
+
+        // Set up button click
+        newChatStartBtn.onclick = startNewChat;
+    }
 }
 
 /**
@@ -5298,11 +5446,21 @@ window.addEventListener("DOMContentLoaded", async () => {
             popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
     }
-    domChatBackBtn.onclick = closeChat;
+    domChatBackBtn.onclick = () => {
+  if (isWidescreen) {
+    // In widescreen, close chat and show hello screen
+    closeChat();
+  } else {
+    // Mobile behavior
+    closeChat();
+  }
+};
     domChatBookmarksBtn.onclick = () => {
         openChat(strPubkey);
     };
     domChatNewBackBtn.onclick = closeChat;
+    // Set up new chat back button handler (widescreen-aware)
+    setupNewChatBackButton();
     
     // Add scroll event listener for procedural message loading
     let scrollTimeout;
@@ -5313,16 +5471,8 @@ window.addEventListener("DOMContentLoaded", async () => {
             handleProceduralScroll();
         }, 100);
     });
-    domChatNewStartBtn.onclick = () => {
-        openChat(domChatNewInput.value.trim());
-        domChatNewInput.value = ``;
-    };
-    domChatNewInput.onkeydown = async (evt) => {
-        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
-            evt.preventDefault();
-            domChatNewStartBtn.click();
-        }
-    };
+    // Set up the new chat input handlers (unified for widescreen/mobile)
+    setupNewChatInput();
     domChatMessageInputCancel.onclick = cancelReply;
 
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
@@ -5622,6 +5772,12 @@ domChatMessageInput.oninput = async () => {
             });
         }
     });
+
+  setupEncryptedNotesButton();
+  setupProfileBackButton();
+  
+  // Initialize widescreen layout after DOM is loaded
+  initWidescreenLayout();
 });
 
 // Listen for app-wide click interations
@@ -5745,6 +5901,16 @@ function adjustSize() {
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();
     domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+
+    // New Chat interface in widescreen - ensure proper sizing
+    if (isWidescreen) {
+        const chatNewElement = document.getElementById('chat-new');
+        if (chatNewElement && chatNewElement.style.display !== 'none') {
+            chatNewElement.style.height = '100%';
+            chatNewElement.style.display = 'flex';
+            chatNewElement.style.flexDirection = 'column';
+        }
+    }
 
     // If the chat is open, and the fade-out exists, then position it correctly
     if (strOpenChat) {
@@ -5934,43 +6100,96 @@ function updateCreateGroupValidation(showInline = false) {
  * Open Create Group tab
  */
 function openCreateGroup() {
-    // Show panel
-    domCreateGroup.style.display = '';
-    // Hide others
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
-    domNavbar.style.display = 'none';
+    if (isWidescreen) {
+        // Widescreen behavior - show in right panel
+        navbarSelect('chat-btn');
 
-    // Reset state
-    arrSelectedGroupMembers = [];
-    fCreateGroupAttempt = false;
-    if (domCreateGroupName) domCreateGroupName.value = '';
-    if (domCreateGroupFilter) domCreateGroupFilter.value = '';
-    if (domCreateGroupStatus) {
-        domCreateGroupStatus.style.display = 'none';
-        domCreateGroupStatus.textContent = '';
+        // IMPORTANT: Keep navbar visible in widescreen
+        domNavbar.style.display = '';
+
+        // Hide hello screen and show create group in right panel
+        const helloScreen = document.querySelector('.hello-screen');
+        const createGroupElement = document.getElementById('create-group');
+
+        helloScreen.style.display = 'none';
+        helloScreen.classList.remove('active');
+
+        // Hide other chat views
+        document.querySelectorAll('#chat, #chat-new').forEach(el => {
+            el.style.display = 'none';
+            el.classList.remove('active');
+        });
+
+        // Show create group interface
+        createGroupElement.style.display = '';
+        createGroupElement.classList.add('active');
+
+        // Hide member panel
+        hideMemberPanel();
+
+        // Reset state
+        arrSelectedGroupMembers = [];
+        fCreateGroupAttempt = false;
+        if (domCreateGroupName) domCreateGroupName.value = '';
+        if (domCreateGroupFilter) domCreateGroupFilter.value = '';
+        if (domCreateGroupStatus) {
+            domCreateGroupStatus.style.display = 'none';
+            domCreateGroupStatus.textContent = '';
+        }
+
+        // Render list
+        renderCreateGroupList('');
+        updateCreateGroupValidation(false);
+
+        // Focus name
+        domCreateGroupName?.focus();
+    } else {
+        // Mobile behavior - original implementation
+        domCreateGroup.style.display = '';
+        //Hide others
+        domChats.style.display = 'none';
+        domChat.style.display = 'none';
+        domNavbar.style.display = 'none';
+
+        // Reset state
+        arrSelectedGroupMembers = [];
+        fCreateGroupAttempt = false;
+        if (domCreateGroupName) domCreateGroupName.value = '';
+        if (domCreateGroupFilter) domCreateGroupFilter.value = '';
+        if (domCreateGroupStatus) {
+            domCreateGroupStatus.style.display = 'none';
+            domCreateGroupStatus.textContent = '';
+        }
+
+        // Render list
+        renderCreateGroupList('');
+        updateCreateGroupValidation(false);
+
+        // Focus name
+        domCreateGroupName?.focus();
     }
-
-    // Render list
-    renderCreateGroupList('');
-    updateCreateGroupValidation(false);
-
-    // Focus name
-    domCreateGroupName?.focus();
 }
 
 /**
  * Close Create Group tab and go back to Chat list
  */
 async function closeCreateGroup() {
-    domCreateGroup.style.display = 'none';
+    if (isWidescreen) {
+        const createGroupElement = document.getElementById('create-group');
+        createGroupElement.style.display = 'none';
+        createGroupElement.classList.remove('active');
+
+        // Return to hello screen
+        showHelloScreen();
+    } else {
+        // Mobile behavior
+        domCreateGroup.style.display = 'none';
+        // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
+        domNavbar.style.display = '';
+        await openChatlist();
+    }
+  
     fCreateGroupAttempt = false;
-
-    // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
-    domNavbar.style.display = '';
-
-    // Navigate back to chat list
-    await openChatlist();
 
     // Adjust layout after UI visibility changes
     adjustSize();
@@ -6079,3 +6298,986 @@ Create Group UI wiring
         }
     };
 })();
+
+// Widescreen layout state
+let isWidescreen = window.innerWidth >= 1024;
+let memberPanelVisible = false;
+
+// Initialize widescreen layout
+function initWidescreenLayout() {
+  const wasWidescreen = isWidescreen;
+  isWidescreen = window.innerWidth >= 1024;
+  
+  if (isWidescreen) {
+    document.body.classList.add('widescreen');
+
+    // IMPORTANT: Always show navbar in widescreen
+    domNavbar.style.display = '';
+    
+    // Initialize with proper state
+    if (!strOpenChat) {
+      navbarSelect('chat-btn');
+      showHelloScreen();
+    } else {
+      // If chat is already open, ensure proper layout
+      setupMemberPanelToggle();
+      if (memberPanelVisible) {
+        loadMemberPanel();
+      }
+    }
+
+    // Update notes button visibility based on login state
+    const loginForm = document.getElementById('login-form');
+    const isLoggedIn = loginForm && loginForm.style.display === 'none';
+    if (isLoggedIn) {
+      updateEncryptedNotesButton();
+    }
+    
+    // Hide duplicate elements
+    document.querySelectorAll('.duplicate-fix').forEach(el => el.remove());
+  } else {
+    document.body.classList.remove('widescreen');
+    hideMemberPanel();
+    
+    // Ensure mobile view is clean
+    document.querySelectorAll('.panel-toggle').forEach(toggle => {
+      toggle.style.display = 'none';
+    });
+
+    // Reset encrypted notes button positioning for mobile AND update visibility
+    if (domChatBookmarksBtn) {
+      domChatBookmarksBtn.style.position = 'absolute';
+      domChatBookmarksBtn.style.top = '28px';
+      domChatBookmarksBtn.style.right = '23px';
+      
+      // Update visibility for mobile view
+      const loginForm = document.getElementById('login-form');
+      const isLoggedIn = loginForm && loginForm.style.display === 'none';
+      if (isLoggedIn) {
+        updateEncryptedNotesButton();
+      }
+    }
+  }
+  
+  adjustSize();
+}
+
+// Enhanced navbar selection for widescreen
+function navbarSelect(strSelectionID = '') {
+  // Update navbar buttons
+  for (const navItem of domNavbar.querySelectorAll('div')) {
+    if (strSelectionID === navItem.id) navItem.classList.remove('navbar-btn-inactive');
+    else navItem.classList.add('navbar-btn-inactive');
+  }
+
+  // Handle widescreen layout
+  if (isWidescreen) {
+    // Hide all left panel content
+    document.querySelectorAll('.left-panel > *').forEach(el => {
+      if (el.id && el.id !== 'navbar') {
+        el.style.display = 'none';
+        el.classList.remove('active');
+      }
+    });
+
+    // Show selected tab in left panel
+    const tabMap = {
+      'profile-btn': 'profile',
+      'chat-btn': 'chats', 
+      'settings-btn': 'settings',
+      'invites-btn': 'invites'
+    };
+
+    const contentId = tabMap[strSelectionID];
+    if (contentId) {
+      const contentEl = document.getElementById(contentId);
+      if (contentEl) {
+        contentEl.style.display = '';
+        contentEl.classList.add('active');
+      }
+    }
+
+    // If switching to chat tab and no chat is open, show hello screen
+    if (strSelectionID === 'chat-btn' && !strOpenChat) {
+      showHelloScreen();
+    }
+  }
+}
+
+// Show hello screen in right panel
+function showHelloScreen() {
+  if (!isWidescreen) return;
+  
+  const rightPanel = document.querySelector('.right-panel');
+  const helloScreen = document.querySelector('.hello-screen');
+  const chatElements = document.querySelectorAll('#chat, #chat-new, #create-group');
+  
+  // Hide all chat views
+  chatElements.forEach(el => {
+    el.style.display = 'none';
+    el.classList.remove('active');
+  });
+  
+  // Show hello screen
+  helloScreen.style.display = 'flex';
+  helloScreen.classList.add('active');
+  
+  // Hide member panel
+  hideMemberPanel();
+  
+  // Show encrypted notes button when no chat is open
+  updateEncryptedNotesButton();
+}
+
+// Setup member panel toggle
+function setupMemberPanelToggle() {
+  const chatElement = document.getElementById('chat');
+  if (!chatElement) return;
+  
+  // Remove existing toggle if any
+  const existingToggle = chatElement.querySelector('.panel-toggle');
+  if (existingToggle) {
+    existingToggle.remove();
+  }
+  
+  // Add toggle button for member panel (only for groups and DMs, not encrypted notes)
+  if (strOpenChat !== strPubkey) {
+    const toggleBtn = document.createElement('div');
+    toggleBtn.className = 'panel-toggle';
+    toggleBtn.innerHTML = '<span class="icon icon-users"></span>';
+    toggleBtn.onclick = toggleMemberPanel;
+    
+    chatElement.appendChild(toggleBtn);
+    updateToggleButton();
+  }
+}
+
+// Toggle member panel visibility
+function toggleMemberPanel() {
+  if (!isWidescreen) return;
+  
+  memberPanelVisible = !memberPanelVisible;
+  const memberPanel = document.querySelector('.member-panel');
+  
+  if (memberPanelVisible) {
+    memberPanel.style.display = 'flex';
+    memberPanel.style.flex = '0 0 300px';
+    
+    // If profile is open in chat area, adjust layout
+    if (window.isViewingProfileInChat) {
+      domProfile.style.flex = '1';
+      domProfile.style.minWidth = '400px';
+      domProfile.style.width = '';
+    }
+    loadMemberPanel();
+  } else {
+    memberPanel.style.display = 'none';
+    memberPanel.style.flex = '';
+    
+    // If profile is open in chat area, restore full width
+    if (window.isViewingProfileInChat) {
+      domProfile.style.flex = '1';
+      domProfile.style.minWidth = '0';
+      domProfile.style.width = '';
+    }
+  }
+  
+  updateToggleButton();
+}
+
+// Update toggle button icon 
+function updateToggleButton() {
+  const toggleBtn = document.querySelector('.panel-toggle');
+  if (!toggleBtn) return;
+  
+  const icon = toggleBtn.querySelector('.icon');
+  if (memberPanelVisible) {
+    icon.classList.remove('icon-users');
+    icon.classList.add('icon-chevron-double-right'); 
+  } else {
+    icon.classList.remove('icon-chevron-double-right');
+    icon.classList.add('icon-users');
+  }
+}
+
+// Hide member panel
+function hideMemberPanel() {
+  memberPanelVisible = false;
+  const memberPanel = document.querySelector('.member-panel');
+  if (memberPanel) {
+    memberPanel.style.display = 'none';
+  }
+  updateToggleButton();
+}
+
+// Load members into member panel 
+function loadMemberPanel() {
+  if (!isWidescreen || !memberPanelVisible) return;
+  
+  const memberList = document.getElementById('member-list');
+  const memberCount = document.getElementById('member-count');
+  
+  if (!memberList || !memberCount) return;
+  
+  const currentChat = arrChats.find(c => c.id === strOpenChat);
+  if (!currentChat) return;
+  
+  memberList.innerHTML = '';
+  
+  // Handle different chat types
+  if (currentChat.chat_type === 'MlsGroup') {
+    // Group chat - show all members including current user
+    const members = currentChat.participants || [];
+    const totalMembers = members.length + 1; // +1 for current user
+    memberCount.textContent = `Members — ${totalMembers}`;
+    
+    // Add current user first
+    const myProfile = arrProfiles.find(p => p.mine);
+    if (myProfile) {
+      const myItem = createMemberItem(myProfile, strPubkey);
+      memberList.appendChild(myItem);
+    }
+    
+    // Add other members
+    members.forEach(npub => {
+      const profile = getProfile(npub);
+      const memberItem = createMemberItem(profile, npub);
+      memberList.appendChild(memberItem);
+    });
+  } else {
+    // DM chat - show both users
+    memberCount.textContent = `Members — 2`;
+    const myProfile = arrProfiles.find(p => p.mine);
+    const otherProfile = getProfile(currentChat.id);
+    
+    // Add current user
+    if (myProfile) {
+      const myItem = createMemberItem(myProfile, strPubkey);
+      memberList.appendChild(myItem);
+    }
+    
+    // Add other user
+    if (otherProfile) {
+      const otherItem = createMemberItem(otherProfile, currentChat.id);
+      memberList.appendChild(otherItem);
+    }
+  }
+}
+
+// Simple member list item
+function createMemberItem(profile, npub) {
+  const memberItem = document.createElement('div');
+  memberItem.className = 'member-item';
+  
+  // Avatar
+  const avatar = document.createElement('div');
+  avatar.className = 'member-avatar';
+  
+  if (profile?.avatar) {
+    const img = document.createElement('img');
+    img.src = profile.avatar;
+    img.onerror = () => {
+      // If image fails to load, fallback to generated avatar
+      const fallbackAvatar = pubkeyToAvatar(npub, profile?.nickname || profile?.name, 32);
+      avatar.innerHTML = '';
+      avatar.appendChild(fallbackAvatar);
+    };
+    avatar.appendChild(img);
+  } else {
+    // Use generated avatar if no profile avatar
+    avatar.appendChild(pubkeyToAvatar(npub, profile?.nickname || profile?.name, 32));
+  }
+  
+  // User name - make sure we have a display name
+  const name = document.createElement('div');
+  name.className = 'member-name';
+  
+  // Get display name with proper fallbacks
+  let displayName = 'Unknown User';
+  if (profile) {
+    displayName = profile.nickname || profile.name || npub.substring(0, 8) + '...';
+  } else {
+    // If no profile found, try to get from profiles array
+    const foundProfile = getProfile(npub);
+    if (foundProfile) {
+      displayName = foundProfile.nickname || foundProfile.name || npub.substring(0, 8) + '...';
+    } else {
+      displayName = npub.substring(0, 8) + '...';
+    }
+  }
+  
+  name.textContent = displayName;
+  
+  memberItem.appendChild(avatar);
+  memberItem.appendChild(name);
+  
+  return memberItem;
+}
+
+// Modified openChat function to preserve navbar in widescreen
+const originalOpenChat = openChat;
+openChat = function(contact) {
+  // Clear any auto-scroll timer
+  if (chatOpenAutoScrollTimer) {
+    clearTimeout(chatOpenAutoScrollTimer);
+    chatOpenAutoScrollTimer = null;
+  }
+
+  // Record when the chat was opened
+  chatOpenTimestamp = Date.now();
+
+  // After 100ms, stop auto-scrolling on media loads
+  chatOpenAutoScrollTimer = setTimeout(() => {
+    chatOpenTimestamp = 0;
+    chatOpenAutoScrollTimer = null;
+  }, 100);
+
+  if (isWidescreen) {
+    // Widescreen behavior
+    navbarSelect('chat-btn');
+    
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
+    
+    // Get the chat
+    const chat = arrChats.find(c => c.id === contact);
+    const isGroup = chat?.chat_type === 'MlsGroup';
+    const profile = !isGroup ? getProfile(contact) : null;
+    strOpenChat = contact;
+    
+    if (isGroup) { 
+      refreshGroupMemberCount(contact); 
+    }
+
+    // Update notes button (should remain visible in widescreen)
+    updateEncryptedNotesButton();
+    
+    // Hide hello screen and show chat in right panel
+    const helloScreen = document.querySelector('.hello-screen');
+    const chatElement = document.getElementById('chat');
+    
+    helloScreen.style.display = 'none';
+    helloScreen.classList.remove('active');
+    chatElement.style.display = 'flex';
+    chatElement.classList.add('active');
+    
+    // For encrypted notes, don't show member panel
+    if (contact === strPubkey) {
+      hideMemberPanel();
+      // Remove the panel toggle button for encrypted notes
+      const toggleBtn = chatElement.querySelector('.panel-toggle');
+      if (toggleBtn) {
+        toggleBtn.style.display = 'none';
+      }
+    } else {
+      // Setup member panel for groups and DMs
+      setupMemberPanelToggle();
+      if (memberPanelVisible) {
+        loadMemberPanel();
+      }
+    }
+    
+    // Update chat content
+    updateChat(chat, (chat?.messages || []).slice(-100), profile, true);
+    
+  } else {
+    // Mobile behavior - use original function
+    originalOpenChat(contact);
+  }
+};
+
+function setupEncryptedNotesButton() {
+  const notesBtn = document.getElementById('chat-bookmarks-btn');
+  if (notesBtn) {
+    // Remove any existing click handlers to prevent duplicates
+    notesBtn.onclick = null;
+    notesBtn.addEventListener('click', handleEncryptedNotesClick);
+    
+    // Simple visibility management
+    updateEncryptedNotesButton();
+  }
+}
+
+function handleEncryptedNotesClick() {
+    // Store current state before opening notes
+    if (strOpenChat !== strPubkey) { // Only store if we're not already in notes
+        window.previousStateBeforeNotes = {
+            type: window.isViewingProfileInChat ? 'profile' : 'chat',
+            profile: window.isViewingProfileInChat ? getProfile(strOpenChat) : null,
+            chatId: strOpenChat
+        };
+    }
+    
+    openEncryptedNotes();
+}
+
+// Simple function to show/hide notes button
+function updateEncryptedNotesButton() {
+  const notesBtn = document.getElementById('chat-bookmarks-btn');
+  if (!notesBtn) return;
+  
+  // Check if user is logged in by looking at login form visibility
+  const loginForm = document.getElementById('login-form');
+  const isLoggedIn = loginForm && loginForm.style.display === 'none';
+  
+  if (!isLoggedIn) {
+    // User is not logged in - hide bookmark button completely
+    notesBtn.style.display = 'none';
+    return;
+  }
+  
+  // User is logged in - handle visibility based on view
+  if (isWidescreen) {
+    // Widescreen: always show when logged in
+    notesBtn.style.display = 'flex';
+    
+    // Position it properly in widescreen
+    notesBtn.style.position = 'absolute';
+    notesBtn.style.top = '28px';
+    notesBtn.style.right = '23px';
+  } else {
+    // Mobile: only show when in chat list (no chat open)
+    if (strOpenChat) {
+      notesBtn.style.display = 'none';
+    } else {
+      notesBtn.style.display = 'flex';
+      // Reset positioning for mobile
+      notesBtn.style.position = '';
+      notesBtn.style.top = '';
+      notesBtn.style.right = '';
+    }
+  }
+}
+
+function openEncryptedNotes() {
+    // If we're already in notes and there's a previous state, go back
+    if (strOpenChat === strPubkey && window.previousStateBeforeNotes) {
+        returnToPreviousState();
+        return;
+    }
+    
+    // Otherwise open notes
+    openChat(strPubkey);
+}
+
+function returnToPreviousState() {
+    if (!window.previousStateBeforeNotes) {
+        // If no previous state, show hello screen
+        showHelloScreen();
+        return;
+    }
+    
+    const previous = window.previousStateBeforeNotes;
+    
+    if (previous.type === 'profile' && previous.profile) {
+        // Return to profile view
+        showProfileInChatArea(previous.profile);
+    } else if (previous.type === 'chat' && previous.chatId) {
+        // Return to chat
+        openChat(previous.chatId);
+    } else {
+        // Fallback to hello screen
+        showHelloScreen();
+    }
+    
+    // Clear the previous state
+    window.previousStateBeforeNotes = null;
+}
+
+// Function to show profile in chat area
+function showProfileInChatArea(profile) {
+    if (!profile || !isWidescreen) return;
+    
+    // Render the profile first
+    renderProfileTab(profile);
+    
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
+    
+    // Hide ALL chat interface elements completely
+    const chatInterface = document.querySelector('.chat-interface');
+    if (chatInterface) {
+        chatInterface.style.display = 'none';
+        chatInterface.style.visibility = 'hidden'; 
+        chatInterface.style.opacity = '0';
+    }
+    
+    // Also hide individual elements with multiple methods to prevent artifacts
+    [domChatMessages, domChatMessageBox, domChatContact, domChatContactStatus].forEach(element => {
+        if (element) {
+            element.style.display = 'none';
+            element.style.visibility = 'hidden';
+            element.style.opacity = '0';
+            element.style.height = '0';
+            element.style.overflow = 'hidden';
+        }
+    });
+    
+    // Get the chat container
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) {
+        console.error('Chat container not found');
+        return;
+    }
+    
+    // Completely clear any chat content that might be visible
+    chatContainer.style.background = 'var(--bg-color)';
+    chatContainer.style.overflow = 'hidden';
+    
+    // Remove any potential borders or outlines from chat container
+    chatContainer.style.border = 'none';
+    chatContainer.style.outline = 'none';
+    chatContainer.style.boxShadow = 'none';
+    
+    // Ensure profile is in the correct container
+    if (!chatContainer.contains(domProfile)) {
+        console.log('Moving profile to chat container');
+        chatContainer.appendChild(domProfile);
+    }
+    
+    // Reset any conflicting styles first
+    domProfile.style.cssText = '';
+    
+    // Apply chat area specific styles - make profile take full space
+    domProfile.style.display = 'block';
+    domProfile.style.position = 'relative';
+    domProfile.style.width = '100%';
+    domProfile.style.height = '100%';
+    domProfile.style.overflow = 'auto';
+    domProfile.style.background = 'var(--bg-color)';
+    domProfile.style.zIndex = '100'; 
+    
+    // Ensure the profile content has proper styling
+    const profileContent = domProfile.querySelector('.profile-content');
+    if (profileContent) {
+        profileContent.style.padding = '0';
+        profileContent.style.margin = '0';
+        profileContent.style.height = '100%';
+        profileContent.style.overflow = 'auto';
+        profileContent.style.background = 'var(--bg-color)';
+    }
+    
+    // Ensure banner has proper styling
+    if (domProfileBanner) {
+        domProfileBanner.style.marginTop = '0';
+        domProfileBanner.style.height = 'auto';
+        domProfileBanner.style.minHeight = '50px';
+        domProfileBanner.style.border = 'none';
+    }
+    
+    if (domProfileBackBtn) {
+        if (domProfile.contains(domProfileBackBtn)) {
+            domProfileBackBtn.remove();
+        }
+        chatContainer.appendChild(domProfileBackBtn);
+        
+        // Use fixed positioning with proper calculation
+        domProfileBackBtn.style.display = 'flex';
+        domProfileBackBtn.style.position = 'fixed';
+        domProfileBackBtn.style.top = '20px';
+        domProfileBackBtn.style.zIndex = '1000';
+        domProfileBackBtn.style.borderRadius = '50%';
+        domProfileBackBtn.style.width = '40px';
+        domProfileBackBtn.style.height = '40px';
+        domProfileBackBtn.style.alignItems = 'center';
+        domProfileBackBtn.style.justifyContent = 'center';
+        domProfileBackBtn.onclick = () => {
+            closeProfileInChatArea();
+        };
+    }
+    
+    // Hide the member panel toggle when viewing profile
+    const panelToggle = document.querySelector('.panel-toggle');
+    if (panelToggle) {
+        panelToggle.style.display = 'none';
+    }
+    
+    // Hide member panel if it was open
+    const memberPanel = document.querySelector('.member-panel');
+    if (memberPanel) {
+        memberPanel.style.display = 'none';
+    }
+    
+    // Force a reflow and ensure no visual artifacts remain
+    setTimeout(() => {
+        // Double-check that all chat elements are completely hidden
+        [domChatMessages, domChatMessageBox, domChatContact, domChatContactStatus].forEach(element => {
+            if (element) {
+                element.style.display = 'none';
+                element.style.visibility = 'hidden';
+            }
+        });
+    }, 10);
+    
+    // Store that we're viewing profile in chat context
+    window.isViewingProfileInChat = true;
+    
+    // Store the previous state so we can return to it
+    window.previousStateBeforeNotes = {
+        type: 'profile',
+        profile: profile,
+        chatId: strOpenChat
+    };
+}
+
+// Function to close profile and return to chat
+function closeProfileInChatArea() {
+    domProfile.style.display = 'none';
+    domProfile.style.cssText = '';
+    
+    // Reset profile content styles
+    const profileContent = domProfile.querySelector('.profile-content');
+    if (profileContent) {
+        profileContent.style.cssText = '';
+    }
+    
+    // Reset banner styles
+    if (domProfileBanner) {
+        domProfileBanner.style.cssText = '';
+    }
+    
+    if (domProfileBackBtn) {
+        const chatContainer = document.getElementById('chat');
+        if (chatContainer && chatContainer.contains(domProfileBackBtn)) {
+            domProfileBackBtn.remove();
+        }
+        domProfile.appendChild(domProfileBackBtn);
+        
+        // Reset back button styles
+        domProfileBackBtn.style.cssText = '';
+        domProfileBackBtn.style.display = 'none'; 
+    }
+    
+    // Reset chat container styles
+    const chatContainer = document.getElementById('chat');
+    if (chatContainer) {
+        chatContainer.style.cssText = ''; 
+    }
+    
+    // Show ALL chat interface elements properly
+    const chatInterface = document.querySelector('.chat-interface');
+    if (chatInterface) {
+        chatInterface.style.display = 'block';
+        chatInterface.style.visibility = 'visible';
+        chatInterface.style.opacity = '1';
+    }
+    
+    // Show individual elements with proper display values
+    if (domChatMessages) {
+        domChatMessages.style.display = 'flex';
+        domChatMessages.style.visibility = 'visible';
+        domChatMessages.style.opacity = '1';
+        domChatMessages.style.height = '';
+        domChatMessages.style.overflow = '';
+    }
+    
+    if (domChatMessageBox) {
+        domChatMessageBox.style.display = 'flex';
+        domChatMessageBox.style.visibility = 'visible';
+        domChatMessageBox.style.opacity = '1';
+        domChatMessageBox.style.height = '';
+        domChatMessageBox.style.overflow = '';
+    }
+    
+    if (domChatContact) {
+        domChatContact.style.display = 'flex'; 
+        domChatContact.style.visibility = 'visible';
+        domChatContact.style.opacity = '1';
+        domChatContact.style.height = '';
+        domChatContact.style.overflow = '';
+    }
+    
+    if (domChatContactStatus) {
+        domChatContactStatus.style.display = 'block'; 
+        domChatContactStatus.style.visibility = 'visible';
+        domChatContactStatus.style.opacity = '1';
+        domChatContactStatus.style.height = '';
+        domChatContactStatus.style.overflow = '';
+    }
+    
+    // Show member panel toggle again 
+    const panelToggle = document.querySelector('.panel-toggle');
+    if (panelToggle && strOpenChat !== strPubkey) {
+        panelToggle.style.display = 'flex';
+    }
+    
+    // Move profile back to main container
+    const mainContainer = document.getElementById('popup-container');
+    if (mainContainer && !mainContainer.contains(domProfile)) {
+        mainContainer.appendChild(domProfile);
+    }
+    
+    // IMPORTANT: Ensure navbar remains visible
+    domNavbar.style.display = '';
+    
+    setTimeout(() => {
+        if (domChatMessages) domChatMessages.style.display = 'flex';
+        if (domChatMessageBox) domChatMessageBox.style.display = 'flex';
+        if (domChatContact) domChatContact.style.display = 'flex';
+    }, 10);
+    
+    // Clear the profile viewing state
+    window.isViewingProfileInChat = false;
+}
+
+// Back button handling for profile view
+function setupProfileBackButton() {
+  if (domProfileBackBtn) {
+    domProfileBackBtn.onclick = () => {
+      if (isWidescreen) {
+        if (window.isViewingProfileInChat) {
+          // If viewing profile in chat, return to chat
+          closeProfileInChatArea();
+        } else if (strOpenChat === strPubkey && window.previousStateBeforeNotes) {
+          // If in notes with previous state, return to that state
+          returnToPreviousState();
+        } else if (strOpenChat === strPubkey) {
+          // If in notes without previous state, go to hello screen
+          closeChat();
+        } else {
+          openChatlist();
+        }
+      } else {
+        if (strOpenChat) {
+          openChat(strOpenChat);
+        } else {
+          openChatlist();
+        }
+      }
+    };
+  }
+}
+
+// Modified closeChat function for clean transitions
+const originalCloseChat = closeChat;
+closeChat = async function() {
+  if (isWidescreen) {
+    // Widescreen cleanup
+    if (chatOpenAutoScrollTimer) {
+      clearTimeout(chatOpenAutoScrollTimer);
+      chatOpenAutoScrollTimer = null;
+    }
+
+    // Release memory
+    while (domChatMessages.firstElementChild) {
+      const domChild = domChatMessages.firstElementChild;
+      const domMedias = domChild?.querySelectorAll('img, audio, video');
+      for (const domMedia of domMedias) {
+        if (domMedia instanceof HTMLMediaElement) {
+          domMedia.pause();
+          if (platformFeatures.os === 'android' && domMedia.src.startsWith('blob:')) {
+            URL.revokeObjectURL(domMedia.src);
+          }
+          domMedia.removeAttribute('src');
+          domMedia.load();
+        }
+        if (domMedia instanceof HTMLImageElement) {
+          if (domMedia.src.startsWith('blob:')) {
+            URL.revokeObjectURL(domMedia.src);
+          }
+          domMedia.removeAttribute('src');
+        }
+      }
+      domChild.remove();
+    }
+
+    // Reset state
+    strOpenChat = "";
+    nLastTypingIndicator = 0;
+
+    // Update notes button (should remain visible in widescreen)
+    updateEncryptedNotesButton();
+
+    // Cancel any ongoing replies or selections
+    strCurrentReactionReference = "";
+    strCurrentReplyReference = "";
+    cancelReply();
+
+    // Close profile if it's open in chat area
+    if (window.isViewingProfileInChat) {
+      closeProfileInChatArea();
+    }
+
+    // Show hello screen (conversation area)
+    showHelloScreen();
+
+    // Hide member panel
+    hideMemberPanel();
+
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
+
+    // Update chat list
+    renderChatlist();
+
+    adjustSize();
+  } else {
+    await originalCloseChat();
+  }
+};
+
+// Modified navigation functions for widescreen
+function openChatlist() {
+  if (isWidescreen) {
+    navbarSelect('chat-btn');
+    domProfile.style.display = 'none';
+    domProfile.classList.remove('active');
+    domSettings.style.display = 'none';
+    domSettings.classList.remove('active');
+    domInvites.style.display = 'none';
+    domInvites.classList.remove('active');
+    domChats.style.display = '';
+    domChats.classList.add('active');
+
+    // IMPORTANT: Keep navbar visible in widescreen
+    domNavbar.style.display = '';
+
+    // Show hello screen in right panel
+    showHelloScreen();
+    
+    // Load MLS invites
+    loadMLSInvites();
+  } else {
+    // Original mobile behavior
+    navbarSelect('chat-btn');
+    domProfile.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+
+    if (domChats.style.display !== '') {
+      domChats.classList.add('fadein-subtle-anim');
+      domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
+      domChats.style.display = '';
+    }
+    
+    loadMLSInvites();
+  }
+}
+
+function openProfile(cProfile) {
+  if (isWidescreen) {
+    // In widescreen, always show profile in the left panel
+    navbarSelect('profile-btn');
+    domChats.style.display = 'none';
+    domChats.classList.remove('active');
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+
+    // Render profile in left panel
+    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
+    renderProfileTab(cProfile);
+
+    if (domProfile.style.display !== '') {
+      domProfile.classList.add('fadein-subtle-anim');
+      domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
+      domProfile.style.display = '';
+      domProfile.classList.add('active');
+    }
+    
+    // IMPORTANT: Keep the navbar visible in widescreen
+    domNavbar.style.display = '';
+    
+  } else {
+    // Mobile behavior - hide navbar when opening profile
+    navbarSelect('profile-btn');
+    domChats.style.display = 'none';
+    domSettings.style.display = 'none';
+    domInvites.style.display = 'none';
+    domNavbar.style.display = 'none'; // Hide navbar in mobile
+
+    if (!cProfile) cProfile = arrProfiles.find(a => a.mine);
+    renderProfileTab(cProfile);
+
+    if (domProfile.style.display !== '') {
+      domProfile.classList.add('fadein-subtle-anim');
+      domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
+      domProfile.style.display = '';
+    }
+  }
+}
+
+// Enhanced resize handler with smooth transitions
+let resizeTimeout;
+window.addEventListener('resize', () => {
+  const wasWidescreen = isWidescreen;
+  
+  // Debounce resize events
+  clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
+    document.body.classList.add('layout-transition');
+    
+    initWidescreenLayout();
+    
+    // If layout changed significantly, force a clean re-render
+    if (wasWidescreen !== isWidescreen) {
+      if (strOpenChat) {
+        // Re-open current chat to ensure proper layout
+        const currentChat = strOpenChat;
+        strOpenChat = "";
+        setTimeout(() => openChat(currentChat), 50);
+      }
+    }
+    
+    setTimeout(() => {
+      document.body.classList.remove('layout-transition');
+    }, 300);
+  }, 100);
+});
+
+// Function to handle login state and UI visibility
+function updateUIVisibilityForLoginState(isLoggedIn) {
+  const loginForm = document.getElementById('login-form');
+  const navbar = document.getElementById('navbar');
+  const bookmarksBtn = document.getElementById('chat-bookmarks-btn');
+  
+  // Check if login form is currently visible/active
+  const isLoginActive = loginForm && 
+                       !loginForm.classList.contains('fadeout-anim') && 
+                       loginForm.style.display !== 'none';
+  
+  if (isLoginActive) {
+    // Login is active - hide navbar and bookmark
+    if (navbar) navbar.style.display = 'none';
+    if (bookmarksBtn) bookmarksBtn.style.display = 'none';
+  } else {
+    // Login is NOT active - user is logged in
+    if (isLoggedIn) {
+      if (window.innerWidth >= 1024) {
+        // Widescreen - show navbar and bookmarks
+        if (navbar) navbar.style.display = 'flex';
+        if (bookmarksBtn) bookmarksBtn.style.display = 'block';
+      } else {
+        // Mobile - show navbar, hide bookmarks (if that's your design)
+        if (navbar) navbar.style.display = 'flex';
+        if (bookmarksBtn) bookmarksBtn.style.display = 'block';
+      }
+    } else {
+      // Not logged in and login not active - hide everything
+      if (navbar) navbar.style.display = 'none';
+      if (bookmarksBtn) bookmarksBtn.style.display = 'none';
+    }
+  }
+}
+
+// Call this function when login state changes
+document.addEventListener('DOMContentLoaded', function() {
+  // Initial check - assuming not logged in
+  updateUIVisibilityForLoginState(false);
+  
+  // Check on resize
+  window.addEventListener('resize', function() {
+    // Check if we're logged in by looking for the navbar or other logged-in indicators
+    const isLoggedIn = document.getElementById('navbar').style.display !== 'none' || 
+                      document.body.classList.contains('logged-in');
+    updateUIVisibilityForLoginState(isLoggedIn);
+  });
+});
+
+// You'll need to call this when login completes
+function onLoginSuccess() {
+  updateUIVisibilityForLoginState(true);
+}
+
+function onLogout() {
+  updateUIVisibilityForLoginState(false);
+}
