@@ -3662,6 +3662,68 @@ hr {
     overflow: hidden;
   }
 
+  #chat-new {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    height: 100%;
+    background-color: #0a0a0a;
+  }
+    
+  #chat-new.active {
+    display: flex;
+  }
+    
+  .chat-new-header {
+    background-color: #161616;
+    height: 65px;
+    display: flex;
+    align-items: center;
+    padding: 0 15px;
+    flex-shrink: 0;
+  }
+    
+  .chat-new-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+    overflow-y: auto;
+  }
+    
+  .chat-new-center-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    margin-top: -50px; 
+  }
+    
+  .chat-new-input-box {
+    position: relative;
+    width: 100%;
+    padding: 5px;
+    background-color: #0a0a0a;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    flex-shrink: 0;
+  }
+    
+  .chat-new-center-content {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+    
+  .chat-new-input-box {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+
   #chats, #profile, #settings, #invites {
     flex: 1;
     display: none;

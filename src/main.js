@@ -4319,13 +4319,126 @@ function openChat(contact) {
  * Open the dialog for starting a new chat
  */
 function openNewChat() {
-    // Display the UI
-    domChatNew.style.display = '';
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
+    if (isWidescreen) {
+        // Widescreen behavior - show in right panel
+        navbarSelect('chat-btn');
+        
+        // IMPORTANT: Keep navbar visible in widescreen
+        domNavbar.style.display = '';
+        
+        // Hide hello screen and show new chat in right panel
+        const helloScreen = document.querySelector('.hello-screen');
+        const chatNewElement = document.getElementById('chat-new');
+        
+        helloScreen.style.display = 'none';
+        helloScreen.classList.remove('active');
+        
+        // Hide other chat views
+        document.querySelectorAll('#chat, #create-group').forEach(el => {
+            el.style.display = 'none';
+            el.classList.remove('active');
+        });
+        
+        // Show new chat interface
+        chatNewElement.style.display = '';
+        chatNewElement.classList.add('active');
+        
+        // Hide member panel
+        hideMemberPanel();
+        
+        // Update notes button visibility
+        updateEncryptedNotesButton();
+        
+        // Focus the input field for better UX
+        setTimeout(() => {
+            const newChatInput = document.getElementById('chat-new-input');
+            if (newChatInput) {
+                newChatInput.focus();
+            }
+        }, 100);
+        
+    } else {
+        // Mobile behavior - original implementation
+        domChatNew.style.display = '';
+        domChats.style.display = 'none';
+        domChat.style.display = 'none';
+        domNavbar.style.display = 'none';
+    }
+}
 
-    // Hide the Navbar
-    domNavbar.style.display = 'none';
+function closeNewChat() {
+    if (isWidescreen) {
+        const chatNewElement = document.getElementById('chat-new');
+        chatNewElement.style.display = 'none';
+        chatNewElement.classList.remove('active');
+        
+        // Return to hello screen
+        showHelloScreen();
+    } else {
+        // Mobile behavior
+        domChatNew.style.display = 'none';
+        domNavbar.style.display = '';
+        openChatlist();
+    }
+}
+
+function setupNewChatBackButton() {
+    const newChatBackBtn = document.getElementById('chat-new-back-text-btn');
+    if (newChatBackBtn) {
+        // Remove any existing handlers to prevent duplicates
+        newChatBackBtn.onclick = null;
+        newChatBackBtn.addEventListener('click', () => {
+            if (isWidescreen) {
+                closeNewChat();
+            } else {
+                // Mobile behavior
+                domChatNew.style.display = 'none';
+                domNavbar.style.display = '';
+                openChatlist();
+            }
+        });
+    }
+}
+
+function setupNewChatInput() {
+    const newChatInput = document.getElementById('chat-new-input');
+    const newChatStartBtn = document.getElementById('chat-new-btn');
+
+    if (newChatInput && newChatStartBtn) {
+        // Remove any existing handlers
+        newChatInput.onkeydown = null;
+        newChatStartBtn.onclick = null;
+
+        // Unified handler for starting new chat
+        const startNewChat = () => {
+            const npub = newChatInput.value.trim();
+            if (npub) {
+                // Clear input
+                newChatInput.value = '';
+
+                if (isWidescreen) {
+                    // Close new chat interface and open the actual chat
+                    closeNewChat();
+                    openChat(npub);
+                } else {
+                    // Mobile behavior
+                    openChat(npub);
+                    domChatNew.style.display = 'none';
+                }
+            }
+        };
+
+        // Set up enter key
+        newChatInput.onkeydown = async (evt) => {
+            if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
+                evt.preventDefault();
+                startNewChat();
+            }
+        };
+
+        // Set up button click
+        newChatStartBtn.onclick = startNewChat;
+    }
 }
 
 /**
@@ -5346,6 +5459,8 @@ window.addEventListener("DOMContentLoaded", async () => {
         openChat(strPubkey);
     };
     domChatNewBackBtn.onclick = closeChat;
+    // Set up new chat back button handler (widescreen-aware)
+    setupNewChatBackButton();
     
     // Add scroll event listener for procedural message loading
     let scrollTimeout;
@@ -5356,16 +5471,8 @@ window.addEventListener("DOMContentLoaded", async () => {
             handleProceduralScroll();
         }, 100);
     });
-    domChatNewStartBtn.onclick = () => {
-        openChat(domChatNewInput.value.trim());
-        domChatNewInput.value = ``;
-    };
-    domChatNewInput.onkeydown = async (evt) => {
-        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
-            evt.preventDefault();
-            domChatNewStartBtn.click();
-        }
-    };
+    // Set up the new chat input handlers (unified for widescreen/mobile)
+    setupNewChatInput();
     domChatMessageInputCancel.onclick = cancelReply;
 
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
@@ -5794,6 +5901,16 @@ function adjustSize() {
     // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
     const rectContact = domChatContact.getBoundingClientRect();
     domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+
+    // New Chat interface in widescreen - ensure proper sizing
+    if (isWidescreen) {
+        const chatNewElement = document.getElementById('chat-new');
+        if (chatNewElement && chatNewElement.style.display !== 'none') {
+            chatNewElement.style.height = '100%';
+            chatNewElement.style.display = 'flex';
+            chatNewElement.style.flexDirection = 'column';
+        }
+    }
 
     // If the chat is open, and the fade-out exists, then position it correctly
     if (strOpenChat) {
