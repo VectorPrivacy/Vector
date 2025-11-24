@@ -496,6 +496,11 @@ body {
   opacity: 0.5;
 }
 
+/* Add spacing to dangerzone info icons */
+.danger-option .icon-info {
+  margin-right: 5px;
+}
+
 .profile-banner-edit {
   position: absolute;
   top: 10px;
@@ -516,7 +521,6 @@ body {
   align-items: center;
   justify-content: space-between; /* left info+title, right button */
   gap: 8px;
-  margin-bottom: 8px;
   width: 100%;
 }
 
@@ -3159,9 +3163,8 @@ select:disabled:hover {
 }
 
 #check-updates-btn {
-  margin: 10px auto;
-  padding: 12px 24px;
-  font-weight: 600;
+  margin: 0 auto;
+  padding: 8px 24px;
 }
 
 #update-status-text {

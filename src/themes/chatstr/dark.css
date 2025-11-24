@@ -271,7 +271,6 @@ select:disabled {
 #current-version,
 #new-version {
   color: #b188e2;
-  font-weight: 600;
 }
 
 .accept-btn {
