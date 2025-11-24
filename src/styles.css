@@ -2911,16 +2911,16 @@ select:disabled:hover {
   font-size: 12px;
   font-weight: 600;
   padding: 4px 12px;
-  border-radius: 12px;
+  border-radius: 20px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   white-space: nowrap;
 }
 
 .relay-status.connected {
-  background: rgba(89, 252, 179, 0.2);
+  background: rgba(90, 252, 180, 0.1);
   color: #59fcb3;
-  border: 1px solid rgba(89, 252, 179, 0.3);
+  border: 1px solid rgba(90, 252, 180, 0.5);
 }
 
 .relay-status.connecting {
