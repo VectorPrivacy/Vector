@@ -6375,49 +6375,87 @@ function initWidescreenLayout() {
 
 // Enhanced navbar selection for widescreen
 function navbarSelect(strSelectionID = '') {
-  // Update navbar buttons
-  for (const navItem of domNavbar.querySelectorAll('div')) {
-    if (strSelectionID === navItem.id) navItem.classList.remove('navbar-btn-inactive');
-    else navItem.classList.add('navbar-btn-inactive');
-  }
-
-  // Handle widescreen layout
-  if (isWidescreen) {
-    // Hide all left panel content
-    document.querySelectorAll('.left-panel > *').forEach(el => {
-      if (el.id && el.id !== 'navbar') {
-        el.style.display = 'none';
-        el.classList.remove('active');
-      }
-    });
-
-    // Show selected tab in left panel
-    const tabMap = {
-      'profile-btn': 'profile',
-      'chat-btn': 'chats', 
-      'settings-btn': 'settings',
-      'invites-btn': 'invites'
-    };
-
-    const contentId = tabMap[strSelectionID];
-    if (contentId) {
-      const contentEl = document.getElementById(contentId);
-      if (contentEl) {
-        contentEl.style.display = '';
-        contentEl.classList.add('active');
-      }
+    // Update navbar buttons
+    for (const navItem of domNavbar.querySelectorAll('div')) {
+        if (strSelectionID === navItem.id) navItem.classList.remove('navbar-btn-inactive');
+        else navItem.classList.add('navbar-btn-inactive');
     }
 
-    // If switching to chat tab and no chat is open, show hello screen
-    if (strSelectionID === 'chat-btn' && !strOpenChat) {
-      showHelloScreen();
+    // Handle widescreen layout
+    if (isWidescreen) {
+        // Hide all left panel content
+        document.querySelectorAll('.left-panel > *').forEach(el => {
+            if (el.id && el.id !== 'navbar') {
+                el.style.display = 'none';
+                el.classList.remove('active');
+            }
+        });
+
+        // Show selected tab in left panel
+        const tabMap = {
+            'profile-btn': 'profile',
+            'chat-btn': 'chats', 
+            'settings-btn': 'settings',
+            'invites-btn': 'invites'
+        };
+
+        const contentId = tabMap[strSelectionID];
+        if (contentId) {
+            const contentEl = document.getElementById(contentId);
+            if (contentEl) {
+                contentEl.style.display = '';
+                contentEl.classList.add('active');
+            }
+        }
+
+        // RIGHT PANEL: NEVER close an open chat when switching navbar tabs
+        // The chat should stay open until user explicitly closes it with back button
+        const chatElement = document.getElementById('chat');
+        const helloScreen = document.querySelector('.hello-screen');
+        
+        if (strOpenChat) {
+            // ALWAYS show the open chat in right panel, regardless of selected tab
+            if (chatElement) {
+                chatElement.style.display = 'flex';
+                chatElement.classList.add('active');
+            }
+            if (helloScreen) {
+                helloScreen.style.display = 'none';
+                helloScreen.classList.remove('active');
+            }
+            
+            // Setup member panel for the open chat (if applicable)
+            if (strOpenChat !== strPubkey) {
+                setupMemberPanelToggle();
+                if (memberPanelVisible) {
+                    loadMemberPanel();
+                }
+            }
+        } else {
+            // No chat open - only show hello screen when specifically on chat tab
+            if (strSelectionID === 'chat-btn') {
+                showHelloScreen();
+            } else {
+                // On other tabs with no open chat - hide both
+                if (chatElement) {
+                    chatElement.style.display = 'none';
+                    chatElement.classList.remove('active');
+                }
+                if (helloScreen) {
+                    helloScreen.style.display = 'none';
+                    helloScreen.classList.remove('active');
+                }
+            }
+        }
+    } else {
+        // Mobile behavior - original implementation
+        // ... (keep existing mobile code)
     }
-  }
 }
 
 // Show hello screen in right panel
 function showHelloScreen() {
-  if (!isWidescreen) return;
+  if (!isWidescreen || strOpenChat) return; // DON'T show hello screen if chat is open
   
   const rightPanel = document.querySelector('.right-panel');
   const helloScreen = document.querySelector('.hello-screen');
@@ -7279,8 +7317,11 @@ function openChatlist() {
     // IMPORTANT: Keep navbar visible in widescreen
     domNavbar.style.display = '';
 
-    // Show hello screen in right panel
-    showHelloScreen();
+    // ONLY show hello screen if no chat is currently open
+    if (!strOpenChat) {
+        showHelloScreen();
+    }
+    // If strOpenChat exists, the chat will remain visible from the navbarSelect logic
     
     // Load MLS invites
     loadMLSInvites();
