@@ -42,7 +42,7 @@
           <input id="popupInput">
         </div>
         <div class="popup-buttons">
-          <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
+          <button id="popupConfirm">Confirm</button><button id="popupCancel" class="cancel-btn">Cancel</button>
         </div>
       </center>
     </div>
@@ -304,7 +304,7 @@
 
         <div style="display: flex; gap: 10px; padding: 15px; justify-content: center;">
           <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
-          <button id="create-group-cancel-btn" class="btn logout-btn">Cancel</button>
+          <button id="create-group-cancel-btn" class="btn cancel-btn">Cancel</button>
         </div>
 
         <center>
@@ -416,7 +416,7 @@
                     </div>
                   </div>
                   <div class="form-group" style="margin-top: 15px;">
-                    <button id="clear-storage-btn" class="btn logout-btn">Clear Storage</button>
+                    <button id="clear-storage-btn" class="btn cancel-btn">Clear Storage</button>
                   </div>
                 </div>
 
@@ -453,10 +453,40 @@
         <div class="settings-section">
           <hr class="divider settings-divider">
           <img src="./icons/aggro-glitch.gif">
-          <h2 class="danger-title">Dangerzone</h2>
-          <button id="deep-rescan-btn" class="logout-btn">Deep Rescan</button>
-          <button id="export-account-btn" class="logout-btn">Export Account</button>
-          <button id="logout-btn" class="logout-btn">Logout</button>
+          <h2 class="danger-title" style="margin-bottom: 0; margin-top: 0;">Dangerzone</h2>
+          <p class="danger-subtitle">Irreversible Actions</p>
+          <div class="danger-buttons">
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="deep-rescan-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Deep Rescan</span>
+              </div>
+              <button id="deep-rescan-btn" class="cancel-btn">
+                Rescan
+              </button>
+            </div>
+
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Export Account</span>
+              </div>
+              <button id="export-account-btn" class="cancel-btn">
+                Export
+              </button>
+            </div>
+
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="logout-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Logout</span>
+              </div>
+              <button id="logout-btn" class="danger-btn">
+                <img src="./icons/warning_pink.png" class="danger-btn-icon" alt="">
+                Logout
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

@@ -455,6 +455,47 @@ body {
   cursor: pointer;
 }
 
+/* Dangerzone button group styling */
+.danger-buttons {
+  display: block;
+}
+
+/* Style each danger option like toggle-container */
+.danger-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Make dangerzone buttons thinner */
+.danger-option button {
+  padding-top: 0.4em;
+  padding-bottom: 0.4em;
+  margin-bottom: 0.5em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Style the warning icon inside danger buttons */
+.danger-btn-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Left side (info icon + label) stays together */
+.danger-option .left-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Set opacity for all info icons */
+.icon-info {
+  opacity: 0.5;
+}
+
 .profile-banner-edit {
   position: absolute;
   top: 10px;
@@ -467,6 +508,28 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+/* Style individual options within the danger zone */
+.danger-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* left info+title, right button */
+  gap: 8px;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+/* Left side (info icon and label) should take remaining space */
+.danger-option .left-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Ensure the button stays on the right */
+.danger-option button {
+  margin-left: auto;
 }
 
 .profile-options {
@@ -888,7 +951,6 @@ body {
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
-  overflow-x: auto;
 }
 
 .msg-them p {
@@ -2023,7 +2085,10 @@ select:disabled:hover {
   transform: none;
 }
 
-.popup-cancel-btn {
+.cancel-btn {
+  backdrop-filter: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background-color: #00000000;
   margin-left: 10px;
   backdrop-filter: none;
   border-color: #ff2ea9;
@@ -2159,14 +2224,28 @@ select:disabled:hover {
 }
 
 .danger-title {
+  color: white;
+}
+
+.danger-subtitle {
   color: #ff2ea9;
+  font-size: 12px;
+  text-align: center;
+  margin-top: 5px;
+  margin-bottom: 15px;
   margin-top: 0px;
 }
 
-.logout-btn {
+.cancel-btn {
+  backdrop-filter: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background-color: #00000000;
+}
+
+.danger-btn {
   backdrop-filter: none;
   border-color: #ff2ea9;
-  background-color: #161616;
+  background-color: #00000000;
 }
 
 .navbar {

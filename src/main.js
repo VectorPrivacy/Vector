@@ -108,6 +108,9 @@ const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-au
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
+const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
+const domSettingsExportAccountInfo = document.getElementById('export-account-info');
+const domSettingsLogoutInfo = document.getElementById('logout-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
@@ -5607,7 +5610,25 @@ domChatMessageInput.oninput = async () => {
         popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
     };
 
-        // Add npub copy functionality for chat-new section
+    domSettingsDeepRescanInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Deep Rescan', 'This will forcefully sync your message history backwards in two‑day sections until 30 days of no events are found. This may take some time.', true);
+    };
+
+    domSettingsExportAccountInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
+    };
+
+    domSettingsLogoutInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.', true);
+    };
+
+    // Add npub copy functionality for chat-new section
     document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('share-npub')?.textContent;
         if (npub) {
