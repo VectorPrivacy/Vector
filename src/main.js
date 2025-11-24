@@ -151,18 +151,15 @@ function openEmojiPanel(e) {
         // Load emoji sections
         loadEmojiSections();
 
-        // Display the picker - use class instead of inline style
+        // Display the picker
         picker.classList.add('visible');
 
-        // Always use the same fixed position (bottom-up) for both message input and reactions
-        picker.classList.add('emoji-picker-message-type');
-        
-        // Clear any positioning styles to ensure CSS fixed positioning takes effect
-        picker.style.top = '';
-        picker.style.left = '';
-        picker.style.right = '';
-        picker.style.transform = '';
-        
+        if (isWidescreen) {
+            picker.classList.add('emoji-picker-widescreen');
+        } else {
+            picker.classList.remove('emoji-picker-widescreen');
+        }
+
         // Change the emoji button to a wink while the panel is open (only for message input)
         if (isDefaultPanel) {
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
@@ -178,13 +175,25 @@ function openEmojiPanel(e) {
         // Focus on the emoji search box for easy searching
         emojiSearch.focus();
     } else {
-        // Hide and reset the UI - use class instead of inline style
+        // Hide and reset the UI
         emojiSearch.value = '';
         picker.classList.remove('visible');
+        picker.classList.remove('emoji-picker-widescreen');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+    }
+}
+
+function updateEmojiPickerPosition() {
+    if (!isWidescreen || !picker.classList.contains('visible')) return;
+    
+    // Adjust position based on member panel state
+    if (memberPanelVisible) {
+        picker.style.right = '320px'; // 300px panel + 20px margin
+    } else {
+        picker.style.right = '20px';
     }
 }
 
@@ -6465,6 +6474,7 @@ function toggleMemberPanel() {
   if (memberPanelVisible) {
     memberPanel.style.display = 'flex';
     memberPanel.style.flex = '0 0 300px';
+    loadMemberPanel(); 
     
     // If profile is open in chat area, adjust layout
     if (window.isViewingProfileInChat) {
@@ -6472,7 +6482,7 @@ function toggleMemberPanel() {
       domProfile.style.minWidth = '400px';
       domProfile.style.width = '';
     }
-    loadMemberPanel();
+
   } else {
     memberPanel.style.display = 'none';
     memberPanel.style.flex = '';
@@ -6486,6 +6496,7 @@ function toggleMemberPanel() {
   }
   
   updateToggleButton();
+  updateEmojiPickerPosition(); // Update emoji picker position
 }
 
 // Update toggle button icon 

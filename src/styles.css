@@ -3662,6 +3662,22 @@ hr {
     overflow: hidden;
   }
 
+  /* Widescreen emoji picker positioning */
+.emoji-picker.emoji-picker-widescreen {
+  left: auto;
+  right: 20px;
+  transform: translateX(0) translateY(100%);
+}
+
+.emoji-picker.emoji-picker-widescreen.visible {
+  transform: translateX(0) translateY(0);
+}
+
+/* Adjust position when member panel is open */
+.member-panel ~ .right-panel .emoji-picker.emoji-picker-widescreen {
+  right: 320px;
+}
+
   #chat-new {
     flex: 1;
     display: none;
