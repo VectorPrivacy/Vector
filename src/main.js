@@ -6758,7 +6758,6 @@ function updateEncryptedNotesButton() {
   }
 }
 
-// Replace the openEncryptedNotes function with this corrected version
 function openEncryptedNotes() {
     // If we're already in notes, return to previous state
     if (strOpenChat === strPubkey && window.previousStateBeforeNotes) {
@@ -6771,14 +6770,73 @@ function openEncryptedNotes() {
         window.previousStateBeforeNotes = {
             type: window.isViewingProfileInChat ? 'profile' : 'chat',
             chatId: strOpenChat,
-            profile: window.isViewingProfileInChat ? getProfile(strOpenChat) : null
+            profileOpen: window.isViewingProfileInChat
         };
+        
+        // If a contact profile is open in chat area, close it properly
+        if (window.isViewingProfileInChat) {
+            closeProfileInChatArea();
+        }
     } else {
         window.previousStateBeforeNotes = {
-            type: 'list',
+            type: 'list', 
             chatId: null
         };
     }
+    
+    // Get or create the notes chat
+    const notesChat = getOrCreateDMChat(strPubkey);
+    const myProfile = getProfile(strPubkey);
+    
+    if (isWidescreen) {
+        // Widescreen behavior
+        navbarSelect('chat-btn');
+        domNavbar.style.display = '';
+        
+        // Hide hello screen and show chat
+        const helloScreen = document.querySelector('.hello-screen');
+        const chatElement = document.getElementById('chat');
+        
+        helloScreen.style.display = 'none';
+        helloScreen.classList.remove('active');
+        chatElement.style.display = 'flex';
+        chatElement.classList.add('active');
+        
+        // Clear chat area
+        clearChatArea();
+        
+        // Hide member panel for notes and remove togggle
+        hideMemberPanel();
+        const toggleBtn = chatElement.querySelector('.panel-toggle');
+        if (toggleBtn) {
+            toggleBtn.style.display = 'none';
+        }
+
+        // Close any profile view in chat area
+        if (window.isViewingProfileInChat) {
+            closeProfileInChatArea();
+        }
+        
+        // Set current chat to notes
+        strOpenChat = strPubkey;
+        
+        // Update chat with notes content
+        updateChat(notesChat, notesChat.messages || [], myProfile, true);
+        
+    } else {
+        // Mobile behavior
+        clearChatArea();
+        strOpenChat = strPubkey;
+        updateChat(notesChat, notesChat.messages || [], myProfile, true);
+        // Show chat UI, hide others
+        domChat.style.display = '';
+        domChats.style.display = 'none';
+        domNavbar.style.display = 'none';
+    }
+    
+    // Update the back button notification
+    updateChatBackNotification();
+}
 
 function clearChatArea() {
     // Clear all messages from the chat area
@@ -6796,63 +6854,6 @@ function clearChatArea() {
     if (domChatMessagesFade) {
         domChatMessagesFade.style.display = 'none';
     }
-}
-    
-    // Get or create the notes chat
-    const notesChat = getOrCreateDMChat(strPubkey);
-    const myProfile = getProfile(strPubkey);
-    
-    if (isWidescreen) {
-        // Widescreen behavior - open in right panel
-        navbarSelect('chat-btn');
-        domNavbar.style.display = '';
-        
-        // Hide hello screen and show chat
-        const helloScreen = document.querySelector('.hello-screen');
-        const chatElement = document.getElementById('chat');
-        
-        helloScreen.style.display = 'none';
-        helloScreen.classList.remove('active');
-        chatElement.style.display = 'flex';
-        chatElement.classList.add('active');
-        
-        // IMPORTANT: Completely clear the chat area first
-        clearChatArea();
-        
-        // Hide member panel for notes and remove toggle
-        hideMemberPanel();
-        const toggleBtn = chatElement.querySelector('.panel-toggle');
-        if (toggleBtn) {
-            toggleBtn.style.display = 'none';
-        }
-        
-        // Close any profile view in chat area
-        if (window.isViewingProfileInChat) {
-            closeProfileInChatArea();
-        }
-        
-        // Set current chat to notes
-        strOpenChat = strPubkey;
-        
-        // Now update the chat with notes content
-        updateChat(notesChat, notesChat.messages || [], myProfile, true);
-        
-    } else {
-        // Mobile behavior
-        // Clear chat area first
-        clearChatArea();
-        
-        strOpenChat = strPubkey;
-        updateChat(notesChat, notesChat.messages || [], myProfile, true);
-        
-        // Show chat UI, hide others
-        domChat.style.display = '';
-        domChats.style.display = 'none';
-        domNavbar.style.display = 'none';
-    }
-    
-    // Update the back button notification
-    updateChatBackNotification();
 }
 
 function returnToPreviousState() {
@@ -6895,10 +6896,16 @@ function returnToPreviousState() {
 function showProfileInChatArea(profile) {
     if (!profile || !isWidescreen) return;
     
-    // Render the profile first
-    renderProfileTab(profile);
+    // Store the current chat context before opening profile
+    window.previousStateBeforeProfile = {
+        type: 'chat', 
+        chatId: strOpenChat
+    };
     
-    // IMPORTANT: Keep navbar visible in widescreen
+    // Render the profile for chat area - IMPORTANT: Use the existing function
+    renderProfileTab(profile);
+
+        // IMPORTANT: Keep navbar visible in widescreen
     domNavbar.style.display = '';
     
     // Hide ALL chat interface elements completely
@@ -6922,12 +6929,9 @@ function showProfileInChatArea(profile) {
     
     // Get the chat container
     const chatContainer = document.getElementById('chat');
-    if (!chatContainer) {
-        console.error('Chat container not found');
-        return;
-    }
-    
-    // Completely clear any chat content that might be visible
+    if (!chatContainer) return;
+
+       // Completely clear any chat content that might be visible
     chatContainer.style.background = 'var(--bg-color)';
     chatContainer.style.overflow = 'hidden';
     
