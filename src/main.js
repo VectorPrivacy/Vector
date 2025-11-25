@@ -1586,20 +1586,16 @@ function updateChatBackNotification() {
 /**
  * Sets a specific message as the last read message
  * @param {Chat} chat - The Chat to update
- * @param {Message|string} message - The Message object or message ID to set as last read
+ * @param {Message|string} message - The Message to set as last read
  */
 function markAsRead(chat, message) {
-    // If a Message object was provided, extract its ID
-    const messageId = typeof message === 'string' ? message : message.id;
-
-    // If we have a chat, update its last_read and notify backend
-    if (chat) {
-        chat.last_read = messageId;
+    // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
+    if (chat && message.id !== chat.last_read) {
+        chat.last_read = message.id;
 
         // Persist via backend using chat-based API
-        invoke("mark_as_read", { chatId: chat.id, messageId: messageId });
+        invoke("mark_as_read", { chatId: chat.id, messageId: message.id });
     }
-    // If no chat is supplied, do nothing (no profile-based persistence here)
 }
 
 /**
@@ -3073,7 +3069,6 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 // If we found a message and it's not already marked as read, update the read status
                 if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
                     // Update the chat's last_read
-                    chat.last_read = lastContactMsg.id;
                     markAsRead(chat, lastContactMsg);
                 }
             }
@@ -4364,6 +4359,12 @@ function openChat(contact) {
         : [];
     
     updateChat(chat, initialMessages, profile, true);
+
+    // If the opened chat has messages, mark them as read (last message)
+    if (totalMessages) {
+        const lastMsg = chat.messages[chat.messages.length - 1];
+        markAsRead(chat, lastMsg);
+    }
     
     // Update the back button notification dot
     updateChatBackNotification();
@@ -4423,6 +4424,13 @@ async function closeChat() {
 
         // Now we explicitly drop them
         domChild.remove();
+    }
+
+    // If the chat had any messages, mark them as read before leaving
+    const closedChat = arrChats.find(c => c.id === strOpenChat);
+    if (closedChat.messages?.length) {
+        const lastMsg = closedChat.messages[closedChat.messages.length - 1];
+        markAsRead(closedChat, lastMsg);
     }
 
     // Reset the chat UI
