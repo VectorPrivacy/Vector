@@ -150,22 +150,22 @@ function openEmojiPanel(e) {
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
         // Reset the emoji picker state first
         resetEmojiPicker();
-        
-        // Load emoji sections
-        loadEmojiSections();
+
+        // Load emoji sections with optimized rendering
+        renderEmojiPanel();
 
         // Display the picker - use class instead of inline style
         picker.classList.add('visible');
 
         // Always use the same fixed position (bottom-up) for both message input and reactions
         picker.classList.add('emoji-picker-message-type');
-        
+
         // Clear any positioning styles to ensure CSS fixed positioning takes effect
         picker.style.top = '';
         picker.style.left = '';
         picker.style.right = '';
         picker.style.transform = '';
-        
+
         // Change the emoji button to a wink while the panel is open (only for message input)
         if (isDefaultPanel) {
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
@@ -191,41 +191,86 @@ function openEmojiPanel(e) {
     }
 }
 
-function loadEmojiSections() {
-    // Load recent emojis
+/**
+ * Renders the Recently Used emojis immediately, then renders
+ * the All Emojis grid after the last recent emoji image loads.
+ */
+function renderEmojiPanel() {
     const recentsGrid = document.getElementById('emoji-recents-grid');
-    recentsGrid.innerHTML = '';
-    getMostUsedEmojis().slice(0, 24).forEach(emoji => {
-        const span = document.createElement('span');
-        span.textContent = emoji.emoji;
-        span.title = emoji.name;
-        recentsGrid.appendChild(span);
-    });
-    
-    // Load favorite emojis
-    const favoritesGrid = document.getElementById('emoji-favorites-grid');
-    favoritesGrid.innerHTML = '';
-    arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
-        const span = document.createElement('span');
-        span.textContent = emoji.emoji;
-        span.title = emoji.name;
-        favoritesGrid.appendChild(span);
-    });
-    
-    // Load all emojis
     const allGrid = document.getElementById('emoji-all-grid');
+    
+    recentsGrid.innerHTML = '';
     allGrid.innerHTML = '';
+    
+    // Build Recently Used with DocumentFragment
+    const recentsFragment = document.createDocumentFragment();
+    const recentEmojis = getMostUsedEmojis().slice(0, 24);
+    
+    recentEmojis.forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        recentsFragment.appendChild(span);
+    });
+    
+    recentsGrid.appendChild(recentsFragment);
+    twemojify(recentsGrid);
+    
+    // Find the last <img> in recents and wait for it to load
+    const lastRecentImage = recentsGrid.lastElementChild?.querySelector('img');
+    
+    if (lastRecentImage) {
+        lastRecentImage.addEventListener('load', () => {
+            renderAllEmojisGrid(allGrid);
+        }, { once: true });
+    } else {
+        // No recent emojis, render all grid immediately
+        renderAllEmojisGrid(allGrid);
+    }
+    
+    // Load favorites section
+    loadFavoritesSection();
+}
+
+/**
+ * Renders the full All Emojis grid using DocumentFragment.
+ */
+function renderAllEmojisGrid(allGrid) {
+    const allFragment = document.createDocumentFragment();
+    
     arrEmojis.forEach(emoji => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
         span.title = emoji.name;
-        allGrid.appendChild(span);
+        allFragment.appendChild(span);
     });
     
-    // Twemojify all emojis
-    twemojify(recentsGrid);
-    twemojify(favoritesGrid);
+    allGrid.appendChild(allFragment);
     twemojify(allGrid);
+}
+
+/**
+ * Loads the favorites section separately.
+ */
+function loadFavoritesSection() {
+    const favoritesGrid = document.getElementById('emoji-favorites-grid');
+    favoritesGrid.innerHTML = '';
+    
+    const favoritesFragment = document.createDocumentFragment();
+    arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        favoritesFragment.appendChild(span);
+    });
+    
+    favoritesGrid.appendChild(favoritesFragment);
+    twemojify(favoritesGrid);
+}
+
+function loadEmojiSections() {
+    // Legacy function - now calls renderEmojiPanel
+    renderEmojiPanel();
     
     // Initialize collapsible sections after loading emojis
     initCollapsibleSections();
