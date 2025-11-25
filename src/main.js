@@ -3654,10 +3654,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 imgContainer.appendChild(imgPreview);
                 imgContainer.appendChild(extBadge);
                 pMessage.appendChild(imgContainer);
-                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
+                } else if (platformFeatures.os !== 'linux' && ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
-                } else if (['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
+                } else if (platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
                 // Videos
                 const handleMetadataLoaded = (video) => {
                     // Seek a tiny amount to force the frame 'poster' to load
