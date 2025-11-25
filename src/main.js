@@ -3568,11 +3568,14 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         linkifyUrls(spanMessage);
     }
 
-    // Twemojify!
-    twemojify(spanMessage);
+    // Only process Text Content if any exists
+    if (spanMessage.textContent) {
+        // Twemojify!
+        twemojify(spanMessage);
 
-    // Append the message contents
-    pMessage.appendChild(spanMessage);
+        // Append the message contents
+        pMessage.appendChild(spanMessage);
+    }
 
     // Append attachments
     let strRevealAttachmentPath = '';
@@ -3581,6 +3584,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.style.float = msg.mine ? 'right' : 'left';
         // Remove any message bubbles
         pMessage.classList.add('no-background');
+        pMessage.style.overflow = 'visible';
     }
     for (const cAttachment of msg.attachments) {
         if (cAttachment.downloaded) {
@@ -3680,11 +3684,70 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     pMessage.appendChild(vidPreview);
                 }
             } else {
-                // Unknown attachment
-                const iUnknown = document.createElement('i');
-                iUnknown.classList.add('text-gradient');
-                iUnknown.textContent = `Previews not supported for "${cAttachment.extension}" files yet`;
-                pMessage.appendChild(iUnknown);
+                // File Attachment
+                const ext = cAttachment.extension.toLowerCase();
+                const fileTypeInfo = getFileTypeInfo(ext);
+                
+                const fileDiv = document.createElement('div');
+                fileDiv.setAttribute('filepath', cAttachment.path);
+
+                // Create the main container
+                const btnDiv = document.createElement('div');
+                btnDiv.className = 'btn custom-audio-player';
+                btnDiv.style.display = 'flex';
+                btnDiv.style.alignItems = 'center';
+                btnDiv.style.padding = '10px';
+                btnDiv.style.paddingRight = '15px';
+
+                // Create the icon span
+                const iconSpan = document.createElement('span');
+                iconSpan.className = `icon icon-${fileTypeInfo.icon}`;
+                iconSpan.style.marginLeft = '5px';
+                iconSpan.style.width = '50px';
+                iconSpan.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+
+                // Create the text container span
+                const textContainerSpan = document.createElement('span');
+                textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
+                textContainerSpan.style.marginLeft = '50px';
+                textContainerSpan.style.lineHeight = '1.2';
+
+                // Create the description span
+                const descriptionSpan = document.createElement('span');
+                descriptionSpan.style.display = 'block';
+                descriptionSpan.style.color = 'var(--icon-color-primary)';
+                descriptionSpan.style.fontWeight = '400';
+                descriptionSpan.innerText = fileTypeInfo.description;
+
+                // Create the small element for file details
+                const smallElement = document.createElement('small');
+
+                // Create the extension span
+                const extSpan = document.createElement('span');
+                extSpan.style.color = 'white';
+                extSpan.style.fontWeight = '400';
+                extSpan.innerText = `.${ext}`;
+
+                // Create the size span
+                const sizeSpan = document.createElement('span');
+                sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+
+                // Assemble the structure
+                smallElement.appendChild(extSpan);
+                smallElement.appendChild(sizeSpan);
+                textContainerSpan.appendChild(descriptionSpan);
+                textContainerSpan.appendChild(smallElement);
+                btnDiv.appendChild(iconSpan);
+                btnDiv.appendChild(textContainerSpan);
+                fileDiv.appendChild(btnDiv);
+
+                // Click to reveal in explorer
+                fileDiv.addEventListener('click', (e) => {
+                    const path = e.currentTarget.getAttribute('filepath');
+                    if (path) revealItemInDir(path);
+                });
+
+                pMessage.appendChild(fileDiv);
             }
 
             // If the message is mine, and pending: display an uploading status
