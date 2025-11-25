@@ -3611,7 +3611,15 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
-                // Add event listener for auto-scrolling within the first 100ms of chat opening
+                
+                // Add file extension badge
+                const extBadge = document.createElement('span');
+                extBadge.className = 'file-ext-badge';
+                extBadge.textContent = cAttachment.extension.toUpperCase();
+                // Initially hide the badge until we check image dimensions
+                extBadge.style.display = 'none';
+                
+                // Add event listener for auto-scrolling and badge size check
                 imgPreview.addEventListener('load', () => {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
@@ -3623,15 +3631,30 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         // Normal soft scroll for layout adjustments
                         softChatScroll();
                     }
+                    
+                    // Check badge size relative to image
+                    const imgWidth = imgPreview.offsetWidth;
+                    const imgHeight = imgPreview.offsetHeight;
+                    
+                    // Temporarily show badge to measure it
+                    extBadge.style.display = '';
+                    const badgeWidth = extBadge.offsetWidth;
+                    const badgeHeight = extBadge.offsetHeight;
+                    
+                    // Check if badge would be more than 25% of image width or height
+                    const widthRatio = badgeWidth / imgWidth;
+                    const heightRatio = badgeHeight / imgHeight;
+                    
+                    if (widthRatio > 0.25 || heightRatio > 0.25) {
+                        // Hide badge if it's too large relative to the image
+                        extBadge.style.display = 'none';
+                        // Remove border radius from small images
+                        imgPreview.style.borderRadius = '0';
+                    }
                 }, { once: true });
                 
                 // Attach image preview handler
                 attachImagePreview(imgPreview);
-                
-                // Add file extension badge
-                const extBadge = document.createElement('span');
-                extBadge.className = 'file-ext-badge';
-                extBadge.textContent = cAttachment.extension.toUpperCase();
                 
                 imgContainer.appendChild(imgPreview);
                 imgContainer.appendChild(extBadge);
