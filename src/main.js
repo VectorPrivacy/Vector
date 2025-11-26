@@ -4343,10 +4343,12 @@ async function closeChat() {
     }
 
     // If the chat had any messages, mark them as read before leaving
-    const closedChat = arrChats.find(c => c.id === strOpenChat);
-    if (closedChat.messages?.length) {
-        const lastMsg = closedChat.messages[closedChat.messages.length - 1];
-        markAsRead(closedChat, lastMsg);
+    if (strOpenChat) {
+        const closedChat = arrChats.find(c => c.id === strOpenChat);
+        if (closedChat?.messages?.length) {
+            const lastMsg = closedChat.messages[closedChat.messages.length - 1];
+            markAsRead(closedChat, lastMsg);
+        }
     }
 
     // Reset the chat UI
