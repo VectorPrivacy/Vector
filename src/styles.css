@@ -2112,6 +2112,14 @@ select:disabled:hover {
   background-color: #161616;
 }
 
+.cancel-btn:disabled,
+.cancel-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: grayscale(0.6);
+}
+
 #popupConfirm {
   background-color: #58fcb3;
   color: black;

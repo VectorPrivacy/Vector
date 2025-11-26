@@ -2824,7 +2824,7 @@ async fn encrypt(input: String, password: Option<String>) -> String {
         }
         
         println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
-        match bootstrap_mls_device_keypackage().await {
+        match regenerate_device_keypackage(true).await {
             Ok(info) => {
                 let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
                 let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2857,7 +2857,7 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
             }
             
             println!("[MLS] Ensuring persistent device KeyPackage...");
-            match bootstrap_mls_device_keypackage().await {
+            match regenerate_device_keypackage(true).await {
                 Ok(info) => {
                     let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
                     let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3581,9 +3581,10 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
 // MLS Tauri Commands
 
 
-/// Bootstrap this device's MLS KeyPackage: ensure device_id, publish if missing, and cache reference
+/// Regenerate this device's MLS KeyPackage. If `cache` is true, attempt to reuse an existing
+/// cached KeyPackage if it exists on the relay; otherwise always generate a fresh one.
 #[tauri::command]
-async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> {
+async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, String> {
     // Access handle and client
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
@@ -3608,47 +3609,47 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
     let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
     let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
-    // Load existing keypackage index and verify it exists on relay before returning cached
-    let cached_kp_ref: Option<String> = {
-        let index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
+    // If caching is requested, attempt to load and verify an existing KeyPackage
+    if cache {
+        // Load existing keypackage index and verify it exists on relay before returning cached
+        let cached_kp_ref: Option<String> = {
+            let index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
 
-        index.iter().find(|entry| {
-            entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
-                && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-        })
-        .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
-    };
+            index.iter().find(|entry| {
+                entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
+                    && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            })
+            .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        };
 
-    // If we have a cached reference, verify it exists on the relay
-    if let Some(ref_id) = cached_kp_ref {
-        println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
-        
-        // Try to fetch the event from the relay to verify it exists
-        if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
-            let filter = Filter::new()
-                .id(event_id)
-                .kind(Kind::MlsKeyPackage)
-                .limit(1);
+        // If we have a cached reference, verify it exists on the relay
+        if let Some(ref_id) = cached_kp_ref {
+            println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
             
-            match client.stream_events_from(
-                vec![TRUSTED_RELAY],
-                filter,
-                std::time::Duration::from_secs(5)
-            ).await {
-                Ok(mut events) => {
-                    // Check if we got any events - if so, the cached KeyPackage exists on relay
-                    if events.next().await.is_some() {
-                        return Ok(serde_json::json!({
-                            "device_id": device_id,
-                            "owner_pubkey": owner_pubkey_b32,
-                            "keypackage_ref": ref_id,
-                            "cached": true
-                        }));
+            // Try to fetch the event from the relay to verify it exists
+            if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
+                let filter = Filter::new()
+                    .id(event_id)
+                    .kind(Kind::MlsKeyPackage)
+                    .limit(1);
+                
+                match client.stream_events_from(
+                    vec![TRUSTED_RELAY],
+                    filter,
+                    std::time::Duration::from_secs(5)
+                ).await {
+                    Ok(mut events) => {
+                        // Check if we got any events - if so, the cached KeyPackage exists on relay
+                        if events.next().await.is_some() {
+                            return Ok(serde_json::json!({
+                                "device_id": device_id,
+                                "owner_pubkey": owner_pubkey_b32,
+                                "keypackage_ref": ref_id,
+                                "cached": true
+                            }));
+                        }
                     }
-                    // Fall through to create new KeyPackage
-                }
-                _ => {
-                    // Fall through to create new KeyPackage
+                    _ => {}
                 }
             }
         }
@@ -3780,47 +3781,17 @@ async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> Resul
 
     // Delegate to existing helper that persists metadata, publishes welcomes and emits UI events
     // avatar_ref: None for now (out of scope for this subtask)
-    create_mls_group(name.to_string(), None, initial_member_devices).await
-}
-#[tauri::command]
-async fn mls_create_group_simple(name: String) -> Result<String, String> {
-    // Minimal: avoid holding non-Send types across await points
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    let result = create_mls_group(name.to_string(), None, initial_member_devices).await;
 
-    // Resolve creator pubkey
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
-    let creator_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        tokio::spawn(async {
+            if let Err(err) = regenerate_device_keypackage(false).await {
+                eprintln!("[MLS] Failed to regenerate device KeyPackage after group creation: {}", err);
+            }
+        });
+    }
 
-    // Generate a 128-bit hex group_id using time + rng (limit RNG scope to avoid !Send across await)
-    let group_id = {
-        let mut rng = thread_rng();
-        format!("{:016x}{:016x}", Timestamp::now().as_u64(), rng.gen::<u64>())
-    };
-
-    // Prepare metadata timestamps
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
-
-    // Append new metadata entry
-    let new_group = mls::MlsGroupMetadata {
-        group_id: group_id.clone(),
-        engine_group_id: String::new(),
-        creator_pubkey: creator_pubkey_b32,
-        name,
-        avatar_ref: None,
-        created_at: now_secs,
-        updated_at: now_secs,
-        evicted: false,
-    };
-
-    // Save only the new group to SQL/store (more efficient)
-    let _ = db_migration::save_mls_group(handle.clone(), &new_group).await;
-
-    Ok(group_id)
+    result
 }
 
 /// Add a member device to an MLS group
@@ -4075,7 +4046,7 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
 #[tauri::command]
 async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String> {
     // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
+    let accepted = tokio::task::spawn_blocking(move || {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
@@ -4244,11 +4215,21 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 }
             }
 
-            Ok(true)
+            Ok::<bool, String>(true)
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+
+    if accepted {
+        tokio::spawn(async {
+            if let Err(err) = regenerate_device_keypackage(false).await {
+                eprintln!("[MLS] Failed to regenerate device KeyPackage after accepting welcome: {}", err);
+            }
+        });
+    }
+
+    Ok(accepted)
 }
 
 #[tauri::command]
@@ -4413,7 +4394,8 @@ async fn refresh_keypackages_for_contact(
     let filter = Filter::new()
         .author(contact_pubkey)
         .kind(Kind::MlsKeyPackage)
-        .limit(200);
+        // Only need the newest KeyPackage
+        .limit(1);
 
     // Fetch from TRUSTED_RELAY with short timeout
     let mut events = client
@@ -4628,9 +4610,7 @@ pub fn run() {
             get_storage_info,
             clear_storage,
             export_keys,
-            bootstrap_mls_device_keypackage,
-            // Simple MLS command wrappers for console/manual testing:
-            mls_create_group_simple,
+            regenerate_device_keypackage,
             // MLS core commands
             create_group_chat,
             create_mls_group,

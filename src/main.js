@@ -5087,8 +5087,10 @@ async function openChatlist() {
         domChats.style.display = '';
     }
     
-    // Load and display MLS invites in the Chat tab
+    // Load and display MLS invites in the Chat tab (and adjust layout before/after for consistency)
+    adjustSize();
     await loadMLSInvites();
+    adjustSize();
 }
 
 function openSettings() {
@@ -5618,6 +5620,20 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
     };
+
+    // Info button for Refresh KeyPackages
+    const domRefreshKeypkgInfo = document.getElementById('refresh-keypkg-info');
+    if (domRefreshKeypkgInfo) {
+        domRefreshKeypkgInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm(
+                'Refresh KeyPackages',
+                'Regenerates a fresh device KeyPackage for MLS. This can help you receive Group Invites on this device.',
+                true
+            );
+        };
+    }
 
     domSettingsLogoutInfo.onclick = (e) => {
         e.preventDefault();

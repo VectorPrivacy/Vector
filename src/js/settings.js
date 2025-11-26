@@ -608,6 +608,27 @@ domSettingsLogout.onclick = async (evt) => {
     await invoke('logout');
 };
 
+// Listen for Refresh KeyPackages clicks
+const domRefreshKeypkg = document.getElementById('refresh-keypkg-btn');
+if (domRefreshKeypkg) {
+    domRefreshKeypkg.onclick = async (evt) => {
+        if (domRefreshKeypkg.disabled) return;
+
+        // Disable button to prevent multiple clicks
+        domRefreshKeypkg.disabled = true;
+        try {
+            await invoke('regenerate_device_keypackage', { cache: false });
+            await popupConfirm('KeyPackages Refreshed', 'A new device KeyPackage has been generated.', true, '', 'vector-check.svg');
+        } catch (error) {
+            console.error('Refresh KeyPackages failed:', error);
+            await popupConfirm('Refresh Failed', error.toString(), true, '', 'vector_warning.svg');
+        } finally {
+            // Re‑enable button regardless of success or failure
+            domRefreshKeypkg.disabled = false;
+        }
+    };
+}
+
 // Listen for Deep Rescan clicks
 const domSettingsDeepRescan = document.getElementById('deep-rescan-btn');
 domSettingsDeepRescan.onclick = async (evt) => {
