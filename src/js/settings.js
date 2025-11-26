@@ -796,10 +796,21 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
         return { name: category.name, size: size };
     });
     
-    // Calculate size for other files
+    // Add AI Models category if ai_models exists in type distribution
+    if (typeDistribution['ai_models']) {
+        categorySizes.push({
+            name: 'AI',
+            size: typeDistribution['ai_models']
+        });
+    }
+    
+    // Calculate size for other files (excluding ai_models)
     let otherSize = 0;
     for (const ext in typeDistribution) {
         let isCategorized = false;
+        // Skip ai_models as it's already handled
+        if (ext === 'ai_models') continue;
+        
         for (const category of categories) {
             if (category.extensions.includes(ext)) {
                 isCategorized = true;
@@ -838,14 +849,20 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
     const primaryColor = getComputedStyle(root).getPropertyValue('--icon-color-primary').trim();
     
     // Create segments in the bar
+    const largestSize = segments[0].size;
+    
     for (const segmentData of segments) {
-        const size = Number(segmentData.size);
+        const size = segmentData.size;
         // Use sum of all typeDistribution values as total, since totalBytes is incorrect
-        const total = Object.values(typeDistribution).reduce((sum, val) => sum + Number(val), 0);
+        const total = Object.values(typeDistribution).reduce((sum, val) => sum + val, 0);
         const percentage = (size / total) * 100;
-        // Convert hex to RGB and set opacity based on percentage
+        // Convert hex to RGB and set opacity
         const rgbColor = hexToRgb(primaryColor);
-        const opacity = percentage / 100;
+        
+        // Calculate opacity relative to the largest segment
+        // Largest segment gets 100% opacity, others get proportionally less
+        const relativeOpacity = size / largestSize;
+        
         // Round to 2 decimal places to avoid floating point precision issues
         const roundedPercentage = Math.round(percentage * 100) / 100;
         const segment = document.createElement('div');
@@ -853,7 +870,7 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
         segment.style.flexShrink = '0';
         segment.style.boxSizing = 'border-box';
         // Ensure minimum opacity of 1% for visibility
-        const preciseOpacity = Math.max(0.01, opacity);
+        const preciseOpacity = Math.max(0.01, relativeOpacity);
         // Set background color using CSS variable and opacity
         // Apply opacity directly to background using existing primaryColor and rgbColor
         const backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, ${preciseOpacity})`;
@@ -869,7 +886,8 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
             label.style.top = '50%';
             label.style.left = '50%';
             label.style.transform = 'translate(-50%, -50%)';
-            label.style.color = 'white';
+            // Change text color to black when opacity is 50% or above
+            label.style.color = preciseOpacity >= 0.5 ? 'black' : 'white';
             label.style.textAlign = 'center';
             label.style.fontWeight = 'bold';
             label.style.fontSize = '12px';

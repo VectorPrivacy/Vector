@@ -3362,6 +3362,25 @@ async fn get_storage_info() -> Result<serde_json::Value, String> {
             }
         }
     }
+
+    // Calculate Whisper models size if whisper feature is enabled
+    #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+    {
+        // Calculate total size of downloaded Whisper models
+        let mut ai_models_size = 0;
+        for model in whisper::MODELS {
+            if whisper::is_model_downloaded(&handle, model.name) {
+                // Convert MB to bytes (model sizes are in MB)
+                ai_models_size += (model.size as u64) * 1024 * 1024;
+            }
+        }
+        
+        if ai_models_size > 0 {
+            // Add AI models to type distribution
+            *type_distribution.entry("ai_models".to_string()).or_insert(0) += ai_models_size;
+            total_bytes += ai_models_size;
+        }
+    }
     
     // Return storage information with type distribution
     Ok(serde_json::json!({
