@@ -1062,7 +1062,7 @@ async fn start_typing(receiver: String) -> bool {
                 .build(my_public_key);
 
             // Send via MLS
-            match mls::send_mls_message(&group_id, rumor).await {
+            match mls::send_mls_message(&group_id, rumor, None).await {
                 Ok(_) => true,
                 Err(_e) => false,
             }
@@ -1367,7 +1367,7 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
     }
 
     // Add the message to the state and clear typing indicator for sender
-    let (was_msg_added_to_state, active_typers) = {
+    let (was_msg_added_to_state, _active_typers) = {
         let mut state = STATE.lock().await;
         let added = state.add_message_to_participant(contact, msg.clone());
         
@@ -1625,7 +1625,7 @@ async fn notifs() -> Result<bool, String> {
                                                                 // Clear typing indicator for this sender (they just sent a message)
                                                                 let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
                                                                 
-                                                                let (was_added, active_typers, should_notify) = {
+                                                                let (was_added, _active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
                                                                     
                                                                     // Add message to chat
@@ -1706,7 +1706,7 @@ async fn notifs() -> Result<bool, String> {
                                                                 let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
                                                                 let is_file = true;
                                                                 
-                                                                let (was_added, active_typers, should_notify) = {
+                                                                let (was_added, _active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
                                                                     
                                                                     // Add message to chat
@@ -3728,8 +3728,7 @@ async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> Resul
     - Any error bubbled from create_mls_group(...): engine/storage/network issues are propagated as user-facing strings. Surface them verbatim in the UI.
 
     Success path
-    - Returns group_id (wire id used for relay 'h' tag filtering). 
-    - Frontend should await loadMLSGroups() to persist/refresh local list, then openChat(group_id) to navigate immediately.
+    - Returns group_id (wire id used for relay 'h' tag filtering).
     - Backend also emits "mls_group_initial_sync" so the list view updates without restart.
     */
     let name = group_name.trim();
@@ -3763,27 +3762,6 @@ async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> Resul
     // Delegate to existing helper that persists metadata, publishes welcomes and emits UI events
     // avatar_ref: None for now (out of scope for this subtask)
     create_mls_group(name.to_string(), None, initial_member_devices).await
-}
-/// Send a message to an MLS group
-#[tauri::command]
-async fn send_mls_group_message(
-    group_id: String,
-    text: String,
-    replied_to: Option<String>,
-) -> Result<String, String> {
-    // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.send_group_message(&group_id, &text, replied_to)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
 }
 #[tauri::command]
 async fn mls_create_group_simple(name: String) -> Result<String, String> {
@@ -3824,31 +3802,6 @@ async fn mls_create_group_simple(name: String) -> Result<String, String> {
     let _ = db_migration::save_mls_group(handle.clone(), &new_group).await;
 
     Ok(group_id)
-}
-
-#[tauri::command]
-async fn mls_send_group_message_simple(group_id: String, text: String) -> Result<String, String> {
-    // Minimal: validate group exists via JSON store, then return placeholder message_id
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-
-    // Load groups
-    let groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
-
-    // Validate group exists
-    let exists = groups.iter().any(|g| g.group_id == group_id);
-    if !exists {
-        return Err("Group not found".to_string());
-    }
-
-    // Generate placeholder message_id
-    let mut rng = thread_rng();
-    let message_id = format!("{:016x}{:016x}", Timestamp::now().as_u64(), rng.gen::<u64>());
-
-    println!("[MLS] send_group_message_simple group_id={}, msg_id={}, len={}", group_id, message_id, text.len());
-
-    // TODO: Wire nostr-mls create_message + publish (Kind 445) and local encrypted storage (mls_messages_{group_id}, mls_timeline_{group_id})
-
-    Ok(message_id)
 }
 
 /// Add a member device to an MLS group
@@ -4279,26 +4232,6 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Process an incoming MLS event from the nostr network
-#[tauri::command]
-async fn process_mls_event(
-    event_json: String,
-) -> Result<bool, String> {
-    // Run non-Send MLS engine work on a blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.process_incoming_event(&event_json)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
-
 #[tauri::command]
 async fn list_mls_groups() -> Result<Vec<String>, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
@@ -4312,90 +4245,6 @@ async fn list_mls_groups() -> Result<Vec<String>, String> {
         Err(e) => Err(format!("Failed to load MLS groups: {}", e)),
     }
 }
-
-#[derive(serde::Serialize, Clone)]
-struct MlsGroupInfo {
-    group_id: String,
-    engine_group_id: String,
-    name: String,
-    avatar_ref: Option<String>,
-    created_at: u64,
-    updated_at: u64,
-    // Total number of members in the group (computed from persistent MLS engine)
-    member_count: u32,
-}
-
-/// Return detailed MLS group metadata so the frontend can render group names and avatars
-#[tauri::command]
-async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
-    // Run in a blocking thread so the outer future is Send (Tauri requires commands' futures to be Send)
-    tokio::task::spawn_blocking(move || {
-        // Acquire handle in blocking context
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-
-        // Use current runtime to drive our small async decrypt step
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            // Load groups from SQL/store
-            let groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
-
-            // Try to open persistent MLS engine for computing member counts
-            // This block must avoid awaits while engine is in scope
-            let maybe_engine = match MlsService::new_persistent(&handle) {
-                Ok(svc) => svc.engine().ok(),
-                Err(_) => None,
-            };
-
-            // Needed to decode engine group ids
-            use mdk_core::prelude::GroupId;
-
-            // Build enriched infos with member_count computed from engine (fallback to 0 on any failure)
-            let infos = groups
-                .into_iter()
-                .filter_map(|g| {
-                    // Skip evicted groups
-                    if g.evicted {
-                        return None;
-                    }
-
-                    // Prefer engine_group_id for engine lookup; fallback to wire group_id
-                    let engine_id_hex = if !g.engine_group_id.is_empty() {
-                        g.engine_group_id.clone()
-                    } else {
-                        g.group_id.clone()
-                    };
-
-                    // Default to 0 members if engine not available or lookup fails
-                    let mut member_count: u32 = 0;
-
-                    if let Some(engine) = &maybe_engine {
-                        if let Ok(bytes) = hex::decode(&engine_id_hex) {
-                            let gid = GroupId::from_slice(&bytes);
-                            if let Ok(pks) = engine.get_members(&gid) {
-                                member_count = pks.len() as u32;
-                            }
-                        }
-                    }
-
-                    Some(MlsGroupInfo {
-                        group_id: g.group_id,
-                        engine_group_id: g.engine_group_id,
-                        name: g.name,
-                        avatar_ref: g.avatar_ref,
-                        created_at: g.created_at,
-                        updated_at: g.updated_at,
-                        member_count,
-                    })
-                })
-                .collect::<Vec<MlsGroupInfo>>();
-
-            Ok(infos)
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
-
 
 #[derive(serde::Serialize, Clone)]
 struct GroupMembers {
@@ -4763,19 +4612,15 @@ pub fn run() {
             bootstrap_mls_device_keypackage,
             // Simple MLS command wrappers for console/manual testing:
             mls_create_group_simple,
-            mls_send_group_message_simple,
             // MLS core commands
             create_group_chat,
             create_mls_group,
-            send_mls_group_message,
             sync_mls_groups_now,
             list_mls_groups,
-            list_mls_groups_detailed,
             // MLS welcome/invite commands
             list_pending_mls_welcomes,
             accept_mls_welcome,
             // MLS advanced helpers
-            process_mls_event,
             add_mls_member_device,
             invite_member_to_group,
             remove_mls_member_device,

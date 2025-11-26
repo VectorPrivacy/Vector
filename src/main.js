@@ -792,14 +792,12 @@ async function init() {
     await invoke("fetch_messages", { init: true });
 
     // Begin an asynchronous loop to refresh profile data
-    await invoke("load_profile", { npub: strPubkey });
     fetchProfiles().finally(async () => {
         setAsyncInterval(fetchProfiles, 45000);
     });
 
-    // Load MLS groups and sync welcomes on init
-    loadMLSGroups();
-    syncMLSWelcomes();
+    // Display Invites (MLS Welcomes)
+    await loadMLSInvites();
 
     // Run a very slow loop to update dynamic elements, like "last message time"
     setInterval(() => {
@@ -835,87 +833,6 @@ async function init() {
 }
 
 /**
- * Load MLS groups and integrate them into the chat list
- */
-async function loadMLSGroups() {
-    try {
-        const detailed = await invoke('list_mls_groups_detailed');
-        const groupsToRefresh = new Set();
-
-        if (!Array.isArray(detailed)) {
-            throw new Error('Backend did not return detailed MLS groups array');
-        }
-
-        for (const info of detailed) {
-            const groupId = info.group_id || info.groupId || info.id;
-            if (!groupId) continue;
-            groupsToRefresh.add(groupId);
-
-            const chat = getOrCreateChat(groupId, 'MlsGroup');
-
-            // Populate metadata for UI rendering and send path
-            chat.metadata = chat.metadata || {};
-            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
-            
-            // Store in custom_fields (backend format)
-            const groupName = info.name || chat.metadata.custom_fields.name || `Group ${String(groupId).substring(0, 8)}...`;
-            chat.metadata.custom_fields.name = groupName;
-            chat.metadata.custom_fields.engine_group_id = info.engine_group_id || info.engineGroupId || chat.metadata.custom_fields.engine_group_id || '';
-            chat.metadata.custom_fields.avatar_ref = info.avatar_ref || info.avatarRef || chat.metadata.custom_fields.avatar_ref || null;
-            chat.metadata.custom_fields.created_at = String(info.created_at || info.createdAt || chat.metadata.custom_fields.created_at || 0);
-            chat.metadata.custom_fields.updated_at = String(info.updated_at || info.updatedAt || chat.metadata.custom_fields.updated_at || 0);
-            
-            // Preserve member count from detailed API to avoid showing "0 members" before refresh
-            const memberCount = (typeof info.member_count === 'number')
-                ? info.member_count
-                : (typeof info.memberCount === 'number' ? info.memberCount : (chat.metadata.custom_fields.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null));
-            if (typeof memberCount === 'number') {
-                chat.metadata.custom_fields.member_count = String(memberCount);
-            }
-
-            // Load initial messages if not already in memory
-            if ((chat.messages || []).length === 0) {
-                try {
-                    // Use unified chat message storage (same as DMs)
-                    const messages = await invoke('get_chat_messages', {
-                        chatId: groupId,
-                        limit: 50
-                    }) || [];
-
-
-                    // Messages are already in the correct format from unified storage!
-                    chat.messages = messages;
-                } catch (e) {
-                    console.error(`Failed to load messages for group ${groupId}:`, e);
-                    chat.messages = [];
-                }
-            }
-        }
-
-        // After loading groups, refresh their member counts
-        await Promise.all(Array.from(groupsToRefresh).map(gid => refreshGroupMemberCount(gid)));
-        
-        // Sort chats to ensure groups appear properly
-        arrChats.sort((a, b) => {
-            // Groups without messages go to the bottom
-            const aLastMsg = a.messages[a.messages.length - 1];
-            const bLastMsg = b.messages[b.messages.length - 1];
-
-            if (!aLastMsg && !bLastMsg) return 0;
-            if (!aLastMsg) return 1;
-            if (!bLastMsg) return -1;
-
-            return bLastMsg.at - aLastMsg.at;
-        });
-
-        // Re-render the chat list
-        renderChatlist();
-    } catch (e) {
-        console.error('Failed to load MLS groups (detailed):', e);
-    }
-}
-
-/**
  * Refresh and cache the member count for a given MLS group.
  * Also updates open chat header and re-renders chat list.
  */
@@ -939,19 +856,6 @@ async function refreshGroupMemberCount(groupId) {
         }
     } catch (e) {
         console.warn('Failed to refresh group member count for', groupId, e);
-    }
-}
-
-/**
- * Load MLS welcomes/invites (no manual sync needed - handled by fetch_messages)
- */
-async function syncMLSWelcomes() {
-    try {
-        // Welcomes are already synced via fetch_messages() -> handle_event()
-        // Just load the pending welcomes from the engine
-        await loadMLSInvites();
-    } catch (e) {
-        console.error('Failed to load MLS welcomes:', e);
     }
 }
 
@@ -984,9 +888,8 @@ async function acceptMLSInvite(welcomeEventId) {
         });
         
         if (success) {
-            // Reload invites and groups
+            // Reload invites
             await loadMLSInvites();
-            await loadMLSGroups();
 
             // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
             adjustSize();
@@ -1532,7 +1435,7 @@ function updateChatlistTimestamps() {
     // For each chat item, find and update the timestamp and status
     chatListItems.forEach(item => {
         // Extract chat ID from the item's ID (format: chatlist-{chatId})
-        const chatId = item.id.substring(8);
+        const chatId = item.id.substring(9);
         
         // Find the corresponding chat in our array
         const chat = arrChats.find(c => c.id === chatId);
@@ -1541,8 +1444,9 @@ function updateChatlistTimestamps() {
             // Get the last message timestamp
             const lastMessage = chat.messages[chat.messages.length - 1];
             
-            // Skip updating if the message is older than 1 day (for performance)
-            if (lastMessage.at < Date.now() - 86400000) return;
+            // Skip updating if the message is older than 1 week (for performance)
+            // Messages older than 1 week display as "1w", "2w", etc. and are unlikely to change
+            if (lastMessage?.at < Date.now() - 604800000) return;
             
             // Find the timestamp element in this chat item
             const timestampElement = item.querySelector('.chatlist-contact-timestamp');
@@ -1767,9 +1671,8 @@ async function setupRustListeners() {
     // Listen for MLS welcome accepted events
     await listen('mls_welcome_accepted', async (evt) => {
         console.log('MLS welcome accepted, refreshing groups and invites');
-        // Reload invites and groups
+        // Reload invites
         await loadMLSInvites();
-        await loadMLSGroups();
     });
 
     // Listen for MLS group updates (member additions, removals, etc.)
@@ -3485,13 +3388,13 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             }
 
             // Add some additional margin to separate the senders visually (extra space for username in groups)
-            divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
+            if (!msg.mine) divMessage.style.marginTop = isGroupChat ? `20px` : `15px`;
         }
         
         // For group chats, add margin-top to the <p> element for the first message in a streak
         if (isGroupChat) {
-            pMessage.style.marginTop = `25px`;
-        }
+            pMessage.style.marginTop = !msg.mine ? `25px` : `10px`;
+        } else if (msg.mine) pMessage.style.marginTop = `10px`;
         
         // Check if this is a singular message (no next message from same sender)
         // This check happens after the message is rendered (at the end of the function)
@@ -4168,7 +4071,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     else divExtras.style.marginLeft = `5px`;
     
     // Apply the same top margin to divExtras if this is the first message in a streak (group chats only)
-    if (isNewStreak && isGroupChat) {
+    if (isNewStreak && isGroupChat && !msg.mine) {
         // Match the pMessage top margin for proper alignment with username labels
         divExtras.style.marginTop = `25px`;
     }
@@ -4361,38 +4264,6 @@ function openChat(contact) {
         chatOpenTimestamp = 0; // Reset timestamp to disable auto-scrolling
         chatOpenAutoScrollTimer = null;
     }, 100);
-
-    // If it's a group, load messages from unified storage (no sync needed - live subscription handles it)
-    if (isGroup && chat) {
-        (async () => {
-            // Load messages using unified storage
-            try {
-                const messages = await invoke('get_chat_messages', {
-                    chatId: contact,
-                    limit: 50
-                }) || [];
-
-
-                // Messages are already in the correct format from unified storage!
-                // Merge with existing messages to avoid duplicates
-                const existingIds = new Set((chat.messages || []).map(m => m.id));
-                const newOnly = messages.filter(m => !existingIds.has(m.id));
-
-                // Append new messages and keep chronological order
-                chat.messages = (chat.messages || []).concat(newOnly);
-                chat.messages.sort((a, b) => a.at - b.at);
-
-                // Insert only the new messages into the open chat
-                if (newOnly.length) {
-                    updateChat(chat, newOnly, null, false);
-                    // Preserve typing indicator after async message load
-                    updateChatHeaderSubtext(chat);
-                }
-            } catch (e) {
-                console.error('Failed to load group messages:', e);
-            }
-        })();
-    }
 
     // Initialize procedural scroll state
     initProceduralScroll(chat);
@@ -5536,21 +5407,8 @@ async function sendMessage(messageText) {
         const replyRef = strCurrentReplyReference;
         cancelReply();
         
-        // Check if current chat is a group
-        const chat = arrChats.find(c => c.id === strOpenChat);
-        if (chat?.chat_type === 'MlsGroup') {
-            // Send group message with cleaned text
-            const wrapperId = await invoke('send_mls_group_message', {
-                groupId: strOpenChat,
-                text: cleanedText,
-                repliedTo: replyRef || null
-            });
-            // Message is already added optimistically by send_mls_group_message
-            // Live subscription will handle receiving it back from the relay
-        } else {
-            // Send regular DM with cleaned text
-            await message(strOpenChat, cleanedText, replyRef, "");
-        }
+        // Send message (unified function handles both DMs and MLS groups)
+        await message(strOpenChat, cleanedText, replyRef);
         
         nLastTypingIndicator = 0;
     } catch(e) {
@@ -6150,15 +6008,13 @@ Create Group UI wiring
     - Backend validates inputs and refreshes each member's device KeyPackage.
     - If any member fails refresh/fetch, backend returns Err with a user-facing string. We surface that string directly via popupConfirm and status label.
   • On success:
-    - loadMLSGroups() ensures immediate discoverability in chat list.
     - openChat(newGroupId) navigates to the newly created group.
 - Error handling:
   • popupConfirm('Group creation failed', errorString, ...) shows a clear toast/modal.
   • domCreateGroupStatus also mirrors the exact error string for inline context.
   • We do not partially create groups: any device refresh failure aborts.
 - Notes:
-  • Tauri expects camelCase params from JS for Rust snake_case args.
-  • Backend emits 'mls_group_initial_sync' on success; the chat list also refreshes via loadMLSGroups().
+  • Backend emits 'mls_group_initial_sync' on success.
 */
 (function wireCreateGroupUI() {
     if (!domCreateGroup) return;
@@ -6203,9 +6059,6 @@ Create Group UI wiring
             if (domCreateGroupStatus) {
                 domCreateGroupStatus.textContent = 'Finalizing...';
             }
-
-            // Ensure groups list is current and visible in UI immediately
-            await loadMLSGroups();
 
             // Navigate to the new group
             openChat(newGroupId);
