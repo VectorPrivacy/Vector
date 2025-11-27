@@ -4131,6 +4131,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                         .as_secs();
                     // Update only the specific group instead of all groups
                     crate::db_migration::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
+                    mls::emit_group_metadata_event(&groups[idx]);
                 } else {
                     println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
                 }
@@ -4153,6 +4154,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 };
                 
                 crate::db_migration::save_mls_group(handle.clone(), &metadata).await.map_err(|e| e.to_string())?;
+                mls::emit_group_metadata_event(&metadata);
                 
                 // Create the Chat in STATE with metadata and save to disk
                 {
@@ -4244,6 +4246,20 @@ async fn list_mls_groups() -> Result<Vec<String>, String> {
         }
         Err(e) => Err(format!("Failed to load MLS groups: {}", e)),
     }
+}
+
+#[tauri::command]
+async fn get_mls_group_metadata() -> Result<Vec<serde_json::Value>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    let groups = db_migration::load_mls_groups(&handle)
+        .await
+        .map_err(|e| format!("Failed to load MLS group metadata: {}", e))?;
+
+    Ok(groups
+        .iter()
+        .filter(|meta| !meta.evicted)
+        .map(|meta| mls::metadata_to_frontend(meta))
+        .collect())
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -4616,6 +4632,7 @@ pub fn run() {
             create_mls_group,
             sync_mls_groups_now,
             list_mls_groups,
+            get_mls_group_metadata,
             // MLS welcome/invite commands
             list_pending_mls_welcomes,
             accept_mls_welcome,

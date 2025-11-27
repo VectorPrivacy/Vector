@@ -496,6 +496,7 @@ impl MlsService {
         let mut groups = self.read_groups().await?;
         groups.push(meta.clone());
         self.write_groups(&groups).await?;
+        emit_group_metadata_event(&meta);
  
         // Create the Chat in STATE with metadata and save to disk
         {
@@ -1879,4 +1880,33 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Emit a frontend event whenever MLS group metadata changes so the UI can hydrate quickly.
+pub fn emit_group_metadata_event(meta: &MlsGroupMetadata) {
+    if let Some(handle) = TAURI_APP.get() {
+        if let Err(e) = handle.emit(
+            "mls_group_metadata",
+            serde_json::json!({ "metadata": metadata_to_frontend(meta) }),
+        ) {
+            eprintln!("[MLS] Failed to emit mls_group_metadata event: {}", e);
+        }
+    }
+}
+
+fn seconds_to_millis(value: u64) -> u64 {
+    value.saturating_mul(1000)
+}
+
+pub fn metadata_to_frontend(meta: &MlsGroupMetadata) -> serde_json::Value {
+    serde_json::json!({
+        "group_id": meta.group_id,
+        "engine_group_id": meta.engine_group_id,
+        "creator_pubkey": meta.creator_pubkey,
+        "name": meta.name,
+        "avatar_ref": meta.avatar_ref,
+        "created_at": seconds_to_millis(meta.created_at),
+        "updated_at": seconds_to_millis(meta.updated_at),
+        "evicted": meta.evicted,
+    })
 }

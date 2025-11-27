@@ -756,6 +756,92 @@ function getOrCreateDMChat(npub) {
 }
 
 /**
+ * Compute a timestamp for sorting chats, falling back to metadata for empty groups.
+ * @param {Chat} chat
+ * @returns {number}
+ */
+function getChatSortTimestamp(chat) {
+    const lastMessage = chat.messages?.length ? chat.messages[chat.messages.length - 1] : null;
+    let lastActivity = lastMessage?.at || 0;
+
+    if (chat.chat_type === 'MlsGroup') {
+        const updatedAt = chat.metadata?.updated_at || chat.metadata?.custom_fields?.updated_at || 0;
+        if (updatedAt > lastActivity) {
+            lastActivity = updatedAt;
+        }
+    }
+
+    if (!lastActivity) {
+        lastActivity =
+            chat.metadata?.created_at ||
+            chat.metadata?.custom_fields?.created_at ||
+            chat.created_at ||
+            0;
+    }
+
+    return lastActivity || 0;
+}
+
+/**
+ * Apply backend-provided metadata to an MLS group chat object.
+ * @param {Object} metadata - The metadata from Rust.
+ * @returns {{chat: Chat|null, changed: boolean}}
+ */
+function applyMlsGroupMetadata(metadata) {
+    if (!metadata || !metadata.group_id) {
+        return { chat: null, changed: false };
+    }
+
+    const chat = getOrCreateChat(metadata.group_id, 'MlsGroup');
+    chat.metadata = chat.metadata || {};
+    chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+
+    let changed = false;
+    const assignIfChanged = (target, key, value) => {
+        if (value === undefined) return;
+        if (target[key] !== value) {
+            target[key] = value;
+            changed = true;
+        }
+    };
+
+    assignIfChanged(chat.metadata, 'group_id', metadata.group_id);
+    assignIfChanged(chat.metadata, 'engine_group_id', metadata.engine_group_id);
+    assignIfChanged(chat.metadata, 'creator_pubkey', metadata.creator_pubkey);
+    assignIfChanged(chat.metadata, 'avatar_ref', metadata.avatar_ref ?? null);
+    assignIfChanged(chat.metadata, 'created_at', metadata.created_at);
+    assignIfChanged(chat.metadata, 'updated_at', metadata.updated_at);
+    assignIfChanged(chat.metadata, 'evicted', metadata.evicted);
+    assignIfChanged(chat.metadata.custom_fields, 'name', metadata.name);
+    if (metadata.member_count !== undefined) {
+        assignIfChanged(chat.metadata.custom_fields, 'member_count', metadata.member_count);
+    }
+
+    return { chat, changed };
+}
+
+/**
+ * Hydrate all MLS group metadata from the backend store.
+ */
+async function hydrateMLSGroupMetadata() {
+    try {
+        const metadataList = await invoke('get_mls_group_metadata');
+        let changed = false;
+        for (const metadata of metadataList || []) {
+            const result = applyMlsGroupMetadata(metadata);
+            if (result.changed) {
+                changed = true;
+            }
+        }
+        if (changed && !fInit) {
+            renderChatlist();
+        }
+    } catch (e) {
+        console.error('Failed to hydrate MLS group metadata:', e);
+    }
+}
+
+/**
  * Get a profile by npub
  * @param {string} npub - The user's npub
  * @returns {Profile|undefined} - The profile if it exists
@@ -1648,14 +1734,8 @@ async function setupRustListeners() {
             console.log('Group chat not open, message added to background chat');
         }
         
-        // Resort chat list order by last message time so groups bubble to the top
-        arrChats.sort((a, b) => {
-            const aLast = a.messages[a.messages.length - 1];
-            const bLast = b.messages[b.messages.length - 1];
-            if (!aLast) return 1;
-            if (!bLast) return -1;
-            return bLast.at - aLast.at;
-        });
+        // Resort chat list order so recent groups bubble up (fallback to metadata)
+        arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         
         // Re-render chat list
         renderChatlist();
@@ -1666,6 +1746,30 @@ async function setupRustListeners() {
         console.log('MLS invite received in real-time, refreshing invites list');
         // Reload invites list to show the new invite
         await loadMLSInvites();
+    });
+
+    // Listen for MLS group metadata updates
+    await listen('mls_group_metadata', async (evt) => {
+        try {
+            const metadata = evt.payload?.metadata;
+            const { chat, changed } = applyMlsGroupMetadata(metadata);
+            if (!chat || !changed) return;
+
+            if (strOpenChat === chat.id) {
+                const groupName = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+                domChatContact.textContent = groupName;
+                updateChatHeaderSubtext(chat);
+            }
+
+            const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
+            if (overviewGroupId && overviewGroupId === chat.id) {
+                await renderGroupOverview(chat);
+            }
+
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_metadata event:', e);
+        }
     });
 
     // Listen for MLS welcome accepted events
@@ -1765,14 +1869,8 @@ async function setupRustListeners() {
                 }
             }
 
-            // Resort chat list order by last message time to reflect any loaded timeline
-            arrChats.sort((a, b) => {
-                const aLast = a.messages[a.messages.length - 1];
-                const bLast = b.messages[b.messages.length - 1];
-                if (!aLast) return 1;
-                if (!bLast) return -1;
-                return bLast.at - aLast.at;
-            });
+            // Resort chat list order by last activity (message or metadata)
+            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
 
             // Re-render the chat list so empty groups show with "No messages yet" preview
             renderChatlist();
@@ -2039,14 +2137,8 @@ async function setupRustListeners() {
             // Insert at the end (newest)
             messages.push(newMessage);
 
-            // Sort chats by last message time
-            arrChats.sort((a, b) => {
-                const aLastMsg = a.messages[a.messages.length - 1];
-                const bLastMsg = b.messages[b.messages.length - 1];
-                if (!aLastMsg) return 1;
-                if (!bLastMsg) return -1;
-                return bLastMsg.at - aLastMsg.at;
-            });
+            // Sort chats by most recent activity (message or metadata fallback)
+            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         }
         // Check if the new message is older than the oldest message
         else if (newMessage.at < messages[0].at) {
@@ -2311,10 +2403,12 @@ async function login() {
         }, { once: true });
 
         // Setup a Rust Listener for the backend's init finish
-        await listen('init_finished', (evt) => {
+        await listen('init_finished', async (evt) => {
             // The backend now sends both profiles (without messages) and chats (with messages)
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
+
+            await hydrateMLSGroupMetadata();
 
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
@@ -3168,26 +3262,31 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+            domChatContact.onclick = null;
+            domChatContact.classList.remove('btn');
+            domChatContactStatus.textContent = 'Encrypted Notes to Self';
+            domChatContactStatus.classList.remove('text-gradient');
         } else if (isGroup) {
             domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+            domChatContact.onclick = () => {
+                closeChat();
+                openGroupOverview(chat);
+            };
+            domChatContact.classList.add('btn');
+
+            // Ensure the member count/status renders even before the first message
+            updateChatHeaderSubtext(chat);
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
+            domChatContact.onclick = null;
+            domChatContact.classList.remove('btn');
+            domChatContactStatus.textContent = '';
+            domChatContactStatus.classList.remove('text-gradient');
         }
-        // There's no profile to render; so don't allow clicking them to expand it
-        domChatContact.onclick = null;
-        domChatContact.classList.remove('btn');
 
-        // Force wipe the 'Status' and it's styling
-        domChatContactStatus.textContent = fNotes ? domChatContactStatus.textContent = 'Encrypted Notes to Self' : '';
-        if (!domChatContactStatus.textContent) {
-            domChatContact.classList.add('chat-contact');
-            domChatContact.classList.remove('chat-contact-with-status');
-            domChatContactStatus.style.display = 'none';
-        } else {
-            domChatContact.classList.add('chat-contact-with-status');
-            domChatContact.classList.remove('chat-contact');
-            domChatContactStatus.style.display = '';
-        }
+        domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
+        domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
+        domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
     }
 
     adjustSize();
@@ -4547,7 +4646,7 @@ async function renderGroupOverview(chat) {
             memberDiv.style.borderRadius = '6px';
             memberDiv.style.transition = 'background 0.2s ease';
             memberDiv.style.isolation = 'isolate';
-            memberDiv.style.cursor = 'default';
+            memberDiv.style.cursor = 'pointer';
             
             // Add hover effect with theme-based gradient using ::before pseudo-element approach
             const bgDiv = document.createElement('div');
@@ -4576,6 +4675,20 @@ async function renderGroupOverview(chat) {
             
             // Get member profile
             const memberProfile = getProfile(member);
+            if (!memberProfile && member) {
+                invoke("queue_profile_sync", {
+                    npub: member,
+                    priority: "normal",
+                    forceRefresh: false
+                }).catch(console.error);
+            }
+            const openMemberProfile = () => {
+                const profile = getProfile(member) || memberProfile || { id: member, mine: false };
+                const originChatId = domGroupOverview.getAttribute('data-group-id') || strOpenChat || chat.id;
+                previousChatBeforeProfile = originChatId;
+                openProfile(profile);
+            };
+            memberDiv.onclick = openMemberProfile;
             
             // Crown icon for admins (or invisible spacer for alignment)
             const crownContainer = document.createElement('span');
