@@ -548,6 +548,25 @@ body {
   margin-left: auto;
 }
 
+/* Primary Device Status Dot */
+.device-status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-left: 10px;
+  display: inline-block;
+  vertical-align: middle;
+  transition: background-color 0.3s ease;
+}
+
+.device-status-dot.primary {
+  background-color: #59fcb3; /* Green for primary device */
+}
+
+.device-status-dot.not-primary {
+  background-color: #ff5252; /* Red for not primary device */
+}
+
 .profile-options {
   display: flex;
   justify-content: center;

@@ -5222,6 +5222,9 @@ function openSettings() {
     // Update the Storage Breakdown
     initStorageSection();
 
+    // Check primary device status when settings are opened
+    checkPrimaryDeviceStatus();
+
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
     if (updateDot && updateDot.style.display !== 'none') {

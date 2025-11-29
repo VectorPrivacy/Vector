@@ -3583,6 +3583,25 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
 
 /// Regenerate this device's MLS KeyPackage. If `cache` is true, attempt to reuse an existing
 /// cached KeyPackage if it exists on the relay; otherwise always generate a fresh one.
+/// Load MLS device ID for the current account
+#[tauri::command]
+async fn load_mls_device_id() -> Result<Option<String>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    match db_migration::load_mls_device_id(&handle).await {
+        Ok(Some(id)) => Ok(Some(id)),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Load MLS keypackages for the current account
+#[tauri::command]
+async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    db_migration::load_mls_keypackages(&handle).await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, String> {
     // Access handle and client
@@ -4625,6 +4644,8 @@ pub fn run() {
             check_fawkes_badge,
             get_storage_info,
             clear_storage,
+            load_mls_device_id,
+            load_mls_keypackages,
             export_keys,
             regenerate_device_keypackage,
             // MLS core commands

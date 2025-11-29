@@ -608,6 +608,115 @@ domSettingsLogout.onclick = async (evt) => {
     await invoke('logout');
 };
 
+// Check if this device is the primary one (has the latest keypackage)
+async function checkPrimaryDeviceStatus() {
+    try {
+        // Refresh keypackages from the network for the current user
+        try {
+            await invoke('refresh_keypackages_for_contact', { npub: strPubkey });
+        } catch (error) {
+            // Continue with local data if network fetch fails
+        }
+        
+        // Get all keypackages for the current account (now includes fresh network data)
+        const keypackages = await invoke('load_mls_keypackages');
+        
+        if (!keypackages || keypackages.length === 0) {
+            updatePrimaryDeviceDot(false);
+            return;
+        }
+        
+        let userKeypackages = keypackages.filter(kp =>
+            kp.owner_pubkey === strPubkey
+        );
+        
+        // Deduplicate entries with the same keypackage_ref (event ID)
+        // Since device_id is purely local, we use keypackage_ref as the common identifier
+        const deduped = new Map();
+        for (const kp of userKeypackages) {
+            const ref = kp.keypackage_ref;
+            if (!deduped.has(ref)) {
+                deduped.set(ref, kp);
+            }
+        }
+        userKeypackages = Array.from(deduped.values());
+        
+        if (userKeypackages.length === 0) {
+            updatePrimaryDeviceDot(false);
+            return;
+        }
+        
+        // Find the latest keypackage (highest fetched_at timestamp)
+        const latestKeypackage = userKeypackages.reduce((latest, current) => {
+            return (current.fetched_at > latest.fetched_at) ? current : latest;
+        });
+        
+        // Check if this device created the latest keypackage
+        // Get the local device_id to find keypackages created by this device
+        let myDeviceId;
+        try {
+            myDeviceId = await invoke('load_mls_device_id');
+        } catch (error) {
+            updatePrimaryDeviceDot(false);
+            return;
+        }
+        
+        // Find keypackages that have our device_id (created locally)
+        const myKeypackages = userKeypackages.filter(kp =>
+            kp.device_id === myDeviceId
+        );
+        
+        // Get the most recent keypackage created by this device
+        const myLatestKeypackage = myKeypackages.length > 0
+            ? myKeypackages.reduce((latest, current) =>
+                (current.fetched_at > latest.fetched_at) ? current : latest
+              )
+            : null;
+        
+        const myLatestKeypackageRef = myLatestKeypackage?.keypackage_ref;
+        
+        // This device is primary if its latest keypackage matches the overall latest
+        const isPrimary = myLatestKeypackageRef && latestKeypackage.keypackage_ref === myLatestKeypackageRef;
+        updatePrimaryDeviceDot(isPrimary);
+        
+    } catch (error) {
+        console.error('Error checking primary device status:', error);
+        updatePrimaryDeviceDot(false);
+    }
+}
+
+// Update the primary device dot UI
+function updatePrimaryDeviceDot(isPrimary) {
+    const dot = document.getElementById('primary-device-dot');
+    if (dot) {
+        dot.className = 'device-status-dot ' + (isPrimary ? 'primary' : 'not-primary');
+    }
+}
+
+// Show info popup about primary device status
+async function showPrimaryDeviceInfo() {
+    const dot = document.getElementById('primary-device-dot');
+    const isPrimary = dot?.classList.contains('primary');
+    
+    if (isPrimary) {
+        await popupConfirm(
+            'Primary Device',
+            'This device is currently the Primary Device for receiving Group Invites.',
+            true,
+            '',
+            'vector-check.svg'
+        );
+    } else {
+        await popupConfirm(
+            'Not Primary Device',
+            'This device is NOT currently the Primary Device for receiving Group Invites.',
+            true,
+            '',
+            'vector_warning.svg'
+        );
+    }
+}
+
 // Listen for Refresh KeyPackages clicks
 const domRefreshKeypkg = document.getElementById('refresh-keypkg-btn');
 if (domRefreshKeypkg) {
@@ -618,6 +727,10 @@ if (domRefreshKeypkg) {
         domRefreshKeypkg.disabled = true;
         try {
             await invoke('regenerate_device_keypackage', { cache: false });
+            // Wait a moment for the database to be updated
+            await new Promise(resolve => setTimeout(resolve, 100));
+            // Refresh primary device status after keypackage regeneration
+            await checkPrimaryDeviceStatus();
             await popupConfirm('KeyPackages Refreshed', 'A new device KeyPackage has been generated.', true, '', 'vector-check.svg');
         } catch (error) {
             console.error('Refresh KeyPackages failed:', error);
@@ -1085,4 +1198,8 @@ async function initSettings() {
         const success = await clearStorage();
         if (success) initStorageSection();
     });
+
+    // Add click handler for primary device status
+    const primaryDeviceStatus = document.getElementById('primary-device-status');
+    primaryDeviceStatus.onclick = showPrimaryDeviceInfo;
 }
