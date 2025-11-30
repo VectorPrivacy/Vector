@@ -14,6 +14,28 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Read version from Cargo.toml
+val cargoTomlFile = file("../../../Cargo.toml")
+val cargoVersion = if (cargoTomlFile.exists()) {
+    cargoTomlFile.readLines()
+        .find { it.trim().startsWith("version") }
+        ?.substringAfter("=")
+        ?.trim()
+        ?.trim('"')
+        ?: "0.0.1"
+} else {
+    "0.0.1"
+}
+
+// Convert semantic version to version code (e.g., 0.2.2 -> 22, 1.0.0 -> 10000)
+fun versionToCode(version: String): Int {
+    val parts = version.split(".").map { it.toIntOrNull() ?: 0 }
+    val major = parts.getOrElse(0) { 0 }
+    val minor = parts.getOrElse(1) { 0 }
+    val patch = parts.getOrElse(2) { 0 }
+    return major * 10000 + minor * 100 + patch
+}
+
 android {
     compileSdk = 34
     namespace = "io.vectorapp"
@@ -22,8 +44,8 @@ android {
         applicationId = "io.vectorapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionCode = versionToCode(cargoVersion)
+        versionName = cargoVersion
     }
     signingConfigs {
         create("release") {
