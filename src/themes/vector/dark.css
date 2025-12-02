@@ -156,17 +156,15 @@ select {
 #current-version,
 #new-version {
   color: #59fcb3;
-  font-weight: 600;
 }
 
 .accept-btn {
   background: rgba(89, 252, 179, 0.1);
-  border: 1px solid rgba(89, 252, 179, 0.3);
-  color: #59fcb3;
+  border: 1px solid rgba(90, 252, 180, 0.65);
+  color: #ffffff;
 }
 
 .accept-btn:hover:not(:disabled) {
-  background: rgba(89, 252, 179, 0.2);
   border-color: rgba(89, 252, 179, 0.5);
 }
 
@@ -259,7 +257,7 @@ select:disabled {
 /* Custom Audio Player Theme Overrides */
 .custom-audio-player {
   background: rgba(11, 41, 28, 0.4);
-  border-color: rgba(89, 252, 179, 0.25);
+  border-color: rgba(90, 252, 180, 0.43);
 }
 
 .custom-audio-player:hover {

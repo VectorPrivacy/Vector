@@ -234,7 +234,6 @@ impl MlsService {
 
     - Persistence & discoverability:
       • The group metadata is written to "mls_groups" (encrypted) so it appears in list_mls_groups().
-      • The frontend awaits loadMLSGroups() and opens the chat (openChat(group_id)) immediately.
       • Event "mls_group_initial_sync" is emitted here for zero-latency list refresh.
 
     - Partial membership:
@@ -497,6 +496,7 @@ impl MlsService {
         let mut groups = self.read_groups().await?;
         groups.push(meta.clone());
         self.write_groups(&groups).await?;
+        emit_group_metadata_event(&meta);
  
         // Create the Chat in STATE with metadata and save to disk
         {
@@ -831,386 +831,12 @@ impl MlsService {
         Ok(())
     }
 
-    /// Send a message to an MLS group
-    ///
-    /// This will:
-    /// 1. Encrypt the message for all group members via nostr-mls
-    /// 2. Publish to TRUSTED_RELAY
-    /// 3. Optionally store in "mls_messages_{group_id}" for optimistic UI
-    /// 4. Update "mls_timeline_{group_id}"
-    pub async fn send_group_message(
-        &self,
-        group_id: &str,
-        text: &str,
-        replied_to: Option<String>,
-    ) -> Result<String, MlsError> {
-        use nostr_sdk::prelude::*;
-
-        // Create a pending message immediately for optimistic UI
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        let pending_id = format!("pending-{}", current_time.as_nanos());
-        
-        let pending_msg = crate::Message {
-            id: pending_id.clone(),
-            content: text.to_string(),
-            replied_to: replied_to.clone().unwrap_or_default(),
-            preview_metadata: None,
-            at: current_time.as_millis() as u64,
-            attachments: Vec::new(),
-            reactions: Vec::new(),
-            pending: true,
-            failed: false,
-            mine: true,
-            npub: None, // Pending messages don't need npub (they're always mine)
-        };
-        
-        // Add pending message to state and emit to UI
-        {
-            let mut state = crate::STATE.lock().await;
-            state.add_message_to_chat(group_id, pending_msg.clone());
-        }
-        
-        if let Some(handle) = TAURI_APP.get() {
-            handle.emit("mls_message_new", serde_json::json!({
-                "group_id": group_id,
-                "message": pending_msg
-            })).unwrap_or_else(|e| {
-                eprintln!("[MLS] Failed to emit pending message: {}", e);
-            });
-        }
-
-        // Resolve target metadata
-        let groups = self.read_groups().await?;
-        let meta = match groups.iter().find(|g| g.group_id == group_id || (!g.engine_group_id.is_empty() && g.engine_group_id == group_id)) {
-            Some(m) => m.clone(),
-            None => {
-                eprintln!("[MLS] Group not found: {}", group_id);
-                
-                // Mark pending message as failed and emit full message
-                {
-                    let mut state = crate::STATE.lock().await;
-                    if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
-                        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == pending_id) {
-                            msg.failed = true;
-                            msg.pending = false;
-                            
-                            // Emit update with full message object
-                            if let Some(handle) = TAURI_APP.get() {
-                                handle.emit("message_update", serde_json::json!({
-                                    "old_id": &pending_id,
-                                    "message": msg,
-                                    "chat_id": group_id
-                                })).ok();
-                            }
-                        }
-                    }
-                }
-                
-                return Err(MlsError::GroupNotFound);
-            }
-        };
-
-        // Resolve client and my pubkey (awaits before any engine usage)
-        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
-        let signer = client
-            .signer()
-            .await
-            .map_err(|e| MlsError::NetworkError(e.to_string()))?;
-        let my_pubkey = signer
-            .get_public_key()
-            .await
-            .map_err(|e| MlsError::NetworkError(e.to_string()))?;
-
-        // Build a minimal inner rumor carrying the plaintext payload.
-        let mut rumor_builder = EventBuilder::new(Kind::PrivateDirectMessage, text)
-            .tag(Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("vector-mls-msg")),
-                // Attach the wire id (UI/relay id) for easier diagnostics
-                vec![&meta.group_id],
-            ));
-        
-        // Add reply tag if replying to a message
-        if let Some(ref reply_id) = replied_to {
-            if !reply_id.is_empty() {
-                rumor_builder = rumor_builder.tag(Tag::custom(
-                    TagKind::e(),
-                    vec![reply_id, "", "reply"],
-                ));
-            }
-        }
-        
-        let rumor = rumor_builder.build(my_pubkey);
-        
-        // Store the inner event id for optimistic persistence
-        let inner_event_id = rumor.id.unwrap().to_hex();
-        
-        // Clone rumor for later processing (before it's moved into create_message)
-        let rumor_for_processing = rumor.clone();
-
-        // Create the MLS wrapper with the non-Send engine in a no-await scope
-        let wrapper_event = {
-            // Decode GroupId from engine id (preferred), fall back to wire id if missing in legacy data
-            let engine_hex = if !meta.engine_group_id.is_empty() { &meta.engine_group_id } else { &meta.group_id };
-            let gid_bytes = hex::decode(engine_hex)
-                .map_err(|e| {
-                    eprintln!("[MLS] Failed to decode engine_group_id hex '{}': {}", engine_hex, e);
-                    MlsError::InvalidGroupId
-                })?;
-            let gid = GroupId::from_slice(&gid_bytes);
-
-            let engine = self.engine()?; // Arc<NostrMls<NostrMlsSqliteStorage>>
-            
-            // TODO: Handle potential rekey/commit flow if required by nostr-mls
-            engine
-                .create_message(&gid, rumor)
-                .map_err(|e| {
-                    let error_msg = e.to_string();
-                    eprintln!("[MLS] create_message failed for engine_group_id {}: {}", engine_hex, e);
-                    eprintln!("[MLS] Error details: {:?}", e);
-                    
-                    // Check if this is a pending proposal error
-                    if error_msg.contains("pending proposal") || error_msg.contains("PendingProposal") {
-                        eprintln!("[MLS] ⚠️  PENDING PROPOSAL ERROR - Auto-cleaning broken group state");
-                        eprintln!("[MLS] This group has an uncommitted proposal from a previous session");
-                        eprintln!("[MLS] Removing group from local state - user will need to accept a fresh invite");
-                        
-                        // Note: We can't do async cleanup here in the engine scope
-                        // The group will be marked as broken and user will need to accept fresh invite
-                        // The error message will guide them
-                        
-                        return MlsError::NostrMlsError("Group has pending proposal. Please ask an admin to re-invite you.".to_string());
-                    }
-                    
-                    eprintln!("[MLS] Group not found in engine state");
-                    MlsError::NostrMlsError(format!("create_message: group not found - {}", e))
-                })?
-        }; // engine dropped here
-
-        // Process the rumor through unified storage to replace pending message
-        // This ensures replies and other metadata are properly extracted
-        {
-            use crate::rumor::{process_rumor, RumorProcessingResult, RumorContext, ConversationType};
-            
-            let rumor_context = RumorContext {
-                sender: my_pubkey,
-                is_mine: true,
-                conversation_id: meta.group_id.clone(),
-                conversation_type: ConversationType::MlsGroup,
-            };
-            
-            // Convert UnsignedEvent to RumorEvent
-            let rumor_event = crate::rumor::RumorEvent {
-                id: rumor_for_processing.id.unwrap(),
-                kind: rumor_for_processing.kind,
-                content: rumor_for_processing.content.clone(),
-                tags: rumor_for_processing.tags.clone(),
-                created_at: rumor_for_processing.created_at,
-                pubkey: rumor_for_processing.pubkey,
-            };
-            
-            // Process the rumor to extract reply references and create proper Message
-            match process_rumor(rumor_event, rumor_context).await {
-                Ok(result) => {
-                    match result {
-                        RumorProcessingResult::TextMessage(mut msg) => {
-                            // Keep the message as pending until network publish succeeds
-                            msg.pending = true;
-                            
-                            // Remove the pending message and add the real one (still pending)
-                            {
-                                let mut state = crate::STATE.lock().await;
-                                if let Some(chat) = state.chats.iter_mut().find(|c| c.id == meta.group_id) {
-                                    // Remove pending message
-                                    chat.messages.retain(|m| m.id != pending_id);
-                                    // Add real message (still pending network confirmation)
-                                    chat.internal_add_message(msg.clone());
-                                }
-                            }
-                            
-                            // Emit message_update to replace pending with real message (still shows as pending)
-                            if let Some(handle) = TAURI_APP.get() {
-                                handle.emit("message_update", serde_json::json!({
-                                    "old_id": &pending_id,
-                                    "message": &msg,
-                                    "chat_id": &meta.group_id
-                                })).unwrap_or_else(|e| {
-                                    eprintln!("[MLS] Failed to emit message_update: {}", e);
-                                });
-                            }
-                        }
-                        _ => {
-                            eprintln!("[MLS] Unexpected rumor processing result for text message");
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[MLS] Failed to process sent rumor: {}", e);
-                    
-                    // Mark pending message as failed and emit full message
-                    {
-                        let mut state = crate::STATE.lock().await;
-                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == meta.group_id) {
-                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == pending_id) {
-                                msg.failed = true;
-                                msg.pending = false;
-                                
-                                // Emit update with full message object
-                                if let Some(handle) = TAURI_APP.get() {
-                                    handle.emit("message_update", serde_json::json!({
-                                        "old_id": &pending_id,
-                                        "message": msg,
-                                        "chat_id": &meta.group_id
-                                    })).ok();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-        }
-
-        // Publish wrapper to TRUSTED_RELAY with retry logic (network await after engine is dropped)
-        let mut send_attempts = 0;
-        const MAX_ATTEMPTS: u32 = 12;
-        const RETRY_DELAY: u64 = 5; // 5 seconds
-        
-        let mut send_success = false;
-        
-        while send_attempts < MAX_ATTEMPTS {
-            send_attempts += 1;
-            
-            match client
-                .send_event_to([TRUSTED_RELAY], &wrapper_event)
-                .await
-            {
-                Ok(output) => {
-                    // Check if at least one relay acknowledged the message
-                    if !output.success.is_empty() {
-                        send_success = true;
-                        break;
-                    } else if output.failed.is_empty() {
-                        // No success but also no failures - temporary network issue, retry
-                    } else {
-                        // We have failures but no successes
-                        if send_attempts == MAX_ATTEMPTS {
-                            break; // Exit loop, will be handled as failure below
-                        }
-                    }
-                    
-                    // Wait before retrying if we haven't reached max attempts
-                    if send_attempts < MAX_ATTEMPTS {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[MLS] Failed to send wrapper (attempt {}/{}): {}", send_attempts, MAX_ATTEMPTS, e);
-                    
-                    if send_attempts == MAX_ATTEMPTS {
-                        break; // Exit loop, will be handled as failure below
-                    }
-                    
-                    // Wait before retrying
-                    if send_attempts < MAX_ATTEMPTS {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
-                    }
-                }
-            }
-        }
-        
-        if send_success {
-            // Mark message as successfully sent (no longer pending) and emit full message
-            let message_to_save = {
-                let mut state = crate::STATE.lock().await;
-                if let Some(chat) = state.chats.iter_mut().find(|c| c.id == meta.group_id) {
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == inner_event_id) {
-                        msg.pending = false;
-                        
-                        // Emit update with full message object
-                        if let Some(handle) = TAURI_APP.get() {
-                            handle.emit("message_update", serde_json::json!({
-                                "old_id": &inner_event_id,
-                                "message": msg,
-                                "chat_id": &meta.group_id
-                            })).ok();
-                        }
-                        
-                        Some(msg.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
-            
-            // Persist the single updated message to database
-            if let Some(msg) = message_to_save {
-                if let Some(handle) = TAURI_APP.get() {
-                    let _ = crate::db_migration::save_message(handle.clone(), &meta.group_id, &msg).await;
-                }
-            }
-            
-            // Return the network event id as the message identifier
-            Ok(wrapper_event.id.to_hex())
-        } else {
-            // Failed to send after all retries
-            eprintln!("[MLS] Failed to publish wrapper after {} attempts", MAX_ATTEMPTS);
-            
-            // Mark the message as failed and emit full message
-            {
-                let mut state = crate::STATE.lock().await;
-                if let Some(chat) = state.chats.iter_mut().find(|c| c.id == meta.group_id) {
-                    // Find the real message and mark it as failed
-                    if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == inner_event_id) {
-                        msg.failed = true;
-                        msg.pending = false;
-                        
-                        // Emit update with full message object
-                        if let Some(handle) = TAURI_APP.get() {
-                            handle.emit("message_update", serde_json::json!({
-                                "old_id": &inner_event_id,
-                                "message": msg,
-                                "chat_id": &meta.group_id
-                            })).ok();
-                        }
-                    }
-                }
-            }
-            
-            Err(MlsError::NetworkError("Failed to publish MLS wrapper after retries".to_string()))
-        }
-    }
-
-    /// Process an incoming MLS event from the nostr network
-    /// 
-    /// This will:
-    /// 1. Parse the nostr event containing MLS data
-    /// 2. Decrypt and process via nostr-mls
-    /// 3. Update relevant storage (messages, group state, etc.)
-    /// 4. Update "mls_event_cursors" for the group
-    /// 
-    /// Returns true if the event was successfully processed
-    pub async fn process_incoming_event(&self, event_json: &str) -> Result<bool, MlsError> {
-        // TODO: Parse nostr event JSON
-        // TODO: Extract MLS ciphertext from event
-        // TODO: Process through nostr-mls (handles welcome, commit, application messages)
-        // TODO: Store any resulting messages in "mls_messages_{group_id}"
-        // TODO: Update "mls_event_cursors" with event ID and timestamp
-        
-        // Stub implementation
-        let _ = event_json;
-        Ok(false)
-    }
-
     /// Sync group messages since last cursor position
     /// 
     /// This will:
     /// 1. Read cursor from "mls_event_cursors" for the group
     /// 2. Query TRUSTED_RELAY for events since cursor
-    /// 3. Process each event via process_incoming_event
+    /// 3. Process each event via engine.process_message
     /// 4. Update cursor position
     /// 
     /// Returns (processed_events_count, new_messages_count)
@@ -2051,10 +1677,15 @@ impl MlsService {
 
 /// Send an MLS message (rumor) to a group
 ///
-/// This function takes a group_id and an UnsignedEvent (rumor) and sends it through the MLS protocol.
+/// This function takes a group_id, an UnsignedEvent (rumor), and an optional pending_id,
+/// and sends it through the MLS protocol.
 /// It's used by the protocol-agnostic message sending system to route group messages through MLS.
-pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent) -> Result<(), String> {
+///
+/// If a pending_id is provided, it will update that pending message with the real message ID
+/// and handle success/failure state updates.
+pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, pending_id: Option<String>) -> Result<(), String> {
     let group_id = group_id.to_string();
+    let pending_id = pending_id.clone();
     
     // Run non-Send MLS engine work on blocking thread
     tokio::task::spawn_blocking(move || {
@@ -2117,15 +1748,38 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent) -
                         }
                     }
                     
+                    // Mark pending message as failed if we have a pending_id
+                    if let Some(ref pid) = pending_id {
+                        let mut state = crate::STATE.lock().await;
+                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
+                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == *pid) {
+                                msg.failed = true;
+                                msg.pending = false;
+                                
+                                if let Some(handle) = TAURI_APP.get() {
+                                    handle.emit("message_update", serde_json::json!({
+                                        "old_id": pid,
+                                        "message": msg,
+                                        "chat_id": &group_id
+                                    })).ok();
+                                }
+                            }
+                        }
+                    }
+                    
                     return Err(format!("Failed to create MLS message: {}", e));
                 }
             };
+            
+            // Get the inner rumor ID for the final update
+            let inner_event_id = rumor.id.map(|id| id.to_hex());
             
             // Check if this is a typing indicator and add expiration to wrapper if so
             let is_typing_indicator = rumor.kind == nostr_sdk::Kind::ApplicationSpecificData
                 && rumor.content == "typing";
             
-            if is_typing_indicator {
+            // Send the message and handle success/failure
+            let send_result = if is_typing_indicator {
                 // For typing indicators, add a 30-second expiration to the wrapper event
                 use nostr_sdk::{EventBuilder, Tag, Timestamp};
                 
@@ -2158,13 +1812,67 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent) -
                 client
                     .send_event_to([TRUSTED_RELAY], &wrapper_with_expiry)
                     .await
-                    .map_err(|e| format!("Failed to send MLS wrapper: {}", e))?;
             } else {
                 // Send normal wrapper without expiration
                 client
                     .send_event_to([TRUSTED_RELAY], &mls_wrapper)
                     .await
-                    .map_err(|e| format!("Failed to send MLS wrapper: {}", e))?;
+            };
+            
+            // Update pending message based on send result
+            if let (Some(ref pid), Some(ref real_id)) = (&pending_id, &inner_event_id) {
+                match send_result {
+                    Ok(_) => {
+                        // Mark message as successfully sent and update ID
+                        let mut state = crate::STATE.lock().await;
+                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
+                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == *pid) {
+                                // Update to real ID and mark as sent
+                                msg.id = real_id.clone();
+                                msg.pending = false;
+                                
+                                // Emit update
+                                if let Some(handle) = TAURI_APP.get() {
+                                    handle.emit("message_update", serde_json::json!({
+                                        "old_id": pid,
+                                        "message": msg,
+                                        "chat_id": &group_id
+                                    })).ok();
+                                }
+                                
+                                // Save to database
+                                let msg_clone = msg.clone();
+                                drop(state);
+                                if let Some(handle) = TAURI_APP.get() {
+                                    let _ = crate::db_migration::save_message(handle.clone(), &group_id, &msg_clone).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Mark message as failed (keep pending ID)
+                        let mut state = crate::STATE.lock().await;
+                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
+                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == *pid) {
+                                msg.failed = true;
+                                msg.pending = false;
+                                
+                                // Emit update
+                                if let Some(handle) = TAURI_APP.get() {
+                                    handle.emit("message_update", serde_json::json!({
+                                        "old_id": pid,
+                                        "message": msg,
+                                        "chat_id": &group_id
+                                    })).ok();
+                                }
+                            }
+                        }
+                        return Err(format!("Failed to send MLS wrapper: {}", e));
+                    }
+                }
+            } else {
+                // No pending_id provided, just return the send result
+                send_result.map_err(|e| format!("Failed to send MLS wrapper: {}", e))?;
             }
             
             Ok(())
@@ -2172,4 +1880,33 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent) -
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Emit a frontend event whenever MLS group metadata changes so the UI can hydrate quickly.
+pub fn emit_group_metadata_event(meta: &MlsGroupMetadata) {
+    if let Some(handle) = TAURI_APP.get() {
+        if let Err(e) = handle.emit(
+            "mls_group_metadata",
+            serde_json::json!({ "metadata": metadata_to_frontend(meta) }),
+        ) {
+            eprintln!("[MLS] Failed to emit mls_group_metadata event: {}", e);
+        }
+    }
+}
+
+fn seconds_to_millis(value: u64) -> u64 {
+    value.saturating_mul(1000)
+}
+
+pub fn metadata_to_frontend(meta: &MlsGroupMetadata) -> serde_json::Value {
+    serde_json::json!({
+        "group_id": meta.group_id,
+        "engine_group_id": meta.engine_group_id,
+        "creator_pubkey": meta.creator_pubkey,
+        "name": meta.name,
+        "avatar_ref": meta.avatar_ref,
+        "created_at": seconds_to_millis(meta.created_at),
+        "updated_at": seconds_to_millis(meta.updated_at),
+        "evicted": meta.evicted,
+    })
 }

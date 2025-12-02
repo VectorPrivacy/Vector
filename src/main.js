@@ -108,6 +108,11 @@ const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-au
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
+const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
+const domSettingsExportAccountInfo = document.getElementById('export-account-info');
+const domSettingsLogoutInfo = document.getElementById('logout-info');
+const domSettingsDonorsInfo = document.getElementById('donors-info');
+const domDonorPivx = document.getElementById('donor-pivx');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
@@ -147,9 +152,9 @@ function openEmojiPanel(e) {
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
         // Reset the emoji picker state first
         resetEmojiPicker();
-        
-        // Load emoji sections
-        loadEmojiSections();
+
+        // Load emoji sections with optimized rendering
+        renderEmojiPanel();
 
         // Display the picker
         picker.classList.add('visible');
@@ -159,6 +164,15 @@ function openEmojiPanel(e) {
         } else {
             picker.classList.remove('emoji-picker-widescreen');
         }
+
+        // Always use the same fixed position (bottom-up) for both message input and reactions
+        picker.classList.add('emoji-picker-message-type');
+
+        // Clear any positioning styles to ensure CSS fixed positioning takes effect
+        picker.style.top = '';
+        picker.style.left = '';
+        picker.style.right = '';
+        picker.style.transform = '';
 
         // Change the emoji button to a wink while the panel is open (only for message input)
         if (isDefaultPanel) {
@@ -197,41 +211,86 @@ function updateEmojiPickerPosition() {
     }
 }
 
-function loadEmojiSections() {
-    // Load recent emojis
+/**
+ * Renders the Recently Used emojis immediately, then renders
+ * the All Emojis grid after the last recent emoji image loads.
+ */
+function renderEmojiPanel() {
     const recentsGrid = document.getElementById('emoji-recents-grid');
-    recentsGrid.innerHTML = '';
-    getMostUsedEmojis().slice(0, 24).forEach(emoji => {
-        const span = document.createElement('span');
-        span.textContent = emoji.emoji;
-        span.title = emoji.name;
-        recentsGrid.appendChild(span);
-    });
-    
-    // Load favorite emojis
-    const favoritesGrid = document.getElementById('emoji-favorites-grid');
-    favoritesGrid.innerHTML = '';
-    arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
-        const span = document.createElement('span');
-        span.textContent = emoji.emoji;
-        span.title = emoji.name;
-        favoritesGrid.appendChild(span);
-    });
-    
-    // Load all emojis
     const allGrid = document.getElementById('emoji-all-grid');
+    
+    recentsGrid.innerHTML = '';
     allGrid.innerHTML = '';
+    
+    // Build Recently Used with DocumentFragment
+    const recentsFragment = document.createDocumentFragment();
+    const recentEmojis = getMostUsedEmojis().slice(0, 24);
+    
+    recentEmojis.forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        recentsFragment.appendChild(span);
+    });
+    
+    recentsGrid.appendChild(recentsFragment);
+    twemojify(recentsGrid);
+    
+    // Find the last <img> in recents and wait for it to load
+    const lastRecentImage = recentsGrid.lastElementChild?.querySelector('img');
+    
+    if (lastRecentImage) {
+        lastRecentImage.addEventListener('load', () => {
+            renderAllEmojisGrid(allGrid);
+        }, { once: true });
+    } else {
+        // No recent emojis, render all grid immediately
+        renderAllEmojisGrid(allGrid);
+    }
+    
+    // Load favorites section
+    loadFavoritesSection();
+}
+
+/**
+ * Renders the full All Emojis grid using DocumentFragment.
+ */
+function renderAllEmojisGrid(allGrid) {
+    const allFragment = document.createDocumentFragment();
+    
     arrEmojis.forEach(emoji => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
         span.title = emoji.name;
-        allGrid.appendChild(span);
+        allFragment.appendChild(span);
     });
     
-    // Twemojify all emojis
-    twemojify(recentsGrid);
-    twemojify(favoritesGrid);
+    allGrid.appendChild(allFragment);
     twemojify(allGrid);
+}
+
+/**
+ * Loads the favorites section separately.
+ */
+function loadFavoritesSection() {
+    const favoritesGrid = document.getElementById('emoji-favorites-grid');
+    favoritesGrid.innerHTML = '';
+    
+    const favoritesFragment = document.createDocumentFragment();
+    arrFavoriteEmojis.slice(0, 24).forEach(emoji => {
+        const span = document.createElement('span');
+        span.textContent = emoji.emoji;
+        span.title = emoji.name;
+        favoritesFragment.appendChild(span);
+    });
+    
+    favoritesGrid.appendChild(favoritesFragment);
+    twemojify(favoritesGrid);
+}
+
+function loadEmojiSections() {
+    // Legacy function - now calls renderEmojiPanel
+    renderEmojiPanel();
     
     // Initialize collapsible sections after loading emojis
     initCollapsibleSections();
@@ -717,6 +776,92 @@ function getOrCreateDMChat(npub) {
 }
 
 /**
+ * Compute a timestamp for sorting chats, falling back to metadata for empty groups.
+ * @param {Chat} chat
+ * @returns {number}
+ */
+function getChatSortTimestamp(chat) {
+    const lastMessage = chat.messages?.length ? chat.messages[chat.messages.length - 1] : null;
+    let lastActivity = lastMessage?.at || 0;
+
+    if (chat.chat_type === 'MlsGroup') {
+        const updatedAt = chat.metadata?.updated_at || chat.metadata?.custom_fields?.updated_at || 0;
+        if (updatedAt > lastActivity) {
+            lastActivity = updatedAt;
+        }
+    }
+
+    if (!lastActivity) {
+        lastActivity =
+            chat.metadata?.created_at ||
+            chat.metadata?.custom_fields?.created_at ||
+            chat.created_at ||
+            0;
+    }
+
+    return lastActivity || 0;
+}
+
+/**
+ * Apply backend-provided metadata to an MLS group chat object.
+ * @param {Object} metadata - The metadata from Rust.
+ * @returns {{chat: Chat|null, changed: boolean}}
+ */
+function applyMlsGroupMetadata(metadata) {
+    if (!metadata || !metadata.group_id) {
+        return { chat: null, changed: false };
+    }
+
+    const chat = getOrCreateChat(metadata.group_id, 'MlsGroup');
+    chat.metadata = chat.metadata || {};
+    chat.metadata.custom_fields = chat.metadata.custom_fields || {};
+
+    let changed = false;
+    const assignIfChanged = (target, key, value) => {
+        if (value === undefined) return;
+        if (target[key] !== value) {
+            target[key] = value;
+            changed = true;
+        }
+    };
+
+    assignIfChanged(chat.metadata, 'group_id', metadata.group_id);
+    assignIfChanged(chat.metadata, 'engine_group_id', metadata.engine_group_id);
+    assignIfChanged(chat.metadata, 'creator_pubkey', metadata.creator_pubkey);
+    assignIfChanged(chat.metadata, 'avatar_ref', metadata.avatar_ref ?? null);
+    assignIfChanged(chat.metadata, 'created_at', metadata.created_at);
+    assignIfChanged(chat.metadata, 'updated_at', metadata.updated_at);
+    assignIfChanged(chat.metadata, 'evicted', metadata.evicted);
+    assignIfChanged(chat.metadata.custom_fields, 'name', metadata.name);
+    if (metadata.member_count !== undefined) {
+        assignIfChanged(chat.metadata.custom_fields, 'member_count', metadata.member_count);
+    }
+
+    return { chat, changed };
+}
+
+/**
+ * Hydrate all MLS group metadata from the backend store.
+ */
+async function hydrateMLSGroupMetadata() {
+    try {
+        const metadataList = await invoke('get_mls_group_metadata');
+        let changed = false;
+        for (const metadata of metadataList || []) {
+            const result = applyMlsGroupMetadata(metadata);
+            if (result.changed) {
+                changed = true;
+            }
+        }
+        if (changed && !fInit) {
+            renderChatlist();
+        }
+    } catch (e) {
+        console.error('Failed to hydrate MLS group metadata:', e);
+    }
+}
+
+/**
  * Get a profile by npub
  * @param {string} npub - The user's npub
  * @returns {Profile|undefined} - The profile if it exists
@@ -753,14 +898,12 @@ async function init() {
     await invoke("fetch_messages", { init: true });
 
     // Begin an asynchronous loop to refresh profile data
-    await invoke("load_profile", { npub: strPubkey });
     fetchProfiles().finally(async () => {
         setAsyncInterval(fetchProfiles, 45000);
     });
 
-    // Load MLS groups and sync welcomes on init
-    loadMLSGroups();
-    syncMLSWelcomes();
+    // Display Invites (MLS Welcomes)
+    await loadMLSInvites();
 
     // Run a very slow loop to update dynamic elements, like "last message time"
     setInterval(() => {
@@ -796,87 +939,6 @@ async function init() {
 }
 
 /**
- * Load MLS groups and integrate them into the chat list
- */
-async function loadMLSGroups() {
-    try {
-        const detailed = await invoke('list_mls_groups_detailed');
-        const groupsToRefresh = new Set();
-
-        if (!Array.isArray(detailed)) {
-            throw new Error('Backend did not return detailed MLS groups array');
-        }
-
-        for (const info of detailed) {
-            const groupId = info.group_id || info.groupId || info.id;
-            if (!groupId) continue;
-            groupsToRefresh.add(groupId);
-
-            const chat = getOrCreateChat(groupId, 'MlsGroup');
-
-            // Populate metadata for UI rendering and send path
-            chat.metadata = chat.metadata || {};
-            chat.metadata.custom_fields = chat.metadata.custom_fields || {};
-            
-            // Store in custom_fields (backend format)
-            const groupName = info.name || chat.metadata.custom_fields.name || `Group ${String(groupId).substring(0, 8)}...`;
-            chat.metadata.custom_fields.name = groupName;
-            chat.metadata.custom_fields.engine_group_id = info.engine_group_id || info.engineGroupId || chat.metadata.custom_fields.engine_group_id || '';
-            chat.metadata.custom_fields.avatar_ref = info.avatar_ref || info.avatarRef || chat.metadata.custom_fields.avatar_ref || null;
-            chat.metadata.custom_fields.created_at = String(info.created_at || info.createdAt || chat.metadata.custom_fields.created_at || 0);
-            chat.metadata.custom_fields.updated_at = String(info.updated_at || info.updatedAt || chat.metadata.custom_fields.updated_at || 0);
-            
-            // Preserve member count from detailed API to avoid showing "0 members" before refresh
-            const memberCount = (typeof info.member_count === 'number')
-                ? info.member_count
-                : (typeof info.memberCount === 'number' ? info.memberCount : (chat.metadata.custom_fields.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null));
-            if (typeof memberCount === 'number') {
-                chat.metadata.custom_fields.member_count = String(memberCount);
-            }
-
-            // Load initial messages if not already in memory
-            if ((chat.messages || []).length === 0) {
-                try {
-                    // Use unified chat message storage (same as DMs)
-                    const messages = await invoke('get_chat_messages', {
-                        chatId: groupId,
-                        limit: 50
-                    }) || [];
-
-
-                    // Messages are already in the correct format from unified storage!
-                    chat.messages = messages;
-                } catch (e) {
-                    console.error(`Failed to load messages for group ${groupId}:`, e);
-                    chat.messages = [];
-                }
-            }
-        }
-
-        // After loading groups, refresh their member counts
-        await Promise.all(Array.from(groupsToRefresh).map(gid => refreshGroupMemberCount(gid)));
-        
-        // Sort chats to ensure groups appear properly
-        arrChats.sort((a, b) => {
-            // Groups without messages go to the bottom
-            const aLastMsg = a.messages[a.messages.length - 1];
-            const bLastMsg = b.messages[b.messages.length - 1];
-
-            if (!aLastMsg && !bLastMsg) return 0;
-            if (!aLastMsg) return 1;
-            if (!bLastMsg) return -1;
-
-            return bLastMsg.at - aLastMsg.at;
-        });
-
-        // Re-render the chat list
-        renderChatlist();
-    } catch (e) {
-        console.error('Failed to load MLS groups (detailed):', e);
-    }
-}
-
-/**
  * Refresh and cache the member count for a given MLS group.
  * Also updates open chat header and re-renders chat list.
  */
@@ -900,19 +962,6 @@ async function refreshGroupMemberCount(groupId) {
         }
     } catch (e) {
         console.warn('Failed to refresh group member count for', groupId, e);
-    }
-}
-
-/**
- * Load MLS welcomes/invites (no manual sync needed - handled by fetch_messages)
- */
-async function syncMLSWelcomes() {
-    try {
-        // Welcomes are already synced via fetch_messages() -> handle_event()
-        // Just load the pending welcomes from the engine
-        await loadMLSInvites();
-    } catch (e) {
-        console.error('Failed to load MLS welcomes:', e);
     }
 }
 
@@ -945,9 +994,8 @@ async function acceptMLSInvite(welcomeEventId) {
         });
         
         if (success) {
-            // Reload invites and groups
+            // Reload invites
             await loadMLSInvites();
-            await loadMLSGroups();
 
             // After rendering UI changes, ensure layout recalculates to prevent oversized chat list
             adjustSize();
@@ -1518,7 +1566,7 @@ function updateChatlistTimestamps() {
     // For each chat item, find and update the timestamp and status
     chatListItems.forEach(item => {
         // Extract chat ID from the item's ID (format: chatlist-{chatId})
-        const chatId = item.id.substring(8);
+        const chatId = item.id.substring(9);
         
         // Find the corresponding chat in our array
         const chat = arrChats.find(c => c.id === chatId);
@@ -1527,8 +1575,9 @@ function updateChatlistTimestamps() {
             // Get the last message timestamp
             const lastMessage = chat.messages[chat.messages.length - 1];
             
-            // Skip updating if the message is older than 1 day (for performance)
-            if (lastMessage.at < Date.now() - 86400000) return;
+            // Skip updating if the message is older than 1 week (for performance)
+            // Messages older than 1 week display as "1w", "2w", etc. and are unlikely to change
+            if (lastMessage?.at < Date.now() - 604800000) return;
             
             // Find the timestamp element in this chat item
             const timestampElement = item.querySelector('.chatlist-contact-timestamp');
@@ -1617,20 +1666,16 @@ function updateChatBackNotification() {
 /**
  * Sets a specific message as the last read message
  * @param {Chat} chat - The Chat to update
- * @param {Message|string} message - The Message object or message ID to set as last read
+ * @param {Message|string} message - The Message to set as last read
  */
 function markAsRead(chat, message) {
-    // If a Message object was provided, extract its ID
-    const messageId = typeof message === 'string' ? message : message.id;
-
-    // If we have a chat, update its last_read and notify backend
-    if (chat) {
-        chat.last_read = messageId;
+    // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
+    if (chat && message.id !== chat.last_read) {
+        chat.last_read = message.id;
 
         // Persist via backend using chat-based API
-        invoke("mark_as_read", { chatId: chat.id, messageId: messageId });
+        invoke("mark_as_read", { chatId: chat.id, messageId: message.id });
     }
-    // If no chat is supplied, do nothing (no profile-based persistence here)
 }
 
 /**
@@ -1734,14 +1779,8 @@ async function setupRustListeners() {
             console.log('Group chat not open, message added to background chat');
         }
         
-        // Resort chat list order by last message time so groups bubble to the top
-        arrChats.sort((a, b) => {
-            const aLast = a.messages[a.messages.length - 1];
-            const bLast = b.messages[b.messages.length - 1];
-            if (!aLast) return 1;
-            if (!bLast) return -1;
-            return bLast.at - aLast.at;
-        });
+        // Resort chat list order so recent groups bubble up (fallback to metadata)
+        arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         
         // Re-render chat list
         renderChatlist();
@@ -1754,12 +1793,35 @@ async function setupRustListeners() {
         await loadMLSInvites();
     });
 
+    // Listen for MLS group metadata updates
+    await listen('mls_group_metadata', async (evt) => {
+        try {
+            const metadata = evt.payload?.metadata;
+            const { chat, changed } = applyMlsGroupMetadata(metadata);
+            if (!chat || !changed) return;
+
+            if (strOpenChat === chat.id) {
+                const groupName = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+                domChatContact.textContent = groupName;
+                updateChatHeaderSubtext(chat);
+            }
+
+            const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
+            if (overviewGroupId && overviewGroupId === chat.id) {
+                await renderGroupOverview(chat);
+            }
+
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling mls_group_metadata event:', e);
+        }
+    });
+
     // Listen for MLS welcome accepted events
     await listen('mls_welcome_accepted', async (evt) => {
         console.log('MLS welcome accepted, refreshing groups and invites');
-        // Reload invites and groups
+        // Reload invites
         await loadMLSInvites();
-        await loadMLSGroups();
     });
 
     // Listen for MLS group updates (member additions, removals, etc.)
@@ -1852,14 +1914,8 @@ async function setupRustListeners() {
                 }
             }
 
-            // Resort chat list order by last message time to reflect any loaded timeline
-            arrChats.sort((a, b) => {
-                const aLast = a.messages[a.messages.length - 1];
-                const bLast = b.messages[b.messages.length - 1];
-                if (!aLast) return 1;
-                if (!bLast) return -1;
-                return bLast.at - aLast.at;
-            });
+            // Resort chat list order by last activity (message or metadata)
+            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
 
             // Re-render the chat list so empty groups show with "No messages yet" preview
             renderChatlist();
@@ -2126,14 +2182,8 @@ async function setupRustListeners() {
             // Insert at the end (newest)
             messages.push(newMessage);
 
-            // Sort chats by last message time
-            arrChats.sort((a, b) => {
-                const aLastMsg = a.messages[a.messages.length - 1];
-                const bLastMsg = b.messages[b.messages.length - 1];
-                if (!aLastMsg) return 1;
-                if (!bLastMsg) return -1;
-                return bLastMsg.at - aLastMsg.at;
-            });
+            // Sort chats by most recent activity (message or metadata fallback)
+            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         }
         // Check if the new message is older than the oldest message
         else if (newMessage.at < messages[0].at) {
@@ -2252,9 +2302,14 @@ async function renderRelayList() {
         // Clear existing content
         networkList.innerHTML = '';
         
-        // Add Nostr Relays subtitle with info button
+        // Add Nostr Relays subtitle with info button - wrap in container for centering
+        const relaysTitleContainer = document.createElement('div');
+        relaysTitleContainer.style.textAlign = 'center';
+        
         const relaysTitle = document.createElement('h3');
         relaysTitle.className = 'network-section-title';
+        relaysTitle.style.display = 'inline-flex';
+        relaysTitle.style.alignItems = 'center';
         relaysTitle.textContent = 'Nostr Relays';
         
         const relaysInfoBtn = document.createElement('span');
@@ -2263,8 +2318,7 @@ async function renderRelayList() {
         relaysInfoBtn.style.height = '16px';
         relaysInfoBtn.style.position = 'relative';
         relaysInfoBtn.style.display = 'inline-block';
-        relaysInfoBtn.style.verticalAlign = 'middle';
-        relaysInfoBtn.style.marginLeft = '5px';
+        relaysInfoBtn.style.marginLeft = '8px';
         relaysInfoBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2272,7 +2326,8 @@ async function renderRelayList() {
         };
         
         relaysTitle.appendChild(relaysInfoBtn);
-        networkList.appendChild(relaysTitle);
+        relaysTitleContainer.appendChild(relaysTitle);
+        networkList.appendChild(relaysTitleContainer);
         
         // Create relay items
         relays.forEach(relay => {
@@ -2293,10 +2348,15 @@ async function renderRelayList() {
             networkList.appendChild(relayItem);
         });
         
-        // Add Media Servers subtitle with info button
+        // Add Media Servers subtitle with info button - wrap in container for centering
+        const mediaTitleContainer = document.createElement('div');
+        mediaTitleContainer.style.textAlign = 'center';
+        mediaTitleContainer.style.marginTop = '2rem';
+        
         const mediaTitle = document.createElement('h3');
         mediaTitle.className = 'network-section-title';
-        mediaTitle.style.marginTop = '2rem';
+        mediaTitle.style.display = 'inline-flex';
+        mediaTitle.style.alignItems = 'center';
         mediaTitle.textContent = 'Media Servers';
         
         const mediaInfoBtn = document.createElement('span');
@@ -2305,8 +2365,7 @@ async function renderRelayList() {
         mediaInfoBtn.style.height = '16px';
         mediaInfoBtn.style.position = 'relative';
         mediaInfoBtn.style.display = 'inline-block';
-        mediaInfoBtn.style.verticalAlign = 'middle';
-        mediaInfoBtn.style.marginLeft = '5px';
+        mediaInfoBtn.style.marginLeft = '8px';
         mediaInfoBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2314,7 +2373,8 @@ async function renderRelayList() {
         };
         
         mediaTitle.appendChild(mediaInfoBtn);
-        networkList.appendChild(mediaTitle);
+        mediaTitleContainer.appendChild(mediaTitle);
+        networkList.appendChild(mediaTitleContainer);
         
         // Create media server items
         mediaServers.forEach(serverUrl => {
@@ -2398,10 +2458,12 @@ async function login() {
         }, { once: true });
 
         // Setup a Rust Listener for the backend's init finish
-        await listen('init_finished', (evt) => {
+        await listen('init_finished', async (evt) => {
             // The backend now sends both profiles (without messages) and chats (with messages)
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
+
+            await hydrateMLSGroupMetadata();
 
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
@@ -3114,7 +3176,6 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 // If we found a message and it's not already marked as read, update the read status
                 if (lastContactMsg && chat.last_read !== lastContactMsg.id) {
                     // Update the chat's last_read
-                    chat.last_read = lastContactMsg.id;
                     markAsRead(chat, lastContactMsg);
                 }
             }
@@ -3266,26 +3327,31 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
         if (fNotes) {
             domChatContact.textContent = 'Notes';
+            domChatContact.onclick = null;
+            domChatContact.classList.remove('btn');
+            domChatContactStatus.textContent = 'Encrypted Notes to Self';
+            domChatContactStatus.classList.remove('text-gradient');
         } else if (isGroup) {
             domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
+            domChatContact.onclick = () => {
+                closeChat();
+                openGroupOverview(chat);
+            };
+            domChatContact.classList.add('btn');
+
+            // Ensure the member count/status renders even before the first message
+            updateChatHeaderSubtext(chat);
         } else {
             domChatContact.textContent = profile?.nickname || profile?.name || strOpenChat.substring(0, 10) + '…';
+            domChatContact.onclick = null;
+            domChatContact.classList.remove('btn');
+            domChatContactStatus.textContent = '';
+            domChatContactStatus.classList.remove('text-gradient');
         }
-        // There's no profile to render; so don't allow clicking them to expand it
-        domChatContact.onclick = null;
-        domChatContact.classList.remove('btn');
 
-        // Force wipe the 'Status' and it's styling
-        domChatContactStatus.textContent = fNotes ? domChatContactStatus.textContent = 'Encrypted Notes to Self' : '';
-        if (!domChatContactStatus.textContent) {
-            domChatContact.classList.add('chat-contact');
-            domChatContact.classList.remove('chat-contact-with-status');
-            domChatContactStatus.style.display = 'none';
-        } else {
-            domChatContact.classList.add('chat-contact-with-status');
-            domChatContact.classList.remove('chat-contact');
-            domChatContactStatus.style.display = '';
-        }
+        domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
+        domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
+        domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
     }
 
     adjustSize();
@@ -3486,13 +3552,13 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             }
 
             // Add some additional margin to separate the senders visually (extra space for username in groups)
-            divMessage.style.marginTop = isGroupChat ? `30px` : `15px`;
+            if (!msg.mine) divMessage.style.marginTop = isGroupChat ? `20px` : `15px`;
         }
         
         // For group chats, add margin-top to the <p> element for the first message in a streak
         if (isGroupChat) {
-            pMessage.style.marginTop = `25px`;
-        }
+            pMessage.style.marginTop = !msg.mine ? `25px` : `10px`;
+        } else if (msg.mine) pMessage.style.marginTop = `10px`;
         
         // Check if this is a singular message (no next message from same sender)
         // This check happens after the message is rendered (at the end of the function)
@@ -3609,11 +3675,14 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         linkifyUrls(spanMessage);
     }
 
-    // Twemojify!
-    twemojify(spanMessage);
+    // Only process Text Content if any exists
+    if (spanMessage.textContent) {
+        // Twemojify!
+        twemojify(spanMessage);
 
-    // Append the message contents
-    pMessage.appendChild(spanMessage);
+        // Append the message contents
+        pMessage.appendChild(spanMessage);
+    }
 
     // Append attachments
     let strRevealAttachmentPath = '';
@@ -3622,6 +3691,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.style.float = msg.mine ? 'right' : 'left';
         // Remove any message bubbles
         pMessage.classList.add('no-background');
+        pMessage.style.overflow = 'visible';
     }
     for (const cAttachment of msg.attachments) {
         if (cAttachment.downloaded) {
@@ -3648,7 +3718,15 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
-                // Add event listener for auto-scrolling within the first 100ms of chat opening
+                
+                // Add file extension badge
+                const extBadge = document.createElement('span');
+                extBadge.className = 'file-ext-badge';
+                extBadge.textContent = cAttachment.extension.toUpperCase();
+                // Initially hide the badge until we check image dimensions
+                extBadge.style.display = 'none';
+                
+                // Add event listener for auto-scrolling and badge size check
                 imgPreview.addEventListener('load', () => {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
@@ -3660,23 +3738,38 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         // Normal soft scroll for layout adjustments
                         softChatScroll();
                     }
+                    
+                    // Check badge size relative to image
+                    const imgWidth = imgPreview.offsetWidth;
+                    const imgHeight = imgPreview.offsetHeight;
+                    
+                    // Temporarily show badge to measure it
+                    extBadge.style.display = '';
+                    const badgeWidth = extBadge.offsetWidth;
+                    const badgeHeight = extBadge.offsetHeight;
+                    
+                    // Check if badge would be more than 25% of image width or height
+                    const widthRatio = badgeWidth / imgWidth;
+                    const heightRatio = badgeHeight / imgHeight;
+                    
+                    if (widthRatio > 0.25 || heightRatio > 0.25) {
+                        // Hide badge if it's too large relative to the image
+                        extBadge.style.display = 'none';
+                        // Remove border radius from small images
+                        imgPreview.style.borderRadius = '0';
+                    }
                 }, { once: true });
                 
                 // Attach image preview handler
                 attachImagePreview(imgPreview);
                 
-                // Add file extension badge
-                const extBadge = document.createElement('span');
-                extBadge.className = 'file-ext-badge';
-                extBadge.textContent = cAttachment.extension.toUpperCase();
-                
                 imgContainer.appendChild(imgPreview);
                 imgContainer.appendChild(extBadge);
                 pMessage.appendChild(imgContainer);
-                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
+                } else if (platformFeatures.os !== 'linux' && ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
                 handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
-                } else if (['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
+                } else if (platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
                 // Videos
                 const handleMetadataLoaded = (video) => {
                     // Seek a tiny amount to force the frame 'poster' to load
@@ -3721,11 +3814,70 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     pMessage.appendChild(vidPreview);
                 }
             } else {
-                // Unknown attachment
-                const iUnknown = document.createElement('i');
-                iUnknown.classList.add('text-gradient');
-                iUnknown.textContent = `Previews not supported for "${cAttachment.extension}" files yet`;
-                pMessage.appendChild(iUnknown);
+                // File Attachment
+                const ext = cAttachment.extension.toLowerCase();
+                const fileTypeInfo = getFileTypeInfo(ext);
+                
+                const fileDiv = document.createElement('div');
+                fileDiv.setAttribute('filepath', cAttachment.path);
+
+                // Create the main container
+                const btnDiv = document.createElement('div');
+                btnDiv.className = 'btn custom-audio-player';
+                btnDiv.style.display = 'flex';
+                btnDiv.style.alignItems = 'center';
+                btnDiv.style.padding = '10px';
+                btnDiv.style.paddingRight = '15px';
+
+                // Create the icon span
+                const iconSpan = document.createElement('span');
+                iconSpan.className = `icon icon-${fileTypeInfo.icon}`;
+                iconSpan.style.marginLeft = '5px';
+                iconSpan.style.width = '50px';
+                iconSpan.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+
+                // Create the text container span
+                const textContainerSpan = document.createElement('span');
+                textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
+                textContainerSpan.style.marginLeft = '50px';
+                textContainerSpan.style.lineHeight = '1.2';
+
+                // Create the description span
+                const descriptionSpan = document.createElement('span');
+                descriptionSpan.style.display = 'block';
+                descriptionSpan.style.color = 'var(--icon-color-primary)';
+                descriptionSpan.style.fontWeight = '400';
+                descriptionSpan.innerText = fileTypeInfo.description;
+
+                // Create the small element for file details
+                const smallElement = document.createElement('small');
+
+                // Create the extension span
+                const extSpan = document.createElement('span');
+                extSpan.style.color = 'white';
+                extSpan.style.fontWeight = '400';
+                extSpan.innerText = `.${ext}`;
+
+                // Create the size span
+                const sizeSpan = document.createElement('span');
+                sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+
+                // Assemble the structure
+                smallElement.appendChild(extSpan);
+                smallElement.appendChild(sizeSpan);
+                textContainerSpan.appendChild(descriptionSpan);
+                textContainerSpan.appendChild(smallElement);
+                btnDiv.appendChild(iconSpan);
+                btnDiv.appendChild(textContainerSpan);
+                fileDiv.appendChild(btnDiv);
+
+                // Click to reveal in explorer
+                fileDiv.addEventListener('click', (e) => {
+                    const path = e.currentTarget.getAttribute('filepath');
+                    if (path) revealItemInDir(path);
+                });
+
+                pMessage.appendChild(fileDiv);
             }
 
             // If the message is mine, and pending: display an uploading status
@@ -4083,7 +4235,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     else divExtras.style.marginLeft = `5px`;
     
     // Apply the same top margin to divExtras if this is the first message in a streak (group chats only)
-    if (isNewStreak && isGroupChat) {
+    if (isNewStreak && isGroupChat && !msg.mine) {
         // Match the pMessage top margin for proper alignment with username labels
         divExtras.style.marginTop = `25px`;
     }
@@ -4277,38 +4429,6 @@ function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
-    // If it's a group, load messages from unified storage (no sync needed - live subscription handles it)
-    if (isGroup && chat) {
-        (async () => {
-            // Load messages using unified storage
-            try {
-                const messages = await invoke('get_chat_messages', {
-                    chatId: contact,
-                    limit: 50
-                }) || [];
-
-
-                // Messages are already in the correct format from unified storage!
-                // Merge with existing messages to avoid duplicates
-                const existingIds = new Set((chat.messages || []).map(m => m.id));
-                const newOnly = messages.filter(m => !existingIds.has(m.id));
-
-                // Append new messages and keep chronological order
-                chat.messages = (chat.messages || []).concat(newOnly);
-                chat.messages.sort((a, b) => a.at - b.at);
-
-                // Insert only the new messages into the open chat
-                if (newOnly.length) {
-                    updateChat(chat, newOnly, null, false);
-                    // Preserve typing indicator after async message load
-                    updateChatHeaderSubtext(chat);
-                }
-            } catch (e) {
-                console.error('Failed to load group messages:', e);
-            }
-        })();
-    }
-
     // Initialize procedural scroll state
     initProceduralScroll(chat);
 
@@ -4319,6 +4439,12 @@ function openChat(contact) {
         : [];
     
     updateChat(chat, initialMessages, profile, true);
+
+    // If the opened chat has messages, mark them as read (last message)
+    if (totalMessages) {
+        const lastMsg = chat.messages[chat.messages.length - 1];
+        markAsRead(chat, lastMsg);
+    }
     
     // Update the back button notification dot
     updateChatBackNotification();
@@ -4491,6 +4617,15 @@ async function closeChat() {
 
         // Now we explicitly drop them
         domChild.remove();
+    }
+
+    // If the chat had any messages, mark them as read before leaving
+    if (strOpenChat) {
+        const closedChat = arrChats.find(c => c.id === strOpenChat);
+        if (closedChat?.messages?.length) {
+            const lastMsg = closedChat.messages[closedChat.messages.length - 1];
+            markAsRead(closedChat, lastMsg);
+        }
     }
 
     // Reset the chat UI
@@ -4689,7 +4824,7 @@ async function renderGroupOverview(chat) {
             memberDiv.style.borderRadius = '6px';
             memberDiv.style.transition = 'background 0.2s ease';
             memberDiv.style.isolation = 'isolate';
-            memberDiv.style.cursor = 'default';
+            memberDiv.style.cursor = 'pointer';
             
             // Add hover effect with theme-based gradient using ::before pseudo-element approach
             const bgDiv = document.createElement('div');
@@ -4718,6 +4853,20 @@ async function renderGroupOverview(chat) {
             
             // Get member profile
             const memberProfile = getProfile(member);
+            if (!memberProfile && member) {
+                invoke("queue_profile_sync", {
+                    npub: member,
+                    priority: "normal",
+                    forceRefresh: false
+                }).catch(console.error);
+            }
+            const openMemberProfile = () => {
+                const profile = getProfile(member) || memberProfile || { id: member, mine: false };
+                const originChatId = domGroupOverview.getAttribute('data-group-id') || strOpenChat || chat.id;
+                previousChatBeforeProfile = originChatId;
+                openProfile(profile);
+            };
+            memberDiv.onclick = openMemberProfile;
             
             // Crown icon for admins (or invisible spacer for alignment)
             const crownContainer = document.createElement('span');
@@ -5231,8 +5380,10 @@ async function openChatlist() {
         domChats.style.display = '';
     }
     
-    // Load and display MLS invites in the Chat tab
+    // Load and display MLS invites in the Chat tab (and adjust layout before/after for consistency)
+    adjustSize();
     await loadMLSInvites();
+    adjustSize();
 }
 
 function openSettings() {
@@ -5248,6 +5399,9 @@ function openSettings() {
 
     // Update the Storage Breakdown
     initStorageSection();
+
+    // Check primary device status when settings are opened
+    checkPrimaryDeviceStatus();
 
     // If an update is available, scroll to the updates section
     const updateDot = document.getElementById('settings-update-dot');
@@ -5553,21 +5707,8 @@ async function sendMessage(messageText) {
         const replyRef = strCurrentReplyReference;
         cancelReply();
         
-        // Check if current chat is a group
-        const chat = arrChats.find(c => c.id === strOpenChat);
-        if (chat?.chat_type === 'MlsGroup') {
-            // Send group message with cleaned text
-            const wrapperId = await invoke('send_mls_group_message', {
-                groupId: strOpenChat,
-                text: cleanedText,
-                repliedTo: replyRef || null
-            });
-            // Message is already added optimistically by send_mls_group_message
-            // Live subscription will handle receiving it back from the relay
-        } else {
-            // Send regular DM with cleaned text
-            await message(strOpenChat, cleanedText, replyRef, "");
-        }
+        // Send message (unified function handles both DMs and MLS groups)
+        await message(strOpenChat, cleanedText, replyRef);
         
         nLastTypingIndicator = 0;
     } catch(e) {
@@ -5766,7 +5907,53 @@ domChatMessageInput.oninput = async () => {
         popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
     };
 
-        // Add npub copy functionality for chat-new section
+    domSettingsDeepRescanInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Deep Rescan', 'This will forcefully sync your message history backwards in two‑day sections until 30 days of no events are found. This may take some time.', true);
+    };
+
+    domSettingsExportAccountInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
+    };
+
+    // Info button for Refresh KeyPackages
+    const domRefreshKeypkgInfo = document.getElementById('refresh-keypkg-info');
+    if (domRefreshKeypkgInfo) {
+        domRefreshKeypkgInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm(
+                'Refresh KeyPackages',
+                'Regenerates a fresh device KeyPackage for MLS. This can help you receive Group Invites on this device.',
+                true
+            );
+        };
+    }
+
+    domSettingsLogoutInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.', true);
+    };
+
+    // Donors & Contributors info button
+    domSettingsDonorsInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Donors & Contributors', 'The organisations listed below have contributed either <b>financially or resourcefully</b> (developers, infrastructure, etc) to Vector\'s development.<br><br>We extend our sincere thanks to these supporters for helping make Vector possible.', true);
+    };
+
+    // PIVX donor logo click - opens pivx.org
+    domDonorPivx.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openUrl('https://pivx.org');
+    };
+
+    // Add npub copy functionality for chat-new section
     document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('share-npub')?.textContent;
         if (npub) {
@@ -6220,15 +6407,13 @@ Create Group UI wiring
     - Backend validates inputs and refreshes each member's device KeyPackage.
     - If any member fails refresh/fetch, backend returns Err with a user-facing string. We surface that string directly via popupConfirm and status label.
   • On success:
-    - loadMLSGroups() ensures immediate discoverability in chat list.
     - openChat(newGroupId) navigates to the newly created group.
 - Error handling:
   • popupConfirm('Group creation failed', errorString, ...) shows a clear toast/modal.
   • domCreateGroupStatus also mirrors the exact error string for inline context.
   • We do not partially create groups: any device refresh failure aborts.
 - Notes:
-  • Tauri expects camelCase params from JS for Rust snake_case args.
-  • Backend emits 'mls_group_initial_sync' on success; the chat list also refreshes via loadMLSGroups().
+  • Backend emits 'mls_group_initial_sync' on success.
 */
 (function wireCreateGroupUI() {
     if (!domCreateGroup) return;
@@ -6273,9 +6458,6 @@ Create Group UI wiring
             if (domCreateGroupStatus) {
                 domCreateGroupStatus.textContent = 'Finalizing...';
             }
-
-            // Ensure groups list is current and visible in UI immediately
-            await loadMLSGroups();
 
             // Navigate to the new group
             openChat(newGroupId);

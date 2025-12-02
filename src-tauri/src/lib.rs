@@ -1062,7 +1062,7 @@ async fn start_typing(receiver: String) -> bool {
                 .build(my_public_key);
 
             // Send via MLS
-            match mls::send_mls_message(&group_id, rumor).await {
+            match mls::send_mls_message(&group_id, rumor, None).await {
                 Ok(_) => true,
                 Err(_e) => false,
             }
@@ -1367,7 +1367,7 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
     }
 
     // Add the message to the state and clear typing indicator for sender
-    let (was_msg_added_to_state, active_typers) = {
+    let (was_msg_added_to_state, _active_typers) = {
         let mut state = STATE.lock().await;
         let added = state.add_message_to_participant(contact, msg.clone());
         
@@ -1625,7 +1625,7 @@ async fn notifs() -> Result<bool, String> {
                                                                 // Clear typing indicator for this sender (they just sent a message)
                                                                 let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
                                                                 
-                                                                let (was_added, active_typers, should_notify) = {
+                                                                let (was_added, _active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
                                                                     
                                                                     // Add message to chat
@@ -1706,7 +1706,7 @@ async fn notifs() -> Result<bool, String> {
                                                                 let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
                                                                 let is_file = true;
                                                                 
-                                                                let (was_added, active_typers, should_notify) = {
+                                                                let (was_added, _active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
                                                                     
                                                                     // Add message to chat
@@ -2824,7 +2824,7 @@ async fn encrypt(input: String, password: Option<String>) -> String {
         }
         
         println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
-        match bootstrap_mls_device_keypackage().await {
+        match regenerate_device_keypackage(true).await {
             Ok(info) => {
                 let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
                 let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2857,7 +2857,7 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
             }
             
             println!("[MLS] Ensuring persistent device KeyPackage...");
-            match bootstrap_mls_device_keypackage().await {
+            match regenerate_device_keypackage(true).await {
                 Ok(info) => {
                     let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
                     let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3362,6 +3362,25 @@ async fn get_storage_info() -> Result<serde_json::Value, String> {
             }
         }
     }
+
+    // Calculate Whisper models size if whisper feature is enabled
+    #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+    {
+        // Calculate total size of downloaded Whisper models
+        let mut ai_models_size = 0;
+        for model in whisper::MODELS {
+            if whisper::is_model_downloaded(&handle, model.name) {
+                // Convert MB to bytes (model sizes are in MB)
+                ai_models_size += (model.size as u64) * 1024 * 1024;
+            }
+        }
+        
+        if ai_models_size > 0 {
+            // Add AI models to type distribution
+            *type_distribution.entry("ai_models".to_string()).or_insert(0) += ai_models_size;
+            total_bytes += ai_models_size;
+        }
+    }
     
     // Return storage information with type distribution
     Ok(serde_json::json!({
@@ -3562,9 +3581,29 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
 // MLS Tauri Commands
 
 
-/// Bootstrap this device's MLS KeyPackage: ensure device_id, publish if missing, and cache reference
+/// Regenerate this device's MLS KeyPackage. If `cache` is true, attempt to reuse an existing
+/// cached KeyPackage if it exists on the relay; otherwise always generate a fresh one.
+/// Load MLS device ID for the current account
 #[tauri::command]
-async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> {
+async fn load_mls_device_id() -> Result<Option<String>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    match db_migration::load_mls_device_id(&handle).await {
+        Ok(Some(id)) => Ok(Some(id)),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Load MLS keypackages for the current account
+#[tauri::command]
+async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    db_migration::load_mls_keypackages(&handle).await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, String> {
     // Access handle and client
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
@@ -3589,47 +3628,47 @@ async fn bootstrap_mls_device_keypackage() -> Result<serde_json::Value, String> 
     let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
     let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
-    // Load existing keypackage index and verify it exists on relay before returning cached
-    let cached_kp_ref: Option<String> = {
-        let index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
+    // If caching is requested, attempt to load and verify an existing KeyPackage
+    if cache {
+        // Load existing keypackage index and verify it exists on relay before returning cached
+        let cached_kp_ref: Option<String> = {
+            let index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
 
-        index.iter().find(|entry| {
-            entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
-                && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-        })
-        .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
-    };
+            index.iter().find(|entry| {
+                entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
+                    && entry.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            })
+            .and_then(|existing| existing.get("keypackage_ref").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        };
 
-    // If we have a cached reference, verify it exists on the relay
-    if let Some(ref_id) = cached_kp_ref {
-        println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
-        
-        // Try to fetch the event from the relay to verify it exists
-        if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
-            let filter = Filter::new()
-                .id(event_id)
-                .kind(Kind::MlsKeyPackage)
-                .limit(1);
+        // If we have a cached reference, verify it exists on the relay
+        if let Some(ref_id) = cached_kp_ref {
+            println!("[MLS][KeyPackage] Found cached reference {}, verifying on relay...", ref_id);
             
-            match client.stream_events_from(
-                vec![TRUSTED_RELAY],
-                filter,
-                std::time::Duration::from_secs(5)
-            ).await {
-                Ok(mut events) => {
-                    // Check if we got any events - if so, the cached KeyPackage exists on relay
-                    if events.next().await.is_some() {
-                        return Ok(serde_json::json!({
-                            "device_id": device_id,
-                            "owner_pubkey": owner_pubkey_b32,
-                            "keypackage_ref": ref_id,
-                            "cached": true
-                        }));
+            // Try to fetch the event from the relay to verify it exists
+            if let Ok(event_id) = nostr_sdk::EventId::from_hex(&ref_id) {
+                let filter = Filter::new()
+                    .id(event_id)
+                    .kind(Kind::MlsKeyPackage)
+                    .limit(1);
+                
+                match client.stream_events_from(
+                    vec![TRUSTED_RELAY],
+                    filter,
+                    std::time::Duration::from_secs(5)
+                ).await {
+                    Ok(mut events) => {
+                        // Check if we got any events - if so, the cached KeyPackage exists on relay
+                        if events.next().await.is_some() {
+                            return Ok(serde_json::json!({
+                                "device_id": device_id,
+                                "owner_pubkey": owner_pubkey_b32,
+                                "keypackage_ref": ref_id,
+                                "cached": true
+                            }));
+                        }
                     }
-                    // Fall through to create new KeyPackage
-                }
-                _ => {
-                    // Fall through to create new KeyPackage
+                    _ => {}
                 }
             }
         }
@@ -3728,8 +3767,7 @@ async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> Resul
     - Any error bubbled from create_mls_group(...): engine/storage/network issues are propagated as user-facing strings. Surface them verbatim in the UI.
 
     Success path
-    - Returns group_id (wire id used for relay 'h' tag filtering). 
-    - Frontend should await loadMLSGroups() to persist/refresh local list, then openChat(group_id) to navigate immediately.
+    - Returns group_id (wire id used for relay 'h' tag filtering).
     - Backend also emits "mls_group_initial_sync" so the list view updates without restart.
     */
     let name = group_name.trim();
@@ -3762,93 +3800,17 @@ async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> Resul
 
     // Delegate to existing helper that persists metadata, publishes welcomes and emits UI events
     // avatar_ref: None for now (out of scope for this subtask)
-    create_mls_group(name.to_string(), None, initial_member_devices).await
-}
-/// Send a message to an MLS group
-#[tauri::command]
-async fn send_mls_group_message(
-    group_id: String,
-    text: String,
-    replied_to: Option<String>,
-) -> Result<String, String> {
-    // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.send_group_message(&group_id, &text, replied_to)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
-#[tauri::command]
-async fn mls_create_group_simple(name: String) -> Result<String, String> {
-    // Minimal: avoid holding non-Send types across await points
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    let result = create_mls_group(name.to_string(), None, initial_member_devices).await;
 
-    // Resolve creator pubkey
-    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
-    let creator_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
-
-    // Generate a 128-bit hex group_id using time + rng (limit RNG scope to avoid !Send across await)
-    let group_id = {
-        let mut rng = thread_rng();
-        format!("{:016x}{:016x}", Timestamp::now().as_u64(), rng.gen::<u64>())
-    };
-
-    // Prepare metadata timestamps
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
-
-    // Append new metadata entry
-    let new_group = mls::MlsGroupMetadata {
-        group_id: group_id.clone(),
-        engine_group_id: String::new(),
-        creator_pubkey: creator_pubkey_b32,
-        name,
-        avatar_ref: None,
-        created_at: now_secs,
-        updated_at: now_secs,
-        evicted: false,
-    };
-
-    // Save only the new group to SQL/store (more efficient)
-    let _ = db_migration::save_mls_group(handle.clone(), &new_group).await;
-
-    Ok(group_id)
-}
-
-#[tauri::command]
-async fn mls_send_group_message_simple(group_id: String, text: String) -> Result<String, String> {
-    // Minimal: validate group exists via JSON store, then return placeholder message_id
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-
-    // Load groups
-    let groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
-
-    // Validate group exists
-    let exists = groups.iter().any(|g| g.group_id == group_id);
-    if !exists {
-        return Err("Group not found".to_string());
+    if result.is_ok() {
+        tokio::spawn(async {
+            if let Err(err) = regenerate_device_keypackage(false).await {
+                eprintln!("[MLS] Failed to regenerate device KeyPackage after group creation: {}", err);
+            }
+        });
     }
 
-    // Generate placeholder message_id
-    let mut rng = thread_rng();
-    let message_id = format!("{:016x}{:016x}", Timestamp::now().as_u64(), rng.gen::<u64>());
-
-    println!("[MLS] send_group_message_simple group_id={}, msg_id={}, len={}", group_id, message_id, text.len());
-
-    // TODO: Wire nostr-mls create_message + publish (Kind 445) and local encrypted storage (mls_messages_{group_id}, mls_timeline_{group_id})
-
-    Ok(message_id)
+    result
 }
 
 /// Add a member device to an MLS group
@@ -4103,7 +4065,7 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
 #[tauri::command]
 async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String> {
     // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
+    let accepted = tokio::task::spawn_blocking(move || {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
@@ -4188,6 +4150,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                         .as_secs();
                     // Update only the specific group instead of all groups
                     crate::db_migration::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
+                    mls::emit_group_metadata_event(&groups[idx]);
                 } else {
                     println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
                 }
@@ -4210,6 +4173,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 };
                 
                 crate::db_migration::save_mls_group(handle.clone(), &metadata).await.map_err(|e| e.to_string())?;
+                mls::emit_group_metadata_event(&metadata);
                 
                 // Create the Chat in STATE with metadata and save to disk
                 {
@@ -4272,31 +4236,21 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 }
             }
 
-            Ok(true)
+            Ok::<bool, String>(true)
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
-}
+    .map_err(|e| format!("Task join error: {}", e))??;
 
-/// Process an incoming MLS event from the nostr network
-#[tauri::command]
-async fn process_mls_event(
-    event_json: String,
-) -> Result<bool, String> {
-    // Run non-Send MLS engine work on a blocking thread; drive async via current runtime
-    tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.process_incoming_event(&event_json)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    if accepted {
+        tokio::spawn(async {
+            if let Err(err) = regenerate_device_keypackage(false).await {
+                eprintln!("[MLS] Failed to regenerate device KeyPackage after accepting welcome: {}", err);
+            }
+        });
+    }
+
+    Ok(accepted)
 }
 
 #[tauri::command]
@@ -4313,89 +4267,19 @@ async fn list_mls_groups() -> Result<Vec<String>, String> {
     }
 }
 
-#[derive(serde::Serialize, Clone)]
-struct MlsGroupInfo {
-    group_id: String,
-    engine_group_id: String,
-    name: String,
-    avatar_ref: Option<String>,
-    created_at: u64,
-    updated_at: u64,
-    // Total number of members in the group (computed from persistent MLS engine)
-    member_count: u32,
-}
-
-/// Return detailed MLS group metadata so the frontend can render group names and avatars
 #[tauri::command]
-async fn list_mls_groups_detailed() -> Result<Vec<MlsGroupInfo>, String> {
-    // Run in a blocking thread so the outer future is Send (Tauri requires commands' futures to be Send)
-    tokio::task::spawn_blocking(move || {
-        // Acquire handle in blocking context
-        let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+async fn get_mls_group_metadata() -> Result<Vec<serde_json::Value>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+    let groups = db_migration::load_mls_groups(&handle)
+        .await
+        .map_err(|e| format!("Failed to load MLS group metadata: {}", e))?;
 
-        // Use current runtime to drive our small async decrypt step
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async move {
-            // Load groups from SQL/store
-            let groups = db_migration::load_mls_groups(&handle).await.unwrap_or_default();
-
-            // Try to open persistent MLS engine for computing member counts
-            // This block must avoid awaits while engine is in scope
-            let maybe_engine = match MlsService::new_persistent(&handle) {
-                Ok(svc) => svc.engine().ok(),
-                Err(_) => None,
-            };
-
-            // Needed to decode engine group ids
-            use mdk_core::prelude::GroupId;
-
-            // Build enriched infos with member_count computed from engine (fallback to 0 on any failure)
-            let infos = groups
-                .into_iter()
-                .filter_map(|g| {
-                    // Skip evicted groups
-                    if g.evicted {
-                        return None;
-                    }
-
-                    // Prefer engine_group_id for engine lookup; fallback to wire group_id
-                    let engine_id_hex = if !g.engine_group_id.is_empty() {
-                        g.engine_group_id.clone()
-                    } else {
-                        g.group_id.clone()
-                    };
-
-                    // Default to 0 members if engine not available or lookup fails
-                    let mut member_count: u32 = 0;
-
-                    if let Some(engine) = &maybe_engine {
-                        if let Ok(bytes) = hex::decode(&engine_id_hex) {
-                            let gid = GroupId::from_slice(&bytes);
-                            if let Ok(pks) = engine.get_members(&gid) {
-                                member_count = pks.len() as u32;
-                            }
-                        }
-                    }
-
-                    Some(MlsGroupInfo {
-                        group_id: g.group_id,
-                        engine_group_id: g.engine_group_id,
-                        name: g.name,
-                        avatar_ref: g.avatar_ref,
-                        created_at: g.created_at,
-                        updated_at: g.updated_at,
-                        member_count,
-                    })
-                })
-                .collect::<Vec<MlsGroupInfo>>();
-
-            Ok(infos)
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    Ok(groups
+        .iter()
+        .filter(|meta| !meta.evicted)
+        .map(|meta| mls::metadata_to_frontend(meta))
+        .collect())
 }
-
 
 #[derive(serde::Serialize, Clone)]
 struct GroupMembers {
@@ -4545,7 +4429,8 @@ async fn refresh_keypackages_for_contact(
     let filter = Filter::new()
         .author(contact_pubkey)
         .kind(Kind::MlsKeyPackage)
-        .limit(200);
+        // Only need the newest KeyPackage
+        .limit(1);
 
     // Fetch from TRUSTED_RELAY with short timeout
     let mut events = client
@@ -4759,23 +4644,20 @@ pub fn run() {
             check_fawkes_badge,
             get_storage_info,
             clear_storage,
+            load_mls_device_id,
+            load_mls_keypackages,
             export_keys,
-            bootstrap_mls_device_keypackage,
-            // Simple MLS command wrappers for console/manual testing:
-            mls_create_group_simple,
-            mls_send_group_message_simple,
+            regenerate_device_keypackage,
             // MLS core commands
             create_group_chat,
             create_mls_group,
-            send_mls_group_message,
             sync_mls_groups_now,
             list_mls_groups,
-            list_mls_groups_detailed,
+            get_mls_group_metadata,
             // MLS welcome/invite commands
             list_pending_mls_welcomes,
             accept_mls_welcome,
             // MLS advanced helpers
-            process_mls_event,
             add_mls_member_device,
             invite_member_to_group,
             remove_mls_member_device,

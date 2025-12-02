@@ -608,6 +608,140 @@ domSettingsLogout.onclick = async (evt) => {
     await invoke('logout');
 };
 
+// Check if this device is the primary one (has the latest keypackage)
+async function checkPrimaryDeviceStatus() {
+    try {
+        // Refresh keypackages from the network for the current user
+        try {
+            await invoke('refresh_keypackages_for_contact', { npub: strPubkey });
+        } catch (error) {
+            // Continue with local data if network fetch fails
+        }
+        
+        // Get all keypackages for the current account (now includes fresh network data)
+        const keypackages = await invoke('load_mls_keypackages');
+        
+        if (!keypackages || keypackages.length === 0) {
+            updatePrimaryDeviceDot(false);
+            return;
+        }
+        
+        let userKeypackages = keypackages.filter(kp =>
+            kp.owner_pubkey === strPubkey
+        );
+        
+        // Deduplicate entries with the same keypackage_ref (event ID)
+        // Since device_id is purely local, we use keypackage_ref as the common identifier
+        const deduped = new Map();
+        for (const kp of userKeypackages) {
+            const ref = kp.keypackage_ref;
+            if (!deduped.has(ref)) {
+                deduped.set(ref, kp);
+            }
+        }
+        userKeypackages = Array.from(deduped.values());
+        
+        if (userKeypackages.length === 0) {
+            updatePrimaryDeviceDot(false);
+            return;
+        }
+        
+        // Find the latest keypackage (highest fetched_at timestamp)
+        const latestKeypackage = userKeypackages.reduce((latest, current) => {
+            return (current.fetched_at > latest.fetched_at) ? current : latest;
+        });
+        
+        // Check if this device created the latest keypackage
+        // Get the local device_id to find keypackages created by this device
+        let myDeviceId;
+        try {
+            myDeviceId = await invoke('load_mls_device_id');
+        } catch (error) {
+            updatePrimaryDeviceDot(false);
+            return;
+        }
+        
+        // Find keypackages that have our device_id (created locally)
+        const myKeypackages = userKeypackages.filter(kp =>
+            kp.device_id === myDeviceId
+        );
+        
+        // Get the most recent keypackage created by this device
+        const myLatestKeypackage = myKeypackages.length > 0
+            ? myKeypackages.reduce((latest, current) =>
+                (current.fetched_at > latest.fetched_at) ? current : latest
+              )
+            : null;
+        
+        const myLatestKeypackageRef = myLatestKeypackage?.keypackage_ref;
+        
+        // This device is primary if its latest keypackage matches the overall latest
+        const isPrimary = myLatestKeypackageRef && latestKeypackage.keypackage_ref === myLatestKeypackageRef;
+        updatePrimaryDeviceDot(isPrimary);
+        
+    } catch (error) {
+        console.error('Error checking primary device status:', error);
+        updatePrimaryDeviceDot(false);
+    }
+}
+
+// Update the primary device dot UI
+function updatePrimaryDeviceDot(isPrimary) {
+    const dot = document.getElementById('primary-device-dot');
+    if (dot) {
+        dot.className = 'device-status-dot ' + (isPrimary ? 'primary' : 'not-primary');
+    }
+}
+
+// Show info popup about primary device status
+async function showPrimaryDeviceInfo() {
+    const dot = document.getElementById('primary-device-dot');
+    const isPrimary = dot?.classList.contains('primary');
+    
+    if (isPrimary) {
+        await popupConfirm(
+            'Primary Device',
+            'This device is currently the Primary Device for receiving Group Invites.',
+            true,
+            '',
+            'vector-check.svg'
+        );
+    } else {
+        await popupConfirm(
+            'Not Primary Device',
+            'This device is NOT currently the Primary Device for receiving Group Invites.',
+            true,
+            '',
+            'vector_warning.svg'
+        );
+    }
+}
+
+// Listen for Refresh KeyPackages clicks
+const domRefreshKeypkg = document.getElementById('refresh-keypkg-btn');
+if (domRefreshKeypkg) {
+    domRefreshKeypkg.onclick = async (evt) => {
+        if (domRefreshKeypkg.disabled) return;
+
+        // Disable button to prevent multiple clicks
+        domRefreshKeypkg.disabled = true;
+        try {
+            await invoke('regenerate_device_keypackage', { cache: false });
+            // Wait a moment for the database to be updated
+            await new Promise(resolve => setTimeout(resolve, 100));
+            // Refresh primary device status after keypackage regeneration
+            await checkPrimaryDeviceStatus();
+            await popupConfirm('KeyPackages Refreshed', 'A new device KeyPackage has been generated.', true, '', 'vector-check.svg');
+        } catch (error) {
+            console.error('Refresh KeyPackages failed:', error);
+            await popupConfirm('Refresh Failed', error.toString(), true, '', 'vector_warning.svg');
+        } finally {
+            // Re‑enable button regardless of success or failure
+            domRefreshKeypkg.disabled = false;
+        }
+    };
+}
+
 // Listen for Deep Rescan clicks
 const domSettingsDeepRescan = document.getElementById('deep-rescan-btn');
 domSettingsDeepRescan.onclick = async (evt) => {
@@ -796,10 +930,21 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
         return { name: category.name, size: size };
     });
     
-    // Calculate size for other files
+    // Add AI Models category if ai_models exists in type distribution
+    if (typeDistribution['ai_models']) {
+        categorySizes.push({
+            name: 'AI',
+            size: typeDistribution['ai_models']
+        });
+    }
+    
+    // Calculate size for other files (excluding ai_models)
     let otherSize = 0;
     for (const ext in typeDistribution) {
         let isCategorized = false;
+        // Skip ai_models as it's already handled
+        if (ext === 'ai_models') continue;
+        
         for (const category of categories) {
             if (category.extensions.includes(ext)) {
                 isCategorized = true;
@@ -838,14 +983,20 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
     const primaryColor = getComputedStyle(root).getPropertyValue('--icon-color-primary').trim();
     
     // Create segments in the bar
+    const largestSize = segments[0].size;
+    
     for (const segmentData of segments) {
-        const size = Number(segmentData.size);
+        const size = segmentData.size;
         // Use sum of all typeDistribution values as total, since totalBytes is incorrect
-        const total = Object.values(typeDistribution).reduce((sum, val) => sum + Number(val), 0);
+        const total = Object.values(typeDistribution).reduce((sum, val) => sum + val, 0);
         const percentage = (size / total) * 100;
-        // Convert hex to RGB and set opacity based on percentage
+        // Convert hex to RGB and set opacity
         const rgbColor = hexToRgb(primaryColor);
-        const opacity = percentage / 100;
+        
+        // Calculate opacity relative to the largest segment
+        // Largest segment gets 100% opacity, others get proportionally less
+        const relativeOpacity = size / largestSize;
+        
         // Round to 2 decimal places to avoid floating point precision issues
         const roundedPercentage = Math.round(percentage * 100) / 100;
         const segment = document.createElement('div');
@@ -853,7 +1004,7 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
         segment.style.flexShrink = '0';
         segment.style.boxSizing = 'border-box';
         // Ensure minimum opacity of 1% for visibility
-        const preciseOpacity = Math.max(0.01, opacity);
+        const preciseOpacity = Math.max(0.01, relativeOpacity);
         // Set background color using CSS variable and opacity
         // Apply opacity directly to background using existing primaryColor and rgbColor
         const backgroundColor = `rgba(${rgbColor.r}, ${rgbColor.g}, ${rgbColor.b}, ${preciseOpacity})`;
@@ -869,7 +1020,8 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
             label.style.top = '50%';
             label.style.left = '50%';
             label.style.transform = 'translate(-50%, -50%)';
-            label.style.color = 'white';
+            // Change text color to black when opacity is 50% or above
+            label.style.color = preciseOpacity >= 0.5 ? 'black' : 'white';
             label.style.textAlign = 'center';
             label.style.fontWeight = 'bold';
             label.style.fontSize = '12px';
@@ -1046,4 +1198,8 @@ async function initSettings() {
         const success = await clearStorage();
         if (success) initStorageSection();
     });
+
+    // Add click handler for primary device status
+    const primaryDeviceStatus = document.getElementById('primary-device-status');
+    primaryDeviceStatus.onclick = showPrimaryDeviceInfo;
 }

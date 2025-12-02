@@ -43,7 +43,7 @@
           <hr class="divider">
         </div>
         <div class="popup-buttons">
-          <button id="popupConfirm">Confirm</button><button id="popupCancel" class="popup-cancel-btn">Cancel</button>
+          <button id="popupConfirm">Confirm</button><button id="popupCancel" class="cancel-btn">Cancel</button>
         </div>
       </center>
     </div>
@@ -239,6 +239,41 @@
         </div>
       </div>
 
+      <div id="create-group" style="display: none; overflow-x: hidden;">
+        <div class="chat-new-header">
+          <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
+            <span class="icon icon-chevron-double-left nav-icon"></span>
+            <p class="chat-new-back-text">Back</p>
+          </div>
+        </div>
+
+        <center class="chat-new-content">
+          <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
+          <hr class="divider chat-new-divider">
+          <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+            <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
+          </div>
+        </center>
+
+        <center class="chat-new-center-content" style="position: static; padding: 0 15px; box-sizing: border-box; width: 100%;">
+          <h2 class="chat-new-subtitle">Select Members</h2>
+          <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
+          <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
+            <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input" style="width: 75%" />
+            <div id="create-group-list" style="margin-top: 10px; max-height: 150px; overflow-y: auto; width: 100%; box-sizing: border-box;"></div>
+          </div>
+        </center>
+
+        <div style="display: flex; gap: 10px; padding: 15px; justify-content: center;">
+          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
+          <button id="create-group-cancel-btn" class="btn cancel-btn">Cancel</button>
+        </div>
+
+        <center>
+          <p id="create-group-status" class="chat-contact-status" style="display: none; opacity: 0.8;"></p>
+        </center>
+      </div>
+
       <!-- Settings -->
       <div id="settings" style="display: none;">
         <h2 style="margin-top: 40px">Choose your Theme</h2>
@@ -248,18 +283,35 @@
         </select>
 
         <!-- Voice Settings Section -->
-        <div id="settings-voice" class="settings-section">
-          <hr class="divider settings-divider">
-          <h2>Voice Settings</h2>
+        <div id="settings-voice" class="settings-section" style="display: none;">
+        <hr class="divider settings-divider">
+        <h2>Voice Settings</h2>
 
-          <div class="form-group">
-            <label class="toggle-container">
-              <span>
-                <span id="whisper-auto-translate-info" class="icon icon-info btn"
-                  style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto-Translate</span>
-              <input type="checkbox" id="auto-translate-toggle">
-              <span class="neon-toggle"></span>
-            </label>
+         <div class="form-group">
+          <label class="toggle-container">
+            <span><span id="whisper-auto-translate-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto-Translate</span>
+            <input type="checkbox" id="auto-translate-toggle">
+            <span class="neon-toggle"></span>
+          </label>
+        </div>
+        
+         <div class="form-group">
+          <label class="toggle-container">
+            <span>
+            <span id="whisper-auto-transcribe-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Auto-Transcribe</span>
+            <input type="checkbox" id="auto-transcribe-toggle">
+            <span class="neon-toggle"></span>
+          </label>
+        </div>
+
+        <div class="form-group" style="margin-top: 30px;">
+          <label for="whisper-model" style="display: inline-flex; align-items: center;">Whisper Model
+          <span id="whisper-model-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; margin-left: 5px;"></span></label>
+          <div class="model-select-container">
+            <select id="whisper-model" class="form-control" style="margin-top: 10px;"></select>
+            <button id="delete-model" class="btn-delete-model" title="Delete selected model">
+              <span class="icon-trash"></span>
+            </button>
           </div>
 
           <div class="form-group">
@@ -351,7 +403,7 @@
             </div>
           </div>
           <div class="form-group" style="margin-top: 15px;">
-            <button id="clear-storage-btn" class="btn logout-btn">Clear Storage</button>
+            <button id="clear-storage-btn" class="btn cancel-btn">Clear Storage</button>
           </div>
         </div>
 
@@ -360,7 +412,7 @@
           <hr class="divider settings-divider">
           <h2>Updates</h2>
           <div class="update-info">
-            <p style="opacity: 0.7;">Current Version: <span id="current-version">Loading...</span></p>
+            <p><span style="opacity: 0.7;">Current Version: </span><span id="current-version"></span></p>
             <p id="new-version-display" style="display: none;">New Version: <span id="new-version"></span></p>
 
             <!-- Changelog -->
@@ -387,13 +439,72 @@
           </div>
         </div>
 
+        <!-- Donors & Contributors Section -->
+        <div id="settings-donors" class="settings-section" style="text-align: center;">
+          <hr class="divider settings-divider">
+          <h3 style="opacity: 0.6; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 5px;">Donors & Contributors
+            <span id="donors-info" class="icon icon-info btn" style="width: 16px; height: 16px; position: relative; display: inline-block; margin-left: 8px;"></span>
+          </h3>
+          <div class="donors-list" style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; padding: 15px 0;">
+            <div id="donor-pivx" class="btn" style="cursor: pointer;">
+              <img src="./icons/PIVX-White.svg" alt="PIVX" style="height: 40px; width: auto;">
+            </div>
+          </div>
+        </div>
+
         <div class="settings-section">
           <hr class="divider settings-divider">
           <img src="./icons/aggro-glitch.gif">
-          <h2 class="danger-title">Dangerzone</h2>
-          <button id="deep-rescan-btn" class="logout-btn">Deep Rescan</button>
-          <button id="export-account-btn" class="logout-btn">Export Account</button>
-          <button id="logout-btn" class="logout-btn">Logout</button>
+          <h2 class="danger-title" style="margin-bottom: 0; margin-top: 0;">Dangerzone</h2>
+          <p class="danger-subtitle">Irreversible Actions</p>
+          <div class="danger-buttons">
+
+            <center id="primary-device-status" class="btn" style="width: 100%;margin-bottom: 15px; display: inline-flex; align-items: center; justify-content: center;">
+              <span>Primary Device Status</span>
+              <div id="primary-device-dot" class="device-status-dot" style="margin-left: 8px;"></div>
+            </center>
+
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="refresh-keypkg-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Refresh KeyPackages</span>
+              </div>
+              <button id="refresh-keypkg-btn" class="cancel-btn">
+                Refresh
+              </button>
+            </div>
+
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="deep-rescan-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Deep Rescan</span>
+              </div>
+              <button id="deep-rescan-btn" class="cancel-btn">
+                Rescan
+              </button>
+            </div>
+
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Export Account</span>
+              </div>
+              <button id="export-account-btn" class="cancel-btn">
+                Export
+              </button>
+            </div>
+
+            <div class="danger-option">
+              <div class="left-group">
+                <span id="logout-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Logout</span>
+              </div>
+              <button id="logout-btn" class="danger-btn">
+                <img src="./icons/warning_pink.png" class="danger-btn-icon" alt="">
+                Logout
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

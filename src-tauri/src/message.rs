@@ -602,40 +602,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     // Route to appropriate protocol handler
     if is_group_chat {
         // MLS Group Chat - send through MLS engine
-        match crate::mls::send_mls_message(&receiver, built_rumor.clone()).await {
-            Ok(_) => {
-                // Mark the message as a success
-                let pending_id_for_success = Arc::clone(&pending_id);
-                let mut state = STATE.lock().await;
-                let sent_msg = state.chats.iter_mut()
-                    .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
-                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_success))
-                    .unwrap();
-                sent_msg.id = rumor_id.to_hex();
-                sent_msg.pending = false;
-
-                // Update the frontend
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": pending_id_for_success.as_ref(),
-                    "message": &sent_msg,
-                    "chat_id": &receiver
-                })).unwrap();
-
-                // Save the message to our DB
-                let handle = TAURI_APP.get().unwrap();
-                let message_to_save = sent_msg.clone();
-                let chat_to_save = state.get_chat(&receiver).cloned();
-                drop(state); // Release lock before async DB operations
-                
-                if let Some(chat) = chat_to_save {
-                    let _ = save_chat(handle.clone(), &chat).await;
-                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
-                }
-                return Ok(true);
-            }
+        // Note: send_mls_message handles all state management internally:
+        // - Uses the pending message we created above (via pending_id)
+        // - Updates message ID when processed
+        // - Marks as success/failure after network confirmation
+        // - Saves to database
+        match crate::mls::send_mls_message(&receiver, built_rumor.clone(), Some(pending_id.to_string())).await {
+            Ok(_) => return Ok(true),
             Err(e) => {
                 eprintln!("Failed to send MLS message: {:?}", e);
-                mark_message_failed(Arc::clone(&pending_id), &receiver).await;
                 return Ok(false);
             }
         }
@@ -1010,7 +985,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
             let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
             
             // Send through MLS
-            crate::mls::send_mls_message(&chat_id, rumor).await?;
+            crate::mls::send_mls_message(&chat_id, rumor, None).await?;
             
             // Add reaction to local state
             let reaction = Reaction {

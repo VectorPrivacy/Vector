@@ -59,6 +59,18 @@
   mask-image: url("./icons/file-search.svg");
 }
 
+.icon-file-unknown {
+  mask-image: url("./icons/file-unknown.svg");
+}
+
+.icon-file {
+  mask-image: url("./icons/file.svg");
+}
+
+.icon-film {
+  mask-image: url("./icons/film.svg");
+}
+
 .icon-gift {
   mask-image: url("./icons/gift.svg");
 }
@@ -463,6 +475,52 @@ body {
   cursor: pointer;
 }
 
+/* Dangerzone button group styling */
+.danger-buttons {
+  display: block;
+}
+
+/* Style each danger option like toggle-container */
+.danger-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Make dangerzone buttons thinner */
+.danger-option button {
+  padding-top: 0.4em;
+  padding-bottom: 0.4em;
+  margin-bottom: 0.5em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Style the warning icon inside danger buttons */
+.danger-btn-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Left side (info icon + label) stays together */
+.danger-option .left-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Set opacity for all info icons */
+.icon-info {
+  opacity: 0.5;
+}
+
+/* Add spacing to dangerzone info icons */
+.danger-option .icon-info {
+  margin-right: 5px;
+}
+
 .profile-banner-edit {
   position: absolute;
   top: 10px;
@@ -475,6 +533,46 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+/* Style individual options within the danger zone */
+.danger-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* left info+title, right button */
+  gap: 8px;
+  width: 100%;
+}
+
+/* Left side (info icon and label) should take remaining space */
+.danger-option .left-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Ensure the button stays on the right */
+.danger-option button {
+  margin-left: auto;
+}
+
+/* Primary Device Status Dot */
+.device-status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-left: 10px;
+  display: inline-block;
+  vertical-align: middle;
+  transition: background-color 0.3s ease;
+}
+
+.device-status-dot.primary {
+  background-color: #59fcb3; /* Green for primary device */
+}
+
+.device-status-dot.not-primary {
+  background-color: #ff5252; /* Red for not primary device */
 }
 
 .profile-options {
@@ -897,7 +995,6 @@ body {
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
-  overflow-x: auto;
 }
 
 .msg-them p {
@@ -1068,6 +1165,7 @@ body {
   border-color: transparent !important;
   padding-left: 0 !important;
   padding-right: 0 !important;
+  padding-top: 0 !important;
   padding-bottom: 0 !important;
 }
 
@@ -2032,11 +2130,22 @@ select:disabled:hover {
   transform: none;
 }
 
-.popup-cancel-btn {
+.cancel-btn {
+  backdrop-filter: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background-color: #00000000;
   margin-left: 10px;
   backdrop-filter: none;
   border-color: #ff2ea9;
   background-color: #161616;
+}
+
+.cancel-btn:disabled,
+.cancel-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: grayscale(0.6);
 }
 
 #popupConfirm {
@@ -2168,14 +2277,28 @@ select:disabled:hover {
 }
 
 .danger-title {
+  color: white;
+}
+
+.danger-subtitle {
   color: #ff2ea9;
+  font-size: 12px;
+  text-align: center;
+  margin-top: 5px;
+  margin-bottom: 15px;
   margin-top: 0px;
 }
 
-.logout-btn {
+.cancel-btn {
+  backdrop-filter: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background-color: #00000000;
+}
+
+.danger-btn {
   backdrop-filter: none;
   border-color: #ff2ea9;
-  background-color: #161616;
+  background-color: #00000000;
 }
 
 .navbar {
@@ -2841,16 +2964,16 @@ select:disabled:hover {
   font-size: 12px;
   font-weight: 600;
   padding: 4px 12px;
-  border-radius: 12px;
+  border-radius: 20px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   white-space: nowrap;
 }
 
 .relay-status.connected {
-  background: rgba(89, 252, 179, 0.2);
+  background: rgba(90, 252, 180, 0.1);
   color: #59fcb3;
-  border: 1px solid rgba(89, 252, 179, 0.3);
+  border: 1px solid rgba(90, 252, 180, 0.5);
 }
 
 .relay-status.connecting {
@@ -3089,9 +3212,8 @@ select:disabled:hover {
 }
 
 #check-updates-btn {
-  margin: 10px auto;
-  padding: 12px 24px;
-  font-weight: 600;
+  margin: 0 auto;
+  padding: 8px 24px;
 }
 
 #update-status-text {
