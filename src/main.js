@@ -5397,8 +5397,79 @@ window.addEventListener("DOMContentLoaded", async () => {
         applyTheme(strTheme);
     }
 
-    // If a local account exists, boot up the decryption UI
-    if (await hasAccount()) {
+    // [DEBUG MODE] Check if backend already has state from a previous session (hot-reload scenario)
+    // This allows skipping the entire login/decrypt flow during development hot-reloads
+    let fDebugHotReloaded = false;
+    if (platformFeatures.debug_mode) {
+        try {
+            const hotReloadState = await invoke('debug_hot_reload_sync');
+            if (hotReloadState && hotReloadState.success) {
+                console.log('[Debug Hot-Reload] Backend state recovered, skipping login flow');
+                
+                // Hydrate frontend state from backend
+                strPubkey = hotReloadState.npub;
+                arrProfiles = hotReloadState.profiles || [];
+                arrChats = hotReloadState.chats || [];
+                
+                // Setup Rust listeners
+                await setupRustListeners();
+                
+                // Hydrate MLS group metadata
+                await hydrateMLSGroupMetadata();
+                
+                // Hide login UI and show main UI
+                domLogin.style.display = 'none';
+                domLoginEncrypt.style.display = 'none';
+                domNavbar.style.display = '';
+                domChatBookmarksBtn.style.display = 'flex';
+                
+                // Render our profile
+                const cProfile = arrProfiles.find(p => p.mine);
+                renderCurrentProfile(cProfile);
+                domAccount.style.display = '';
+                
+                // Mark init as complete so renderChatlist works
+                fInit = false;
+                
+                // Render the chatlist
+                renderChatlist();
+                
+                // Show the New Chat buttons (same as normal login flow)
+                if (domChatNewDM) {
+                    domChatNewDM.style.display = '';
+                    domChatNewDM.onclick = openNewChat;
+                }
+                if (domChatNewGroup) {
+                    domChatNewGroup.style.display = '';
+                    domChatNewGroup.onclick = openCreateGroup;
+                }
+                
+                // Adjust sizes
+                adjustSize();
+                
+                // Update unread counter
+                await invoke('update_unread_counter');
+                
+                // Monitor relay connections and render relay list
+                invoke("monitor_relay_connections");
+                renderRelayList();
+                
+                // Initialize the updater (version info, update button)
+                initializeUpdater();
+                
+                console.log(`[Debug Hot-Reload] Restored ${arrProfiles.length} profiles, ${arrChats.length} chats`);
+                
+                // Mark as hot-reloaded so we skip the login flow but continue with button setup
+                fDebugHotReloaded = true;
+            }
+        } catch (e) {
+            // Backend not initialized - continue normal flow
+            console.log('[Debug Hot-Reload] Backend not initialized, proceeding with normal login');
+        }
+    }
+
+    // If a local account exists, boot up the decryption UI (skip if hot-reloaded)
+    if (!fDebugHotReloaded && await hasAccount()) {
         // Account is available, login screen!
         openEncryptionFlow(null, true);
     }
