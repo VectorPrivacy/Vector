@@ -8,6 +8,7 @@ let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
  * @property {boolean} transcription - Whether transcriptions are enabled
  * @property {"android" | "ios" | "macos" | "windows" | "linux" | "unknown"} os - The operating system
  * @property {boolean} is_mobile - Whether the platform is mobile (Android or iOS)
+ * @property {boolean} debug_mode - Whether the app is running in debug/development mode
  */
 
 /** @type {PlatformFeatures} */

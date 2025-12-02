@@ -2651,6 +2651,54 @@ struct LoginKeyPair {
     private: String,
 }
 
+/// # Debug Hot-Reload State Sync
+///
+/// This command ONLY compiles in debug builds and provides a fast-path for
+/// frontend hot-reloads during development. When the frontend hot-reloads,
+/// the backend retains all state, so we can skip the entire login/decrypt
+/// flow and just bulk-send the existing state back to the frontend.
+///
+/// Returns:
+/// - `Ok(json)` with full state if backend is already initialized
+/// - `Err(...)` if backend is not initialized (frontend should do normal login)
+#[cfg(debug_assertions)]
+#[tauri::command]
+async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
+    // Check if we have an active Nostr client (meaning we're already logged in)
+    let client = match NOSTR_CLIENT.get() {
+        Some(c) => c,
+        None => return Err("Backend not initialized - perform normal login".to_string()),
+    };
+    
+    // Get the current user's public key
+    let signer = client.signer().await.map_err(|e| format!("Signer error: {}", e))?;
+    let my_npub = signer.get_public_key().await
+        .map_err(|e| format!("Public key error: {}", e))?
+        .to_bech32()
+        .map_err(|e| format!("Bech32 error: {}", e))?;
+    
+    // Get the full state
+    let state = STATE.lock().await;
+    
+    // Verify we have meaningful state (not just an empty initialized state)
+    if state.profiles.is_empty() && state.chats.is_empty() {
+        return Err("Backend state is empty - perform normal login".to_string());
+    }
+    
+    // Return the full state for the frontend to hydrate
+    println!("[Debug Hot-Reload] Sending cached state to frontend ({} profiles, {} chats)",
+             state.profiles.len(), state.chats.len());
+    
+    Ok(serde_json::json!({
+        "success": true,
+        "npub": my_npub,
+        "profiles": &state.profiles,
+        "chats": &state.chats,
+        "is_syncing": state.is_syncing,
+        "sync_mode": format!("{:?}", state.sync_mode)
+    }))
+}
+
 #[tauri::command]
 async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     let keys: Keys;
@@ -3057,6 +3105,7 @@ struct PlatformFeatures {
     transcription: bool,
     os: String,
     is_mobile: bool,
+    debug_mode: bool,
     // Add more features here as needed
 }
 
@@ -3083,6 +3132,7 @@ async fn get_platform_features() -> PlatformFeatures {
         transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
         os: os.to_string(),
         is_mobile,
+        debug_mode: cfg!(debug_assertions),
     }
 }
 
@@ -4622,6 +4672,8 @@ pub fn run() {
             generate_blurhash_preview,
             download_attachment,
             login,
+            #[cfg(debug_assertions)]
+            debug_hot_reload_sync,
             notifs,
             get_relays,
             get_media_servers,
