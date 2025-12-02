@@ -111,6 +111,8 @@ const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-t
 const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
+const domSettingsDonorsInfo = document.getElementById('donors-info');
+const domDonorPivx = document.getElementById('donor-pivx');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
@@ -2257,9 +2259,14 @@ async function renderRelayList() {
         // Clear existing content
         networkList.innerHTML = '';
         
-        // Add Nostr Relays subtitle with info button
+        // Add Nostr Relays subtitle with info button - wrap in container for centering
+        const relaysTitleContainer = document.createElement('div');
+        relaysTitleContainer.style.textAlign = 'center';
+        
         const relaysTitle = document.createElement('h3');
         relaysTitle.className = 'network-section-title';
+        relaysTitle.style.display = 'inline-flex';
+        relaysTitle.style.alignItems = 'center';
         relaysTitle.textContent = 'Nostr Relays';
         
         const relaysInfoBtn = document.createElement('span');
@@ -2268,8 +2275,7 @@ async function renderRelayList() {
         relaysInfoBtn.style.height = '16px';
         relaysInfoBtn.style.position = 'relative';
         relaysInfoBtn.style.display = 'inline-block';
-        relaysInfoBtn.style.verticalAlign = 'middle';
-        relaysInfoBtn.style.marginLeft = '5px';
+        relaysInfoBtn.style.marginLeft = '8px';
         relaysInfoBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2277,7 +2283,8 @@ async function renderRelayList() {
         };
         
         relaysTitle.appendChild(relaysInfoBtn);
-        networkList.appendChild(relaysTitle);
+        relaysTitleContainer.appendChild(relaysTitle);
+        networkList.appendChild(relaysTitleContainer);
         
         // Create relay items
         relays.forEach(relay => {
@@ -2298,10 +2305,15 @@ async function renderRelayList() {
             networkList.appendChild(relayItem);
         });
         
-        // Add Media Servers subtitle with info button
+        // Add Media Servers subtitle with info button - wrap in container for centering
+        const mediaTitleContainer = document.createElement('div');
+        mediaTitleContainer.style.textAlign = 'center';
+        mediaTitleContainer.style.marginTop = '2rem';
+        
         const mediaTitle = document.createElement('h3');
         mediaTitle.className = 'network-section-title';
-        mediaTitle.style.marginTop = '2rem';
+        mediaTitle.style.display = 'inline-flex';
+        mediaTitle.style.alignItems = 'center';
         mediaTitle.textContent = 'Media Servers';
         
         const mediaInfoBtn = document.createElement('span');
@@ -2310,8 +2322,7 @@ async function renderRelayList() {
         mediaInfoBtn.style.height = '16px';
         mediaInfoBtn.style.position = 'relative';
         mediaInfoBtn.style.display = 'inline-block';
-        mediaInfoBtn.style.verticalAlign = 'middle';
-        mediaInfoBtn.style.marginLeft = '5px';
+        mediaInfoBtn.style.marginLeft = '8px';
         mediaInfoBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2319,7 +2330,8 @@ async function renderRelayList() {
         };
         
         mediaTitle.appendChild(mediaInfoBtn);
-        networkList.appendChild(mediaTitle);
+        mediaTitleContainer.appendChild(mediaTitle);
+        networkList.appendChild(mediaTitleContainer);
         
         // Create media server items
         mediaServers.forEach(serverUrl => {
@@ -5757,6 +5769,20 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.', true);
+    };
+
+    // Donors & Contributors info button
+    domSettingsDonorsInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Donors & Contributors', 'The organisations listed below have contributed either <b>financially or resourcefully</b> (developers, infrastructure, etc) to Vector\'s development.<br><br>We extend our sincere thanks to these supporters for helping make Vector possible.', true);
+    };
+
+    // PIVX donor logo click - opens pivx.org
+    domDonorPivx.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openUrl('https://pivx.org');
     };
 
     // Add npub copy functionality for chat-new section
