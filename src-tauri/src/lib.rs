@@ -304,42 +304,23 @@ impl ChatState {
             // Find the last read message ID for this chat
             let last_read_id = &chat.last_read;
             
-            let unread_count = if last_read_id.is_empty() {
-                // No last_read_id set - walk backwards from the end to find unread messages
-                let mut unread_messages = 0;
-                // Iterate messages in reverse order (newest first)
-                for msg in chat.messages.iter().rev() {
-                    if msg.mine {
-                        // If we find our own message first, everything before it is considered read
-                        // (because we responded to those messages)
-                        break;
-                    } else {
-                        // Count non-mine messages (unread)
-                        unread_messages += 1;
-                    }
+            // Walk backwards from the end to count unread messages
+            // Stop when we hit: 1) our own message, or 2) the last_read message
+            let mut unread_count = 0;
+            for msg in chat.messages.iter().rev() {
+                // If we hit our own message, stop - we clearly read everything before it
+                if msg.mine {
+                    break;
                 }
-                unread_messages
-            } else {
-                // Last read message ID is set - count messages after it
-                if let Some(last_read_index) = chat.messages.iter().position(|msg| msg.id == *last_read_id) {
-                    // Count messages after the last read message that are not mine
-                    chat.messages.iter().skip(last_read_index + 1).filter(|msg| !msg.mine).count()
-                } else {
-                    // If last_read_id not found, fall back to walking backwards
-                    let mut unread_messages = 0;
-                    // Iterate messages in reverse order (newest first)
-                    for msg in chat.messages.iter().rev() {
-                        if msg.mine {
-                            // If we find our own message first, everything before it is considered read
-                            break;
-                        } else {
-                            // Count non-mine messages (unread)
-                            unread_messages += 1;
-                        }
-                    }
-                    unread_messages
+                
+                // If we hit the last_read message, stop - everything at and before this is read
+                if !last_read_id.is_empty() && msg.id == *last_read_id {
+                    break;
                 }
-            };
+                
+                // Count this message as unread
+                unread_count += 1;
+            }
             
             total_unread += unread_count as u32;
         }

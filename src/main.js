@@ -1477,38 +1477,27 @@ function countUnreadMessages(chat) {
     // If no messages, return 0
     if (!chat.messages || !chat.messages.length) return 0;
     
-    // If last_read is set, count messages after it
-    if (chat.last_read) {
-        // Find the index of the last read message
-        const lastReadIndex = chat.messages.findIndex(msg => msg.id === chat.last_read);
-        if (lastReadIndex !== -1) {
-            // Count non-mine messages after the last read message
-            let unreadCount = 0;
-            for (let i = lastReadIndex + 1; i < chat.messages.length; i++) {
-                if (!chat.messages[i].mine) {
-                    unreadCount++;
-                }
-            }
-            return unreadCount;
-        }
-        // If last_read message not found, fall back to walk-back logic
-    }
-    
-    // No last_read set or not found - walk backwards from the end
+    // Walk backwards from the end to count unread messages
+    // Stop when we hit: 1) our own message, or 2) the last_read message
     let unreadCount = 0;
-    
-    // Iterate messages in reverse order (newest first)
+
     for (let i = chat.messages.length - 1; i >= 0; i--) {
-        if (chat.messages[i].mine) {
-            // If we find our own message first, everything before it is considered read
-            // (because we responded to those messages)
+        const msg = chat.messages[i];
+        
+        // If we hit our own message, stop - we clearly read everything before it
+        if (msg.mine) {
             break;
-        } else {
-            // Count non-mine messages (unread)
-            unreadCount++;
         }
+        
+        // If we hit the last_read message, stop - everything at and before this is read
+        if (chat.last_read && msg.id === chat.last_read) {
+            break;
+        }
+        
+        // Count this message as unread
+        unreadCount++;
     }
-    
+
     return unreadCount;
 }
 
