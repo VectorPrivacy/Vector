@@ -2001,6 +2001,13 @@ async fn get_media_servers() -> Vec<String> {
 /// Monitor relay pool connection status changes
 #[tauri::command]
 async fn monitor_relay_connections() -> Result<bool, String> {
+    // Guard against multiple invocations (e.g., from hot-reloads in debug mode)
+    static MONITOR_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if MONITOR_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Already running, return success without spawning duplicate tasks
+        return Ok(false);
+    }
+
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let handle = TAURI_APP.get().unwrap().clone();
 

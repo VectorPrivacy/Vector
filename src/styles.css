@@ -196,7 +196,8 @@
   overscroll-behavior: none;
 }
 
-body {
+html, body {
+  height: 100%;
   margin: 0;
 }
 
@@ -229,8 +230,10 @@ body {
   margin: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   text-align: center;
+  height: 100%;
+  min-height: 0;
 }
 
 .settings-btn {
@@ -411,6 +414,76 @@ body {
     opacity: 0; 
     transform: scaleX(0); 
   }
+}
+
+/* Profile Header - Fixed at top */
+.profile-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background-color: rgba(22, 22, 22, 0.85);
+  z-index: 100;
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-header .profile-header-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  max-width: 60%;
+}
+
+.profile-header-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 5px;
+}
+
+.account .profile-header-name-row {
+  width: 100%;
+}
+
+.profile-header #profile-header-avatar-container {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-header #profile-name {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.profile-header #profile-status {
+  width: 100%;
+  text-align: center;
+}
+
+/* Profile Content - Scrollable */
+.profile-content {
+  padding-top: 60px;
+  padding-bottom: 60px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  height: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: none;
+  touch-action: pan-y;
+  box-sizing: border-box;
 }
 
 /* Profile Banner */
@@ -680,24 +753,75 @@ body {
 
 
 .account {
+  display: flex;
   align-items: center;
-  background-color: #161616;
-  padding: 10px;
+  justify-content: center;
+  height: 60px;
+  background-color: rgba(22, 22, 22, 0.85);
+  backdrop-filter: blur(8px);
+  padding: 0 10px;
   margin-bottom: 15px;
 }
 
-.account .placeholder-avatar {
-  margin-right: 10px;
+.account #account-avatar-container,
+.profile-header #profile-header-avatar-container,
+.chat-header #chat-header-avatar-container,
+#group-overview-header-avatar-container {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.account .status {
+.account #account-avatar-container img,
+.account #account-avatar-container .placeholder-avatar,
+.profile-header #profile-header-avatar-container img,
+.profile-header #profile-header-avatar-container .placeholder-avatar,
+.chat-header #chat-header-avatar-container img,
+.chat-header #chat-header-avatar-container .placeholder-avatar,
+#group-overview-header-avatar-container img,
+#group-overview-header-avatar-container .placeholder-avatar {
+  object-fit: cover;
+  object-position: center;
+  height: 22px;
+  width: 22px;
+  border-radius: 100%;
+  display: block;
+}
+
+.account #account-avatar-container .placeholder-avatar,
+.profile-header #profile-header-avatar-container .placeholder-avatar,
+.chat-header #chat-header-avatar-container .placeholder-avatar,
+#group-overview-header-avatar-container .placeholder-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.account #account-name {
   margin: 0;
-  margin-top: 5px;
-  margin-left: auto;
-  margin-right: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 100%;
 }
 
-.account .status .emoji,
+.account #account-status {
+  width: 100%;
+  text-align: center;
+}
+
+.account .placeholder-avatar span {
+  margin: 0;
+  line-height: 1;
+  font-size: 8px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.account #account-status .emoji,
+.profile-header #profile-status .emoji,
 #profile-name .emoji,
 #profile-secondary-name .emoji {
   height: 15px;
@@ -707,9 +831,9 @@ body {
   margin-right: unset;
 }
 
-.account h2 .emoji {
-  height: 22px;
-  width: 22px;
+.account #account-name .emoji {
+  height: 16px;
+  width: 16px;
   border-radius: 0;
   vertical-align: -3px;
   margin-right: unset;
@@ -721,15 +845,6 @@ body {
   font-size: 16px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.75);
-}
-
-.account img {
-  object-fit: cover;
-  object-position: center;
-  height: 35px;
-  width: 35px;
-  margin-right: 10px;
-  border-radius: 100%;
 }
 
 .new-chat-btn {
@@ -869,6 +984,11 @@ body {
   flex-direction: column;
 }
 
+#profile {
+  height: 100%;
+  overflow: hidden;
+}
+
 .back-btn {
   position: absolute;
   cursor: pointer;
@@ -876,6 +996,41 @@ body {
   top: 18px;
   margin: 0;
   z-index: 10;
+}
+
+.chat-header {
+  position: fixed;
+  height: 60px;
+  background-color: rgba(22, 22, 22, 0.85);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  z-index: 100;
+}
+
+.chat-header #chat-contact,
+.chat-header #group-overview-name {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-header #chat-contact-status,
+.chat-header #group-overview-status {
+  width: 100%;
+  text-align: center;
+}
+
+.chat-header #chat-header-avatar-container {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .chat-contact-with-status {
@@ -913,9 +1068,9 @@ body {
   margin-bottom: 2px;
   display: block;
   width: 60%;
-  min-height: 25px;
   margin-left: auto;
   margin-right: auto;
+  margin-top: -1px;
 }
 
 .chat-contact-status .emoji {
@@ -924,13 +1079,25 @@ body {
   vertical-align: -3px;
 }
 
+#chat {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#chat .chat-header {
+  flex-shrink: 0;
+}
+
 .chat-messages {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   overflow-y: scroll;
-  /* An imperfect solution attempting to fit the message list within it's Chat Box proportionately to the window height */
-  height: calc(100% - 100px);
+  /* Use flex: 1 to fill remaining space between header and chat-box */
+  flex: 1;
+  min-height: 0;
   padding-left: 10px;
   padding-right: 10px;
   font-family: 'Rubik';
@@ -940,12 +1107,12 @@ body {
 
 .chat-messages > div:first-child {
   /* The first message should have extra margin from the top */
-  margin-top: 45px;
+  margin-top: 75px;
 }
 
 .chat-messages > div:last-child {
   /* The last message should have extra margin from the bottom */
-  margin-bottom: 15px;
+  margin-bottom: 10px;
 }
 
 .msg-inline-timestamp {
@@ -1260,9 +1427,9 @@ body {
 
 #chat-box {
   width: 100%;
-  height: 55px;
-  position: absolute;
-  bottom: 0;
+  flex-shrink: 0;
+  padding-top: 5px;
+  padding-bottom: 5px;
 }
 
 .chat-input-container {
@@ -1275,6 +1442,13 @@ body {
   margin-left: 8px;
   margin-right: 8px;
   border-radius: 10px;
+}
+
+/* Chat box specific: allow container to grow with textarea */
+#chat-box .chat-input-container {
+  height: auto;
+  min-height: 45px;
+  align-items: flex-start;
 }
 
 .chat-input-container button {
@@ -1292,6 +1466,7 @@ body {
   resize: none;
   overflow: hidden;
   height: 20px;
+  max-height: 150px;
   padding: 10px;
   padding-left: 0;
 }
@@ -1705,7 +1880,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(#060606, #00000000 80%);
+  background: linear-gradient(rgba(7, 7, 7, 0.85), #00000000 80%);
   pointer-events: none;
 }
 
@@ -1765,10 +1940,13 @@ audio {
 
 #settings {
   overflow-y: auto;
-  height: -webkit-fill-available;
+  height: 100%;
   padding-bottom: 100px;
   overscroll-behavior: none;
-  animation: fadeInWithoutTransform 0.4s ease-out
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  box-sizing: border-box;
+  animation: fadeInWithoutTransform 0.4s ease-out;
 }
 
 .settings-section {
@@ -2156,6 +2334,7 @@ select:disabled:hover {
   align-items: center;
   position: absolute;
   top: 10px;
+  left: 0;
   margin-left: 5px;
   padding: 5px;
 }
@@ -2174,9 +2353,16 @@ select:disabled:hover {
 }
 
 .chat-new-header {
-  background-color: #161616;
-  height: 65px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background-color: rgba(22, 22, 22, 0.85);
+  z-index: 100;
+  backdrop-filter: blur(8px);
   display: flex;
+  align-items: center;
 }
 
 .chat-new-content {
@@ -2647,8 +2833,8 @@ select:disabled:hover {
 .chat-bookmarks-btn {
   align-items: center;
   position: absolute;
-  top: 28px;
-  right: 23px;
+  top: 15px;
+  right: 25px;
 }
 
 .corner-float-bottom {
@@ -3336,6 +3522,67 @@ select:disabled:hover {
   color: rgba(255, 255, 255, 0.5);
   font-style: italic;
   padding: 20px;
+}
+
+/* Create Group - Flexbox layout for responsive list */
+.create-group-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.create-group-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 60px;
+  min-height: 0;
+}
+
+/* Override absolute positioning for create-group panel */
+.create-group-content .chat-new-center-content {
+  position: static;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.create-group-content .chat-new-center-content .chat-new-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.create-group-content .chat-new-content:first-child {
+  margin-top: 0; /* Remove default margin since padding-top handles it */
+  flex-shrink: 0; /* Don't shrink the title/input section */
+}
+
+.create-group-list {
+  margin-top: 10px;
+  flex: 1;
+  overflow-y: auto;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 0; /* Critical for flex children with overflow */
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(57, 57, 57, 0.5);
+}
+
+.create-group-footer {
+  display: flex;
+  gap: 10px;
+  padding: 15px;
+  justify-content: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 /* Override: show real checkboxes inside Create Group panel only */
