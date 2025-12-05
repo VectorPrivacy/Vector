@@ -425,6 +425,7 @@ pub async fn get_chat_messages<R: Runtime>(handle: &AppHandle<R>, chat_id: &str)
                 failed: false,
                 mine,
                 npub,
+                wrapper_event_id: None, // Not stored in old Store format
             });
         }
         
@@ -508,8 +509,8 @@ pub async fn save_message<R: Runtime>(
         };
         
         conn.execute(
-            "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id, wrapper_event_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 message.id,
                 chat_int_id,
@@ -521,6 +522,7 @@ pub async fn save_message<R: Runtime>(
                 message.at as i64,
                 message.mine as i32,
                 user_int_id,
+                message.wrapper_event_id,
             ],
         ).map_err(|e| format!("Failed to insert message {}: {}", message.id, e))?;
         
@@ -589,6 +591,7 @@ pub async fn save_chat_messages<R: Runtime>(
                 message.at,
                 message.mine,
                 user_int_id,
+                message.wrapper_event_id.clone(),
             ));
         }
         
@@ -599,10 +602,10 @@ pub async fn save_chat_messages<R: Runtime>(
             .map_err(|e| format!("Failed to start transaction: {}", e))?;
         
         // Use INSERT OR REPLACE to upsert individual messages (preserves other messages in the chat)
-        for (id, encrypted_content, replied_to, preview_json, attachments_json, reactions_json, at, mine, user_int_id) in encrypted_messages {
+        for (id, encrypted_content, replied_to, preview_json, attachments_json, reactions_json, at, mine, user_int_id, wrapper_event_id) in encrypted_messages {
             if let Err(e) = tx.execute(
-                "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id, wrapper_event_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     id,
                     chat_int_id,
@@ -614,6 +617,7 @@ pub async fn save_chat_messages<R: Runtime>(
                     at as i64,
                     mine as i32,
                     user_int_id,
+                    wrapper_event_id,
                 ],
             ) {
                 eprintln!("Failed to insert message {} for chat {}: {}",
@@ -998,5 +1002,378 @@ pub async fn load_mls_device_id<R: Runtime>(
         }
         
         Ok(device_id)
+    }
+}
+
+/// Lightweight attachment reference for file deduplication
+/// Contains only the data needed to reuse an existing upload
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AttachmentRef {
+    /// The SHA256 hash of the original file (used as ID)
+    pub hash: String,
+    /// The message ID containing this attachment
+    pub message_id: String,
+    /// The chat ID containing this message
+    pub chat_id: String,
+    /// The encrypted file URL on the server
+    pub url: String,
+    /// The encryption key
+    pub key: String,
+    /// The encryption nonce
+    pub nonce: String,
+    /// The file extension
+    pub extension: String,
+    /// The encrypted file size
+    pub size: u64,
+}
+
+/// Build a file hash index from all attachments in the database
+/// This is used for file deduplication without loading full message content
+/// Returns a HashMap of file_hash -> AttachmentRef
+pub async fn build_file_hash_index<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<HashMap<String, AttachmentRef>, String> {
+    let mut index: HashMap<String, AttachmentRef> = HashMap::new();
+    
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        // Query all messages with non-empty attachments
+        // The attachments field is stored as plaintext JSON, so no decryption needed!
+        // Collect all data first, then drop the statement before returning connection
+        let attachment_data: Vec<(String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, c.chat_identifier, m.attachments
+                 FROM messages m
+                 JOIN chats c ON m.chat_id = c.id
+                 WHERE m.attachments != '[]'"
+            ).map_err(|e| format!("Failed to prepare attachment query: {}", e))?;
+            
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?, // message_id
+                    row.get::<_, String>(1)?, // chat_identifier
+                    row.get::<_, String>(2)?, // attachments JSON
+                ))
+            }).map_err(|e| format!("Failed to query attachments: {}", e))?;
+            
+            // Collect immediately to consume the iterator while stmt is still alive
+            let result: Result<Vec<_>, _> = rows.collect();
+            result.map_err(|e| format!("Failed to collect attachment rows: {}", e))?
+        }; // stmt is dropped here
+        
+        // Return connection to pool before processing
+        crate::account_manager::return_db_connection(conn);
+        
+        // Process the collected data
+        const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        for (message_id, chat_id, attachments_json) in attachment_data {
+            // Parse the attachments JSON
+            let attachments: Vec<crate::Attachment> = serde_json::from_str(&attachments_json)
+                .unwrap_or_default();
+            
+            // Add each attachment to the index (skip empty hashes and empty URLs)
+            for attachment in attachments {
+                if !attachment.id.is_empty()
+                    && attachment.id != EMPTY_FILE_HASH
+                    && !attachment.url.is_empty()
+                {
+                    index.insert(attachment.id.clone(), AttachmentRef {
+                        hash: attachment.id,
+                        message_id: message_id.clone(),
+                        chat_id: chat_id.clone(),
+                        url: attachment.url,
+                        key: attachment.key,
+                        nonce: attachment.nonce,
+                        extension: attachment.extension,
+                        size: attachment.size,
+                    });
+                }
+            }
+        }
+    }
+    
+    Ok(index)
+}
+
+/// Get paginated messages for a chat (newest first, with offset)
+/// This allows loading messages on-demand instead of all at once
+///
+/// Parameters:
+/// - chat_id: The chat identifier (npub for DMs, group_id for groups)
+/// - limit: Maximum number of messages to return
+/// - offset: Number of messages to skip from the newest
+///
+/// Returns messages in chronological order (oldest first within the batch)
+pub async fn get_chat_messages_paginated<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Message>, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        // Get integer chat ID from identifier
+        let chat_int_id: i64 = conn.query_row(
+            "SELECT id FROM chats WHERE chat_identifier = ?1",
+            rusqlite::params![chat_id],
+            |row| row.get(0)
+        ).map_err(|e| format!("Chat not found: {}", e))?;
+        
+        // Query messages with pagination (newest first, then reverse for chronological order)
+        // We use a subquery to get the right slice, then order chronologically
+        let messages = {
+            let mut stmt = conn.prepare(
+                "SELECT id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id
+                 FROM (
+                     SELECT m.id, m.content_encrypted, m.replied_to, m.preview_metadata, m.attachments, m.reactions, m.at, m.mine, p.npub as user_id
+                     FROM messages m
+                     LEFT JOIN profiles p ON m.user_id = p.id
+                     WHERE m.chat_id = ?1
+                     ORDER BY m.at DESC
+                     LIMIT ?2 OFFSET ?3
+                 )
+                 ORDER BY at ASC"
+            ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
+            
+            let rows = stmt.query_map(rusqlite::params![chat_int_id, limit as i64, offset as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?, // id
+                    row.get::<_, String>(1)?, // content_encrypted
+                    row.get::<_, String>(2)?, // replied_to
+                    row.get::<_, Option<String>>(3)?, // preview_metadata
+                    row.get::<_, String>(4)?, // attachments
+                    row.get::<_, String>(5)?, // reactions
+                    row.get::<_, i64>(6)? as u64, // at
+                    row.get::<_, i32>(7)? != 0, // mine
+                    row.get::<_, Option<String>>(8)?, // npub
+                ))
+            }).map_err(|e| format!("Failed to query messages: {}", e))?;
+            
+            let result: Result<Vec<_>, _> = rows.collect();
+            result.map_err(|e| format!("Failed to collect messages: {}", e))?
+        };
+        
+        crate::account_manager::return_db_connection(conn);
+        
+        // Decrypt content for each message
+        let mut result = Vec::with_capacity(messages.len());
+        for (id, content_encrypted, replied_to, preview_json, attachments_json, reactions_json, at, mine, npub) in messages {
+            let content = internal_decrypt(content_encrypted, None).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string());
+            
+            let attachments: Vec<crate::Attachment> = serde_json::from_str(&attachments_json).unwrap_or_default();
+            let reactions: Vec<crate::Reaction> = serde_json::from_str(&reactions_json).unwrap_or_default();
+            let preview_metadata = preview_json.and_then(|p| serde_json::from_str(&p).ok());
+            
+            result.push(Message {
+                id,
+                content,
+                replied_to,
+                preview_metadata,
+                attachments,
+                reactions,
+                at,
+                pending: false,
+                failed: false,
+                mine,
+                npub,
+                wrapper_event_id: None, // Paginated queries don't need wrapper_event_id
+            });
+        }
+        
+        return Ok(result);
+    }
+    
+    // Fallback: For Store mode, just use the existing function with manual slicing
+    // This is less efficient but maintains backwards compatibility
+    let all_messages = get_chat_messages(handle, chat_id).await?;
+    let total = all_messages.len();
+    
+    if offset >= total {
+        return Ok(vec![]);
+    }
+    
+    // Calculate the slice (from the end, since we want newest first for offset)
+    let end_idx = total.saturating_sub(offset);
+    let start_idx = end_idx.saturating_sub(limit);
+    
+    Ok(all_messages[start_idx..end_idx].to_vec())
+}
+
+/// Get the total message count for a chat
+/// This is useful for the frontend to know how many messages exist without loading them all
+pub async fn get_chat_message_count<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: &str,
+) -> Result<usize, String> {
+    // Check if we have a current account (SQL mode)
+    if let Ok(_npub) = crate::account_manager::get_current_account() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        
+        // Get integer chat ID from identifier
+        let chat_int_id: i64 = conn.query_row(
+            "SELECT id FROM chats WHERE chat_identifier = ?1",
+            rusqlite::params![chat_id],
+            |row| row.get(0)
+        ).map_err(|e| format!("Chat not found: {}", e))?;
+        
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = ?1",
+            rusqlite::params![chat_int_id],
+            |row| row.get(0)
+        ).map_err(|e| format!("Failed to count messages: {}", e))?;
+        
+        crate::account_manager::return_db_connection(conn);
+        
+        return Ok(count as usize);
+    }
+    
+    // Fallback: For Store mode, load all and count
+    let all_messages = get_chat_messages(handle, chat_id).await?;
+    Ok(all_messages.len())
+}
+
+/// Get the last N messages for a chat (for preview purposes)
+/// This is optimized for getting just the most recent messages without loading the full history
+pub async fn get_chat_last_messages<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: &str,
+    count: usize,
+) -> Result<Vec<Message>, String> {
+    // Just use paginated with offset 0
+    get_chat_messages_paginated(handle, chat_id, count, 0).await
+}
+
+/// Check if a message exists in the database by its ID
+/// This is used to prevent duplicate processing during sync
+pub async fn message_exists_in_db<R: Runtime>(
+    handle: &AppHandle<R>,
+    message_id: &str,
+) -> Result<bool, String> {
+    // Try to get a database connection - if it fails, we're not using DB mode
+    let conn = match crate::account_manager::get_db_connection(handle) {
+        Ok(c) => c,
+        Err(_) => return Ok(false), // No DB, let in-memory check handle it
+    };
+    
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+        rusqlite::params![message_id],
+        |row| row.get(0)
+    ).map_err(|e| format!("Failed to check message existence: {}", e))?;
+    
+    crate::account_manager::return_db_connection(conn);
+    
+    Ok(exists)
+}
+
+/// Check if a wrapper (giftwrap) event ID exists in the database
+/// This allows skipping the expensive unwrap operation for already-processed events
+pub async fn wrapper_event_exists<R: Runtime>(
+    handle: &AppHandle<R>,
+    wrapper_event_id: &str,
+) -> Result<bool, String> {
+    // Try to get a database connection - if it fails, we're not using DB mode
+    let conn = match crate::account_manager::get_db_connection(handle) {
+        Ok(c) => c,
+        Err(_) => return Ok(false), // No DB, can't check
+    };
+    
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE wrapper_event_id = ?1)",
+        rusqlite::params![wrapper_event_id],
+        |row| row.get(0)
+    ).map_err(|e| format!("Failed to check wrapper event existence: {}", e))?;
+    
+    crate::account_manager::return_db_connection(conn);
+    
+    Ok(exists)
+}
+
+/// Update the wrapper event ID for an existing message
+/// This is called when we process a message that was previously stored without its wrapper ID
+/// Returns: Ok(true) if updated, Ok(false) if message already had a wrapper_id (duplicate giftwrap)
+pub async fn update_wrapper_event_id<R: Runtime>(
+    handle: &AppHandle<R>,
+    message_id: &str,
+    wrapper_event_id: &str,
+) -> Result<bool, String> {
+    // Try to get a database connection - if it fails, we're not using DB mode
+    let conn = match crate::account_manager::get_db_connection(handle) {
+        Ok(c) => c,
+        Err(_) => return Ok(false), // No DB, nothing to update
+    };
+    
+    let rows_updated = match conn.execute(
+        "UPDATE messages SET wrapper_event_id = ?1 WHERE id = ?2 AND (wrapper_event_id IS NULL OR wrapper_event_id = '')",
+        rusqlite::params![wrapper_event_id, message_id],
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::account_manager::return_db_connection(conn);
+            return Err(format!("Failed to update wrapper event ID: {}", e));
+        }
+    };
+    
+    crate::account_manager::return_db_connection(conn);
+    
+    // Returns true if backfill succeeded, false if message already has a wrapper_id (duplicate giftwrap)
+    Ok(rows_updated > 0)
+}
+
+/// Load recent wrapper_event_ids into a HashSet for fast duplicate detection
+/// This preloads wrapper_ids from the last N days to avoid SQL queries during sync
+pub async fn load_recent_wrapper_ids<R: Runtime>(
+    handle: &AppHandle<R>,
+    days: u64,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut wrapper_ids = std::collections::HashSet::new();
+    
+    // Try to get a database connection - if it fails, we're not using DB mode
+    let conn = match crate::account_manager::get_db_connection(handle) {
+        Ok(c) => c,
+        Err(_) => return Ok(wrapper_ids), // No DB, return empty set
+    };
+    
+    // Calculate timestamp for N days ago (in milliseconds, matching our `at` field)
+    let cutoff_ms = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64)
+        .saturating_sub(days * 24 * 60 * 60 * 1000);
+    
+    // Query all wrapper_event_ids from recent messages
+    let result: Result<Vec<String>, _> = {
+        let mut stmt = conn.prepare(
+            "SELECT wrapper_event_id FROM messages
+             WHERE wrapper_event_id IS NOT NULL
+             AND wrapper_event_id != ''
+             AND at >= ?1"
+        ).map_err(|e| format!("Failed to prepare wrapper_id query: {}", e))?;
+        
+        let rows = stmt.query_map(rusqlite::params![cutoff_ms as i64], |row| {
+            row.get::<_, String>(0)
+        }).map_err(|e| format!("Failed to query wrapper_ids: {}", e))?;
+        
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect wrapper_ids: {}", e))
+    };
+    
+    crate::account_manager::return_db_connection(conn);
+    
+    match result {
+        Ok(ids) => {
+            for id in ids {
+                wrapper_ids.insert(id);
+            }
+            Ok(wrapper_ids)
+        }
+        Err(_) => {
+            Ok(wrapper_ids) // Return empty set on error, will fall back to DB queries
+        }
     }
 }

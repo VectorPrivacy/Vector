@@ -1233,6 +1233,16 @@ impl MlsService {
                     Ok(result) => {
                         match result {
                             RumorProcessingResult::TextMessage(msg) | RumorProcessingResult::FileAttachment(msg) => {
+                                // Check if message already exists in database (important for sync with partial message loading)
+                                if let Some(handle) = TAURI_APP.get() {
+                                    if let Ok(exists) = crate::db_migration::message_exists_in_db(&handle, &msg.id).await {
+                                        if exists {
+                                            // Message already in DB, skip processing
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 // Add message to the unified Chat storage
                                 let was_added = {
                                     let mut state = STATE.lock().await;

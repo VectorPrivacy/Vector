@@ -1102,6 +1102,11 @@ function updateChatHeaderSubtext(chat) {
             twemojify(domChatContactStatus);
         }
     }
+    
+    // Update visibility based on whether there's content to show
+    domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
+    domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
+    domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
 }
 
 // Store a hash of the last rendered state to detect actual changes
@@ -1119,7 +1124,7 @@ function generateChatlistStateHash() {
         states.push(inv.id || inv.welcome_event_id || inv.group_id);
     }
     
-    // Add chat states
+    // Add chat states (including chat ID to capture order changes)
     for (const chat of arrChats) {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
@@ -1128,7 +1133,9 @@ function generateChatlistStateHash() {
         const activeTypers = chat.active_typers || [];
         
         // Push values directly (faster than creating object)
+        // Include chat.id to ensure order changes are detected
         states.push(
+            chat.id,
             nUnread,
             activeTypers.length,
             cLastMsg?.id,
@@ -1689,11 +1696,19 @@ async function setupRustListeners() {
         // Find or create the group chat
         const chat = getOrCreateChat(group_id, 'MlsGroup');
         
-        // Check for duplicates
-        const existingMsg = chat.messages.find(m => m.id === message.id);
+        // Check for duplicates in chat.messages
+        const existingMsg = chat.messages?.find(m => m.id === message.id);
         if (existingMsg) {
-            console.log('Duplicate message detected (already in memory):', message.id);
             return;
+        }
+        
+        // Add to message cache
+        // During sync, only add if this chat is currently open (to avoid cache flooding)
+        // After sync complete, always add to cache
+        const shouldAddToCache = fSyncComplete || group_id === strOpenChat;
+        if (shouldAddToCache) {
+            const added = messageCache.addNewMessage(group_id, message);
+            if (!added) return;
         }
         
         // Clear typing indicator for the sender when they send a message
@@ -1757,6 +1772,8 @@ async function setupRustListeners() {
         console.log('MLS invite received in real-time, refreshing invites list');
         // Reload invites list to show the new invite
         await loadMLSInvites();
+        // Re-render chatlist to display the new invite
+        renderChatlist();
     });
 
     // Listen for MLS group metadata updates
@@ -1859,26 +1876,8 @@ async function setupRustListeners() {
             console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
 
             // Ensure the group chat exists even if there are no messages yet
-            const chat = getOrCreateChat(group_id, 'MlsGroup');
+            getOrCreateChat(group_id, 'MlsGroup');
             await refreshGroupMemberCount(group_id);
-
-            // If there are no messages loaded yet, fetch a small recent slice so we can render previews/order
-            if (!chat.messages || chat.messages.length === 0) {
-                try {
-                    // Use unified chat message storage (same as DMs)
-                    const messages = await invoke('get_chat_messages', {
-                        chatId: group_id,
-                        limit: 50
-                    }) || [];
-
-                    // Messages are already in the correct format from unified storage!
-                    chat.messages = messages;
-                } catch (e) {
-                    console.warn('Failed to load initial group messages after sync:', group_id, e);
-                    // Keep chat with zero messages; UI will show "No messages yet"
-                    chat.messages = [];
-                }
-            }
 
             // Resort chat list order by last activity (message or metadata)
             arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
@@ -1892,6 +1891,9 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Finish updates
     await listen('sync_finished', async (_) => {
+        // Mark sync as complete - this allows real-time messages to be cached
+        fSyncComplete = true;
+        
         // Fade out the sync line
         domSyncLine.classList.remove('active');
         domSyncLine.classList.add('fade-out');
@@ -2129,22 +2131,27 @@ async function setupRustListeners() {
         
         // Get the new message
         const newMessage = evt.payload.message;
-
-        // Double-check we haven't received this twice
-        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
-        if (existingMsg) return;
+        
+        // Add to message cache
+        // During sync, only add if this chat is currently open (to avoid cache flooding)
+        // After sync complete, always add to cache
+        const shouldAddToCache = fSyncComplete || chat.id === strOpenChat;
+        if (shouldAddToCache) {
+            const added = messageCache.addNewMessage(chat.id, newMessage);
+            if (!added) return;
+        }
 
         // Clear typing indicator for the sender when they send a message
         if (!newMessage.mine && chat.active_typers) {
             // Remove the sender from active typers
-            chat.active_typers = chat.active_typers.filter(npub => npub !== evt.payload.chat_id);
+            chat.active_typers = chat.active_typers.filter(npub => npub !== chat.id);
         }
 
         // Find the correct position to insert the message based on timestamp
         const messages = chat.messages;
 
-        // Check if the array is empty or the new message is newer than the newest message
-        if (messages.length === 0 || newMessage.at > messages[messages.length - 1].at) {
+        // Check if the array is empty or the new message is newer than (or equal to) the newest message
+        if (messages.length === 0 || newMessage.at >= messages[messages.length - 1].at) {
             // Insert at the end (newest)
             messages.push(newMessage);
 
@@ -2177,14 +2184,14 @@ async function setupRustListeners() {
         }
 
         // If this user has the open chat, then update the chat too
-        if (strOpenChat === evt.payload.chat_id) {
+        if (strOpenChat === chat.id) {
             updateChat(chat, [newMessage]);
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
         }
 
-        // Render the Chat List
+        // Render the Chat List (only when user is viewing it)
         if (!strOpenChat) renderChatlist();
     });
 
@@ -2198,6 +2205,18 @@ async function setupRustListeners() {
 
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
+        
+        // Also update the message cache
+        // This is important for pending->sent transitions where the ID changes
+        if (messageCache.has(evt.payload.chat_id)) {
+            const cachedMessages = messageCache.getMessages(evt.payload.chat_id);
+            if (cachedMessages) {
+                const cacheIdx = cachedMessages.findIndex(m => m.id === evt.payload.old_id);
+                if (cacheIdx !== -1) {
+                    cachedMessages[cacheIdx] = evt.payload.message;
+                }
+            }
+        }
 
         // If this chat is open, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
@@ -2255,6 +2274,12 @@ async function setupRustListeners() {
  * A flag that indicates when Vector is still in it's initiation sequence
  */
 let fInit = true;
+
+/**
+ * A flag that indicates when the initial sync is complete
+ * This is separate from fInit because sync continues after UI init
+ */
+let fSyncComplete = false;
 
 /**
  * Renders the relay list and media servers in the Settings Network section
@@ -2430,6 +2455,10 @@ async function login() {
             arrChats = evt.payload.chats || [];
 
             await hydrateMLSGroupMetadata();
+
+            // Load the file hash index for attachment deduplication
+            // This is done asynchronously and doesn't block the UI
+            messageCache.loadFileHashIndex().catch(() => {});
 
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
@@ -3132,11 +3161,6 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
         // Display either their Status or Typing Indicator
         updateChatHeaderSubtext(chat);
-
-        // Adjust our Contact Name class to manage space according to Status visibility
-        domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
-        domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
-        domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
 
         // Auto-mark messages as read when chat is opened AND window is focused
         if (chat?.messages?.length) {
@@ -4392,7 +4416,7 @@ function cancelReply() {
  * Open a chat with a particular contact
  * @param {string} contact
  */
-function openChat(contact) {
+async function openChat(contact) {
     // Display the Chat UI
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
@@ -4437,20 +4461,32 @@ function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
-    // Initialize procedural scroll state
-    initProceduralScroll(chat);
+    // Load messages from cache (on-demand loading)
+    // This uses the LRU message cache for efficient memory management
+    // Load messages from cache (will fetch from DB if not cached)
+    const initialMessages = await messageCache.loadInitialMessages(
+        contact,
+        proceduralScrollState.messagesPerBatch
+    );
+    
+    // Get cache stats for procedural scroll
+    const cacheStats = messageCache.getStats(contact);
+    const totalMessages = cacheStats?.totalInDb || initialMessages.length;
+    
+    // Update the chat object's messages array for compatibility
+    // (Some parts of the code still reference chat.messages)
+    if (chat) {
+        chat.messages = initialMessages;
+    }
 
-    // Render initial batch of messages (most recent ones)
-    const totalMessages = chat?.messages?.length || 0;
-    const initialMessages = totalMessages > 0
-        ? chat.messages.slice(-proceduralScrollState.renderedMessageCount)
-        : [];
+    // Initialize procedural scroll state with actual counts
+    initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
     
     updateChat(chat, initialMessages, profile, true);
 
     // If the opened chat has messages, mark them as read (last message)
-    if (totalMessages) {
-        const lastMsg = chat.messages[chat.messages.length - 1];
+    if (initialMessages) {
+        const lastMsg = initialMessages[initialMessages.length - 1];
         markAsRead(chat, lastMsg);
     }
     
@@ -4521,6 +4557,12 @@ async function closeChat() {
             const lastMsg = closedChat.messages[closedChat.messages.length - 1];
             markAsRead(closedChat, lastMsg);
         }
+    }
+
+    // Trim the message cache for this chat to free memory
+    // (keeps max 100 messages, removes older ones loaded during scroll)
+    if (strOpenChat) {
+        messageCache.trimChat(strOpenChat);
     }
 
     // Reset the chat UI

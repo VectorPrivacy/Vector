@@ -70,12 +70,14 @@ CREATE TABLE IF NOT EXISTS messages (
     at INTEGER NOT NULL,
     mine INTEGER NOT NULL,
     user_id INTEGER,
+    wrapper_event_id TEXT,
     FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, at);
 CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id);
 
 -- Settings table (key-value pairs)
 CREATE TABLE IF NOT EXISTS settings (
@@ -354,6 +356,10 @@ pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::
     conn.execute_batch("PRAGMA journal_mode=WAL;")
         .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
     
+    // Run migrations to ensure schema is up to date
+    // This is important for existing databases that may not have new columns
+    run_migrations(&conn)?;
+    
     Ok(conn)
 }
 
@@ -406,7 +412,41 @@ pub async fn init_profile_database<R: Runtime>(
     conn.execute_batch(SQL_SCHEMA)
         .map_err(|e| format!("Failed to create database schema: {}", e))?;
     
+    // Run migrations for existing databases
+    run_migrations(&conn)?;
+    
     println!("[Account Manager] Database schema created successfully");
+    
+    Ok(())
+}
+
+/// Run database migrations for schema updates
+/// This handles adding new columns to existing tables
+fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
+    // Migration 1: Add wrapper_event_id column to messages table
+    // This column stores the public giftwrap event ID for fast duplicate detection
+    let has_wrapper_column: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'wrapper_event_id'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+    
+    if !has_wrapper_column {
+        println!("[Migration] Adding wrapper_event_id column to messages table...");
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
+            []
+        ).map_err(|e| format!("Failed to add wrapper_event_id column: {}", e))?;
+        
+        // Create index for fast lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id)",
+            []
+        ).map_err(|e| format!("Failed to create wrapper_event_id index: {}", e))?;
+        
+        println!("[Migration] wrapper_event_id column added successfully");
+    }
     
     Ok(())
 }

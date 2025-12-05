@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
-use crate::db_migration::save_chat;
+use crate::db_migration::{self, save_chat};
 use crate::net;
 use crate::STATE;
 use crate::util::{self, calculate_file_hash};
@@ -29,6 +29,8 @@ pub struct Message {
     pub mine: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub npub: Option<String>, // Sender's npub (for group chats)
+    #[serde(skip_serializing, default)]
+    pub wrapper_event_id: Option<String>, // Public giftwrap event ID (for duplicate detection)
 }
 
 impl Default for Message {
@@ -45,6 +47,7 @@ impl Default for Message {
             failed: false,
             mine: false,
             npub: None,
+            wrapper_event_id: None,
         }
     }
 }
@@ -208,6 +211,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         failed: false,
         mine: true,
         npub: None, // Pending messages don't need npub (they're always mine)
+        wrapper_event_id: None, // Will be set when message is sent
     };
     // Grab our pubkey first
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -291,23 +295,28 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         let existing_attachment = if file_hash == EMPTY_FILE_HASH {
             None
         } else {
-            let state = STATE.lock().await;
             let mut found_attachment: Option<(String, Attachment)> = None;
             
-            // Search through all chats for an attachment with matching hash
-            for chat in &state.chats {
-                for message in &chat.messages {
-                    for attachment in &message.attachments {
-                        if attachment.id == file_hash && !attachment.url.is_empty() {
-                            // Found a matching attachment with a valid URL
-                            // For DMs, use first participant; for groups, use chat ID
-                            let chat_identifier = if let Some(participant_id) = chat.participants.first() {
-                                participant_id.clone()
-                            } else {
-                                // Group chat - use the chat ID itself
-                                chat.id.clone()
-                            };
-                            found_attachment = Some((chat_identifier, attachment.clone()));
+            // First, search through in-memory state (fastest check)
+            {
+                let state = STATE.lock().await;
+                for chat in &state.chats {
+                    for message in &chat.messages {
+                        for attachment in &message.attachments {
+                            if attachment.id == file_hash && !attachment.url.is_empty() {
+                                // Found a matching attachment with a valid URL
+                                // For DMs, use first participant; for groups, use chat ID
+                                let chat_identifier = if let Some(participant_id) = chat.participants.first() {
+                                    participant_id.clone()
+                                } else {
+                                    // Group chat - use the chat ID itself
+                                    chat.id.clone()
+                                };
+                                found_attachment = Some((chat_identifier, attachment.clone()));
+                                break;
+                            }
+                        }
+                        if found_attachment.is_some() {
                             break;
                         }
                     }
@@ -315,8 +324,26 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         break;
                     }
                 }
-                if found_attachment.is_some() {
-                    break;
+            }
+            
+            // Fallback: check database index if not found in memory (covers all stored attachments)
+            if found_attachment.is_none() {
+                if let Ok(index) = db_migration::build_file_hash_index(handle).await {
+                    if let Some(attachment_ref) = index.get(&file_hash) {
+                        // Found in database index - convert AttachmentRef to Attachment
+                        found_attachment = Some((attachment_ref.chat_id.clone(), Attachment {
+                            id: attachment_ref.hash.clone(),
+                            url: attachment_ref.url.clone(),
+                            key: attachment_ref.key.clone(),
+                            nonce: attachment_ref.nonce.clone(),
+                            extension: attachment_ref.extension.clone(),
+                            size: attachment_ref.size,
+                            path: String::new(),
+                            img_meta: None,
+                            downloading: false,
+                            downloaded: false,
+                        }));
+                    }
                 }
             }
             
@@ -634,7 +661,44 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     // Check if at least one relay acknowledged the message
                     if !output.success.is_empty() {
                         // Success! Message was acknowledged by at least one relay
+                        // Extract wrapper_event_id BEFORE moving output
+                        let wrapper_id = output.id().to_hex();
                         final_output = Some(output);
+                        
+                        // Immediately update frontend and save to DB
+                        // This provides faster visual feedback without waiting for the self-send
+                        {
+                            let pending_id_for_early_update = Arc::clone(&pending_id);
+                            let mut state = STATE.lock().await;
+                            if let Some(msg) = state.chats.iter_mut()
+                                .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
+                                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_early_update))
+                            {
+                                // Update the message ID and clear pending state
+                                msg.id = rumor_id.to_hex();
+                                msg.pending = false;
+                                msg.wrapper_event_id = Some(wrapper_id);
+                                
+                                // Emit update to frontend for immediate visual feedback
+                                let handle = TAURI_APP.get().unwrap();
+                                let _ = handle.emit("message_update", serde_json::json!({
+                                    "old_id": pending_id_for_early_update.as_ref(),
+                                    "message": &msg,
+                                    "chat_id": &receiver
+                                }));
+                                
+                                // Save to DB immediately (don't wait for self-send)
+                                let message_to_save = msg.clone();
+                                let chat_to_save = state.get_chat(&receiver).cloned();
+                                drop(state); // Release lock before async DB operations
+                                
+                                if let Some(chat) = chat_to_save {
+                                    let _ = save_chat(handle.clone(), &chat).await;
+                                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
+                                }
+                            }
+                        }
+                        
                         break;
                     } else if output.failed.is_empty() {
                         // No success but also no failures - this might be a temporary network issue
@@ -676,72 +740,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         }
 
         // Send message to our own public key, to allow for message recovering
-        match client
+        let _ = client
             .gift_wrap(&my_public_key, built_rumor, [])
-            .await
-        {
-            Ok(_) => {
-                // Mark the message as a success
-                let pending_id_for_success = Arc::clone(&pending_id);
-                let mut state = STATE.lock().await;
-                let sent_msg = state.chats.iter_mut()
-                    .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
-                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_success))
-                    .unwrap();
-                sent_msg.id = rumor_id.to_hex();
-                sent_msg.pending = false;
+            .await;
 
-                // Update the frontend
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": pending_id_for_success.as_ref(),
-                    "message": &sent_msg,
-                    "chat_id": &receiver
-                })).unwrap();
-
-                // Save the message to our DB
-                let handle = TAURI_APP.get().unwrap();
-                let message_to_save = sent_msg.clone();
-                let chat_to_save = state.get_chat(&receiver).cloned();
-                drop(state); // Release lock before async DB operations
-                
-                if let Some(chat) = chat_to_save {
-                    let _ = save_chat(handle.clone(), &chat).await;
-                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
-                }
-                return Ok(true);
-            }
-            Err(_) => {
-                // This is an odd case; the message was sent to the receiver, but NOT ourselves
-                // We'll class it as sent, for now...
-                let pending_id_for_partial = Arc::clone(&pending_id);
-                let mut state = STATE.lock().await;
-                let sent_ish_msg = state.chats.iter_mut()
-                    .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
-                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_partial))
-                    .unwrap();
-                sent_ish_msg.id = rumor_id.to_hex();
-                sent_ish_msg.pending = false;
-
-                // Update the frontend
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": pending_id_for_partial.as_ref(),
-                    "message": &sent_ish_msg,
-                    "chat_id": &receiver
-                })).unwrap();
-
-                // Save the message to our DB
-                let handle = TAURI_APP.get().unwrap();
-                let message_to_save = sent_ish_msg.clone();
-                let chat_to_save = state.get_chat(&receiver).cloned();
-                drop(state); // Release lock before async DB operations
-                
-                if let Some(chat) = chat_to_save {
-                    let _ = save_chat(handle.clone(), &chat).await;
-                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
-                }
-                return Ok(true);
-            }
-        }
+        Ok(true)
     }
 }
 
