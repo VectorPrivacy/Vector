@@ -1031,6 +1031,9 @@ async function fetchProfiles() {
     await invoke("sync_all_profiles");
 }
 
+// Track pending status hide timeout
+let statusHideTimeout = null;
+
 /**
  * Update the chat header subtext (status/typing indicator) for the currently open chat
  * @param {Object} chat - The chat object
@@ -1038,11 +1041,20 @@ async function fetchProfiles() {
 function updateChatHeaderSubtext(chat) {
     if (!chat) return;
     
+    // Clear any pending hide timeout
+    if (statusHideTimeout) {
+        clearTimeout(statusHideTimeout);
+        statusHideTimeout = null;
+    }
+    
+    let newStatusText = '';
+    let shouldAddGradient = false;
+    
     const isGroup = chat.chat_type === 'MlsGroup';
     const fNotes = chat.id === strPubkey;
     if (fNotes) {
-        domChatContactStatus.textContent = 'Encrypted Notes to Self';
-        domChatContactStatus.classList.remove('text-gradient');
+        newStatusText = 'Encrypted Notes to Self';
+        shouldAddGradient = false;
     } else if (isGroup) {
         // Check for typing indicators in groups
         const activeTypers = chat.active_typers || [];
@@ -1053,13 +1065,13 @@ function updateChatHeaderSubtext(chat) {
             if (activeTypers.length === 1) {
                 const typer = getProfile(activeTypers[0]);
                 const name = typer?.nickname || typer?.name || 'Someone';
-                domChatContactStatus.textContent = `${name} is typing...`;
+                newStatusText = `${name} is typing...`;
             } else if (activeTypers.length === 2) {
                 const typer1 = getProfile(activeTypers[0]);
                 const typer2 = getProfile(activeTypers[1]);
                 const name1 = typer1?.nickname || typer1?.name || 'Someone';
                 const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                domChatContactStatus.textContent = `${name1} and ${name2} are typing...`;
+                newStatusText = `${name1} and ${name2} are typing...`;
             } else if (activeTypers.length === 3) {
                 const typer1 = getProfile(activeTypers[0]);
                 const typer2 = getProfile(activeTypers[1]);
@@ -1067,22 +1079,22 @@ function updateChatHeaderSubtext(chat) {
                 const name1 = typer1?.nickname || typer1?.name || 'Someone';
                 const name2 = typer2?.nickname || typer2?.name || 'Someone';
                 const name3 = typer3?.nickname || typer3?.name || 'Someone';
-                domChatContactStatus.textContent = `${name1}, ${name2}, and ${name3} are typing...`;
+                newStatusText = `${name1}, ${name2}, and ${name3} are typing...`;
             } else {
                 // 4+ people typing
-                domChatContactStatus.textContent = `Several people are typing...`;
+                newStatusText = `Several people are typing...`;
             }
-            domChatContactStatus.classList.add('text-gradient');
+            shouldAddGradient = true;
         } else {
             const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
             if (typeof memberCount === 'number') {
                 const label = memberCount === 1 ? 'member' : 'members';
-                domChatContactStatus.textContent = `${memberCount} ${label}`;
+                newStatusText = `${memberCount} ${label}`;
             } else {
                 // Avoid misleading "0 members" before first count refresh
-                domChatContactStatus.textContent = 'Members syncing...';
+                newStatusText = 'Members syncing...';
             }
-            domChatContactStatus.classList.remove('text-gradient');
+            shouldAddGradient = false;
         }
     } else {
         // Check for typing indicators in DMs (using chat.active_typers)
@@ -1093,20 +1105,42 @@ function updateChatHeaderSubtext(chat) {
             // For DMs, there should only be one typer (the other person)
             const typer = getProfile(activeTypers[0]);
             const name = typer?.nickname || typer?.name || 'User';
-            domChatContactStatus.textContent = `${name} is typing...`;
-            domChatContactStatus.classList.add('text-gradient');
+            newStatusText = `${name} is typing...`;
+            shouldAddGradient = true;
         } else {
             const profile = getProfile(chat.id);
-            domChatContactStatus.textContent = profile?.status?.title || '';
-            domChatContactStatus.classList.remove('text-gradient');
-            twemojify(domChatContactStatus);
+            newStatusText = profile?.status?.title || '';
+            shouldAddGradient = false;
         }
     }
     
-    // Update visibility based on whether there's content to show
-    domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
-    domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
-    domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
+    const currentHasStatus = !!domChatContactStatus.textContent && !domChatContactStatus.classList.contains('status-hidden');
+    const newHasStatus = !!newStatusText;
+    
+    if (newHasStatus) {
+        // Show status: remove hidden class, update content
+        domChatContactStatus.classList.remove('status-hidden');
+        domChatContactStatus.textContent = newStatusText;
+        domChatContactStatus.classList.toggle('text-gradient', shouldAddGradient);
+        if (!shouldAddGradient) {
+            twemojify(domChatContactStatus);
+        }
+        domChatContact.classList.remove('chat-contact');
+        domChatContact.classList.add('chat-contact-with-status');
+    } else if (currentHasStatus) {
+        // Hide status: add hidden class, wait for animation, then clear content
+        domChatContactStatus.classList.add('status-hidden');
+        domChatContact.classList.remove('chat-contact-with-status');
+        domChatContact.classList.add('chat-contact');
+        
+        // Clear content after animation completes (300ms matches CSS transition)
+        statusHideTimeout = setTimeout(() => {
+            domChatContactStatus.textContent = '';
+            domChatContactStatus.classList.remove('text-gradient');
+            statusHideTimeout = null;
+        }, 300);
+    }
+    // If both are false (no status before, no status now), do nothing
 }
 
 // Store a hash of the last rendered state to detect actual changes
@@ -4574,6 +4608,13 @@ async function closeChat() {
     strOpenChat = "";
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
+    
+    // Clear the chat header to prevent flicker when opening next chat
+    domChatContact.textContent = '';
+    domChatContactStatus.textContent = '';
+    domChatContactStatus.classList.add('status-hidden');
+    domChatContactStatus.classList.remove('text-gradient');
+    domChatHeaderAvatarContainer.innerHTML = '';
     
     // Reset procedural scroll state
     resetProceduralScroll();

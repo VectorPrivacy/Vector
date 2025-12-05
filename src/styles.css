@@ -1041,6 +1041,7 @@ html, body {
   margin-bottom: 0;
   margin-left: auto;
   margin-right: auto;
+  transition: margin-top 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
 }
 
 .chat-contact {
@@ -1051,6 +1052,7 @@ html, body {
   margin-bottom: 12px;
   margin-left: auto;
   margin-right: auto;
+  transition: margin-top 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
 }
 
 .chat h3 img {
@@ -1071,6 +1073,15 @@ html, body {
   margin-left: auto;
   margin-right: auto;
   margin-top: -1px;
+  transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1), max-height 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
+  max-height: 30px;
+  overflow: hidden;
+}
+
+.chat-contact-status.status-hidden {
+  opacity: 0;
+  max-height: 0;
+  margin-bottom: 0;
 }
 
 .chat-contact-status .emoji {
