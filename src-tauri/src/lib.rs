@@ -107,6 +107,14 @@ lazy_static! {
     static ref NOTIFIED_WELCOMES: Mutex<std::collections::HashSet<String>> = Mutex::new(std::collections::HashSet::new());
 }
 
+// TEMPORARY cache of wrapper_event_ids for fast duplicate detection during INIT SYNC ONLY
+// - Populated at init with recent wrapper_ids (last 30 days) to avoid SQL queries for each historical event
+// - Only used for historical sync events (is_new = false), NOT for real-time new events
+// - Cleared when sync finishes to free memory
+lazy_static! {
+    static ref WRAPPER_ID_CACHE: Mutex<std::collections::HashSet<String>> = Mutex::new(std::collections::HashSet::new());
+}
+
 
 
 
@@ -304,42 +312,23 @@ impl ChatState {
             // Find the last read message ID for this chat
             let last_read_id = &chat.last_read;
             
-            let unread_count = if last_read_id.is_empty() {
-                // No last_read_id set - walk backwards from the end to find unread messages
-                let mut unread_messages = 0;
-                // Iterate messages in reverse order (newest first)
-                for msg in chat.messages.iter().rev() {
-                    if msg.mine {
-                        // If we find our own message first, everything before it is considered read
-                        // (because we responded to those messages)
-                        break;
-                    } else {
-                        // Count non-mine messages (unread)
-                        unread_messages += 1;
-                    }
+            // Walk backwards from the end to count unread messages
+            // Stop when we hit: 1) our own message, or 2) the last_read message
+            let mut unread_count = 0;
+            for msg in chat.messages.iter().rev() {
+                // If we hit our own message, stop - we clearly read everything before it
+                if msg.mine {
+                    break;
                 }
-                unread_messages
-            } else {
-                // Last read message ID is set - count messages after it
-                if let Some(last_read_index) = chat.messages.iter().position(|msg| msg.id == *last_read_id) {
-                    // Count messages after the last read message that are not mine
-                    chat.messages.iter().skip(last_read_index + 1).filter(|msg| !msg.mine).count()
-                } else {
-                    // If last_read_id not found, fall back to walking backwards
-                    let mut unread_messages = 0;
-                    // Iterate messages in reverse order (newest first)
-                    for msg in chat.messages.iter().rev() {
-                        if msg.mine {
-                            // If we find our own message first, everything before it is considered read
-                            break;
-                        } else {
-                            // Count non-mine messages (unread)
-                            unread_messages += 1;
-                        }
-                    }
-                    unread_messages
+                
+                // If we hit the last_read message, stop - everything at and before this is read
+                if !last_read_id.is_empty() && msg.id == *last_read_id {
+                    break;
                 }
-            };
+                
+                // Count this message as unread
+                unread_count += 1;
+            }
             
             total_unread += unread_count as u32;
         }
@@ -505,11 +494,10 @@ async fn fetch_messages<R: Runtime>(
                             }
                         }
                         
-                        // Load messages for this chat
-                        let messages_result = db_migration::get_chat_messages(&handle, &chat.id()).await;
-                        if let Ok(messages) = messages_result {
-                            // Add all messages to the chat and check for downloaded attachments
-                            for message in messages {
+                        // Load only the last message for preview (optimization: full messages loaded on-demand by frontend)
+                        let last_messages_result = db_migration::get_chat_last_messages(&handle, &chat.id(), 1).await;
+                        if let Ok(last_messages) = last_messages_result {
+                            for message in last_messages {
                                 // Check if this message has downloaded attachments (for integrity check)
                                 if !needs_integrity_check && message.attachments.iter().any(|att| att.downloaded) {
                                     needs_integrity_check = true;
@@ -517,7 +505,7 @@ async fn fetch_messages<R: Runtime>(
                                 chat.internal_add_message(message);
                             }
                         } else {
-                            eprintln!("Failed to load messages for chat {}: {:?}", chat.id(), messages_result);
+                            eprintln!("Failed to load last message for chat {}: {:?}", chat.id(), last_messages_result);
                         }
                         
                         // Ensure profiles exist for all chat participants
@@ -554,6 +542,13 @@ async fn fetch_messages<R: Runtime>(
                     eprintln!("[Cache] Failed to preload ID caches: {}", e);
                 }
                 
+                // Preload wrapper_event_ids for fast duplicate detection during sync
+                // Load last 30 days of wrapper_ids to cover typical sync window
+                if let Ok(wrapper_ids) = db_migration::load_recent_wrapper_ids(&handle, 30).await {
+                    let mut cache = WRAPPER_ID_CACHE.lock().await;
+                    *cache = wrapper_ids;
+                }
+                
                 // Send the state to our frontend to signal finalised init with a full state
                 handle.emit("init_finished", serde_json::json!({
                     "profiles": &state.profiles,
@@ -566,6 +561,13 @@ async fn fetch_messages<R: Runtime>(
                 // Preload ID caches for maximum performance
                 if let Err(e) = db_migration::preload_id_caches(&handle).await {
                     eprintln!("[Cache] Failed to preload ID caches: {}", e);
+                }
+                
+                // Preload wrapper_event_ids for fast duplicate detection during sync
+                // Load last 30 days of wrapper_ids to cover typical sync window
+                if let Ok(wrapper_ids) = db_migration::load_recent_wrapper_ids(&handle, 30).await {
+                    let mut cache = WRAPPER_ID_CACHE.lock().await;
+                    *cache = wrapper_ids;
                 }
                 
                 // No integrity check needed, send init immediately
@@ -807,6 +809,16 @@ async fn fetch_messages<R: Runtime>(
             state.sync_empty_iterations = 0;
             state.sync_total_iterations = 0;
         } // Release lock before emitting event
+        
+        // Clear the wrapper_id cache - it's only needed during sync
+        {
+            let mut cache = WRAPPER_ID_CACHE.lock().await;
+            let cache_size = cache.len();
+            cache.clear();
+            cache.shrink_to_fit();
+            // Each entry: 64-char hex String (~88 bytes) + HashSet overhead (~48 bytes) ≈ 136 bytes
+            println!("[Startup] Sync Complete - Dumped NIP-59 Decryption Cache (~{} KB Memory freed)", (cache_size * 136) / 1024);
+        }
 
         if relay_url.is_none() {
             handle.emit("sync_finished", ()).unwrap();
@@ -1090,8 +1102,100 @@ async fn get_chat_messages(chat_id: String, limit: Option<usize>) -> Result<Vec<
     }
 }
 
+/// Get paginated messages for a chat directly from the database
+/// Also adds the messages to the backend state for cache synchronization
+#[tauri::command]
+async fn get_chat_messages_paginated<R: Runtime>(
+    handle: AppHandle<R>,
+    chat_id: String,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Message>, String> {
+    // Load messages from database
+    let messages = db_migration::get_chat_messages_paginated(&handle, &chat_id, limit, offset).await?;
+    
+    // Also add these messages to the backend state for cache synchronization
+    // This ensures operations like fetch_msg_metadata can find the messages
+    if !messages.is_empty() {
+        let mut state = STATE.lock().await;
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+            for msg in &messages {
+                // Only add if not already present (avoid duplicates)
+                if !chat.messages.iter().any(|m| m.id == msg.id) {
+                    chat.messages.push(msg.clone());
+                }
+            }
+            // Sort messages by timestamp to maintain order
+            chat.messages.sort_by_key(|m| m.at);
+        }
+    }
+    
+    Ok(messages)
+}
+
+/// Get the total message count for a chat
+#[tauri::command]
+async fn get_chat_message_count<R: Runtime>(
+    handle: AppHandle<R>,
+    chat_id: String,
+) -> Result<usize, String> {
+    db_migration::get_chat_message_count(&handle, &chat_id).await
+}
+
+/// Evict messages from the backend cache for a specific chat
+/// Called by frontend when LRU eviction occurs to keep caches in sync
+#[tauri::command]
+async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(), String> {
+    let mut state = STATE.lock().await;
+    if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+        let total = chat.messages.len();
+        if total > keep_count {
+            // Keep only the last `keep_count` messages (most recent)
+            let drain_count = total - keep_count;
+            chat.messages.drain(0..drain_count);
+        }
+    }
+    Ok(())
+}
+
+/// Build and return the file hash index for deduplication
+/// Returns a map of file_hash -> attachment reference data
+#[tauri::command]
+async fn get_file_hash_index<R: Runtime>(
+    handle: AppHandle<R>,
+) -> Result<std::collections::HashMap<String, db_migration::AttachmentRef>, String> {
+    db_migration::build_file_hash_index(&handle).await
+}
+
 #[tauri::command]
 async fn handle_event(event: Event, is_new: bool) -> bool {
+    // Get the wrapper (giftwrap) event ID for duplicate detection
+    let wrapper_event_id = event.id.to_hex();
+    
+    // For historical sync events (is_new = false), use the wrapper_id cache for fast duplicate detection
+    // For real-time new events (is_new = true), skip cache checks - they're guaranteed to be new
+    if !is_new {
+        // Check in-memory cache first (O(1) lookup, no SQL overhead)
+        // This cache is only populated during init and cleared after sync finishes
+        {
+            let cache = WRAPPER_ID_CACHE.lock().await;
+            if cache.contains(&wrapper_event_id) {
+                // Already processed this giftwrap, skip (cache hit)
+                return false;
+            }
+        }
+        
+        // Cache miss - check database as fallback (for events older than cache window)
+        if let Some(handle) = TAURI_APP.get() {
+            if let Ok(exists) = db_migration::wrapper_event_exists(handle, &wrapper_event_id).await {
+                if exists {
+                    // Already processed this giftwrap, skip (DB hit)
+                    return false;
+                }
+            }
+        }
+    }
+
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
@@ -1214,11 +1318,15 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
             match process_rumor(rumor_event, rumor_context).await {
                 Ok(result) => {
                     match result {
-                        RumorProcessingResult::TextMessage(msg) => {
-                            handle_text_message(msg, &contact, is_mine, is_new).await
+                        RumorProcessingResult::TextMessage(mut msg) => {
+                            // Set the wrapper event ID for database storage
+                            msg.wrapper_event_id = Some(wrapper_event_id.clone());
+                            handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id).await
                         }
-                        RumorProcessingResult::FileAttachment(msg) => {
-                            handle_file_attachment(msg, &contact, is_mine, is_new).await
+                        RumorProcessingResult::FileAttachment(mut msg) => {
+                            // Set the wrapper event ID for database storage
+                            msg.wrapper_event_id = Some(wrapper_event_id.clone());
+                            handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id).await
                         }
                         RumorProcessingResult::Reaction(reaction) => {
                             handle_reaction(reaction, &contact).await
@@ -1260,7 +1368,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 }
 
 /// Handle a processed text message
-async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new: bool) -> bool {
+async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
     // Send an OS notification for incoming messages (do this before locking state)
     if !is_mine && is_new {
         // Clone necessary data for notification (avoid holding lock during notification)
@@ -1291,6 +1399,26 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
         if let Some((display_name, content)) = display_info {
             let notification = NotificationData::direct_message(display_name, content);
             show_notification_generic(notification);
+        }
+    }
+
+    // Check if message already exists in database (important for sync with partial message loading)
+    if let Some(handle) = TAURI_APP.get() {
+        if let Ok(exists) = db_migration::message_exists_in_db(&handle, &msg.id).await {
+            if exists {
+                // Message already in DB but we got here (wrapper check passed)
+                // Try to backfill the wrapper_event_id for future fast lookups
+                // If backfill fails (message already has a different wrapper), add this wrapper to cache
+                // to prevent repeated processing of duplicate giftwraps
+                if let Ok(updated) = db_migration::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
+                    if !updated {
+                        // Message has a different wrapper_id - add this duplicate wrapper to cache
+                        let mut cache = WRAPPER_ID_CACHE.lock().await;
+                        cache.insert(wrapper_event_id.to_string());
+                    }
+                }
+                return false;
+            }
         }
     }
 
@@ -1325,7 +1453,27 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
 }
 
 /// Handle a processed file attachment
-async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_new: bool) -> bool {
+async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+    // Check if message already exists in database (important for sync with partial message loading)
+    if let Some(handle) = TAURI_APP.get() {
+        if let Ok(exists) = db_migration::message_exists_in_db(&handle, &msg.id).await {
+            if exists {
+                // Message already in DB but we got here (wrapper check passed)
+                // Try to backfill the wrapper_event_id for future fast lookups
+                // If backfill fails (message already has a different wrapper), add this wrapper to cache
+                // to prevent repeated processing of duplicate giftwraps
+                if let Ok(updated) = db_migration::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
+                    if !updated {
+                        // Message has a different wrapper_id - add this duplicate wrapper to cache
+                        let mut cache = WRAPPER_ID_CACHE.lock().await;
+                        cache.insert(wrapper_event_id.to_string());
+                    }
+                }
+                return false;
+            }
+        }
+    }
+
     // Get file extension for notification
     let extension = msg.attachments.first()
         .map(|att| att.extension.clone())
@@ -2020,6 +2168,13 @@ async fn get_media_servers() -> Vec<String> {
 /// Monitor relay pool connection status changes
 #[tauri::command]
 async fn monitor_relay_connections() -> Result<bool, String> {
+    // Guard against multiple invocations (e.g., from hot-reloads in debug mode)
+    static MONITOR_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if MONITOR_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Already running, return success without spawning duplicate tasks
+        return Ok(false);
+    }
+
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let handle = TAURI_APP.get().unwrap().clone();
 
@@ -4668,7 +4823,10 @@ pub fn run() {
             perform_database_migration,
             deep_rescan,
             is_scanning,
-            get_chat_messages,
+            get_chat_messages_paginated,
+            get_chat_message_count,
+            get_file_hash_index,
+            evict_chat_messages,
             generate_blurhash_preview,
             download_attachment,
             login,

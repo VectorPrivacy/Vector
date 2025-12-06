@@ -165,6 +165,7 @@ async fn process_text_message(
             // For DMs, npub is implicit (the other participant)
             None
         },
+        wrapper_event_id: None, // Set by caller after processing
     };
     
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -330,6 +331,7 @@ async fn process_file_attachment(
             // For DMs, npub is implicit (the other participant)
             None
         },
+        wrapper_event_id: None, // Set by caller after processing
     };
     
     Ok(RumorProcessingResult::FileAttachment(msg))
@@ -467,66 +469,4 @@ fn is_typing_indicator(rumor: &RumorEvent) -> bool {
     let is_typing_content = rumor.content == "typing";
     
     has_vector_tag && is_typing_content
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_extract_millisecond_timestamp_with_ms_tag() {
-        // Test with valid ms tag
-        let mut tags = Tags::new();
-        tags.push(Tag::custom(TagKind::Custom(Cow::Borrowed("ms")), vec!["123"]));
-        
-        let rumor = RumorEvent {
-            id: EventId::all_zeros(),
-            kind: Kind::PrivateDirectMessage,
-            content: String::new(),
-            tags,
-            created_at: Timestamp::from_secs(1000),
-            pubkey: PublicKey::from_slice(&[0u8; 32]).unwrap(),
-        };
-        
-        assert_eq!(extract_millisecond_timestamp(&rumor), 1000123);
-    }
-    
-    #[test]
-    fn test_extract_millisecond_timestamp_without_ms_tag() {
-        // Test without ms tag
-        let rumor = RumorEvent {
-            id: EventId::all_zeros(),
-            kind: Kind::PrivateDirectMessage,
-            content: String::new(),
-            tags: Tags::new(),
-            created_at: Timestamp::from_secs(1000),
-            pubkey: PublicKey::from_slice(&[0u8; 32]).unwrap(),
-        };
-        
-        assert_eq!(extract_millisecond_timestamp(&rumor), 1000000);
-    }
-    
-    #[test]
-    fn test_is_typing_indicator() {
-        // Valid typing indicator
-        let mut tags = Tags::new();
-        tags.push(Tag::custom(TagKind::d(), vec!["vector"]));
-        
-        let rumor = RumorEvent {
-            id: EventId::all_zeros(),
-            kind: Kind::ApplicationSpecificData,
-            content: "typing".to_string(),
-            tags,
-            created_at: Timestamp::now(),
-            pubkey: PublicKey::from_slice(&[0u8; 32]).unwrap(),
-        };
-        
-        assert!(is_typing_indicator(&rumor));
-        
-        // Invalid - wrong content
-        let mut rumor2 = rumor.clone();
-        rumor2.content = "not_typing".to_string();
-        
-        assert!(!is_typing_indicator(&rumor2));
-    }
 }

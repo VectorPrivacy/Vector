@@ -259,6 +259,7 @@ impl SlimMessage {
             failed: false,  // Default values
             mine: self.mine,
             npub: self.npub.clone(),
+            wrapper_event_id: None, // Not stored in slim format
         }
     }
 }

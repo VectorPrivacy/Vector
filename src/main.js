@@ -26,6 +26,7 @@ const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
 
 const domProfile = document.getElementById('profile');
 const domProfileBackBtn = document.getElementById('profile-back-btn');
+const domProfileHeaderAvatarContainer = document.getElementById('profile-header-avatar-container');
 const domProfileName = document.getElementById('profile-name');
 const domProfileStatus = document.getElementById('profile-status');
 // Note: these are 'let' due to needing to use `.replaceWith` when hot-swapping profile elements
@@ -58,6 +59,9 @@ const domGroupLeaveBtn = document.getElementById('group-leave-btn');
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
 const domAccount = document.getElementById('account');
+const domAccountAvatarContainer = document.getElementById('account-avatar-container');
+const domAccountName = document.getElementById('account-name');
+const domAccountStatus = document.getElementById('account-status');
 const domSyncLine = document.getElementById('sync-line');
 const domChatList = document.getElementById('chat-list');
 const domChatNewDM = document.getElementById('new-chat-btn');
@@ -72,9 +76,9 @@ const domSettingsBtn = document.getElementById('settings-btn');
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
 const domChatBackNotificationDot = document.getElementById('chat-back-notification-dot');
+const domChatHeaderAvatarContainer = document.getElementById('chat-header-avatar-container');
 const domChatContact = document.getElementById('chat-contact');
 const domChatContactStatus = document.getElementById('chat-contact-status');
-const domChatMessagesFade = document.getElementById('msg-top-fade');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-return');
@@ -168,11 +172,17 @@ function openEmojiPanel(e) {
         // Always use the same fixed position (bottom-up) for both message input and reactions
         picker.classList.add('emoji-picker-message-type');
 
-        // Clear any positioning styles to ensure CSS fixed positioning takes effect
+        // Position emoji picker dynamically above the chat-box (for both input and reactions)
+        const chatBox = document.getElementById('chat-box');
+        if (chatBox) {
+            const chatBoxHeight = chatBox.getBoundingClientRect().height;
+            picker.style.bottom = (chatBoxHeight + 10) + 'px'; // 10px gap above chat-box
+        }
+
+        // Clear any other positioning styles to ensure CSS fixed positioning takes effect
         picker.style.top = '';
         picker.style.left = '';
         picker.style.right = '';
-        picker.style.transform = '';
 
         // Change the emoji button to a wink while the panel is open (only for message input)
         if (isDefaultPanel) {
@@ -186,13 +196,16 @@ function openEmojiPanel(e) {
             strCurrentReactionReference = '';
         }
 
-        // Focus on the emoji search box for easy searching
-        emojiSearch.focus();
+        // Focus on the emoji search box for easy searching (desktop only - mobile keyboards are disruptive)
+        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            emojiSearch.focus();
+        }
     } else {
         // Hide and reset the UI
         emojiSearch.value = '';
         picker.classList.remove('visible');
         picker.classList.remove('emoji-picker-widescreen');
+        picker.style.bottom = ''; // Reset to CSS default
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
@@ -438,7 +451,10 @@ picker.addEventListener('click', (e) => {
             
             // Close the picker - use class instead of inline style
             picker.classList.remove('visible');
-            domChatMessageInput.focus();
+            // Focus chat input (desktop only - mobile keyboards are disruptive)
+            if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+                domChatMessageInput.focus();
+            }
         }
     }
 });
@@ -504,8 +520,10 @@ emojiSearch.onkeydown = async (e) => {
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
 
-        // Bring the focus back to the chat
-        domChatMessageInput.focus();
+        // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
+        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            domChatMessageInput.focus();
+        }
     } else if (e.code === 'Escape') {
         // Close the dialog - use class instead of inline style
         emojiSearch.value = '';
@@ -515,8 +533,10 @@ emojiSearch.onkeydown = async (e) => {
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
 
-        // Bring the focus back to the chat
-        domChatMessageInput.focus();
+        // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
+        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            domChatMessageInput.focus();
+        }
     }
 };
 
@@ -1029,6 +1049,9 @@ async function fetchProfiles() {
     await invoke("sync_all_profiles");
 }
 
+// Track pending status hide timeout
+let statusHideTimeout = null;
+
 /**
  * Update the chat header subtext (status/typing indicator) for the currently open chat
  * @param {Object} chat - The chat object
@@ -1036,13 +1059,20 @@ async function fetchProfiles() {
 function updateChatHeaderSubtext(chat) {
     if (!chat) return;
     
+    // Clear any pending hide timeout
+    if (statusHideTimeout) {
+        clearTimeout(statusHideTimeout);
+        statusHideTimeout = null;
+    }
+    
+    let newStatusText = '';
+    let shouldAddGradient = false;
+    
     const isGroup = chat.chat_type === 'MlsGroup';
     const fNotes = chat.id === strPubkey;
     if (fNotes) {
-        domChatContactStatus.textContent = 'Encrypted Notes to Self';
-        domChatContactStatus.classList.remove('text-gradient');
-        domChatContact.onclick = null;
-        domChatContact.classList.remove('btn');
+        newStatusText = 'Encrypted Notes to Self';
+        shouldAddGradient = false;
     } else if (isGroup) {
         // Group chat typing indicators and member count
         const activeTypers = chat.active_typers || [];
@@ -1053,13 +1083,13 @@ function updateChatHeaderSubtext(chat) {
             if (activeTypers.length === 1) {
                 const typer = getProfile(activeTypers[0]);
                 const name = typer?.nickname || typer?.name || 'Someone';
-                domChatContactStatus.textContent = `${name} is typing...`;
+                newStatusText = `${name} is typing...`;
             } else if (activeTypers.length === 2) {
                 const typer1 = getProfile(activeTypers[0]);
                 const typer2 = getProfile(activeTypers[1]);
                 const name1 = typer1?.nickname || typer1?.name || 'Someone';
                 const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                domChatContactStatus.textContent = `${name1} and ${name2} are typing...`;
+                newStatusText = `${name1} and ${name2} are typing...`;
             } else if (activeTypers.length === 3) {
                 const typer1 = getProfile(activeTypers[0]);
                 const typer2 = getProfile(activeTypers[1]);
@@ -1067,22 +1097,22 @@ function updateChatHeaderSubtext(chat) {
                 const name1 = typer1?.nickname || typer1?.name || 'Someone';
                 const name2 = typer2?.nickname || typer2?.name || 'Someone';
                 const name3 = typer3?.nickname || typer3?.name || 'Someone';
-                domChatContactStatus.textContent = `${name1}, ${name2}, and ${name3} are typing...`;
+                newStatusText = `${name1}, ${name2}, and ${name3} are typing...`;
             } else {
                 // 4+ people typing
-                domChatContactStatus.textContent = `Several people are typing...`;
+                newStatusText = `Several people are typing...`;
             }
-            domChatContactStatus.classList.add('text-gradient');
+            shouldAddGradient = true;
         } else {
             const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
             if (typeof memberCount === 'number') {
                 const label = memberCount === 1 ? 'member' : 'members';
-                domChatContactStatus.textContent = `${memberCount} ${label}`;
+                newStatusText = `${memberCount} ${label}`;
             } else {
                 // Avoid misleading "0 members" before first count refresh
-                domChatContactStatus.textContent = 'Members syncing...';
+                newStatusText = 'Members syncing...';
             }
-            domChatContactStatus.classList.remove('text-gradient');
+            shouldAddGradient = false;
         }
         
         // Group name click opens group overview
@@ -1100,18 +1130,32 @@ function updateChatHeaderSubtext(chat) {
             // For DMs, there should only be one typer (the other person)
             const typer = getProfile(activeTypers[0]);
             const name = typer?.nickname || typer?.name || 'User';
-            domChatContactStatus.textContent = `${name} is typing...`;
-            domChatContactStatus.classList.add('text-gradient');
+            newStatusText = `${name} is typing...`;
+            shouldAddGradient = true;
         } else {
             const profile = getProfile(chat.id);
-            domChatContactStatus.textContent = profile?.status?.title || '';
-            domChatContactStatus.classList.remove('text-gradient');
+            newStatusText = profile?.status?.title || '';
+            shouldAddGradient = false;
+        }
+    }
+    
+    const currentHasStatus = !!domChatContactStatus.textContent && !domChatContactStatus.classList.contains('status-hidden');
+    const newHasStatus = !!newStatusText;
+    
+    if (newHasStatus) {
+        // Show status: remove hidden class, update content
+        domChatContactStatus.classList.remove('status-hidden');
+        domChatContactStatus.textContent = newStatusText;
+        domChatContactStatus.classList.toggle('text-gradient', shouldAddGradient);
+        if (!shouldAddGradient) {
             twemojify(domChatContactStatus);
         }
+        domChatContact.classList.remove('chat-contact');
+        domChatContact.classList.add('chat-contact-with-status');
         
         const profile = getProfile(chat.id);
         
-        // FIXED: Proper click handler for profile in widescreen
+        // Proper click handler for profile in widescreen
         domChatContact.onclick = () => {
             if (isWidescreen && strOpenChat === chat.id) {
                 console.log('Opening profile in chat area for:', profile?.id);
@@ -1124,7 +1168,20 @@ function updateChatHeaderSubtext(chat) {
             }
         };
         domChatContact.classList.add('btn');
+    } else if (currentHasStatus) {
+        // Hide status: add hidden class, wait for animation, then clear content
+        domChatContactStatus.classList.add('status-hidden');
+        domChatContact.classList.remove('chat-contact-with-status');
+        domChatContact.classList.add('chat-contact');
+        
+        // Clear content after animation completes (300ms matches CSS transition)
+        statusHideTimeout = setTimeout(() => {
+            domChatContactStatus.textContent = '';
+            domChatContactStatus.classList.remove('text-gradient');
+            statusHideTimeout = null;
+        }, 300);
     }
+    // If both are false (no status before, no status now), do nothing
 }
 
 // Store a hash of the last rendered state to detect actual changes
@@ -1142,7 +1199,7 @@ function generateChatlistStateHash() {
         states.push(inv.id || inv.welcome_event_id || inv.group_id);
     }
     
-    // Add chat states
+    // Add chat states (including chat ID to capture order changes)
     for (const chat of arrChats) {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
@@ -1151,7 +1208,9 @@ function generateChatlistStateHash() {
         const activeTypers = chat.active_typers || [];
         
         // Push values directly (faster than creating object)
+        // Include chat.id to ensure order changes are detected
         states.push(
+            chat.id,
             nUnread,
             activeTypers.length,
             cLastMsg?.id,
@@ -1520,38 +1579,27 @@ function countUnreadMessages(chat) {
     // If no messages, return 0
     if (!chat.messages || !chat.messages.length) return 0;
     
-    // If last_read is set, count messages after it
-    if (chat.last_read) {
-        // Find the index of the last read message
-        const lastReadIndex = chat.messages.findIndex(msg => msg.id === chat.last_read);
-        if (lastReadIndex !== -1) {
-            // Count non-mine messages after the last read message
-            let unreadCount = 0;
-            for (let i = lastReadIndex + 1; i < chat.messages.length; i++) {
-                if (!chat.messages[i].mine) {
-                    unreadCount++;
-                }
-            }
-            return unreadCount;
-        }
-        // If last_read message not found, fall back to walk-back logic
-    }
-    
-    // No last_read set or not found - walk backwards from the end
+    // Walk backwards from the end to count unread messages
+    // Stop when we hit: 1) our own message, or 2) the last_read message
     let unreadCount = 0;
-    
-    // Iterate messages in reverse order (newest first)
+
     for (let i = chat.messages.length - 1; i >= 0; i--) {
-        if (chat.messages[i].mine) {
-            // If we find our own message first, everything before it is considered read
-            // (because we responded to those messages)
+        const msg = chat.messages[i];
+        
+        // If we hit our own message, stop - we clearly read everything before it
+        if (msg.mine) {
             break;
-        } else {
-            // Count non-mine messages (unread)
-            unreadCount++;
         }
+        
+        // If we hit the last_read message, stop - everything at and before this is read
+        if (chat.last_read && msg.id === chat.last_read) {
+            break;
+        }
+        
+        // Count this message as unread
+        unreadCount++;
     }
-    
+
     return unreadCount;
 }
 
@@ -1723,11 +1771,19 @@ async function setupRustListeners() {
         // Find or create the group chat
         const chat = getOrCreateChat(group_id, 'MlsGroup');
         
-        // Check for duplicates
-        const existingMsg = chat.messages.find(m => m.id === message.id);
+        // Check for duplicates in chat.messages
+        const existingMsg = chat.messages?.find(m => m.id === message.id);
         if (existingMsg) {
-            console.log('Duplicate message detected (already in memory):', message.id);
             return;
+        }
+        
+        // Add to message cache
+        // During sync, only add if this chat is currently open (to avoid cache flooding)
+        // After sync complete, always add to cache
+        const shouldAddToCache = fSyncComplete || group_id === strOpenChat;
+        if (shouldAddToCache) {
+            const added = messageCache.addNewMessage(group_id, message);
+            if (!added) return;
         }
         
         // Clear typing indicator for the sender when they send a message
@@ -1791,6 +1847,8 @@ async function setupRustListeners() {
         console.log('MLS invite received in real-time, refreshing invites list');
         // Reload invites list to show the new invite
         await loadMLSInvites();
+        // Re-render chatlist to display the new invite
+        renderChatlist();
     });
 
     // Listen for MLS group metadata updates
@@ -1893,26 +1951,8 @@ async function setupRustListeners() {
             console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
 
             // Ensure the group chat exists even if there are no messages yet
-            const chat = getOrCreateChat(group_id, 'MlsGroup');
+            getOrCreateChat(group_id, 'MlsGroup');
             await refreshGroupMemberCount(group_id);
-
-            // If there are no messages loaded yet, fetch a small recent slice so we can render previews/order
-            if (!chat.messages || chat.messages.length === 0) {
-                try {
-                    // Use unified chat message storage (same as DMs)
-                    const messages = await invoke('get_chat_messages', {
-                        chatId: group_id,
-                        limit: 50
-                    }) || [];
-
-                    // Messages are already in the correct format from unified storage!
-                    chat.messages = messages;
-                } catch (e) {
-                    console.warn('Failed to load initial group messages after sync:', group_id, e);
-                    // Keep chat with zero messages; UI will show "No messages yet"
-                    chat.messages = [];
-                }
-            }
 
             // Resort chat list order by last activity (message or metadata)
             arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
@@ -1926,6 +1966,9 @@ async function setupRustListeners() {
 
     // Listen for Synchronisation Finish updates
     await listen('sync_finished', async (_) => {
+        // Mark sync as complete - this allows real-time messages to be cached
+        fSyncComplete = true;
+        
         // Fade out the sync line
         domSyncLine.classList.remove('active');
         domSyncLine.classList.add('fade-out');
@@ -2163,22 +2206,27 @@ async function setupRustListeners() {
         
         // Get the new message
         const newMessage = evt.payload.message;
-
-        // Double-check we haven't received this twice
-        const existingMsg = chat.messages.find(m => m.id === newMessage.id);
-        if (existingMsg) return;
+        
+        // Add to message cache
+        // During sync, only add if this chat is currently open (to avoid cache flooding)
+        // After sync complete, always add to cache
+        const shouldAddToCache = fSyncComplete || chat.id === strOpenChat;
+        if (shouldAddToCache) {
+            const added = messageCache.addNewMessage(chat.id, newMessage);
+            if (!added) return;
+        }
 
         // Clear typing indicator for the sender when they send a message
         if (!newMessage.mine && chat.active_typers) {
             // Remove the sender from active typers
-            chat.active_typers = chat.active_typers.filter(npub => npub !== evt.payload.chat_id);
+            chat.active_typers = chat.active_typers.filter(npub => npub !== chat.id);
         }
 
         // Find the correct position to insert the message based on timestamp
         const messages = chat.messages;
 
-        // Check if the array is empty or the new message is newer than the newest message
-        if (messages.length === 0 || newMessage.at > messages[messages.length - 1].at) {
+        // Check if the array is empty or the new message is newer than (or equal to) the newest message
+        if (messages.length === 0 || newMessage.at >= messages[messages.length - 1].at) {
             // Insert at the end (newest)
             messages.push(newMessage);
 
@@ -2211,14 +2259,14 @@ async function setupRustListeners() {
         }
 
         // If this user has the open chat, then update the chat too
-        if (strOpenChat === evt.payload.chat_id) {
+        if (strOpenChat === chat.id) {
             updateChat(chat, [newMessage]);
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
         }
 
-        // Render the Chat List
+        // Render the Chat List (only when user is viewing it)
         if (!strOpenChat) renderChatlist();
     });
 
@@ -2232,6 +2280,18 @@ async function setupRustListeners() {
 
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
+        
+        // Also update the message cache
+        // This is important for pending->sent transitions where the ID changes
+        if (messageCache.has(evt.payload.chat_id)) {
+            const cachedMessages = messageCache.getMessages(evt.payload.chat_id);
+            if (cachedMessages) {
+                const cacheIdx = cachedMessages.findIndex(m => m.id === evt.payload.old_id);
+                if (cacheIdx !== -1) {
+                    cachedMessages[cacheIdx] = evt.payload.message;
+                }
+            }
+        }
 
         // If this chat is open, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
@@ -2289,6 +2349,12 @@ async function setupRustListeners() {
  * A flag that indicates when Vector is still in it's initiation sequence
  */
 let fInit = true;
+
+/**
+ * A flag that indicates when the initial sync is complete
+ * This is separate from fInit because sync continues after UI init
+ */
+let fSyncComplete = false;
 
 /**
  * Renders the relay list and media servers in the Settings Network section
@@ -2465,6 +2531,10 @@ async function login() {
 
             await hydrateMLSGroupMetadata();
 
+            // Load the file hash index for attachment deduplication
+            // This is done asynchronously and doesn't block the UI
+            messageCache.loadFileHashIndex().catch(() => {});
+
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
             domLogin.addEventListener('animationend', async () => {
@@ -2550,48 +2620,29 @@ async function login() {
 function renderCurrentProfile(cProfile) {
     /* Chatlist Tab */
 
-    // Reset any existing UI
-    domAccount.innerHTML = ``;
-
-    // Create the 'Name + Avatar' row
-    const divRow = document.createElement('div');
-    divRow.classList.add('row');
-
-    // Render our avatar (if we have one)
+    // Clear and render avatar
+    domAccountAvatarContainer.innerHTML = '';
     let domAvatar;
     if (cProfile?.avatar) {
         domAvatar = document.createElement('img');
         domAvatar.src = cProfile.avatar;
     } else {
         // Display our placeholder avatar
-        domAvatar = createPlaceholderAvatar(false, 50);
+        domAvatar = createPlaceholderAvatar(false, 22);
     }
     domAvatar.classList.add('btn');
     domAvatar.onclick = () => openProfile();
-    divRow.appendChild(domAvatar);
+    domAccountAvatarContainer.appendChild(domAvatar);
 
-    // Render our Display Name and npub
-    const h2DisplayName = document.createElement('h2');
-    h2DisplayName.textContent = cProfile?.nickname || cProfile?.name || strPubkey.substring(0, 10) + '…';
-    h2DisplayName.classList.add('btn', 'cutoff');
-    h2DisplayName.style.fontFamily = `Rubik`;
-    h2DisplayName.style.marginTop = `auto`;
-    h2DisplayName.style.marginBottom = `auto`;
-    h2DisplayName.style.maxWidth = `calc(100% - 150px)`;
-    h2DisplayName.onclick = () => openProfile();
-    if (cProfile?.nickname || cProfile?.name) twemojify(h2DisplayName);
-    divRow.appendChild(h2DisplayName);
-
-    // Add the username row
-    domAccount.appendChild(divRow);
+    // Render our Display Name
+    domAccountName.textContent = cProfile?.nickname || cProfile?.name || strPubkey.substring(0, 10) + '…';
+    domAccountName.onclick = () => openProfile();
+    if (cProfile?.nickname || cProfile?.name) twemojify(domAccountName);
 
     // Render our status
-    const pStatus = document.createElement('p');
-    pStatus.textContent = cProfile?.status?.title || 'Set a Status';
-    pStatus.classList.add('status', 'btn', 'cutoff', 'chat-contact-status');
-    pStatus.onclick = askForStatus;
-    twemojify(pStatus);
-    domAccount.appendChild(pStatus);
+    domAccountStatus.textContent = cProfile?.status?.title || 'Set a Status';
+    domAccountStatus.onclick = askForStatus;
+    twemojify(domAccountStatus);
 
     /* Start Chat Tab */
     // Render our Share npub
@@ -2612,6 +2663,18 @@ function renderCurrentProfile(cProfile) {
  * @param {Profile} cProfile 
  */
 function renderProfileTab(cProfile) {
+    // Header Mini Avatar
+    domProfileHeaderAvatarContainer.innerHTML = '';
+    let domHeaderAvatar;
+    if (cProfile?.avatar) {
+        domHeaderAvatar = document.createElement('img');
+        domHeaderAvatar.src = cProfile.avatar;
+    } else {
+        domHeaderAvatar = createPlaceholderAvatar(false, 22);
+    }
+    domHeaderAvatar.classList.add('btn');
+    domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
+
     // Display Name
     domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || strPubkey.substring(0, 10) + '…';
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
@@ -3124,6 +3187,39 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     const fNotes = strOpenChat === strPubkey;
 
     if (chat?.messages.length || arrMessages.length) {
+        // Render chat header avatar
+        domChatHeaderAvatarContainer.innerHTML = '';
+        let domChatAvatar;
+        if (fNotes) {
+            // Notes: no avatar, just show the title "Notes"
+            domChatAvatar = null;
+        } else if (isGroup) {
+            // Group: use group placeholder
+            domChatAvatar = document.createElement('img');
+            domChatAvatar.src = './icons/group-placeholder.svg';
+            domChatAvatar.classList.add('btn');
+            domChatAvatar.onclick = () => {
+                closeChat();
+                openGroupOverview(chat);
+            };
+        } else {
+            // DM: use profile avatar or placeholder
+            if (profile?.avatar) {
+                domChatAvatar = document.createElement('img');
+                domChatAvatar.src = profile.avatar;
+            } else {
+                domChatAvatar = createPlaceholderAvatar(false, 22);
+            }
+            domChatAvatar.classList.add('btn');
+            domChatAvatar.onclick = () => {
+                previousChatBeforeProfile = strOpenChat;
+                openProfile(profile);
+            };
+        }
+        if (domChatAvatar) {
+            domChatHeaderAvatarContainer.appendChild(domChatAvatar);
+        }
+
         // Prefer displaying their name, otherwise, npub/group name
         if (fNotes) {
             domChatContact.textContent = 'Notes';
@@ -3150,11 +3246,6 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
         // Display either their Status or Typing Indicator
         updateChatHeaderSubtext(chat);
-
-        // Adjust our Contact Name class to manage space according to Status visibility
-        domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
-        domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
-        domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
 
         // Auto-mark messages as read when chat is opened AND window is focused
         if (chat?.messages?.length) {
@@ -3325,6 +3416,32 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
+        // Render chat header avatar
+        domChatHeaderAvatarContainer.innerHTML = '';
+        let domChatAvatar;
+        if (fNotes) {
+            // Notes: no avatar icon
+            domChatAvatar = null;
+        } else if (isGroup) {
+            // Group: use group placeholder
+            domChatAvatar = document.createElement('img');
+            domChatAvatar.src = './icons/group-placeholder.svg';
+            domChatAvatar.classList.add('btn');
+            domChatAvatar.onclick = () => {
+                closeChat();
+                openGroupOverview(chat);
+            };
+        } else {
+            // DM: use profile avatar or placeholder
+            if (profile?.avatar) {
+                domChatAvatar = document.createElement('img');
+                domChatAvatar.src = profile.avatar;
+            } else {
+                domChatAvatar = createPlaceholderAvatar(false, 22);
+            }
+        }
+        if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
+
         if (fNotes) {
             domChatContact.textContent = 'Notes';
             domChatContact.onclick = null;
@@ -4384,7 +4501,7 @@ function cancelReply() {
  * Open a chat with a particular contact
  * @param {string} contact
  */
-function openChat(contact) {
+async function openChat(contact) {
     // Display the Chat UI
     navbarSelect('chat-btn');
     domProfile.style.display = 'none';
@@ -4429,20 +4546,32 @@ function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
-    // Initialize procedural scroll state
-    initProceduralScroll(chat);
+    // Load messages from cache (on-demand loading)
+    // This uses the LRU message cache for efficient memory management
+    // Load messages from cache (will fetch from DB if not cached)
+    const initialMessages = await messageCache.loadInitialMessages(
+        contact,
+        proceduralScrollState.messagesPerBatch
+    );
+    
+    // Get cache stats for procedural scroll
+    const cacheStats = messageCache.getStats(contact);
+    const totalMessages = cacheStats?.totalInDb || initialMessages.length;
+    
+    // Update the chat object's messages array for compatibility
+    // (Some parts of the code still reference chat.messages)
+    if (chat) {
+        chat.messages = initialMessages;
+    }
 
-    // Render initial batch of messages (most recent ones)
-    const totalMessages = chat?.messages?.length || 0;
-    const initialMessages = totalMessages > 0
-        ? chat.messages.slice(-proceduralScrollState.renderedMessageCount)
-        : [];
+    // Initialize procedural scroll state with actual counts
+    initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
     
     updateChat(chat, initialMessages, profile, true);
 
     // If the opened chat has messages, mark them as read (last message)
-    if (totalMessages) {
-        const lastMsg = chat.messages[chat.messages.length - 1];
+    if (initialMessages) {
+        const lastMsg = initialMessages[initialMessages.length - 1];
         markAsRead(chat, lastMsg);
     }
     
@@ -4628,6 +4757,12 @@ async function closeChat() {
         }
     }
 
+    // Trim the message cache for this chat to free memory
+    // (keeps max 100 messages, removes older ones loaded during scroll)
+    if (strOpenChat) {
+        messageCache.trimChat(strOpenChat);
+    }
+
     // Reset the chat UI
     domProfile.style.display = 'none';
     domGroupOverview.style.display = 'none';
@@ -4637,6 +4772,13 @@ async function closeChat() {
     strOpenChat = "";
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
+    
+    // Clear the chat header to prevent flicker when opening next chat
+    domChatContact.textContent = '';
+    domChatContactStatus.textContent = '';
+    domChatContactStatus.classList.add('status-hidden');
+    domChatContactStatus.classList.remove('text-gradient');
+    domChatHeaderAvatarContainer.innerHTML = '';
     
     // Reset procedural scroll state
     resetProceduralScroll();
@@ -5772,6 +5914,8 @@ async function sendMessage(messageText) {
 
     // Clear input and show sending state
     domChatMessageInput.value = '';
+    domChatMessageInput.style.height = ''; // Reset textarea height
+    domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
 
     try {
@@ -5797,8 +5941,49 @@ async function sendMessage(messageText) {
         });
     }
 
+/**
+ * Auto-resize the chat input textarea based on content.
+ * Expands up to max-height defined in CSS (150px), then scrolls.
+ * Only expands when content actually needs more space (multi-line).
+ */
+function autoResizeChatInput() {
+    // The default single-line scrollHeight is ~44px (varies slightly by browser)
+    // Only expand when we truly need a second line
+    const expandThreshold = 50; // A bit above single-line to avoid premature expansion
+    const paddingOffset = 20; // 10px top + 10px bottom padding included in scrollHeight
+    
+    // Always reset first to measure true content needs
+    domChatMessageInput.style.height = '';
+    
+    // Track if we're expanding
+    const needsExpansion = domChatMessageInput.scrollHeight > expandThreshold;
+    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
+    
+    // Only set explicit height if content needs more than one line
+    if (needsExpansion) {
+        // Subtract padding since scrollHeight includes it but CSS height doesn't need it doubled
+        domChatMessageInput.style.height = (domChatMessageInput.scrollHeight - paddingOffset) + 'px';
+        // Enable scrolling for multi-line content
+        domChatMessageInput.style.overflowY = 'auto';
+        
+        // If we just expanded or height changed, soft scroll to keep chat at bottom
+        softChatScroll();
+    } else {
+        // Single line - hide overflow
+        domChatMessageInput.style.overflowY = 'hidden';
+        
+        // If we just collapsed from multi-line, also soft scroll
+        if (wasExpanded) {
+            softChatScroll();
+        }
+    }
+}
+
     // Hook up an 'input' listener on the Message Box for typing indicators
 domChatMessageInput.oninput = async () => {
+    // Auto-resize the textarea based on content
+    autoResizeChatInput();
+    
     // Toggle send button active state based on text content
     const hasText = domChatMessageInput.value.trim().length > 0;
     if (hasText) {
@@ -5897,6 +6082,8 @@ domChatMessageInput.oninput = async () => {
             if (wavData) {
                 // Placeholder
                 domChatMessageInput.value = '';
+                domChatMessageInput.style.height = ''; // Reset textarea height
+                domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
 
                 // Send raw bytes to Rust, if the chat is still open
@@ -5922,6 +6109,8 @@ domChatMessageInput.oninput = async () => {
         } else {
             // Display our recording status
             domChatMessageInput.value = '';
+            domChatMessageInput.style.height = ''; // Reset textarea height
+            domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
             domChatMessageInput.setAttribute('placeholder', 'Recording...');
 
             // Start recording
@@ -6167,9 +6356,7 @@ function adjustSize() {
     const nNavbarHeight = domNavbar.getBoundingClientRect().height;
     domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
 
-    // Chat Box: resize the chat to fill the remaining space after the upper Contact area (name)
-    const rectContact = domChatContact.getBoundingClientRect();
-    domChat.style.height = (window.innerHeight - rectContact.height) + `px`;
+    // Chat layout is now handled by flexbox - no manual height calculation needed
 
     // New Chat interface in widescreen - ensure proper sizing
     if (isWidescreen) {
@@ -6179,11 +6366,6 @@ function adjustSize() {
             chatNewElement.style.display = 'flex';
             chatNewElement.style.flexDirection = 'column';
         }
-    }
-
-    // If the chat is open, and the fade-out exists, then position it correctly
-    if (strOpenChat) {
-        domChatMessagesFade.style.top = domChatMessages.offsetTop + 'px';
     }
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
@@ -6236,7 +6418,41 @@ function renderCreateGroupList(filterText = '') {
     // Build a fragment for performance
     const frag = document.createDocumentFragment();
 
-    for (const p of arrProfiles) {
+    // Sort profiles: selected members first (by selection order), then unselected by last message time
+    const sortedProfiles = [...arrProfiles].sort((a, b) => {
+        const aSelectedIndex = arrSelectedGroupMembers.indexOf(a?.id);
+        const bSelectedIndex = arrSelectedGroupMembers.indexOf(b?.id);
+        const aSelected = aSelectedIndex !== -1;
+        const bSelected = bSelectedIndex !== -1;
+        
+        // Selected members come first
+        if (aSelected && !bSelected) return -1;
+        if (!aSelected && bSelected) return 1;
+        
+        // For selected members: sort by selection order (first selected = first in list)
+        if (aSelected && bSelected) {
+            return aSelectedIndex - bSelectedIndex;
+        }
+        
+        // For unselected members: sort by last message time (most recent first)
+        const aChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === a?.id) || {});
+        const bChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === b?.id) || {});
+        
+        // If both have timestamps, sort by most recent
+        if (aChatTimestamp && bChatTimestamp) {
+            return bChatTimestamp - aChatTimestamp;
+        }
+        // Contacts with messages come before those without
+        if (aChatTimestamp && !bChatTimestamp) return -1;
+        if (!aChatTimestamp && bChatTimestamp) return 1;
+        
+        // Fallback: sort alphabetically
+        const aName = (a?.nickname || a?.name || '').toLowerCase();
+        const bName = (b?.nickname || b?.name || '').toLowerCase();
+        return aName.localeCompare(bName);
+    });
+
+    for (const p of sortedProfiles) {
         if (!p || !p.id) continue;
         if (p.id === mine) continue;
 
@@ -6245,75 +6461,107 @@ function renderCreateGroupList(filterText = '') {
         const hay = (name + ' ' + p.id).toLowerCase();
         if (f && !hay.includes(f)) continue;
 
-        // Row container (reuse existing styling conventions)
+        // Row container - compact style matching Invite Member list
         const row = document.createElement('div');
-        row.classList.add('chatlist-contact');
         row.id = `cg-${p.id}`;
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.padding = '5px 10px';
+        row.style.borderRadius = '6px';
+        row.style.transition = 'background 0.2s ease';
+        row.style.isolation = 'isolate';
+        row.style.cursor = 'pointer';
+        row.style.position = 'relative';
 
-        // Avatar
-        const avatarContainer = document.createElement('div');
-        avatarContainer.style.position = 'relative';
+        // Add hover effect with theme-based gradient
+        const bgDiv = document.createElement('div');
+        bgDiv.style.position = 'absolute';
+        bgDiv.style.top = '0';
+        bgDiv.style.left = '0';
+        bgDiv.style.right = '0';
+        bgDiv.style.bottom = '0';
+        bgDiv.style.borderRadius = '6px';
+        bgDiv.style.opacity = '0';
+        bgDiv.style.transition = 'opacity 0.2s ease';
+        bgDiv.style.pointerEvents = 'none';
+        bgDiv.style.zIndex = '0';
+        row.appendChild(bgDiv);
+
+        row.addEventListener('mouseenter', () => {
+            const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+            bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+            bgDiv.style.opacity = '1';
+        });
+        row.addEventListener('mouseleave', () => {
+            bgDiv.style.opacity = '0';
+        });
+
+        // Avatar - compact 25px size
+        let avatar;
         if (p.avatar) {
-            const img = document.createElement('img');
-            img.src = p.avatar;
-            avatarContainer.appendChild(img);
+            avatar = document.createElement('img');
+            avatar.src = p.avatar;
+            avatar.style.width = '25px';
+            avatar.style.height = '25px';
+            avatar.style.borderRadius = '50%';
+            avatar.style.objectFit = 'cover';
         } else {
-            avatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+            avatar = createPlaceholderAvatar(false, 25);
         }
-        row.appendChild(avatarContainer);
+        avatar.style.marginRight = '10px';
+        avatar.style.position = 'relative';
+        avatar.style.zIndex = '1';
+        row.appendChild(avatar);
 
-        // Title and subtitle
-        const preview = document.createElement('div');
-        preview.classList.add('chatlist-contact-preview');
+        // Name - compact style
+        const nameSpan = document.createElement('div');
+        nameSpan.className = 'compact-member-name';
+        nameSpan.textContent = name || p.id.substring(0, 10) + '...';
+        nameSpan.style.color = '#f7f4f4';
+        nameSpan.style.fontSize = '14px';
+        nameSpan.style.flex = '1';
+        nameSpan.style.textAlign = 'left';
+        nameSpan.style.position = 'relative';
+        nameSpan.style.zIndex = '1';
+        if (name) twemojify(nameSpan);
+        row.appendChild(nameSpan);
 
-        const title = document.createElement('h4');
-        title.classList.add('cutoff');
-        title.textContent = name || p.id;
-        if (name) twemojify(title);
-        preview.appendChild(title);
+        // Custom checkbox indicator (circular, matching Invite Member style)
+        const indicator = document.createElement('div');
+        indicator.style.width = '18px';
+        indicator.style.height = '18px';
+        indicator.style.borderRadius = '50%';
+        indicator.style.border = '2px solid var(--icon-color-primary)';
+        indicator.style.position = 'relative';
+        indicator.style.zIndex = '1';
+        indicator.style.flexShrink = '0';
+        indicator.style.marginLeft = 'auto';
+        indicator.style.transition = 'background-color 0.2s ease';
+        
+        // Set initial state
+        if (arrSelectedGroupMembers.includes(p.id)) {
+            indicator.style.backgroundColor = 'var(--icon-color-primary)';
+        }
+        row.appendChild(indicator);
 
-        const subtitle = document.createElement('p');
-        subtitle.classList.add('cutoff');
-        subtitle.style.opacity = '0.7';
-        subtitle.textContent = p.id;
-        preview.appendChild(subtitle);
-        row.appendChild(preview);
-
-        // Checkbox
-        const chk = document.createElement('input');
-        chk.type = 'checkbox';
-        chk.style.marginLeft = 'auto';
-        chk.style.marginRight = 'auto';
-        chk.style.width = '18px';
-        chk.style.height = '18px';
-        chk.style.marginTop = 'auto';
-        chk.style.marginBottom = 'auto';
-        chk.checked = arrSelectedGroupMembers.includes(p.id);
-        chk.setAttribute('aria-label', `Select ${name || p.id}`);
-        chk.onchange = () => {
-            if (chk.checked) {
-                if (!arrSelectedGroupMembers.includes(p.id)) {
-                    arrSelectedGroupMembers.push(p.id);
-                }
-            } else {
-                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== p.id);
-            }
-            updateCreateGroupValidation(true);
-        };
-        row.appendChild(chk);
-
-        // Row click toggles checkbox for better UX (avoid toggling when clicking the checkbox itself)
-        // Important: stop propagation to avoid the global document click handler opening the DM chat.
-        row.onclick = null;
+        // Row click toggles selection
         row.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (e.target === chk) return;
-            chk.click();
-        });
-        // Also stop propagation when the checkbox itself is clicked
-        chk.addEventListener('click', (e) => {
-            e.stopPropagation();
+            
+            const isSelected = arrSelectedGroupMembers.includes(p.id);
+            if (isSelected) {
+                // Deselect
+                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== p.id);
+            } else {
+                // Select
+                arrSelectedGroupMembers.push(p.id);
+            }
+            updateCreateGroupValidation(true);
+            
+            // Re-render to hoist selected members to top
+            const currentFilter = domCreateGroupFilter?.value || '';
+            renderCreateGroupList(currentFilter);
         });
 
         frag.appendChild(row);

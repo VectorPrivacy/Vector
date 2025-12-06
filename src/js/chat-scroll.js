@@ -11,7 +11,9 @@ const proceduralScrollState = {
     messagesPerBatch: 20,
     scrollThreshold: 300, // pixels from top to trigger load
     lastScrollHeight: 0, // Track scroll height for media load correction
-    isLoadingOlderMessages: false // Flag to indicate we're in procedural load mode
+    isLoadingOlderMessages: false, // Flag to indicate we're in procedural load mode
+    chatId: null, // Current chat ID for cache lookups
+    useCache: false // Whether to use the message cache
 };
 
 /**
@@ -39,12 +41,25 @@ function correctScrollForMediaLoad() {
 function handleProceduralScroll() {
     if (!strOpenChat || proceduralScrollState.isLoading) return;
 
-    const chat = arrChats.find(c => c.id === strOpenChat);
-    if (!chat || !chat.messages) return;
-
     // Check if user has scrolled near the top
     const scrollTop = domChatMessages.scrollTop;
     if (scrollTop > proceduralScrollState.scrollThreshold) return;
+
+    // Check if we're using cache mode
+    if (proceduralScrollState.useCache) {
+        // Use cache stats to determine if there are more messages
+        const cacheStats = messageCache.getStats(strOpenChat);
+        if (!cacheStats?.hasMoreMessages) {
+            return; // No more messages to load
+        }
+        // Load more messages
+        loadMoreMessages();
+        return;
+    }
+
+    // Legacy mode: check chat.messages array
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat || !chat.messages) return;
 
     // Check if there are more messages to load
     const totalMessages = chat.messages.length;
@@ -56,12 +71,83 @@ function handleProceduralScroll() {
 
 /**
  * Load the next batch of older messages
+ * Uses the message cache for on-demand loading from database
  */
 async function loadMoreMessages() {
     if (proceduralScrollState.isLoading || !strOpenChat) return;
 
     const chat = arrChats.find(c => c.id === strOpenChat);
-    if (!chat || !chat.messages) return;
+    if (!chat) return;
+
+    // Check if we should use the message cache
+    if (proceduralScrollState.useCache) {
+        // Use cache-based loading
+        const cacheStats = messageCache.getStats(strOpenChat);
+        
+        // Check if there are more messages to load
+        if (!cacheStats?.hasMoreMessages) {
+            return;
+        }
+
+        proceduralScrollState.isLoading = true;
+        proceduralScrollState.isLoadingOlderMessages = true;
+
+        // Store scroll position BEFORE rendering
+        const scrollHeightBefore = domChatMessages.scrollHeight;
+        const scrollTopBefore = domChatMessages.scrollTop;
+
+        // Load more messages from cache (fetches from DB if needed)
+        const olderMessages = await messageCache.loadMoreMessages(
+            strOpenChat,
+            proceduralScrollState.messagesPerBatch
+        );
+
+        if (olderMessages.length === 0) {
+            proceduralScrollState.isLoading = false;
+            proceduralScrollState.isLoadingOlderMessages = false;
+            return;
+        }
+
+        // Update the chat object's messages array for compatibility
+        chat.messages = messageCache.getMessages(strOpenChat) || [];
+
+        // Get profile for rendering
+        const isGroup = chat?.chat_type === 'MlsGroup';
+        const profile = !isGroup ? getProfile(chat.id) : null;
+
+        // Render the older messages (prepend)
+        await updateChat(chat, olderMessages, profile, false);
+
+        // Update rendered count
+        proceduralScrollState.renderedMessageCount += olderMessages.length;
+        
+        // Update total from cache stats
+        const newStats = messageCache.getStats(strOpenChat);
+        proceduralScrollState.totalMessageCount = newStats?.totalInDb || proceduralScrollState.totalMessageCount;
+
+        // Correct scroll position to prevent "snapping"
+        const scrollHeightAfter = domChatMessages.scrollHeight;
+        const scrollHeightDiff = scrollHeightAfter - scrollHeightBefore;
+        
+        // Adjust scroll position to maintain visual position
+        domChatMessages.scrollTop = scrollTopBefore + scrollHeightDiff;
+        
+        // Store the current scroll height for media load correction
+        proceduralScrollState.lastScrollHeight = domChatMessages.scrollHeight;
+
+        proceduralScrollState.isLoading = false;
+        
+        // Keep the flag active for a bit longer to catch late-loading media
+        setTimeout(() => {
+            proceduralScrollState.isLoadingOlderMessages = false;
+            proceduralScrollState.lastScrollHeight = 0;
+        }, 2000);
+        
+        return;
+    }
+
+    // Legacy behavior: load from chat.messages array
+    if (!chat.messages) return;
 
     const totalMessages = chat.messages.length;
     const currentRendered = proceduralScrollState.renderedMessageCount;
@@ -122,10 +208,13 @@ async function loadMoreMessages() {
 }
 
 /**
- * Initialize procedural scroll state for a chat
+ * Initialize procedural scroll state for a chat (legacy - uses chat.messages)
  * @param {Object} chat - The chat object
  */
 function initProceduralScroll(chat) {
+    proceduralScrollState.useCache = false;
+    proceduralScrollState.chatId = null;
+    
     if (!chat || !chat.messages) {
         proceduralScrollState.renderedMessageCount = 0;
         proceduralScrollState.totalMessageCount = 0;
@@ -141,6 +230,22 @@ function initProceduralScroll(chat) {
 }
 
 /**
+ * Initialize procedural scroll state with message cache support
+ * @param {string} chatId - The chat identifier
+ * @param {number} initialCount - Number of messages initially loaded
+ * @param {number} totalCount - Total messages in database
+ */
+function initProceduralScrollWithCache(chatId, initialCount, totalCount) {
+    proceduralScrollState.useCache = true;
+    proceduralScrollState.chatId = chatId;
+    proceduralScrollState.renderedMessageCount = initialCount;
+    proceduralScrollState.totalMessageCount = totalCount;
+    proceduralScrollState.isLoading = false;
+    proceduralScrollState.isLoadingOlderMessages = false;
+    proceduralScrollState.lastScrollHeight = 0;
+}
+
+/**
  * Reset procedural scroll state (call when closing chat)
  */
 function resetProceduralScroll() {
@@ -149,6 +254,8 @@ function resetProceduralScroll() {
     proceduralScrollState.totalMessageCount = 0;
     proceduralScrollState.lastScrollHeight = 0;
     proceduralScrollState.isLoadingOlderMessages = false;
+    proceduralScrollState.chatId = null;
+    proceduralScrollState.useCache = false;
 }
 
 /**
