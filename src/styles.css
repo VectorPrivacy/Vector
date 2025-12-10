@@ -1164,6 +1164,7 @@ html, body {
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
+  overflow: hidden;
 }
 
 .msg-them p {
@@ -1178,7 +1179,7 @@ html, body {
   border-bottom-left-radius: 0px;
   word-break: break-word;
   font-weight: 100;
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .file-ext-badge {
@@ -1259,6 +1260,99 @@ html, body {
 .msg-payment button {
   margin-left: auto;
   background-color: rgba(0, 0, 0, 0.4);
+}
+
+/* Nostr Profile Preview (for shared npubs and profile links) */
+.msg-profile-preview {
+  display: flex;
+  align-items: center;
+  padding: 10px;
+  border-radius: 16px;
+  margin-top: 10px;
+  border: 1px solid var(--accent);
+  background-color: var(--accent-transparent);
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.msg-profile-avatar {
+  flex-shrink: 0;
+}
+
+.msg-profile-avatar img,
+.msg-profile-avatar .placeholder-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: middle;
+}
+
+.msg-profile-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 18px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.msg-profile-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg-profile-npub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg-profile-buttons {
+  display: flex;
+  flex-shrink: 0;
+  margin-left: auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.msg-profile-copy-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  background-color: rgba(0, 0, 0, 0.2);
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.msg-profile-copy-btn:hover {
+  opacity: 0.7;
+}
+
+.msg-profile-btn {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  background-color: var(--accent);
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.msg-profile-btn:hover {
+  opacity: 0.8;
 }
 
 /* The `highlightMessage` animation is defined in `/themes/*` */

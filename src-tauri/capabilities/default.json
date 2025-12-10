@@ -14,6 +14,7 @@
     "fs:default",
     "clipboard-manager:default",
     "clipboard-manager:allow-read-image",
-    "process:default"
+    "process:default",
+    "window-state:default"
   ]
 }

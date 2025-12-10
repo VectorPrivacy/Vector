@@ -78,6 +78,14 @@
       "macos": {
         "minimumSystemVersion": "10.15"
       }
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["vector"]
+      },
+      "mobile": [
+        { "host": "vectorapp.io", "pathPrefix": ["/profile"] }
+      ]
     }
   }
 }

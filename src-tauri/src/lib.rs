@@ -59,6 +59,8 @@ pub use chat::{Chat, ChatType, ChatMetadata};
 mod rumor;
 pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationType, process_rumor};
 
+mod deep_link;
+
 /// # Trusted Relay
 ///
 /// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
@@ -4733,13 +4735,39 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init());
+
+    // Desktop-only plugins
+    #[cfg(desktop)]
+    {
+        // Window state plugin: saves and restores window position, size, maximized state, etc.
+        builder = builder.plugin(tauri_plugin_window_state::Builder::new().build());
+        
+        // Single-instance plugin: ensures deep links are passed to existing instance
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Handle deep links from single-instance (Windows/Linux)
+            let urls: Vec<String> = args.iter()
+                .filter(|arg| arg.starts_with("vector://") || arg.contains("vectorapp.io"))
+                .cloned()
+                .collect();
+            if !urls.is_empty() {
+                deep_link::handle_deep_link(app, urls);
+            }
+            // Focus the existing window
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder
         .setup(|app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -4750,10 +4778,19 @@ pub fn run() {
 
             // Setup a graceful shutdown for our Nostr subscriptions
             let window = app.get_webview_window("main").unwrap();
+            #[cfg(desktop)]
+            let handle_for_window_state = handle.clone();
             window.on_window_event(move |event| {
                 match event {
                     // This catches when the window is being closed
                     tauri::WindowEvent::CloseRequested { .. } => {
+                        // Save window state (position, size, maximized, etc.) before closing
+                        #[cfg(desktop)]
+                        {
+                            use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+                            let _ = handle_for_window_state.save_window_state(StateFlags::all());
+                        }
+                        
                         // Cleanly shutdown our Nostr client
                         if let Some(nostr_client) = NOSTR_CLIENT.get() {
                             tauri::async_runtime::block_on(async {
@@ -4788,12 +4825,24 @@ pub fn run() {
             }
 
             // Set as our accessible static app handle
-            TAURI_APP.set(handle).unwrap();
+            TAURI_APP.set(handle.clone()).unwrap();
             
             // Start the profile sync background processor
             tauri::async_runtime::spawn(async {
                 profile_sync::start_profile_sync_processor().await;
             });
+
+            // Setup deep link listener for macOS/iOS/Android
+            // On these platforms, deep links are received as events rather than CLI args
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle_for_deep_link = handle.clone();
+                let _listener_id = app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+                    deep_link::handle_deep_link(&handle_for_deep_link, urls);
+                });
+            }
             
             Ok(())
         })
@@ -4880,6 +4929,8 @@ pub fn run() {
             queue_chat_profiles_sync,
             refresh_profile_now,
             sync_all_profiles,
+            // Deep link commands
+            deep_link::get_pending_deep_link,
             // Account manager commands
             account_manager::get_current_account,
             account_manager::list_all_accounts,

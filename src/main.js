@@ -1118,8 +1118,9 @@ function updateChatHeaderSubtext(chat) {
     const newHasStatus = !!newStatusText;
     
     if (newHasStatus) {
-        // Show status: remove hidden class, update content
+        // Show status: remove hidden class, update content, ensure visible
         domChatContactStatus.classList.remove('status-hidden');
+        domChatContactStatus.style.display = ''; // Reset display in case it was hidden by else branch
         domChatContactStatus.textContent = newStatusText;
         domChatContactStatus.classList.toggle('text-gradient', shouldAddGradient);
         if (!shouldAddGradient) {
@@ -2091,6 +2092,12 @@ async function setupRustListeners() {
             }
         }
         
+        // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
+        const profilePreviews = document.querySelectorAll(`.msg-profile-preview[data-npub="${evt.payload.id}"]`);
+        profilePreviews.forEach(preview => {
+            updateNostrProfilePreview(preview, evt.payload);
+        });
+        
         // If this user is being viewed in the Expanded Profile View, update it
         // Note: no need to update our own, it makes editing very weird
         if (!evt.payload.mine && domProfileId.textContent === evt.payload.id) {
@@ -2302,12 +2309,40 @@ async function setupRustListeners() {
             }
         }
     });
+
+    // Note: Deep link listener is set up early in DOMContentLoaded, before login flow
+    // This ensures deep links work even when the app is opened from a closed state
 }
 
 /**
  * A flag that indicates when Vector is still in it's initiation sequence
  */
 let fInit = true;
+
+/**
+ * Execute a deep link action (profile, etc.)
+ * @param {Object} payload - The action payload with action_type and target
+ */
+async function executeDeepLinkAction(payload) {
+    const { action_type, target } = payload;
+    if (action_type === 'profile') {
+        // Open the profile for the given npub
+        // First, try to find an existing profile in our cache
+        let profile = arrProfiles.find(p => p.id === target);
+        
+        if (!profile) {
+            // Profile not in cache - create a minimal profile object
+            // The openProfile function will trigger a refresh from the network
+            profile = { id: target };
+        }
+        
+        // Store the current chat so we can return to it
+        previousChatBeforeProfile = strOpenChat;
+        
+        // Open the profile view
+        await openProfile(profile);
+    }
+}
 
 /**
  * A flag that indicates when the initial sync is complete
@@ -2560,6 +2595,20 @@ async function login() {
                 
                 // Initialize the updater
                 initializeUpdater();
+                
+                // Execute any pending deep link action that was received before login
+                // The Rust backend stores deep links received before the frontend was ready
+                setTimeout(async () => {
+                    try {
+                        const pendingAction = await invoke('get_pending_deep_link');
+                        if (pendingAction) {
+                            console.log('Executing pending deep link action:', pendingAction);
+                            await executeDeepLinkAction(pendingAction);
+                        }
+                    } catch (e) {
+                        console.error('Failed to check for pending deep link:', e);
+                    }
+                }, 1000);
             }, { once: true });
         });
 
@@ -2624,8 +2673,8 @@ function renderProfileTab(cProfile) {
     domHeaderAvatar.classList.add('btn');
     domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
 
-    // Display Name
-    domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || strPubkey.substring(0, 10) + '…';
+    // Display Name - use profile's npub as fallback
+    domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
 
     // Status
@@ -2674,8 +2723,8 @@ function renderProfileTab(cProfile) {
     domProfileAvatar.onclick = cProfile.mine ? askForAvatar : null;
     if (cProfile.mine) domProfileAvatar.classList.add('btn');
 
-    // Secondary Display Name
-    const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : '';
+    // Secondary Display Name - use profile's npub as fallback
+    const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
     domProfileNameSecondary.innerHTML = cProfile?.nickname || cProfile?.name || strNamePlaceholder;
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
 
@@ -2722,7 +2771,9 @@ function renderProfileTab(cProfile) {
     document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
-            navigator.clipboard.writeText(npub).then(() => {
+            // Copy the full profile URL for easy sharing
+            const profileUrl = `https://vectorapp.io/profile/${npub}`;
+            navigator.clipboard.writeText(profileUrl).then(() => {
                 const copyBtn = e.target.closest('.profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
@@ -3365,6 +3416,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
+        // Clear existing messages when opening a new chat (fClicked = true)
+        // This prevents messages from the previous chat from showing
+        if (fClicked) {
+            domChatMessages.innerHTML = '';
+        }
+        
         // Render chat header avatar
         domChatHeaderAvatarContainer.innerHTML = '';
         let domChatAvatar;
@@ -3722,11 +3779,19 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         }
     }
 
+    // Pre-detect npub to potentially modify displayed content
+    // If npub is at the end of the message, we'll strip it from the text display
+    const npubInfoEarly = detectNostrProfile(msg.content);
+    let displayContent = msg.content;
+    if (npubInfoEarly && npubInfoEarly.isAtEnd && npubInfoEarly.textWithoutNpub) {
+        displayContent = npubInfoEarly.textWithoutNpub;
+    }
+    
     // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
     const spanMessage = document.createElement('span');
     if (fEmojiOnly) {
         // Preserve linebreaks for creative emoji rendering (tophats on wolves)
-        spanMessage.textContent = msg.content;
+        spanMessage.textContent = displayContent;
         spanMessage.style.whiteSpace = `pre-wrap`;
         // Add an emoji-only CSS format
         pMessage.classList.add('emoji-only');
@@ -3735,7 +3800,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
     } else {
         // Render their text content (using our custom Markdown renderer)
-        spanMessage.innerHTML = parseMarkdown(msg.content.trim());
+        spanMessage.innerHTML = parseMarkdown(displayContent.trim());
         
         // Make URLs clickable (after markdown parsing, before twemojify)
         linkifyUrls(spanMessage);
@@ -4165,8 +4230,71 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.appendChild(renderCryptoAddress(cAddress));
     }
 
+    // Append Nostr Profile Previews (for shared npubs and vectorapp.io profile links)
+    // Reuse the early detection result if available
+    const npubInfo = npubInfoEarly;
+    if (npubInfo) {
+        // Check if the message is ONLY an npub (with optional whitespace)
+        // If so, hide the text span since the preview shows all the info
+        const isOnlyNpub = msg.content.trim() === npubInfo.originalMatch;
+        if (isOnlyNpub) {
+            const msgSpan = pMessage.querySelector('span');
+            if (msgSpan) {
+                msgSpan.style.display = 'none';
+            }
+            // Remove padding from the message bubble when it's only an npub
+            pMessage.style.padding = '0';
+        }
+        
+        // Check if we already have the profile cached
+        const cachedProfile = getProfile(npubInfo.npub);
+        const profilePreview = renderNostrProfilePreview(npubInfo, cachedProfile, isOnlyNpub);
+        
+        // Add click handler for the "View Profile" button
+        const btnViewProfile = profilePreview.querySelector('.msg-profile-btn');
+        if (btnViewProfile) {
+            btnViewProfile.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const npub = btnViewProfile.getAttribute('data-npub');
+                // openProfile accepts a profile object with at least an 'id' field
+                // If we have a cached profile, use it; otherwise create a minimal one
+                openProfile(getProfile(npub) || { id: npub });
+            });
+        }
+        
+        // Add click handler for the copy button
+        const btnCopy = profilePreview.querySelector('.msg-profile-copy-btn');
+        if (btnCopy) {
+            btnCopy.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const npub = btnCopy.getAttribute('data-npub');
+                // Always copy the full profile URL for easy sharing
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                await navigator.clipboard.writeText(profileUrl);
+                // Show checkmark feedback
+                btnCopy.innerHTML = '<span class="icon icon-check"></span>';
+                setTimeout(() => {
+                    btnCopy.innerHTML = '<span class="icon icon-copy"></span>';
+                }, 2000);
+            });
+        }
+        
+        // If we don't have the profile yet, queue a high-priority fetch
+        if (!cachedProfile) {
+            invoke('queue_profile_sync', {
+                npub: npubInfo.npub,
+                priority: 'high',
+                forceRefresh: false
+            }).catch(err => console.warn('Failed to queue profile sync for npub preview:', err));
+        }
+        
+        pMessage.appendChild(profilePreview);
+    }
+
     // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled) {
+    // Skip web preview if we already rendered a profile preview (e.g., vectorapp.io/profile links)
+    const skipWebPreview = npubInfoEarly && npubInfoEarly.type === 'link';
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview) {
         // Check if we have metadata with either an image OR a title/description
         const hasMetadata = msg.preview_metadata && (
             msg.preview_metadata.og_image ||
@@ -5535,6 +5663,20 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
+    // Set up early deep link listener BEFORE login flow
+    // This handles deep link events that arrive while the app is running
+    // Note: Deep links received before JS loads are stored in Rust and retrieved after login
+    await listen('deep_link_action', async (evt) => {
+        // If user is not logged in yet (fInit is true), ignore - Rust already stored it
+        if (fInit) {
+            console.log('Deep link received before login, Rust backend has stored it');
+            return;
+        }
+        
+        // User is logged in, execute the action immediately
+        await executeDeepLinkAction(evt.payload);
+    });
+
     // Immediately load and apply theme settings (visual only, don't save)
     const strTheme = await invoke('get_theme');
     if (strTheme) {
@@ -5674,7 +5816,13 @@ window.addEventListener("DOMContentLoaded", async () => {
         }, 100);
     });
     domChatNewStartBtn.onclick = () => {
-        openChat(domChatNewInput.value.trim());
+        let inputValue = domChatNewInput.value.trim();
+        // Parse npub from vectorapp.io profile URL if pasted
+        const profileUrlMatch = inputValue.match(/https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i);
+        if (profileUrlMatch) {
+            inputValue = profileUrlMatch[1];
+        }
+        openChat(inputValue);
         domChatNewInput.value = ``;
     };
     domChatNewInput.onkeydown = async (evt) => {
@@ -6051,7 +6199,9 @@ domChatMessageInput.oninput = async () => {
     document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('share-npub')?.textContent;
         if (npub) {
-            navigator.clipboard.writeText(npub).then(() => {
+            // Copy the full profile URL for easy sharing
+            const profileUrl = `https://vectorapp.io/profile/${npub}`;
+            navigator.clipboard.writeText(profileUrl).then(() => {
                 const copyBtn = e.target.closest('.profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
