@@ -6,7 +6,9 @@
     "main"
   ],
   "permissions": [
-    "updater:default"
+    "core:window:allow-show",
+    "updater:default",
+    "window-state:default"
   ],
   "platforms": ["linux", "windows", "macOS"]
 }

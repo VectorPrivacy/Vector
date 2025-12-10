@@ -4748,7 +4748,13 @@ pub fn run() {
     #[cfg(desktop)]
     {
         // Window state plugin: saves and restores window position, size, maximized state, etc.
-        builder = builder.plugin(tauri_plugin_window_state::Builder::new().build());
+        // Exclude VISIBLE flag so window starts hidden (we show it after content loads to prevent white flash)
+        use tauri_plugin_window_state::StateFlags;
+        builder = builder.plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build()
+        );
         
         // Single-instance plugin: ensures deep links are passed to existing instance
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {

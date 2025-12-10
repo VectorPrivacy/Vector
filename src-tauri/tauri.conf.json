@@ -16,7 +16,8 @@
         "minHeight": 575,
         "height": 650,
         "resizable": true,
-        "backgroundThrottling": "throttle"
+        "backgroundThrottling": "throttle",
+        "visible": false
       }
     ],
     "security": {

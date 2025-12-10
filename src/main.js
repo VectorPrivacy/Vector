@@ -1,6 +1,7 @@
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { getCurrentWindow } = window.__TAURI__.window;
+const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
@@ -5681,6 +5682,17 @@ window.addEventListener("DOMContentLoaded", async () => {
     const strTheme = await invoke('get_theme');
     if (strTheme) {
         applyTheme(strTheme);
+    }
+
+    // Show the main window now that content is ready (prevents white flash on startup)
+    // The window starts hidden via tauri.conf.json and Rust setup hides it explicitly
+    // Only needed on desktop - mobile doesn't have this issue
+    if (!platformFeatures.is_mobile) {
+        try {
+            await getCurrentWebviewWindow().show();
+        } catch (e) {
+            console.warn('Failed to show main window:', e);
+        }
     }
 
     // [DEBUG MODE] Check if backend already has state from a previous session (hot-reload scenario)
