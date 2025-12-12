@@ -5657,6 +5657,53 @@ let strPubkey;
 let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
+
+/**
+ * Auto-resize the chat input textarea based on content.
+ * Expands up to max-height defined in CSS (150px), then scrolls.
+ * Only expands when content actually needs more space (multi-line).
+ */
+function autoResizeChatInput() {
+    // Get actual computed styles
+    const computed = window.getComputedStyle(domChatMessageInput);
+    const lineHeight = parseFloat(computed.lineHeight) || 24;
+    const paddingTop = parseFloat(computed.paddingTop) || 10;
+    const paddingBottom = parseFloat(computed.paddingBottom) || 10;
+    const padding = paddingTop + paddingBottom;
+    
+    // Single line scrollHeight = lineHeight + padding
+    const singleLineScrollHeight = lineHeight + padding;
+    
+    // Track previous state for scroll adjustment
+    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
+    
+    // Reset height and ensure overflow is hidden for accurate measurement
+    // Setting overflow:hidden before measuring prevents scrollbar space from affecting layout
+    domChatMessageInput.style.overflowY = 'hidden';
+    domChatMessageInput.style.height = '0';
+    
+    // Get scrollHeight - this tells us how much space content actually needs
+    const scrollHeight = domChatMessageInput.scrollHeight;
+    
+    // Only expand if content needs more than single line
+    if (scrollHeight > singleLineScrollHeight) {
+        // Set height to content needs minus padding (CSS height is content-box)
+        domChatMessageInput.style.height = (scrollHeight - padding) + 'px';
+        domChatMessageInput.style.overflowY = 'auto';
+        
+        // Soft scroll to keep chat at bottom when expanding
+        softChatScroll();
+    } else {
+        // Single line - use default CSS height, keep overflow hidden
+        domChatMessageInput.style.height = '';
+        
+        // If we just collapsed from multi-line, also soft scroll
+        if (wasExpanded) {
+            softChatScroll();
+        }
+    }
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
     // Once login fade-in animation ends, remove it
     domLogin.addEventListener('animationend', () => domLogin.classList.remove('fadein-anim'), { once: true });
@@ -5934,44 +5981,6 @@ async function sendMessage(messageText) {
             }
         });
     }
-
-/**
- * Auto-resize the chat input textarea based on content.
- * Expands up to max-height defined in CSS (150px), then scrolls.
- * Only expands when content actually needs more space (multi-line).
- */
-function autoResizeChatInput() {
-    // The default single-line scrollHeight is ~44px (varies slightly by browser)
-    // Only expand when we truly need a second line
-    const expandThreshold = 50; // A bit above single-line to avoid premature expansion
-    const paddingOffset = 20; // 10px top + 10px bottom padding included in scrollHeight
-    
-    // Always reset first to measure true content needs
-    domChatMessageInput.style.height = '';
-    
-    // Track if we're expanding
-    const needsExpansion = domChatMessageInput.scrollHeight > expandThreshold;
-    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
-    
-    // Only set explicit height if content needs more than one line
-    if (needsExpansion) {
-        // Subtract padding since scrollHeight includes it but CSS height doesn't need it doubled
-        domChatMessageInput.style.height = (domChatMessageInput.scrollHeight - paddingOffset) + 'px';
-        // Enable scrolling for multi-line content
-        domChatMessageInput.style.overflowY = 'auto';
-        
-        // If we just expanded or height changed, soft scroll to keep chat at bottom
-        softChatScroll();
-    } else {
-        // Single line - hide overflow
-        domChatMessageInput.style.overflowY = 'hidden';
-        
-        // If we just collapsed from multi-line, also soft scroll
-        if (wasExpanded) {
-            softChatScroll();
-        }
-    }
-}
 
     // Hook up an 'input' listener on the Message Box for typing indicators
 domChatMessageInput.oninput = async () => {
@@ -6344,7 +6353,8 @@ function adjustSize() {
     const nNavbarHeight = domNavbar.getBoundingClientRect().height;
     domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
 
-    // Chat layout is now handled by flexbox - no manual height calculation needed
+    // Re-calculate chat input size on window resize (text may reflow)
+    autoResizeChatInput();
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     softChatScroll();
