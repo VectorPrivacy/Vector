@@ -6,10 +6,10 @@ use tauri::{AppHandle, Runtime, Manager};
 lazy_static! {
     /// Global state tracking the currently active account (npub)
     static ref CURRENT_ACCOUNT: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
-    
+
     /// Pending account waiting for encryption (npub stored before database creation)
     static ref PENDING_ACCOUNT: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
-    
+
     /// Persistent database connection pool (one per account)
     /// Keeps connection open to avoid repeated open/close overhead
     static ref DB_CONNECTION_POOL: Arc<Mutex<Option<(String, rusqlite::Connection)>>> =
@@ -17,7 +17,7 @@ lazy_static! {
 }
 
 /// SQL Schema for Vector database
-/// 
+///
 /// This schema uses selective encryption:
 /// - Encrypted: message content, private keys, seed phrases, MLS secrets
 /// - Plaintext: timestamps, IDs, metadata, profiles (for indexing and performance)
@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS mls_event_cursors (
 "#;
 
 /// Get the profile directory for a given npub (full npub, no truncation)
-/// 
+///
 /// Returns: AppData/npub1qwertyuiop.../
 pub fn get_profile_directory<R: Runtime>(
     handle: &AppHandle<R>,
@@ -127,27 +127,27 @@ pub fn get_profile_directory<R: Runtime>(
 ) -> Result<PathBuf, String> {
     let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    
+
     // Validate npub format
     if !npub.starts_with("npub1") {
         return Err(format!("Invalid npub format: {}", npub));
     }
-    
+
     // Use full npub as directory name
     let profile_dir = app_data.join(npub);
-    
+
     // Create directory if it doesn't exist
     if !profile_dir.exists() {
         std::fs::create_dir_all(&profile_dir)
             .map_err(|e| format!("Failed to create profile directory: {}", e))?;
         println!("[Account Manager] Created profile directory: {}", profile_dir.display());
     }
-    
+
     Ok(profile_dir)
 }
 
 /// Get the database path for a given npub
-/// 
+///
 /// Returns: AppData/npub1qwerty.../vector.db
 pub fn get_database_path<R: Runtime>(
     handle: &AppHandle<R>,
@@ -158,7 +158,7 @@ pub fn get_database_path<R: Runtime>(
 }
 
 /// Get the MLS directory for a given npub
-/// 
+///
 /// Returns: AppData/npub1qwerty.../mls/
 pub fn get_mls_directory<R: Runtime>(
     handle: &AppHandle<R>,
@@ -166,13 +166,13 @@ pub fn get_mls_directory<R: Runtime>(
 ) -> Result<PathBuf, String> {
     let profile_dir = get_profile_directory(handle, npub)?;
     let mls_dir = profile_dir.join("mls");
-    
+
     if !mls_dir.exists() {
         std::fs::create_dir_all(&mls_dir)
             .map_err(|e| format!("Failed to create MLS directory: {}", e))?;
         println!("[Account Manager] Created MLS directory: {}", mls_dir.display());
     }
-    
+
     Ok(mls_dir)
 }
 
@@ -183,9 +183,9 @@ pub fn get_mls_directory<R: Runtime>(
 pub fn list_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, String> {
     let app_data = handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    
+
     let mut accounts = Vec::new();
-    
+
     if let Ok(entries) = std::fs::read_dir(app_data) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
@@ -211,7 +211,7 @@ pub fn list_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, S
             }
         }
     }
-    
+
     Ok(accounts)
 }
 
@@ -219,49 +219,30 @@ pub fn list_accounts<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, S
 fn account_has_valid_pkey<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<bool, String> {
     // Try to get database connection for this account
     let db_path = get_database_path(handle, npub)?;
-    
+
     // Check if database file exists
     if !db_path.exists() {
         return Ok(false);
     }
-    
+
     // Try to open database connection
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
-    
-    // Check if the pkey exists in settings table
+
+    // Check if the pkey exists in settings table and is not empty
     let result: Option<String> = conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
         rusqlite::params!["pkey"],
         |row| row.get(0)
     ).ok();
-    
-    Ok(result.is_some())
+
+    Ok(result.map(|s| !s.is_empty()).unwrap_or(false))
 }
 
-/// Check if a Store-based account exists (vector.json) with a valid pkey
-/// This is used to detect accounts that need migration
-pub fn has_store_account<R: Runtime>(handle: &AppHandle<R>) -> bool {
-    if let Ok(app_data) = handle.path().app_data_dir() {
-        let vector_json = app_data.join("vector.json");
-        if vector_json.exists() {
-            // Check if the Store has a pkey (encrypted private key)
-            let store = crate::db::get_store(handle);
-            if let Some(pkey) = store.get("pkey") {
-                if pkey.as_str().is_some() {
-                    println!("[Account Manager] Found Store-based account (vector.json exists with pkey)");
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Check if any account exists (SQL or Store-based)
+/// Check if any account exists
 pub fn has_any_account<R: Runtime>(handle: &AppHandle<R>) -> bool {
     let sql_accounts = list_accounts(handle).unwrap_or_default();
-    !sql_accounts.is_empty() || has_store_account(handle)
+    !sql_accounts.is_empty()
 }
 
 /// Get the currently active account
@@ -274,24 +255,24 @@ pub fn get_current_account() -> Result<String, String> {
 }
 
 /// Auto-select the first available account if none is currently selected
-/// This is useful after migration when an account exists but isn't selected yet
+/// This is useful when an account exists but isn't selected yet
 pub fn auto_select_account<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<String>, String> {
     // Check if an account is already selected
     if let Ok(current) = get_current_account() {
         return Ok(Some(current));
     }
-    
+
     // No account selected, try to find one
     let accounts = list_accounts(handle)?;
-    
+
     if accounts.is_empty() {
         return Ok(None);
     }
-    
+
     // Select the first account
     let first_account = accounts[0].clone();
     set_current_account(first_account.clone())?;
-    
+
     Ok(Some(first_account))
 }
 
@@ -299,10 +280,10 @@ pub fn auto_select_account<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<S
 pub fn set_current_account(npub: String) -> Result<(), String> {
     *CURRENT_ACCOUNT.write()
         .map_err(|e| format!("Failed to write current account: {}", e))? = Some(npub.clone());
-    
+
     // Close old connection when switching accounts
     close_db_connection();
-    
+
     Ok(())
 }
 
@@ -331,10 +312,10 @@ pub fn clear_pending_account() -> Result<(), String> {
 /// This keeps the connection open to avoid repeated open/close overhead
 pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::Connection, String> {
     let npub = get_current_account()?;
-    
+
     // Try to reuse existing connection
     let mut pool = DB_CONNECTION_POOL.lock().unwrap();
-    
+
     if let Some((cached_npub, _)) = pool.as_ref() {
         if cached_npub == &npub {
             // Same account, take the connection out
@@ -346,20 +327,20 @@ pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::
             *pool = None;
         }
     }
-    
+
     // Open new connection
     let db_path = get_database_path(handle, &npub)?;
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
-    
+
     // Enable WAL mode for better concurrency
     conn.execute_batch("PRAGMA journal_mode=WAL;")
         .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
-    
+
     // Run migrations to ensure schema is up to date
     // This is important for existing databases that may not have new columns
     run_migrations(&conn)?;
-    
+
     Ok(conn)
 }
 
@@ -383,7 +364,7 @@ pub fn list_all_accounts<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<String>
     list_accounts(&handle)
 }
 
-/// Check if any account exists (SQL or Store-based) - Tauri command
+/// Check if any account exists - Tauri command
 #[tauri::command]
 pub fn check_any_account_exists<R: Runtime>(handle: AppHandle<R>) -> bool {
     has_any_account(&handle)
@@ -397,26 +378,26 @@ pub async fn init_profile_database<R: Runtime>(
 ) -> Result<(), String> {
     let db_path = get_database_path(handle, npub)?;
     println!("[Account Manager] Initializing database: {}", db_path.display());
-    
+
     // Create the database directory if it doesn't exist
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create database directory: {}", e))?;
     }
-    
+
     // Open connection and create schema
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
-    
+
     // Execute the schema to create all tables
     conn.execute_batch(SQL_SCHEMA)
         .map_err(|e| format!("Failed to create database schema: {}", e))?;
-    
+
     // Run migrations for existing databases
     run_migrations(&conn)?;
-    
+
     println!("[Account Manager] Database schema created successfully");
-    
+
     Ok(())
 }
 
@@ -431,23 +412,23 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         |row| row.get::<_, i32>(0)
     ).map(|count| count > 0)
     .unwrap_or(false);
-    
+
     if !has_wrapper_column {
         println!("[Migration] Adding wrapper_event_id column to messages table...");
         conn.execute(
             "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
             []
         ).map_err(|e| format!("Failed to add wrapper_event_id column: {}", e))?;
-        
+
         // Create index for fast lookups
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id)",
             []
         ).map_err(|e| format!("Failed to create wrapper_event_id index: {}", e))?;
-        
+
         println!("[Migration] wrapper_event_id column added successfully");
     }
-    
+
     Ok(())
 }
 
@@ -461,57 +442,27 @@ pub async fn switch_account<R: Runtime>(
     if !npub.starts_with("npub1") {
         return Err(format!("Invalid npub format: {}", npub));
     }
-    
+
     println!("[Account Manager] Switching to account: {}", npub);
-    
+
     // Initialize database for this profile
     init_profile_database(&handle, &npub).await?;
-    
+
     // Update current account
     set_current_account(npub.clone())?;
-    
+
     // Clear old account's ID caches and preload new account's caches
-    crate::db_migration::clear_id_caches();
-    if let Err(e) = crate::db_migration::preload_id_caches(&handle).await {
+    crate::db::clear_id_caches();
+    if let Err(e) = crate::db::preload_id_caches(&handle).await {
         eprintln!("[Account Manager] Failed to preload ID caches: {}", e);
     }
-    
+
     // Update MLS directory
     let mls_dir = get_mls_directory(&handle, &npub)?;
     println!("[Account Manager] MLS directory: {}", mls_dir.display());
-    
+
     // TODO: Update MLS configuration to use new directory
     // This will be done when we update the MLS module
-    
-    Ok(())
-}
 
-/// Helper function to copy a directory recursively
-pub fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
-    if !src.exists() {
-        return Err(format!("Source directory does not exist: {}", src.display()));
-    }
-    
-    if !dst.exists() {
-        std::fs::create_dir_all(dst)
-            .map_err(|e| format!("Failed to create destination directory: {}", e))?;
-    }
-    
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| format!("Failed to read source directory: {}", e))? 
-    {
-        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let dest_path = dst.join(&file_name);
-        
-        if path.is_dir() {
-            copy_dir_recursive(&path, &dest_path)?;
-        } else {
-            std::fs::copy(&path, &dest_path)
-                .map_err(|e| format!("Failed to copy file: {}", e))?;
-        }
-    }
-    
     Ok(())
 }

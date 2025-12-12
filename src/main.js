@@ -887,12 +887,11 @@ let chatOpenTimestamp = 0;
  * Synchronise all messages from the backend
  */
 async function init() {
-    // Check if account is selected (skip if migration pending)
+    // Check if account is selected
     try {
         await invoke("get_current_account");
     } catch (e) {
-        console.log('[Init] No account selected - migration may be pending, triggering fetch_messages to check');
-        // Call fetch_messages anyway - it will detect migration and trigger it
+        console.log('[Init] No account selected, triggering fetch_messages');
         await invoke("fetch_messages", { init: true });
         return;
     }
@@ -2504,19 +2503,6 @@ async function login() {
             }
         });
 
-        // Setup database migration listener
-        await listen('migration_needed', async (evt) => {
-            console.log('Database migration needed - starting automatically');
-            try {
-                // Trigger migration
-                await invoke('perform_database_migration');
-                console.log('Migration completed successfully');
-            } catch (error) {
-                console.error('Migration failed:', error);
-                domLoginEncryptTitle.textContent = `Migration failed: ${error}`;
-                domLoginEncryptTitle.style.color = 'red';
-            }
-        }, { once: true });
 
         // Setup a Rust Listener for the backend's init finish
         await listen('init_finished', async (evt) => {
