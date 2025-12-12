@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use once_cell::sync::Lazy;
 
-use crate::{Message, Chat, ChatType};
+use crate::{Message, Chat, ChatType, Attachment};
 use crate::crypto::{internal_encrypt, internal_decrypt};
 use crate::db::{SlimMessage, get_store};
 
@@ -1376,4 +1376,58 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
             Ok(wrapper_ids) // Return empty set on error, will fall back to DB queries
         }
     }
+}
+
+/// Update the downloaded status of an attachment in the database
+pub fn update_attachment_downloaded_status<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: &str,
+    msg_id: &str,
+    attachment_id: &str,
+    downloaded: bool,
+    path: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+    
+    // Get the current attachments JSON
+    let attachments_json: String = conn.query_row(
+        "SELECT m.attachments FROM messages m
+         JOIN chats c ON m.chat_id = c.id
+         WHERE m.id = ?1 AND c.chat_identifier = ?2",
+        rusqlite::params![msg_id, chat_id],
+        |row| row.get(0)
+    ).map_err(|e| format!("Message not found: {}", e))?;
+    
+    // Parse and update the attachment
+    let mut attachments: Vec<Attachment> = serde_json::from_str(&attachments_json).unwrap_or_default();
+    
+    if let Some(att) = attachments.iter_mut().find(|a| a.id == attachment_id) {
+        att.downloaded = downloaded;
+        att.downloading = false;
+        att.path = path.to_string();
+    } else {
+        crate::account_manager::return_db_connection(conn);
+        return Err("Attachment not found in message".to_string());
+    }
+    
+    // Serialize back to JSON
+    let updated_json = serde_json::to_string(&attachments)
+        .map_err(|e| format!("Failed to serialize attachments: {}", e))?;
+    
+    // Get the chat's integer ID
+    let chat_int_id: i64 = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![chat_id],
+        |row| row.get(0)
+    ).map_err(|e| format!("Chat not found: {}", e))?;
+    
+    // Update the message in the database
+    conn.execute(
+        "UPDATE messages SET attachments = ?1 WHERE id = ?2 AND chat_id = ?3",
+        rusqlite::params![updated_json, msg_id, chat_int_id],
+    ).map_err(|e| format!("Failed to update message: {}", e))?;
+    
+    crate::account_manager::return_db_connection(conn);
+    
+    Ok(())
 }

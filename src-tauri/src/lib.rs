@@ -2527,6 +2527,8 @@ async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<Strin
 
 #[tauri::command]
 async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+    let handle = TAURI_APP.get().unwrap();
+    
     // Grab the attachment's metadata by searching through chats
     let attachment = {
         let mut state = STATE.lock().await;
@@ -2548,6 +2550,49 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                             return false;
                         }
 
+                        // Check if file already exists on disk (downloaded but flag was wrong)
+                        let base_directory = if cfg!(target_os = "ios") {
+                            tauri::path::BaseDirectory::Document
+                        } else {
+                            tauri::path::BaseDirectory::Download
+                        };
+                        
+                        if let Ok(vector_dir) = handle.path().resolve("vector", base_directory) {
+                            let file_path = vector_dir.join(format!("{}.{}", &attachment.id, &attachment.extension));
+                            if file_path.exists() {
+                                // File already exists! Update the state and return success
+                                attachment.downloaded = true;
+                                attachment.path = file_path.to_string_lossy().to_string();
+                                
+                                // Emit success event
+                                handle.emit("attachment_download_result", serde_json::json!({
+                                    "profile_id": npub,
+                                    "msg_id": msg_id,
+                                    "id": attachment_id,
+                                    "success": true,
+                                    "result": file_path.to_string_lossy().to_string()
+                                })).unwrap();
+                                
+                                // Also update the database
+                                let chat_id_for_db = chat.id().to_string();
+                                let msg_id_clone = msg_id.clone();
+                                let attachment_id_clone = attachment_id.clone();
+                                let path_str = file_path.to_string_lossy().to_string();
+                                drop(state); // Release lock before DB call
+                                
+                                let _ = db_migration::update_attachment_downloaded_status(
+                                    handle,
+                                    &chat_id_for_db,
+                                    &msg_id_clone,
+                                    &attachment_id_clone,
+                                    true,
+                                    &path_str
+                                );
+                                
+                                return true;
+                            }
+                        }
+
                         // Enable the downloading flag to prevent re-calls
                         attachment.downloading = true;
                         found_attachment = Some(attachment.clone());
@@ -2566,7 +2611,6 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
     };
 
     // Begin our download progress events
-    let handle = TAURI_APP.get().unwrap();
     handle.emit("attachment_download_progress", serde_json::json!({
         "id": &attachment.id,
         "progress": 0
