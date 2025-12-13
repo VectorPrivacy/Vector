@@ -89,6 +89,7 @@ const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMessageInputSend = document.getElementById('chat-input-send');
+const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
@@ -4521,8 +4522,10 @@ function selectReplyingMessage(e) {
     domChatMessageInputCancel.style.display = '';
     // Display a replying placeholder
     domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
-    // Focus the message input
-    domChatMessageInput.focus();
+    // Focus the message input (desktop only - mobile keyboards are disruptive)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
     // Add a reply-focus
     e.target.parentElement.parentElement.querySelector('p').style.borderColor = `#ffffff`;
 }
@@ -4536,8 +4539,10 @@ function cancelReply() {
     domChatMessageInputCancel.style.display = 'none';
     domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
 
-    // Focus the message input
-    domChatMessageInput.focus();
+    // Focus the message input (desktop only - mobile keyboards are disruptive)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
 
     // Cancel any existing reply-focus
     if (strCurrentReplyReference) {
@@ -6014,8 +6019,31 @@ domChatMessageInput.oninput = async () => {
     }
 };
 
-    // Hook up the send button click handler
+    // Hook up the send button click handler (handles both text and voice messages)
     domChatMessageInputSend.onclick = async () => {
+        // Check if we're in voice preview mode first
+        if (recorder.isInPreview) {
+            const wavData = recorder.send();
+            if (wavData && strOpenChat) {
+                domChatMessageInput.setAttribute('placeholder', 'Sending...');
+                try {
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await invoke('voice_message', {
+                        receiver: strOpenChat,
+                        repliedTo: strReplyRef,
+                        bytes: wavData
+                    });
+                } catch (e) {
+                    popupConfirm(e, '', true, '', 'vector_warning.svg');
+                }
+                domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+                nLastTypingIndicator = 0;
+            }
+            return;
+        }
+        
+        // Otherwise, handle normal text message send
         const messageText = domChatMessageInput.value;
         if (messageText && messageText.trim()) {
             await sendMessage(messageText);
@@ -6060,56 +6088,27 @@ domChatMessageInput.oninput = async () => {
         });
     }
 
-    // Hook up our voice message recorder listener
-    const recorder = new VoiceRecorder(domChatMessageInputVoice);
-    recorder.button.addEventListener('click', async () => {
-        if (recorder.isRecording) {
-            // Stop the recording and retrieve our WAV data
-            const wavData = await recorder.stop();
-
-            // Unhide our messaging UI
-            if (wavData) {
-                // Placeholder
-                domChatMessageInput.value = '';
-                domChatMessageInput.style.height = ''; // Reset textarea height
-                domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
-                domChatMessageInput.setAttribute('placeholder', 'Sending...');
-
-                // Send raw bytes to Rust, if the chat is still open
-                // Note: since the user could, for some reason, close the chat while recording - we need to check that it's still open
-                if (strOpenChat) {
-                    try {
-                        // Reset reply selection while passing a copy of the reference to the backend
-                        const strReplyRef = strCurrentReplyReference;
-                        cancelReply();
-                        await invoke('voice_message', {
-                            receiver: strOpenChat,
-                            repliedTo: strReplyRef,
-                            bytes: wavData
-                        });
-                    } catch (e) {
-                        // Notify of an attachment send failure
-                        popupConfirm(e, '', true, '', 'vector_warning.svg');
-                    }
-
-                    nLastTypingIndicator = 0;
-                }
-            }
-        } else {
-            // Display our recording status
+    // Hook up our voice message recorder with Telegram-like UX
+    const recorder = new VoiceRecorder(domChatMessageInputVoice, domChatInputContainer);
+    
+    // Handle state changes for UI updates
+    recorder.onStateChange = (newState, oldState) => {
+        if (newState === 'idle') {
+            // Reset placeholder when returning to idle
+            domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+        } else if (newState === 'recording' || newState === 'locked') {
+            // Clear input and show recording status
             domChatMessageInput.value = '';
-            domChatMessageInput.style.height = ''; // Reset textarea height
-            domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
-            domChatMessageInput.setAttribute('placeholder', 'Recording...');
-
-            // Start recording
-            if (await recorder.start() === false) {
-                // An error likely occured: reset the UI
-                cancelReply();
-                await recorder.stop();
-            }
+            domChatMessageInput.style.height = '';
+            domChatMessageInput.style.overflowY = 'hidden';
         }
-    });
+    };
+    
+    // Handle cancel callback
+    recorder.onCancel = () => {
+        domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+        cancelReply();
+    };
 
     // Initialize voice transcription with default model
     window.cTranscriber = new VoiceTranscriptionUI();
