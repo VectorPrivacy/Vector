@@ -1,55 +1,945 @@
 /**
- * Voice recording functionality with start/stop controls.
+ * Voice recording functionality with Mobile-first UX:
+ * - Hold to record (200ms threshold)
+ * - Drag up to lock recording
+ * - Drag left to cancel
+ * - Preview before sending
  */
+
+const HOLD_THRESHOLD_MS = 200;
+const LOCK_DRAG_THRESHOLD = 85; // pixels to drag up to lock
+const LOCK_SHOW_THRESHOLD = 5; // pixels to drag up before lock indicator appears
+const CANCEL_DRAG_THRESHOLD = 100; // pixels to drag left to cancel
+
+/**
+ * Recording states
+ */
+const RecordingState = {
+    IDLE: 'idle',
+    PENDING: 'pending', // Waiting for hold threshold
+    RECORDING: 'recording',
+    LOCKED: 'locked', // Recording locked (finger released)
+    PREVIEW: 'preview', // Showing audio preview
+    CANCELLED: 'cancelled'
+};
+
 class VoiceRecorder {
     /**
      * @param {HTMLElement} button - The recording button element
+     * @param {HTMLElement} inputContainer - The chat input container element
+     * @param {HTMLElement} sendButton - The send button element (optional, will be found if not provided)
      */
-    constructor(button) {
+    constructor(button, inputContainer, sendButton = null) {
         this.button = button;
-        this.isRecording = false;
+        this.inputContainer = inputContainer;
+        this.sendButton = sendButton || document.getElementById('chat-input-send');
+        this.state = RecordingState.IDLE;
+        this.holdTimer = null;
+        this.startPosition = { x: 0, y: 0 };
+        this.currentPosition = { x: 0, y: 0 };
+        this.recordingStartTime = null;
+        this.timerInterval = null;
+        this.audioData = null;
+        this.isStoppingRecording = false; // Lock to prevent double stop_recording calls
+        this.dragAxis = null; // 'x' for cancel, 'y' for lock - locked once determined
+        this.lastMoveAxis = null; // Track previous axis for smooth transitions
+        this.tooltipTimeout = null; // Timeout for hiding the "Hold to record" tooltip
+        
+        // Callbacks
+        this.onSend = null;
+        this.onCancel = null;
+        this.onStateChange = null;
+        
+        this._createUI();
+        this._bindEvents();
     }
 
     /**
-     * Toggles recording state between start and stop.
-     * @returns {Promise<Uint8Array|null>} Audio data when stopping, null when starting
+     * Creates the recording UI elements inside the chat input container
      */
-    async toggle() {
-        return this.isRecording ? this.stop() : this.start();
+    _createUI() {
+        // Get references to existing elements we'll hide during recording
+        this.fileButton = this.inputContainer.querySelector('#chat-input-file');
+        this.textInput = this.inputContainer.querySelector('#chat-input');
+        this.emojiButton = this.inputContainer.querySelector('#chat-input-emoji');
+        
+        // Recording UI container (replaces textarea area during recording)
+        this.recordingUI = document.createElement('div');
+        this.recordingUI.className = 'voice-recording-ui';
+        this.recordingUI.innerHTML = `
+            <div class="voice-recorder-status">
+                <span class="recording-dot"></span>
+                <span class="recording-text">Recording...</span>
+            </div>
+            <div class="voice-recorder-slide-hint">
+                <div class="slide-icon-container">
+                    <span class="icon icon-chevron-double-left"></span>
+                </div>
+                <span class="slide-text">Slide to cancel</span>
+            </div>
+            <div class="voice-recorder-timer">0:00</div>
+        `;
+        
+        // Lock indicator (positioned above the red circle)
+        this.lockZone = document.createElement('div');
+        this.lockZone.className = 'voice-recorder-lock-zone';
+        this.lockZone.innerHTML = `
+            <div class="lock-indicator">
+                <span class="icon icon-locked"></span>
+            </div>
+            <div class="lock-arrow">
+                <div class="arrow-icon-container">
+                    <span class="icon icon-chevron-double-left"></span>
+                </div>
+            </div>
+        `;
+        
+        // Preview UI container (replaces textarea area during preview)
+        this.previewUI = document.createElement('div');
+        this.previewUI.className = 'voice-preview-ui';
+        this.previewUI.innerHTML = `
+            <button class="voice-preview-delete"><span class="icon icon-trash"></span></button>
+            <div class="voice-preview-center">
+                <button class="voice-preview-play"><span class="icon icon-play"></span></button>
+                <div class="voice-preview-waveform">
+                    <div class="voice-preview-progress"></div>
+                    <div class="voice-preview-handle"></div>
+                </div>
+                <span class="voice-preview-time">0:00</span>
+            </div>
+        `;
+        
+        // Red circle/stop button (overlays mic button during recording)
+        this.redCircle = document.createElement('div');
+        this.redCircle.className = 'voice-recorder-red-circle';
+        
+        // Tooltip for quick tap hint
+        this.tooltip = document.createElement('div');
+        this.tooltip.className = 'voice-recorder-tooltip';
+        this.tooltip.textContent = 'Hold to record';
+        
+        // Insert recording UI before the textarea (so it appears in the middle)
+        this.textInput.parentNode.insertBefore(this.recordingUI, this.textInput);
+        this.textInput.parentNode.insertBefore(this.previewUI, this.textInput);
+        
+        // Insert red circle right after the mic button (as a sibling)
+        this.button.parentNode.insertBefore(this.redCircle, this.button.nextSibling);
+        
+        // Insert tooltip into the chat box for positioning above mic button
+        this.inputContainer.parentNode.appendChild(this.tooltip);
+        
+        // Insert lock zone into the chat box (parent of input container) for absolute positioning
+        this.inputContainer.parentNode.appendChild(this.lockZone);
+        
+        // Cache UI elements
+        this.slideHint = this.recordingUI.querySelector('.voice-recorder-slide-hint');
+        this.timerDisplay = this.recordingUI.querySelector('.voice-recorder-timer');
+        this.recordingStatus = this.recordingUI.querySelector('.voice-recorder-status');
+        this.recordingText = this.recordingUI.querySelector('.recording-text');
+        this.lockIndicator = this.lockZone.querySelector('.lock-indicator');
+        this.lockArrow = this.lockZone.querySelector('.lock-arrow');
+        
+        this.previewDeleteBtn = this.previewUI.querySelector('.voice-preview-delete');
+        this.previewPlayBtn = this.previewUI.querySelector('.voice-preview-play');
+        this.previewWaveform = this.previewUI.querySelector('.voice-preview-waveform');
+        this.previewProgress = this.previewUI.querySelector('.voice-preview-progress');
+        this.previewHandle = this.previewUI.querySelector('.voice-preview-handle');
+        this.previewTime = this.previewUI.querySelector('.voice-preview-time');
+        
+        // Audio element for preview
+        this.audioElement = new Audio();
+        this.isPlaying = false;
     }
 
     /**
-     * Starts audio recording.
-     * @returns {Promise<void>}
+     * Binds all event listeners
      */
-    async start() {
+    _bindEvents() {
+        // Pointer events for cross-platform support
+        this.button.addEventListener('pointerdown', this._onPointerDown.bind(this));
+        document.addEventListener('pointermove', this._onPointerMove.bind(this));
+        document.addEventListener('pointerup', this._onPointerUp.bind(this));
+        document.addEventListener('pointercancel', this._onPointerUp.bind(this));
+        
+        // Red circle click (for locked state)
+        this.redCircle.addEventListener('click', this._onRedCircleClick.bind(this));
+        
+        // Preview controls
+        this.previewDeleteBtn.addEventListener('click', this._onPreviewDelete.bind(this));
+        this.previewPlayBtn.addEventListener('click', this._onPreviewPlayPause.bind(this));
+        
+        // Waveform seeking - support both click and drag
+        this.previewWaveform.addEventListener('pointerdown', this._onWaveformPointerDown.bind(this));
+        
+        this.audioElement.addEventListener('ended', this._onAudioEnded.bind(this));
+    }
+
+    /**
+     * Handles play/pause button click in preview
+     */
+    async _onPreviewPlayPause() {
+        if (this.isPlaying) {
+            this.audioElement.pause();
+            this.isPlaying = false;
+            this._stopProgressAnimation();
+            this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+        } else {
+            this.previewPlayBtn.innerHTML = '<span class="icon icon-pause"></span>';
+            
+            try {
+                this.playbackStartPosition = this.audioElement.currentTime;
+                
+                // Wait for audio to actually start playing before starting the timer
+                const playingPromise = new Promise(resolve => {
+                    const onPlaying = () => {
+                        this.audioElement.removeEventListener('playing', onPlaying);
+                        resolve();
+                    };
+                    this.audioElement.addEventListener('playing', onPlaying);
+                });
+                
+                await this.audioElement.play();
+                await playingPromise;
+                
+                // Now the audio is actually playing, start the timer
+                this.playbackStartTime = performance.now();
+                this.isPlaying = true;
+                this._startProgressAnimation();
+            } catch (err) {
+                console.error('Playback failed:', err);
+                this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+            }
+        }
+    }
+
+    /**
+     * Handles pointer down on the mic button
+     */
+    _onPointerDown(e) {
+        if (this.state !== RecordingState.IDLE) return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Store the pointer ID for tracking
+        this.activePointerId = e.pointerId;
+        
+        // Set pointer capture on the button to receive all pointer events
+        this.button.setPointerCapture(e.pointerId);
+        
+        this.startPosition = { x: e.clientX, y: e.clientY };
+        this.currentPosition = { x: e.clientX, y: e.clientY };
+        
+        this._setState(RecordingState.PENDING);
+        
+        // Start hold timer
+        this.holdTimer = setTimeout(async () => {
+            await this._startRecording();
+        }, HOLD_THRESHOLD_MS);
+    }
+
+    /**
+     * Handles pointer move during recording
+     */
+    _onPointerMove(e) {
+        if (this.state !== RecordingState.RECORDING && this.state !== RecordingState.PENDING) return;
+        
+        // Only track the active pointer
+        if (this.activePointerId !== undefined && e.pointerId !== this.activePointerId) return;
+        
+        e.preventDefault();
+        
+        this.currentPosition = { x: e.clientX, y: e.clientY };
+        
+        const deltaX = this.startPosition.x - this.currentPosition.x;
+        const deltaY = this.startPosition.y - this.currentPosition.y;
+        const absDeltaX = Math.abs(deltaX);
+        const absDeltaY = Math.abs(deltaY);
+        
+        // Reset axis if user returns close to origin (within 15px)
+        // This allows changing direction after returning to center
+        if (this.dragAxis && absDeltaX < 15 && absDeltaY < 15) {
+            this.dragAxis = null;
+            // Don't add transition - user is still actively dragging
+        }
+        
+        // Determine primary axis based on which delta is larger
+        // Lock axis after a small movement threshold (15px)
+        if (!this.dragAxis) {
+            if (absDeltaX > 15 || absDeltaY > 15) {
+                this.dragAxis = absDeltaX > absDeltaY ? 'x' : 'y';
+            }
+        }
+        
+        // Check for cancel gesture (drag left) - only if on X axis
+        if (this.dragAxis === 'x' && deltaX > CANCEL_DRAG_THRESHOLD) {
+            this._cancelRecording();
+            return;
+        }
+        
+        // Check for lock gesture (drag up) - only if on Y axis
+        if (this.dragAxis === 'y' && deltaY > LOCK_DRAG_THRESHOLD && this.state === RecordingState.RECORDING) {
+            this._lockRecording();
+            return;
+        }
+        
+        // Update visual feedback
+        this._updateDragFeedback(deltaX, deltaY);
+    }
+
+    /**
+     * Handles pointer up
+     */
+    async _onPointerUp(e) {
+        // Only handle the active pointer
+        if (this.activePointerId !== undefined && e.pointerId !== this.activePointerId) return;
+        
+        // Clear the active pointer and drag axis
+        this.activePointerId = undefined;
+        this._resetDragState();
+        
+        if (this.state === RecordingState.PENDING) {
+            // Didn't hold long enough - show tooltip hint
+            clearTimeout(this.holdTimer);
+            this._showTooltip();
+            this._setState(RecordingState.IDLE);
+            return;
+        }
+        
+        if (this.state === RecordingState.RECORDING) {
+            // Stop and show preview
+            await this._stopRecording();
+        }
+        
+        // If locked, do nothing - wait for red circle click
+    }
+    
+    /**
+     * Shows the "Hold to record" tooltip briefly
+     */
+    _showTooltip() {
+        if (this.tooltipTimeout) {
+            clearTimeout(this.tooltipTimeout);
+        }
+        
+        this.tooltip.classList.add('visible');
+        
+        this.tooltipTimeout = setTimeout(() => {
+            this.tooltip.classList.remove('visible');
+            this.tooltipTimeout = null;
+        }, 2000);
+    }
+    
+    /**
+     * Resets drag state (axis lock and red circle position)
+     */
+    _resetDragState() {
+        this.dragAxis = null;
+        this.lastMoveAxis = null;
+        if (this.redCircle) {
+            // Add returning class for smooth animation back to origin
+            this.redCircle.classList.add('returning');
+            this.redCircle.style.transform = '';
+            
+            // Remove the returning class after animation completes
+            setTimeout(() => {
+                this.redCircle.classList.remove('returning');
+            }, 200);
+        }
+    }
+
+    /**
+     * Starts the actual recording
+     */
+    async _startRecording() {
         try {
+            // Reset status text for new recording
+            this.recordingText.textContent = 'Recording...';
             await invoke('start_recording');
-            this.isRecording = true;
-            this.button.innerHTML = '<span class="icon icon-mic-off"></span>';
-            return true;
+            this._setState(RecordingState.RECORDING);
+            this.recordingStartTime = Date.now();
+            this._startTimer();
         } catch (err) {
             console.error('Recording start failed:', err);
             await popupConfirm('Recording Error', err, true, '', 'vector_warning.svg');
-            this.isRecording = false;
-            return false;
+            this._setState(RecordingState.IDLE);
         }
     }
 
     /**
-     * Stops audio recording and returns the recorded data.
-     * @returns {Promise<Uint8Array|null>} The recorded audio data
+     * Stops recording and shows preview
      */
-    async stop() {
+    async _stopRecording() {
+        // Prevent double calls while stopping
+        if (this.isStoppingRecording) return;
+        this.isStoppingRecording = true;
+        
+        // Update status text to show we're finishing
+        this.recordingText.textContent = 'Finishing...';
+        
         try {
             const wavData = await invoke('stop_recording');
-            this.isRecording = false;
-            this.button.innerHTML = '<span class="icon icon-mic-on"></span>';
-            return new Uint8Array(wavData);
+            this._stopTimer();
+            this.audioData = new Uint8Array(wavData);
+            
+            // Create blob URL for preview
+            const blob = new Blob([this.audioData], { type: 'audio/wav' });
+            const blobUrl = URL.createObjectURL(blob);
+            
+            // Wait for audio to be fully loaded before showing preview
+            this.audioElement.src = blobUrl;
+            this.audioElement.preload = 'auto';
+            
+            // Wait for the audio to be ready
+            await new Promise((resolve) => {
+                const onCanPlay = () => {
+                    this.audioElement.removeEventListener('canplaythrough', onCanPlay);
+                    resolve();
+                };
+                this.audioElement.addEventListener('canplaythrough', onCanPlay);
+                // Also resolve if already ready
+                if (this.audioElement.readyState >= 4) {
+                    resolve();
+                }
+            });
+            
+            this._setState(RecordingState.PREVIEW);
         } catch (err) {
             console.error('Recording stop failed:', err);
-            return null;
+            this._setState(RecordingState.IDLE);
+        } finally {
+            this.isStoppingRecording = false;
         }
+    }
+
+    /**
+     * Locks the recording (allows releasing finger)
+     */
+    _lockRecording() {
+        // Reset drag state (red circle returns to origin)
+        this._resetDragState();
+        
+        // Fade out the lock zone before transitioning to locked state
+        this.lockZone.classList.add('fading-out');
+        
+        // Wait for fade out transition, then update state
+        setTimeout(() => {
+            this.lockZone.classList.remove('fading-out', 'active');
+            this._setState(RecordingState.LOCKED);
+        }, 200); // Match the CSS transition duration
+    }
+
+    /**
+     * Cancels the current recording
+     */
+    async _cancelRecording() {
+        // Prevent double calls while stopping
+        if (this.isStoppingRecording) return;
+        
+        // Reset drag state
+        this._resetDragState();
+        
+        if (this.state === RecordingState.RECORDING || this.state === RecordingState.LOCKED) {
+            this.isStoppingRecording = true;
+            try {
+                await invoke('stop_recording');
+            } catch (err) {
+                console.error('Recording cancel failed:', err);
+            } finally {
+                this.isStoppingRecording = false;
+            }
+        }
+        
+        clearTimeout(this.holdTimer);
+        this._stopTimer();
+        this.audioData = null;
+        this._setState(RecordingState.CANCELLED);
+        
+        if (this.onCancel) this.onCancel();
+        
+        // Reset to idle after animation
+        setTimeout(() => {
+            this._setState(RecordingState.IDLE);
+        }, 300);
+    }
+
+    /**
+     * Handles red circle click in locked state
+     */
+    async _onRedCircleClick() {
+        if (this.state === RecordingState.LOCKED) {
+            await this._stopRecording();
+        }
+    }
+
+    /**
+     * Handles delete button in preview
+     */
+    _onPreviewDelete() {
+        this.audioElement.pause();
+        this.audioElement.src = '';
+        this.audioData = null;
+        this._setState(RecordingState.IDLE);
+        this._animateChatInputFadeIn();
+        if (this.onCancel) this.onCancel();
+    }
+
+    /**
+     * Sends the recorded audio
+     */
+    send() {
+        if (this.state !== RecordingState.PREVIEW || !this.audioData) return null;
+        
+        const data = this.audioData;
+        this.audioElement.pause();
+        this.audioElement.src = '';
+        this.audioData = null;
+        this._setState(RecordingState.IDLE);
+        this._animateChatInputFadeIn();
+        
+        return data;
+    }
+
+    /**
+     * Animates the chat input elements with a fade-in effect
+     */
+    _animateChatInputFadeIn() {
+        const elements = [this.fileButton, this.textInput, this.emojiButton, this.button];
+        
+        elements.forEach(el => {
+            if (el) {
+                el.classList.add('chat-input-fade-in');
+                el.addEventListener('animationend', () => {
+                    el.classList.remove('chat-input-fade-in');
+                }, { once: true });
+            }
+        });
+    }
+
+    /**
+     * Updates the state and UI
+     */
+    _setState(newState) {
+        const oldState = this.state;
+        this.state = newState;
+        
+        // Update UI based on state
+        this._updateUI();
+        
+        if (this.onStateChange) {
+            this.onStateChange(newState, oldState);
+        }
+    }
+
+    /**
+     * Updates UI based on current state
+     */
+    _updateUI() {
+        // Reset all states - show normal input elements
+        this.button.classList.remove('recording', 'pending');
+        this.button.style.display = '';
+        this.redCircle.classList.remove('active', 'locked', 'pending');
+        this.recordingUI.classList.remove('active', 'cancelling');
+        this.previewUI.classList.remove('active');
+        this.lockZone.classList.remove('active', 'locked', 'fading-out');
+        this.lockZone.style.opacity = '';
+        
+        // Show normal input elements
+        if (this.fileButton) this.fileButton.style.display = '';
+        if (this.textInput) this.textInput.style.display = '';
+        if (this.emojiButton) this.emojiButton.style.display = '';
+        
+        // Hide send button by default (will be shown in preview state)
+        if (this.sendButton) {
+            this.sendButton.style.display = 'none';
+            this.sendButton.classList.remove('active', 'voice-preview-send');
+        }
+        
+        // Reset drag feedback
+        if (this.slideHint) {
+            this.slideHint.style.display = '';
+            this.slideHint.style.opacity = '1';
+            this.slideHint.style.transform = '';
+            const iconEl = this.slideHint.querySelector('.icon');
+            if (iconEl) {
+                iconEl.style.backgroundColor = '';
+            }
+        }
+        if (this.lockIndicator) this.lockIndicator.style.transform = '';
+        if (this.lockArrow) this.lockArrow.style.opacity = '';
+        
+        // Reset timer display
+        if (this.timerDisplay) {
+            this.timerDisplay.textContent = '0:00';
+            this.timerDisplay.style.opacity = '';
+        }
+        
+        // Reset recording status opacity
+        if (this.recordingStatus) {
+            this.recordingStatus.style.opacity = '';
+        }
+        
+        // Reset preview progress/handle
+        if (this.previewProgress) this.previewProgress.style.width = '0%';
+        if (this.previewHandle) this.previewHandle.style.left = '0';
+        if (this.previewTime) this.previewTime.textContent = '0:00';
+        
+        switch (this.state) {
+            case RecordingState.IDLE:
+                this.button.innerHTML = '<span class="icon icon-mic-on"></span>';
+                // Reset play state
+                this.isPlaying = false;
+                if (this.previewPlayBtn) {
+                    this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+                }
+                break;
+                
+            case RecordingState.PENDING:
+                // Fade out mic button, fade in red circle
+                this.button.classList.add('pending');
+                this.redCircle.classList.add('pending');
+                break;
+                
+            case RecordingState.RECORDING:
+                // Hide normal input elements
+                if (this.fileButton) this.fileButton.style.display = 'none';
+                if (this.textInput) this.textInput.style.display = 'none';
+                if (this.emojiButton) this.emojiButton.style.display = 'none';
+                
+                // Show recording UI and red circle (hide mic button)
+                this.recordingUI.classList.add('active');
+                this.redCircle.classList.add('active');
+                this.lockZone.classList.add('active');
+                this.button.classList.add('recording');
+                
+                // Force restart the chevron animation (fixes animation stopping after cancel)
+                if (this.slideHint) {
+                    const iconEl = this.slideHint.querySelector('.icon');
+                    if (iconEl) {
+                        iconEl.style.animation = 'none';
+                        // Trigger reflow to ensure the animation reset takes effect
+                        void iconEl.offsetHeight;
+                        iconEl.style.animation = '';
+                    }
+                }
+                break;
+                
+            case RecordingState.LOCKED:
+                // Hide normal input elements
+                if (this.fileButton) this.fileButton.style.display = 'none';
+                if (this.textInput) this.textInput.style.display = 'none';
+                if (this.emojiButton) this.emojiButton.style.display = 'none';
+                
+                // Show recording UI with locked state (hide slide hint)
+                this.recordingUI.classList.add('active');
+                this.redCircle.classList.add('active', 'locked');
+                this.lockZone.classList.add('active', 'locked');
+                this.button.style.display = 'none';
+                // Hide slide to cancel when locked
+                if (this.slideHint) this.slideHint.style.display = 'none';
+                break;
+                
+            case RecordingState.PREVIEW:
+                // Hide normal input elements and mic button
+                if (this.fileButton) this.fileButton.style.display = 'none';
+                if (this.textInput) this.textInput.style.display = 'none';
+                if (this.emojiButton) this.emojiButton.style.display = 'none';
+                this.button.style.display = 'none';
+                
+                // Show preview UI and send button
+                this.previewUI.classList.add('active');
+                if (this.sendButton) {
+                    this.sendButton.style.display = '';
+                    this.sendButton.classList.add('active', 'voice-preview-send');
+                }
+                break;
+                
+            case RecordingState.CANCELLED:
+                this.recordingUI.classList.add('cancelling');
+                break;
+        }
+    }
+
+    /**
+     * Updates drag visual feedback
+     */
+    _updateDragFeedback(deltaX, deltaY) {
+        // Clamp values to prevent negative movement
+        const clampedDeltaX = Math.max(0, deltaX);
+        const clampedDeltaY = Math.max(0, deltaY);
+        
+        // Move red circle along the dominant axis (rail system)
+        // If axis is locked, use that; otherwise use whichever axis has more movement
+        if (this.redCircle) {
+            // Determine current dominant axis based on movement
+            let currentDominantAxis = null;
+            if (clampedDeltaX > 0 || clampedDeltaY > 0) {
+                currentDominantAxis = clampedDeltaX >= clampedDeltaY ? 'x' : 'y';
+            }
+            
+            // Use locked axis if set, otherwise use current dominant
+            const moveAxis = this.dragAxis || currentDominantAxis;
+            
+            // Track axis for other feedback (timer, slide hint, etc.)
+            this.lastMoveAxis = moveAxis;
+            
+            if (moveAxis === 'x' && clampedDeltaX > 0) {
+                // Move left along X axis only
+                this.redCircle.style.transform = `translateX(${-clampedDeltaX}px) scale(1)`;
+            } else if (moveAxis === 'y' && clampedDeltaY > 0) {
+                // Move up along Y axis only
+                this.redCircle.style.transform = `translateY(${-clampedDeltaY}px) scale(1)`;
+            } else {
+                // At origin, reset transform
+                this.redCircle.style.transform = 'scale(1)';
+            }
+        }
+        
+        // Cancel feedback - only show when on X axis
+        const cancelProgress = Math.min(clampedDeltaX / CANCEL_DRAG_THRESHOLD, 1);
+        
+        // Timer and recording status fade out - fades from visible to invisible during X drag
+        // Timer fades faster (0-20px), recording status fades slower (0-50px)
+        // Use the current move axis (locked or dominant) for immediate feedback
+        const effectiveAxisForFade = this.dragAxis || this.lastMoveAxis;
+        if (effectiveAxisForFade === 'x' && clampedDeltaX > 0) {
+            // Timer fades completely over 20px
+            const timerFadeProgress = Math.min(clampedDeltaX / 20, 1);
+            // Recording status fades slower - over 50px (half the cancel threshold)
+            const statusFadeProgress = Math.min(clampedDeltaX / 50, 1);
+            
+            if (this.timerDisplay) {
+                this.timerDisplay.style.opacity = 1 - timerFadeProgress;
+            }
+            if (this.recordingStatus) {
+                this.recordingStatus.style.opacity = 1 - statusFadeProgress;
+            }
+        } else {
+            if (this.timerDisplay) {
+                this.timerDisplay.style.opacity = '1';
+            }
+            if (this.recordingStatus) {
+                this.recordingStatus.style.opacity = '1';
+            }
+        }
+        
+        // Slide hint follows cursor immediately when dragging left
+        if (this.slideHint) {
+            const effectiveAxis = this.dragAxis || this.lastMoveAxis;
+            if (effectiveAxis === 'x' && clampedDeltaX > 0) {
+                // Move the slide hint left and fade to red as user drags
+                this.slideHint.style.transform = `translateX(${-clampedDeltaX * 0.5}px)`;
+                this.slideHint.style.opacity = 1 - (cancelProgress * 0.5);
+                // Change color towards red
+                const iconEl = this.slideHint.querySelector('.icon');
+                if (iconEl) {
+                    iconEl.style.backgroundColor = cancelProgress > 0.5 ? '#ff4444' : '';
+                }
+            } else {
+                // Reset slide hint if not on X axis
+                this.slideHint.style.transform = '';
+                this.slideHint.style.opacity = '1';
+                const iconEl = this.slideHint.querySelector('.icon');
+                if (iconEl) iconEl.style.backgroundColor = '';
+            }
+        }
+        
+        // Lock zone feedback - only show when on Y axis
+        if (this.lockZone) {
+            if (this.dragAxis !== 'y' || clampedDeltaY < LOCK_SHOW_THRESHOLD) {
+                // Keep lock zone hidden
+                this.lockZone.style.opacity = 0;
+                if (this.lockIndicator) this.lockIndicator.style.transform = '';
+                if (this.lockArrow) this.lockArrow.style.opacity = '';
+            } else {
+                // Calculate progress from show threshold to lock threshold
+                const visibleProgress = Math.min((clampedDeltaY - LOCK_SHOW_THRESHOLD) / (LOCK_DRAG_THRESHOLD - LOCK_SHOW_THRESHOLD), 1);
+                // Gradually increase opacity from 0 to 1 as user drags up
+                this.lockZone.style.opacity = visibleProgress;
+                // Move lock indicator up and scale
+                if (this.lockIndicator) {
+                    this.lockIndicator.style.transform = `translateY(${-visibleProgress * 15}px) scale(${1 + visibleProgress * 0.2})`;
+                }
+                // Hide arrow as we approach lock
+                if (this.lockArrow) {
+                    this.lockArrow.style.opacity = 1 - visibleProgress;
+                }
+            }
+        }
+    }
+
+    /**
+     * Starts the recording timer
+     */
+    _startTimer() {
+        this.timerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - this.recordingStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            this.timerDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }, 100);
+    }
+
+    /**
+     * Stops the recording timer
+     */
+    _stopTimer() {
+        if (this.timerInterval) {
+            clearInterval(this.timerInterval);
+            this.timerInterval = null;
+        }
+    }
+
+    /**
+     * Handles seek in preview waveform
+     */
+    /**
+     * Handles pointer down on waveform for seeking
+     */
+    _onWaveformPointerDown(e) {
+        e.preventDefault();
+        this.isSeeking = true;
+        
+        // Capture pointer for reliable mobile drag support
+        this.previewWaveform.setPointerCapture(e.pointerId);
+        
+        // Seek immediately on pointer down
+        this._seekToPosition(e.clientX);
+        
+        // Bind move and up handlers to document for reliable mobile tracking
+        const onMove = (moveEvent) => {
+            this._seekToPosition(moveEvent.clientX);
+        };
+        
+        const onUp = (upEvent) => {
+            this.isSeeking = false;
+            try {
+                this.previewWaveform.releasePointerCapture(upEvent.pointerId);
+            } catch (err) {
+                // Pointer may already be released
+            }
+            document.removeEventListener('pointermove', onMove);
+            document.removeEventListener('pointerup', onUp);
+            document.removeEventListener('pointercancel', onUp);
+        };
+        
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onUp);
+    }
+
+    /**
+     * Seeks to a position based on clientX
+     */
+    _seekToPosition(clientX) {
+        const rect = this.previewWaveform.getBoundingClientRect();
+        const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        
+        if (this.audioElement.duration) {
+            const newTime = percent * this.audioElement.duration;
+            this.audioElement.currentTime = newTime;
+            
+            // Reset playback tracking for smooth animation after seek
+            if (this.isPlaying) {
+                this.playbackStartTime = performance.now();
+                this.playbackStartPosition = newTime;
+            }
+            
+            // Update progress bar and time display immediately
+            this.previewProgress.style.width = `${percent * 100}%`;
+            this.previewHandle.style.left = `calc(${percent * 100}% - 7px)`;
+            this._updateTimeDisplay(newTime);
+        }
+    }
+
+    /**
+     * Updates the time display
+     */
+    _updateTimeDisplay(currentTime) {
+        const current = Math.floor(currentTime !== undefined ? currentTime : this.audioElement.currentTime);
+        const minutes = Math.floor(current / 60);
+        const seconds = current % 60;
+        this.previewTime.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    /**
+     * Smooth progress bar update using requestAnimationFrame
+     * Uses calculated time based on performance.now() for smooth animation
+     */
+    _updateProgressBar() {
+        if (!this.isPlaying || !this.audioElement.duration) return;
+        
+        // Calculate time based on elapsed time since playback started
+        // This avoids the jitter from audioElement.currentTime
+        const elapsed = (performance.now() - this.playbackStartTime) / 1000;
+        const calculatedTime = Math.min(this.playbackStartPosition + elapsed, this.audioElement.duration);
+        
+        const percent = (calculatedTime / this.audioElement.duration) * 100;
+        this.previewProgress.style.width = `${percent}%`;
+        this.previewHandle.style.left = `calc(${percent}% - 7px)`;
+        
+        // Update time display with calculated time
+        this._updateTimeDisplay(calculatedTime);
+        
+        // Check if we've reached the end
+        if (calculatedTime >= this.audioElement.duration) {
+            return; // Let the 'ended' event handle cleanup
+        }
+        
+        this.progressAnimationFrame = requestAnimationFrame(() => this._updateProgressBar());
+    }
+
+    /**
+     * Starts the smooth progress bar animation
+     */
+    _startProgressAnimation() {
+        if (this.progressAnimationFrame) {
+            cancelAnimationFrame(this.progressAnimationFrame);
+        }
+        this._updateProgressBar();
+    }
+
+    /**
+     * Stops the smooth progress bar animation
+     */
+    _stopProgressAnimation() {
+        if (this.progressAnimationFrame) {
+            cancelAnimationFrame(this.progressAnimationFrame);
+            this.progressAnimationFrame = null;
+        }
+    }
+
+    /**
+     * Handles audio playback end
+     */
+    _onAudioEnded() {
+        this._stopProgressAnimation();
+        
+        // Reset audio position to beginning
+        this.audioElement.currentTime = 0;
+        this.playbackStartPosition = 0;
+        
+        // Reset visual progress
+        this.previewProgress.style.width = '0%';
+        this.previewHandle.style.left = '0';
+        this._updateTimeDisplay(0);
+        
+        this.isPlaying = false;
+        this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+    }
+
+    /**
+     * Returns whether recorder is in preview state
+     */
+    get isInPreview() {
+        return this.state === RecordingState.PREVIEW;
+    }
+
+    /**
+     * Returns whether recorder is actively recording
+     */
+    get isRecording() {
+        return this.state === RecordingState.RECORDING || this.state === RecordingState.LOCKED;
     }
 }
 

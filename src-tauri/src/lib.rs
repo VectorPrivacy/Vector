@@ -19,10 +19,7 @@ mod mls;
 pub use mls::MlsService;
 
 
-mod db_migration;
-use db_migration::save_chat_messages;
-
-mod db_sql_migration;
+use db::save_chat_messages;
 
 mod voice;
 use voice::AudioRecorder;
@@ -58,6 +55,8 @@ pub use chat::{Chat, ChatType, ChatMetadata};
 
 mod rumor;
 pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationType, process_rumor};
+
+mod deep_link;
 
 /// # Trusted Relay
 ///
@@ -362,30 +361,6 @@ lazy_static! {
     static ref STATE: Mutex<ChatState> = Mutex::new(ChatState::new());
 }
 
-/// Perform Store-to-SQL migration
-/// This command is called by the frontend when migration is needed
-#[tauri::command]
-async fn perform_database_migration<R: Runtime>(
-    handle: AppHandle<R>
-) -> Result<(), String> {
-    // Perform the migration (no password needed - uses decrypted key from Nostr client)
-    db_sql_migration::migrate_store_to_sql(handle.clone()).await?;
-    
-    // Auto-select the first account after migration
-    if let Ok(Some(npub)) = account_manager::auto_select_account(&handle) {
-        println!("[Migration] Auto-selected account after migration: {}", npub);
-    } else {
-        println!("[Migration] Warning: No account found after migration");
-    }
-    
-    // After successful migration, trigger fetch_messages to load the new database
-    tauri::async_runtime::spawn(async move {
-        fetch_messages(handle, true, None).await;
-    });
-    
-    Ok(())
-}
-
 #[tauri::command]
 async fn fetch_messages<R: Runtime>(
     handle: AppHandle<R>,
@@ -434,20 +409,6 @@ async fn fetch_messages<R: Runtime>(
         let mut state = STATE.lock().await;
         
         if init {
-            // Check if Store-to-SQL migration is needed
-            if db_sql_migration::is_sql_migration_needed(&handle).await.unwrap_or(false) {
-                // Migration is needed - this will be triggered by the frontend
-                // The frontend should call a migration command with the user's password
-                // For now, we'll emit a special event to notify the frontend
-                handle.emit("migration_needed", serde_json::json!({
-                    "message": "Database upgrade required. Please enter your password to continue."
-                })).ok();
-                
-                // Don't proceed with normal initialization until migration is complete
-                // The frontend will call the migration command, which will then call fetch_messages again
-                return;
-            }
-            
             // Set current account for SQL mode if profile database exists
             // This must be done BEFORE loading chats/messages so SQL mode is active
             let signer = client.signer().await.unwrap();
@@ -471,11 +432,11 @@ async fn fetch_messages<R: Runtime>(
                 state.merge_db_profiles(profiles).await;
 
                 // Load chats and their messages from database
-                let slim_chats_result = db_migration::get_all_chats(&handle).await;
+                let slim_chats_result = db::get_all_chats(&handle).await;
                 if let Ok(slim_chats) = slim_chats_result {
                     // Load MLS groups to check for evicted status
                     let mls_groups: Option<Vec<mls::MlsGroupMetadata>> =
-                        db_migration::load_mls_groups(&handle).await.ok();
+                        db::load_mls_groups(&handle).await.ok();
                     
                     // Convert slim chats to full chats and load their messages
                     for slim_chat in slim_chats {
@@ -495,7 +456,7 @@ async fn fetch_messages<R: Runtime>(
                         }
                         
                         // Load only the last message for preview (optimization: full messages loaded on-demand by frontend)
-                        let last_messages_result = db_migration::get_chat_last_messages(&handle, &chat.id(), 1).await;
+                        let last_messages_result = db::get_chat_last_messages(&handle, &chat.id(), 1).await;
                         if let Ok(last_messages) = last_messages_result {
                             for message in last_messages {
                                 // Check if this message has downloaded attachments (for integrity check)
@@ -538,13 +499,13 @@ async fn fetch_messages<R: Runtime>(
                 check_attachment_filesystem_integrity(&handle, &mut state).await;
                 
                 // Preload ID caches for maximum performance
-                if let Err(e) = db_migration::preload_id_caches(&handle).await {
+                if let Err(e) = db::preload_id_caches(&handle).await {
                     eprintln!("[Cache] Failed to preload ID caches: {}", e);
                 }
                 
                 // Preload wrapper_event_ids for fast duplicate detection during sync
                 // Load last 30 days of wrapper_ids to cover typical sync window
-                if let Ok(wrapper_ids) = db_migration::load_recent_wrapper_ids(&handle, 30).await {
+                if let Ok(wrapper_ids) = db::load_recent_wrapper_ids(&handle, 30).await {
                     let mut cache = WRAPPER_ID_CACHE.lock().await;
                     *cache = wrapper_ids;
                 }
@@ -559,13 +520,13 @@ async fn fetch_messages<R: Runtime>(
                 cleanup_empty_file_attachments(&handle, &mut state).await;
                 
                 // Preload ID caches for maximum performance
-                if let Err(e) = db_migration::preload_id_caches(&handle).await {
+                if let Err(e) = db::preload_id_caches(&handle).await {
                     eprintln!("[Cache] Failed to preload ID caches: {}", e);
                 }
                 
                 // Preload wrapper_event_ids for fast duplicate detection during sync
                 // Load last 30 days of wrapper_ids to cover typical sync window
-                if let Ok(wrapper_ids) = db_migration::load_recent_wrapper_ids(&handle, 30).await {
+                if let Ok(wrapper_ids) = db::load_recent_wrapper_ids(&handle, 30).await {
                     let mut cache = WRAPPER_ID_CACHE.lock().await;
                     *cache = wrapper_ids;
                 }
@@ -835,7 +796,7 @@ async fn fetch_messages<R: Runtime>(
                 
                 // After MLS sync completes, check if weekly VACUUM is needed
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if let Err(e) = db_sql_migration::check_and_vacuum_if_needed(&handle_clone).await {
+                if let Err(e) = db::check_and_vacuum_if_needed(&handle_clone).await {
                     eprintln!("[Maintenance] Weekly VACUUM check failed: {}", e);
                 }
             });
@@ -1082,26 +1043,6 @@ async fn start_typing(receiver: String) -> bool {
     }
 }
 
-#[tauri::command]
-async fn get_chat_messages(chat_id: String, limit: Option<usize>) -> Result<Vec<Message>, String> {
-    let state = STATE.lock().await;
-    
-    match state.get_chat(&chat_id) {
-        Some(chat) => {
-            let messages = if let Some(lim) = limit {
-                // Return last N messages
-                let start = chat.messages.len().saturating_sub(lim);
-                chat.messages[start..].to_vec()
-            } else {
-                // Return all messages
-                chat.messages.clone()
-            };
-            Ok(messages)
-        }
-        None => Ok(Vec::new()), // Chat doesn't exist yet, return empty
-    }
-}
-
 /// Get paginated messages for a chat directly from the database
 /// Also adds the messages to the backend state for cache synchronization
 #[tauri::command]
@@ -1112,7 +1053,7 @@ async fn get_chat_messages_paginated<R: Runtime>(
     offset: usize,
 ) -> Result<Vec<Message>, String> {
     // Load messages from database
-    let messages = db_migration::get_chat_messages_paginated(&handle, &chat_id, limit, offset).await?;
+    let messages = db::get_chat_messages_paginated(&handle, &chat_id, limit, offset).await?;
     
     // Also add these messages to the backend state for cache synchronization
     // This ensures operations like fetch_msg_metadata can find the messages
@@ -1139,7 +1080,7 @@ async fn get_chat_message_count<R: Runtime>(
     handle: AppHandle<R>,
     chat_id: String,
 ) -> Result<usize, String> {
-    db_migration::get_chat_message_count(&handle, &chat_id).await
+    db::get_chat_message_count(&handle, &chat_id).await
 }
 
 /// Evict messages from the backend cache for a specific chat
@@ -1163,8 +1104,8 @@ async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(), S
 #[tauri::command]
 async fn get_file_hash_index<R: Runtime>(
     handle: AppHandle<R>,
-) -> Result<std::collections::HashMap<String, db_migration::AttachmentRef>, String> {
-    db_migration::build_file_hash_index(&handle).await
+) -> Result<std::collections::HashMap<String, db::AttachmentRef>, String> {
+    db::build_file_hash_index(&handle).await
 }
 
 #[tauri::command]
@@ -1187,7 +1128,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
         
         // Cache miss - check database as fallback (for events older than cache window)
         if let Some(handle) = TAURI_APP.get() {
-            if let Ok(exists) = db_migration::wrapper_event_exists(handle, &wrapper_event_id).await {
+            if let Ok(exists) = db::wrapper_event_exists(handle, &wrapper_event_id).await {
                 if exists {
                     // Already processed this giftwrap, skip (DB hit)
                     return false;
@@ -1404,13 +1345,13 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
 
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
-        if let Ok(exists) = db_migration::message_exists_in_db(&handle, &msg.id).await {
+        if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
             if exists {
                 // Message already in DB but we got here (wrapper check passed)
                 // Try to backfill the wrapper_event_id for future fast lookups
                 // If backfill fails (message already has a different wrapper), add this wrapper to cache
                 // to prevent repeated processing of duplicate giftwraps
-                if let Ok(updated) = db_migration::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
+                if let Ok(updated) = db::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
                     if !updated {
                         // Message has a different wrapper_id - add this duplicate wrapper to cache
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
@@ -1441,7 +1382,7 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
         // Save the new message to DB (chat_id = contact npub for DMs)
         if let Some(handle) = TAURI_APP.get() {
             // Only save the single new message (efficient!)
-            let _ = db_migration::save_message(handle.clone(), contact, &msg).await;
+            let _ = db::save_message(handle.clone(), contact, &msg).await;
         }
         // Ensure OS badge is updated immediately after accepting the message
         if let Some(handle) = TAURI_APP.get() {
@@ -1456,13 +1397,13 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
 async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
-        if let Ok(exists) = db_migration::message_exists_in_db(&handle, &msg.id).await {
+        if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
             if exists {
                 // Message already in DB but we got here (wrapper check passed)
                 // Try to backfill the wrapper_event_id for future fast lookups
                 // If backfill fails (message already has a different wrapper), add this wrapper to cache
                 // to prevent repeated processing of duplicate giftwraps
-                if let Ok(updated) = db_migration::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
+                if let Ok(updated) = db::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
                     if !updated {
                         // Message has a different wrapper_id - add this duplicate wrapper to cache
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
@@ -1543,7 +1484,7 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
         // Save the new message to DB (chat_id = contact npub for DMs)
         if let Some(handle) = TAURI_APP.get() {
             // Only save the single new message (efficient!)
-            let _ = db_migration::save_message(handle.clone(), contact, &msg).await;
+            let _ = db::save_message(handle.clone(), contact, &msg).await;
         }
         // Ensure OS badge is updated immediately after accepting the attachment
         if let Some(handle) = TAURI_APP.get() {
@@ -1590,7 +1531,7 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
             };
             
             if let Some(msg) = updated_message {
-                let _ = db_migration::save_message(handle.clone(), &chat_id, &msg).await;
+                let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
             }
         }
     }
@@ -1691,7 +1632,7 @@ async fn notifs() -> Result<bool, String> {
                     if let Some(group_wire_id) = group_wire_id_opt {
                         // Check if we are a member of this group (metadata check) without constructing MLS engine
                         let handle = TAURI_APP.get().unwrap().clone();
-                        let is_member: bool = if let Ok(groups) = db_migration::load_mls_groups(&handle).await {
+                        let is_member: bool = if let Ok(groups) = db::load_mls_groups(&handle).await {
                             groups.iter().any(|g| {
                                 g.group_id == group_wire_id || g.engine_group_id == group_wire_id
                             })
@@ -1839,7 +1780,7 @@ async fn notifs() -> Result<bool, String> {
                                                                         };
                                                                         
                                                                         if let Some(chat) = chat_to_save {
-                                                                            use crate::db_migration::{save_chat, save_chat_messages};
+                                                                            use crate::db::{save_chat, save_chat_messages};
                                                                             let _ = save_chat(handle.clone(), &chat).await;
                                                                             let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &chat.messages).await;
                                                                         }
@@ -1929,9 +1870,9 @@ async fn notifs() -> Result<bool, String> {
                                                                         };
                                                                         
                                                                         if let Some(chat) = chat_to_save {
-                                                                            use crate::db_migration::save_chat;
+                                                                            use crate::db::save_chat;
                                                                             let _ = save_chat(handle.clone(), &chat).await;
-                                                                            let _ = db_migration::save_message(handle.clone(), &group_id_for_persist, &message).await;
+                                                                            let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
                                                                         }
                                                                     }
                                                                     Some(message)
@@ -1971,7 +1912,7 @@ async fn notifs() -> Result<bool, String> {
                                                                             };
                                                                             
                                                                             if let Some(msg) = updated_message {
-                                                                                let _ = db_migration::save_message(handle.clone(), &chat_id, &msg).await;
+                                                                                let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
                                                                             }
                                                                         }
                                                                     }
@@ -2525,6 +2466,8 @@ async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<Strin
 
 #[tauri::command]
 async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+    let handle = TAURI_APP.get().unwrap();
+    
     // Grab the attachment's metadata by searching through chats
     let attachment = {
         let mut state = STATE.lock().await;
@@ -2546,6 +2489,49 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                             return false;
                         }
 
+                        // Check if file already exists on disk (downloaded but flag was wrong)
+                        let base_directory = if cfg!(target_os = "ios") {
+                            tauri::path::BaseDirectory::Document
+                        } else {
+                            tauri::path::BaseDirectory::Download
+                        };
+                        
+                        if let Ok(vector_dir) = handle.path().resolve("vector", base_directory) {
+                            let file_path = vector_dir.join(format!("{}.{}", &attachment.id, &attachment.extension));
+                            if file_path.exists() {
+                                // File already exists! Update the state and return success
+                                attachment.downloaded = true;
+                                attachment.path = file_path.to_string_lossy().to_string();
+                                
+                                // Emit success event
+                                handle.emit("attachment_download_result", serde_json::json!({
+                                    "profile_id": npub,
+                                    "msg_id": msg_id,
+                                    "id": attachment_id,
+                                    "success": true,
+                                    "result": file_path.to_string_lossy().to_string()
+                                })).unwrap();
+                                
+                                // Also update the database
+                                let chat_id_for_db = chat.id().to_string();
+                                let msg_id_clone = msg_id.clone();
+                                let attachment_id_clone = attachment_id.clone();
+                                let path_str = file_path.to_string_lossy().to_string();
+                                drop(state); // Release lock before DB call
+                                
+                                let _ = db::update_attachment_downloaded_status(
+                                    handle,
+                                    &chat_id_for_db,
+                                    &msg_id_clone,
+                                    &attachment_id_clone,
+                                    true,
+                                    &path_str
+                                );
+                                
+                                return true;
+                            }
+                        }
+
                         // Enable the downloading flag to prevent re-calls
                         attachment.downloading = true;
                         found_attachment = Some(attachment.clone());
@@ -2564,7 +2550,6 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
     };
 
     // Begin our download progress events
-    let handle = TAURI_APP.get().unwrap();
     handle.emit("attachment_download_progress", serde_json::json!({
         "id": &attachment.id,
         "progress": 0
@@ -2791,7 +2776,7 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                     // Drop the STATE lock before performing async I/O
                     drop(state);
 
-                    let _ = db_migration::save_message(handle.clone(), &npub, &updated_message).await;
+                    let _ = db::save_message(handle.clone(), &npub, &updated_message).await;
                 }
             }
             
@@ -2917,21 +2902,13 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
                 let _ = crate::account_manager::set_current_account(npub.clone());
                 println!("[Login] Set current account for SQL mode: {}", npub);
             } else {
-                // Check if Store-to-SQL migration is needed before creating new database
-                let migration_needed = db_sql_migration::is_sql_migration_needed(handle).await.unwrap_or(false);
-                if migration_needed {
-                    println!("[Login] Store migration needed - database will be created during migration");
-                    // Don't create database yet - migration will handle it
-                    // Just return the keys and let fetch_messages trigger the migration
+                // New account - initialize database and set as current
+                if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
+                    eprintln!("[Login] Failed to initialize profile database: {}", e);
+                } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
+                    eprintln!("[Login] Failed to set current account: {}", e);
                 } else {
-                    // New account - initialize database and set as current
-                    if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
-                        eprintln!("[Login] Failed to initialize profile database: {}", e);
-                    } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
-                        eprintln!("[Login] Failed to set current account: {}", e);
-                    } else {
-                        println!("[Login] Initialized new profile database and set current account: {}", npub);
-                    }
+                    println!("[Login] Initialized new profile database and set current account: {}", npub);
                 }
             }
         }
@@ -3644,7 +3621,7 @@ async fn clear_storage() -> Result<serde_json::Value, String> {
         // If we have messages to update, save them to the database
         if !messages_to_update.is_empty() {
             // Save updated messages to database
-            db_migration::save_chat_messages(handle.clone(), chat.id(), &messages_to_update).await
+            db::save_chat_messages(handle.clone(), chat.id(), &messages_to_update).await
                 .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat.id(), e))?;
             
             // Emit message_update events for each updated message
@@ -3792,7 +3769,7 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
 #[tauri::command]
 async fn load_mls_device_id() -> Result<Option<String>, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    match db_migration::load_mls_device_id(&handle).await {
+    match db::load_mls_device_id(&handle).await {
         Ok(Some(id)) => Ok(Some(id)),
         Ok(None) => Ok(None),
         Err(e) => Err(e.to_string()),
@@ -3803,7 +3780,7 @@ async fn load_mls_device_id() -> Result<Option<String>, String> {
 #[tauri::command]
 async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    db_migration::load_mls_keypackages(&handle).await
+    db::load_mls_keypackages(&handle).await
         .map_err(|e| e.to_string())
 }
 
@@ -3814,7 +3791,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
 
     // Ensure a persistent device_id exists
-    let device_id: String = match db_migration::load_mls_device_id(&handle).await {
+    let device_id: String = match db::load_mls_device_id(&handle).await {
         Ok(Some(id)) => id,
         _ => {
             let id: String = thread_rng()
@@ -3823,7 +3800,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
                 .map(char::from)
                 .collect::<String>()
                 .to_lowercase();
-            let _ = db_migration::save_mls_device_id(handle.clone(), &id).await;
+            let _ = db::save_mls_device_id(handle.clone(), &id).await;
             id
         }
     };
@@ -3837,7 +3814,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
     if cache {
         // Load existing keypackage index and verify it exists on relay before returning cached
         let cached_kp_ref: Option<String> = {
-            let index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
+            let index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
 
             index.iter().find(|entry| {
                 entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
@@ -3903,7 +3880,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
 
     // Upsert into mls_keypackage_index
     {
-        let mut index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
+        let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
         let now = Timestamp::now().as_u64();
         index.push(serde_json::json!({
             "owner_pubkey": owner_pubkey_b32,
@@ -3912,7 +3889,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
             "fetched_at": now,
             "expires_at": 0u64
         }));
-        let _ = db_migration::save_mls_keypackages(handle.clone(), &index).await;
+        let _ = db::save_mls_keypackages(handle.clone(), &index).await;
     }
 
     Ok(serde_json::json!({
@@ -4128,7 +4105,7 @@ async fn sync_mls_groups_now(
                     .map_err(|e| e.to_string())
             } else {
                 // Multi-group sync: load MLS groups from SQL and sync each
-                let group_ids: Vec<String> = match db_migration::load_mls_groups(&handle).await {
+                let group_ids: Vec<String> = match db::load_mls_groups(&handle).await {
                     Ok(groups) => {
                         groups.into_iter()
                             .filter(|g| !g.evicted) // Skip evicted groups
@@ -4354,7 +4331,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                         .map_err(|e| e.to_string())?
                         .as_secs();
                     // Update only the specific group instead of all groups
-                    crate::db_migration::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
+                    crate::db::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
                     mls::emit_group_metadata_event(&groups[idx]);
                 } else {
                     println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
@@ -4377,7 +4354,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                     evicted: false,                           // Accepting a welcome means we're joining, not evicted
                 };
                 
-                crate::db_migration::save_mls_group(handle.clone(), &metadata).await.map_err(|e| e.to_string())?;
+                crate::db::save_mls_group(handle.clone(), &metadata).await.map_err(|e| e.to_string())?;
                 mls::emit_group_metadata_event(&metadata);
                 
                 // Create the Chat in STATE with metadata and save to disk
@@ -4393,7 +4370,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                     
                     // Save chat to disk
                     if let Some(chat) = state.get_chat(&chat_id) {
-                        if let Err(e) = db_migration::save_chat(handle.clone(), chat).await {
+                        if let Err(e) = db::save_chat(handle.clone(), chat).await {
                             eprintln!("[MLS] Failed to save chat after welcome acceptance: {}", e);
                         }
                     }
@@ -4461,7 +4438,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
 #[tauri::command]
 async fn list_mls_groups() -> Result<Vec<String>, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    match db_migration::load_mls_groups(&handle).await {
+    match db::load_mls_groups(&handle).await {
         Ok(groups) => {
             let ids = groups.into_iter()
                 .map(|g| g.group_id)
@@ -4475,7 +4452,7 @@ async fn list_mls_groups() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn get_mls_group_metadata() -> Result<Vec<serde_json::Value>, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    let groups = db_migration::load_mls_groups(&handle)
+    let groups = db::load_mls_groups(&handle)
         .await
         .map_err(|e| format!("Failed to load MLS group metadata: {}", e))?;
 
@@ -4520,7 +4497,7 @@ async fn sync_mls_group_participants(group_id: String) -> Result<(), String> {
         drop(state);
         
         if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = db_migration::save_chat(handle.clone(), &chat_clone).await {
+            if let Err(e) = db::save_chat(handle.clone(), &chat_clone).await {
                 eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
             }
         }
@@ -4668,7 +4645,7 @@ async fn refresh_keypackages_for_contact(
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
 
     // Load existing index
-    let mut index = db_migration::load_mls_keypackages(&handle).await.unwrap_or_default();
+    let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
 
     // Remove any existing entries for this owner+device_id to avoid duplicates
     for new_entry in &new_entries {
@@ -4683,7 +4660,7 @@ async fn refresh_keypackages_for_contact(
 
     // Append new entries and persist
     index.extend(new_entries.into_iter());
-    let _ = db_migration::save_mls_keypackages(handle.clone(), &index).await;
+    let _ = db::save_mls_keypackages(handle.clone(), &index).await;
 
     Ok(results)
 }
@@ -4733,13 +4710,44 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init());
+
+    // Desktop-only plugins
+    #[cfg(desktop)]
+    {
+        // Window state plugin: saves and restores window position, size, maximized state, etc.
+        // Exclude VISIBLE flag so window starts hidden (we show it after content loads to prevent white flash)
+        use tauri_plugin_window_state::StateFlags;
+        builder = builder.plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build()
+        );
+        
+        // Single-instance plugin: ensures deep links are passed to existing instance
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Handle deep links from single-instance (Windows/Linux)
+            let urls: Vec<String> = args.iter()
+                .filter(|arg| arg.starts_with("vector://") || arg.contains("vectorapp.io"))
+                .cloned()
+                .collect();
+            if !urls.is_empty() {
+                deep_link::handle_deep_link(app, urls);
+            }
+            // Focus the existing window
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder
         .setup(|app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -4750,10 +4758,19 @@ pub fn run() {
 
             // Setup a graceful shutdown for our Nostr subscriptions
             let window = app.get_webview_window("main").unwrap();
+            #[cfg(desktop)]
+            let handle_for_window_state = handle.clone();
             window.on_window_event(move |event| {
                 match event {
                     // This catches when the window is being closed
                     tauri::WindowEvent::CloseRequested { .. } => {
+                        // Save window state (position, size, maximized, etc.) before closing
+                        #[cfg(desktop)]
+                        {
+                            use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+                            let _ = handle_for_window_state.save_window_state(StateFlags::all());
+                        }
+                        
                         // Cleanly shutdown our Nostr client
                         if let Some(nostr_client) = NOSTR_CLIENT.get() {
                             tauri::async_runtime::block_on(async {
@@ -4769,31 +4786,38 @@ pub fn run() {
             // Auto-select account on startup if one exists but isn't selected
             {
                 let handle_clone = handle.clone();
-                if let Ok(Some(_npub)) = account_manager::auto_select_account(&handle_clone) {
-                    // Clean up old Store files on 2nd boot (SQL database exists = migration complete)
-                    if let Err(e) = db_sql_migration::cleanup_old_store_files(&handle_clone) {
-                        eprintln!("[Cleanup] Failed to remove old Store files: {}", e);
-                    }
-                }
+                let _ = account_manager::auto_select_account(&handle_clone);
             }
 
             // Startup log: persistent MLS device_id if present
             {
                 let handle_clone = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Ok(Some(id)) = db_migration::load_mls_device_id(&handle_clone).await {
+                    if let Ok(Some(id)) = db::load_mls_device_id(&handle_clone).await {
                         println!("[MLS] Found persistent mls_device_id at startup: {}", id);
                     }
                 });
             }
 
             // Set as our accessible static app handle
-            TAURI_APP.set(handle).unwrap();
+            TAURI_APP.set(handle.clone()).unwrap();
             
             // Start the profile sync background processor
             tauri::async_runtime::spawn(async {
                 profile_sync::start_profile_sync_processor().await;
             });
+
+            // Setup deep link listener for macOS/iOS/Android
+            // On these platforms, deep links are received as events rather than CLI args
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle_for_deep_link = handle.clone();
+                let _listener_id = app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+                    deep_link::handle_deep_link(&handle_for_deep_link, urls);
+                });
+            }
             
             Ok(())
         })
@@ -4820,7 +4844,6 @@ pub fn run() {
             message::react_to_message,
             message::fetch_msg_metadata,
             fetch_messages,
-            perform_database_migration,
             deep_rescan,
             is_scanning,
             get_chat_messages_paginated,
@@ -4880,6 +4903,8 @@ pub fn run() {
             queue_chat_profiles_sync,
             refresh_profile_now,
             sync_all_profiles,
+            // Deep link commands
+            deep_link::get_pending_deep_link,
             // Account manager commands
             account_manager::get_current_account,
             account_manager::list_all_accounts,

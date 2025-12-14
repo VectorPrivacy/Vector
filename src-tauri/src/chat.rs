@@ -312,7 +312,7 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
 
             // Save to DB
             if let Some(chat) = updated_chat {
-                let _ = crate::db_migration::save_chat(handle.clone(), &chat).await;
+                let _ = crate::db::save_chat(handle.clone(), &chat).await;
             }
         }
     }

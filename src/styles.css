@@ -12,6 +12,11 @@
   font-style: italic;
 }
 
+/* Remove blue tap highlight on mobile (Android) */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
 .icon {
   position: absolute;
   top: 0;
@@ -81,6 +86,10 @@
 
 .icon-loading {
   mask-image: url("./icons/loading.svg");
+}
+
+.icon-locked {
+  mask-image: url("./icons/locked.svg");
 }
 
 .icon-mic-on {
@@ -1173,6 +1182,7 @@ html, body {
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
+  overflow: hidden;
 }
 
 .msg-them p {
@@ -1187,7 +1197,7 @@ html, body {
   border-bottom-left-radius: 0px;
   word-break: break-word;
   font-weight: 100;
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .file-ext-badge {
@@ -1268,6 +1278,99 @@ html, body {
 .msg-payment button {
   margin-left: auto;
   background-color: rgba(0, 0, 0, 0.4);
+}
+
+/* Nostr Profile Preview (for shared npubs and profile links) */
+.msg-profile-preview {
+  display: flex;
+  align-items: center;
+  padding: 10px;
+  border-radius: 16px;
+  margin-top: 10px;
+  border: 1px solid var(--accent);
+  background-color: var(--accent-transparent);
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.msg-profile-avatar {
+  flex-shrink: 0;
+}
+
+.msg-profile-avatar img,
+.msg-profile-avatar .placeholder-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: middle;
+}
+
+.msg-profile-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 18px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.msg-profile-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg-profile-npub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg-profile-buttons {
+  display: flex;
+  flex-shrink: 0;
+  margin-left: auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.msg-profile-copy-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  background-color: rgba(0, 0, 0, 0.2);
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.msg-profile-copy-btn:hover {
+  opacity: 0.7;
+}
+
+.msg-profile-btn {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  background-color: var(--accent);
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.msg-profile-btn:hover {
+  opacity: 0.8;
 }
 
 /* The `highlightMessage` animation is defined in `/themes/*` */
@@ -1453,6 +1556,7 @@ html, body {
 }
 
 .chat-input-container {
+  position: relative;
   width: 100%;
   align-items: center;
   background-color: #0a0a0a;
@@ -2160,6 +2264,432 @@ select {
   margin-bottom: 5px;
 }
 
+/* ===== Voice Recorder Mobile-first UI ===== */
+
+/* When recording/previewing, force center alignment in chat input container */
+.chat-input-container:has(.voice-recording-ui.active),
+.chat-input-container:has(.voice-preview-ui.active) {
+  align-items: center !important;
+}
+
+/* Recording UI - inline within chat input container */
+.voice-recording-ui {
+  display: none;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0 12px;
+  min-height: 45px;
+  animation: fadeIn 0.2s ease;
+}
+
+.voice-recording-ui.active {
+  display: flex;
+}
+
+.voice-recording-ui.cancelling {
+  animation: slideOutLeft 0.3s ease forwards;
+}
+
+@keyframes slideOutLeft {
+  to {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+
+/* Recording status indicator */
+.voice-recorder-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+}
+
+.voice-recorder-status .recording-dot {
+  width: 8px;
+  height: 8px;
+  background: #ff4444;
+  border-radius: 50%;
+  animation: recordingPulse 1s ease-in-out infinite;
+}
+
+@keyframes recordingPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.voice-recorder-status .recording-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Slide hint (positioned near the timer, slides left on gesture) */
+.voice-recorder-slide-hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.5);
+  transition: opacity 0.1s ease;
+  flex: 1;
+  padding-right: 12px;
+  user-select: none;
+  cursor: default;
+}
+
+.voice-recorder-slide-hint .slide-icon-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  transform: translateX(0);
+}
+
+.voice-recorder-slide-hint .icon {
+  width: 16px;
+  height: 16px;
+  background-color: rgba(255, 255, 255, 0.5);
+  transition: background-color 0.15s ease;
+  animation: slideLeftHint 1s ease-in-out infinite;
+}
+
+@keyframes slideLeftHint {
+  0% { transform: translateX(0); }
+  50% { transform: translateX(-5px); }
+  100% { transform: translateX(0); }
+}
+
+.voice-recorder-slide-hint .slide-text {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Timer display - positioned right next to the red circle */
+.voice-recorder-timer {
+  font-size: 16px;
+  font-weight: 500;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  margin-left: auto;
+  padding-right: 35px; /* Space for the absolutely positioned red circle */
+  user-select: none;
+  cursor: default;
+}
+
+/* Lock zone (positioned above the red circle button) */
+.voice-recorder-lock-zone {
+  position: absolute;
+  right: 12px;
+  bottom: 55px;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 10;
+  /* No transition during drag - opacity is controlled directly by JS */
+}
+
+.voice-recorder-lock-zone.active {
+  display: flex;
+  /* opacity controlled by JS based on drag distance */
+}
+
+.voice-recorder-lock-zone.fading-out {
+  opacity: 0 !important;
+  transition: opacity 0.2s ease;
+}
+
+.lock-indicator {
+  width: 36px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lock-indicator .icon {
+  width: 16px;
+  height: 16px;
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
+.lock-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lock-arrow .arrow-icon-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  transform: rotate(90deg);
+}
+
+.lock-arrow .icon {
+  width: 16px;
+  height: 16px;
+  background-color: rgba(255, 255, 255, 0.9);
+  animation: bounceUp 1s ease-in-out infinite;
+}
+
+@keyframes bounceUp {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-3px); }
+}
+
+.voice-recorder-lock-zone.locked .lock-arrow {
+  display: none;
+}
+
+/* Hold to record tooltip */
+.voice-recorder-tooltip {
+  position: absolute;
+  bottom: 60px;
+  right: 12px;
+  background-color: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(5px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 100;
+}
+
+.voice-recorder-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Red circle overlays the mic button during recording */
+.voice-recorder-red-circle {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  background: #ff4444;
+  border-radius: 50%;
+  cursor: default;
+  opacity: 0;
+  transform: scale(0.5);
+  /* No transform transition during drag - follows cursor exactly */
+  transition: opacity 0.15s ease, border-radius 0.2s ease, width 0.15s ease, height 0.15s ease;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Position to overlay the mic button (right side of container) */
+  right: 9.5px;
+  top: 50%;
+  margin-top: -13px;
+  z-index: 10;
+}
+
+/* Smooth return animation when drag ends */
+.voice-recorder-red-circle.returning {
+  transition: opacity 0.15s ease, transform 0.15s ease-out, border-radius 0.2s ease, width 0.15s ease, height 0.15s ease;
+}
+
+.voice-recorder-red-circle.pending {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+.voice-recorder-red-circle.active {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.voice-recorder-red-circle.locked {
+  animation: none;
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  margin-top: -12px;
+}
+
+.voice-recorder-red-circle:hover {
+  transform: scale(1.05);
+}
+
+.voice-recorder-red-circle:active {
+  transform: scale(0.95);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(255, 68, 68, 0);
+  }
+}
+
+/* Mic button states */
+#chat-input-voice {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  touch-action: none; /* Prevent browser gestures during voice recording */
+}
+
+#chat-input-voice.pending {
+  opacity: 0;
+  transform: scale(0.5);
+  pointer-events: none;
+}
+
+#chat-input-voice.recording {
+  display: none;
+}
+
+/* Fade-in animation for chat input elements when returning from voice preview */
+.chat-input-fade-in {
+  animation: fadeIn 0.2s ease;
+}
+
+/* ===== Voice Preview UI ===== */
+.voice-preview-ui {
+  display: none;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 45px;
+  animation: fadeIn 0.2s ease;
+}
+
+.voice-preview-ui.active {
+  display: flex;
+}
+
+.voice-preview-delete {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.voice-preview-delete .icon {
+  background-color: #ff4444;
+  transition: opacity 0.15s ease;
+}
+
+.voice-preview-delete:hover .icon {
+  opacity: 0.7;
+}
+
+/* Center container for play, waveform, and time */
+.voice-preview-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  max-width: 75%;
+  margin: 0 auto;
+}
+
+.voice-preview-play {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.voice-preview-play .icon {
+  background-color: #fff;
+  transition: opacity 0.15s ease;
+}
+
+.voice-preview-play:hover .icon {
+  opacity: 0.7;
+}
+
+.voice-preview-waveform {
+  flex: 1;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  position: relative;
+  cursor: pointer;
+  overflow: visible;
+  touch-action: none; /* Enable touch dragging for seek */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.voice-preview-progress {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--icon-color-primary), var(--voice-progress-secondary, rgba(89, 252, 179, 0.4)));
+  border-radius: 5px 0 0 5px;
+  pointer-events: none;
+}
+
+.voice-preview-handle {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.voice-preview-time {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  width: 45px;
+  flex-shrink: 0;
+}
+
+/* Send button in voice preview mode */
+#chat-input-send.voice-preview-send {
+  display: flex !important;
+}
+
+#chat-input-send.voice-preview-send .icon {
+  background-color: var(--icon-color-primary);
+}
+
 /* Neon Green Gradient 3D Toggle */
 .toggle-container {
   display: flex;
@@ -2270,8 +2800,8 @@ select:focus::-ms-value {
 
 .icon-trash {
   display: inline-block;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   background-color: transparent;
   mask: url('./icons/trash.svg') no-repeat center;
   mask-size: contain;

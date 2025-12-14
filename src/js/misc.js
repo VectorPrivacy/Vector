@@ -1,4 +1,160 @@
 /**
+ * Detects npub (Nostr public key) or vectorapp.io profile links in text
+ * @param {string} text - Text to search for npub or profile links
+ * @returns {Object|null} - Detected npub info or null if none found
+ */
+function detectNostrProfile(text) {
+    if (!text || text.length < 10) return null;
+    
+    // Pattern for raw npub (bech32 encoded public key)
+    // npub1 + 58 characters of bech32 data = 63 total characters
+    const npubPattern = /\b(npub1[a-z0-9]{58})\b/i;
+    
+    // Pattern for vectorapp.io profile links
+    const profileLinkPattern = /https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i;
+    
+    // First check for profile links (higher priority - more explicit intent)
+    const linkMatch = text.match(profileLinkPattern);
+    if (linkMatch) {
+        const trimmedText = text.trim();
+        const isAtEnd = trimmedText.endsWith(linkMatch[0]);
+        const textWithoutNpub = isAtEnd ? trimmedText.slice(0, -linkMatch[0].length).trim() : null;
+        return {
+            npub: linkMatch[1].toLowerCase(),
+            type: 'link',
+            originalMatch: linkMatch[0],
+            isAtEnd: isAtEnd,
+            textWithoutNpub: textWithoutNpub
+        };
+    }
+    
+    // Then check for raw npub
+    const npubMatch = text.match(npubPattern);
+    if (npubMatch) {
+        const trimmedText = text.trim();
+        const isAtEnd = trimmedText.endsWith(npubMatch[0]);
+        const textWithoutNpub = isAtEnd ? trimmedText.slice(0, -npubMatch[0].length).trim() : null;
+        return {
+            npub: npubMatch[1].toLowerCase(),
+            type: 'npub',
+            originalMatch: npubMatch[0],
+            isAtEnd: isAtEnd,
+            textWithoutNpub: textWithoutNpub
+        };
+    }
+    
+    return null;
+}
+
+/**
+ * Renders a compact profile preview card for a detected npub
+ * @param {Object} npubInfo - Detected npub info from detectNostrProfile
+ * @param {Object|null} profile - Optional profile data if already available
+ * @returns {HTMLDivElement} Profile preview element
+ */
+function renderNostrProfilePreview(npubInfo, profile = null, isOnlyNpub = false) {
+    const divProfile = document.createElement('div');
+    divProfile.classList.add('msg-profile-preview');
+    divProfile.setAttribute('data-npub', npubInfo.npub);
+    
+    // If this is the only content in the message, remove top margin
+    if (isOnlyNpub) {
+        divProfile.style.marginTop = '0';
+    }
+    
+    // Avatar container
+    const divAvatarContainer = document.createElement('div');
+    divAvatarContainer.classList.add('msg-profile-avatar');
+    
+    // Create avatar (placeholder initially, will be updated when profile loads)
+    let imgAvatar;
+    if (profile?.avatar) {
+        imgAvatar = document.createElement('img');
+        imgAvatar.src = profile.avatar;
+        imgAvatar.alt = 'Profile avatar';
+    } else {
+        imgAvatar = createPlaceholderAvatar(false, 40);
+    }
+    divAvatarContainer.appendChild(imgAvatar);
+    
+    // Info container (name + npub)
+    const divInfo = document.createElement('div');
+    divInfo.classList.add('msg-profile-info');
+    
+    // Display name
+    const spanName = document.createElement('span');
+    spanName.classList.add('msg-profile-name');
+    spanName.textContent = profile?.nickname || profile?.name || npubInfo.npub.substring(0, 12) + '…';
+    if (profile?.nickname || profile?.name) {
+        // Will be twemojified by caller if needed
+        spanName.setAttribute('data-twemoji', 'true');
+    }
+    divInfo.appendChild(spanName);
+    
+    // Full npub (CSS handles overflow/cutoff)
+    const spanNpub = document.createElement('span');
+    spanNpub.classList.add('msg-profile-npub');
+    spanNpub.textContent = npubInfo.npub;
+    divInfo.appendChild(spanNpub);
+
+    // Button container for copy and open buttons
+    const divButtons = document.createElement('div');
+    divButtons.classList.add('msg-profile-buttons');
+    
+    // Copy npub button
+    const btnCopy = document.createElement('button');
+    btnCopy.classList.add('msg-profile-copy-btn');
+    const copyIcon = document.createElement('span');
+    copyIcon.classList.add('icon', 'icon-copy');
+    btnCopy.appendChild(copyIcon);
+    btnCopy.setAttribute('data-npub', npubInfo.npub);
+    btnCopy.title = 'Copy npub';
+    divButtons.appendChild(btnCopy);
+
+    // Open Profile button
+    const btnOpen = document.createElement('button');
+    btnOpen.classList.add('msg-profile-btn', 'accept-btn');
+    btnOpen.textContent = 'Open';
+    btnOpen.setAttribute('data-npub', npubInfo.npub);
+    divButtons.appendChild(btnOpen);
+    
+    // Assemble the preview
+    divProfile.appendChild(divAvatarContainer);
+    divProfile.appendChild(divInfo);
+    divProfile.appendChild(divButtons);
+    
+    return divProfile;
+}
+
+/**
+ * Updates a profile preview element with loaded profile data
+ * @param {HTMLElement} previewElement - The profile preview element to update
+ * @param {Object} profile - The loaded profile data
+ */
+function updateNostrProfilePreview(previewElement, profile) {
+    if (!previewElement || !profile) return;
+    
+    // Update avatar
+    const avatarContainer = previewElement.querySelector('.msg-profile-avatar');
+    if (avatarContainer && profile.avatar) {
+        avatarContainer.innerHTML = '';
+        const imgAvatar = document.createElement('img');
+        imgAvatar.src = profile.avatar;
+        imgAvatar.alt = 'Profile avatar';
+        avatarContainer.appendChild(imgAvatar);
+    }
+    
+    // Update name
+    const nameSpan = previewElement.querySelector('.msg-profile-name');
+    if (nameSpan && (profile.nickname || profile.name)) {
+        nameSpan.textContent = profile.nickname || profile.name;
+        nameSpan.setAttribute('data-twemoji', 'true');
+        // Twemojify if the function is available
+        twemojify(nameSpan);
+    }
+}
+
+/**
  * Generate a placeholder avatar
  * @param {boolean} isGroup - Whether this is a group chat avatar
  * @param {number} limitSizeTo - An optional pixel width/height to lock the avatar to

@@ -134,8 +134,7 @@ async function saveSendTypingIndicators(bool) {
 }
 
 /**
- * Check if any account exists (SQL or Store-based).
- * Checks both SQL accounts and Store-based accounts (for migration).
+ * Check if any account exists.
  * @returns {Promise<boolean>}
  */
 async function hasAccount() {

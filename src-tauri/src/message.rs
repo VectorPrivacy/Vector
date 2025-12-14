@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
-use crate::db_migration::{self, save_chat};
+use crate::db::{self, save_chat};
 use crate::net;
 use crate::STATE;
 use crate::util::{self, calculate_file_hash};
@@ -184,7 +184,7 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
                 // Save the failed message to our DB
                 let message_to_save = message.clone();
                 drop(state); // Release lock before async DB operation
-                let _ = crate::db_migration::save_message(handle.clone(), receiver, &message_to_save).await;
+                let _ = crate::db::save_message(handle.clone(), receiver, &message_to_save).await;
                 break;
             }
         }
@@ -328,7 +328,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             
             // Fallback: check database index if not found in memory (covers all stored attachments)
             if found_attachment.is_none() {
-                if let Ok(index) = db_migration::build_file_hash_index(handle).await {
+                if let Ok(index) = db::build_file_hash_index(handle).await {
                     if let Some(attachment_ref) = index.get(&file_hash) {
                         // Found in database index - convert AttachmentRef to Attachment
                         found_attachment = Some((attachment_ref.chat_id.clone(), Attachment {
@@ -694,7 +694,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 
                                 if let Some(chat) = chat_to_save {
                                     let _ = save_chat(handle.clone(), &chat).await;
-                                    let _ = crate::db_migration::save_message(handle.clone(), &receiver, &message_to_save).await;
+                                    let _ = crate::db::save_message(handle.clone(), &receiver, &message_to_save).await;
                                 }
                             }
                         }
@@ -966,7 +966,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                             let updated_message = msg.clone();
                             let chat_id = chat.id.clone();
                             drop(state); // Release lock before async operation
-                            let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &updated_message).await;
+                            let _ = crate::db::save_message(handle.clone(), &chat_id, &updated_message).await;
                             return Ok(true);
                         }
                     }
@@ -1009,7 +1009,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                             let updated_message = msg.clone();
                             let chat_id_clone = chat.id.clone();
                             drop(state); // Release lock before async operation
-                            let _ = crate::db_migration::save_message(handle.clone(), &chat_id_clone, &updated_message).await;
+                            let _ = crate::db::save_message(handle.clone(), &chat_id_clone, &updated_message).await;
                             return Ok(true);
                         }
                     }
@@ -1073,7 +1073,7 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
                     // Save the updated message with metadata to the DB
                     let message_to_save = msg.clone();
                     drop(state); // Release lock before async DB operation
-                    let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &message_to_save).await;
+                    let _ = crate::db::save_message(handle.clone(), &chat_id, &message_to_save).await;
                     return true;
                 }
             }

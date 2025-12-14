@@ -1,6 +1,7 @@
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { getCurrentWindow } = window.__TAURI__.window;
+const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
@@ -88,6 +89,7 @@ const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMessageInputSend = document.getElementById('chat-input-send');
+const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
@@ -904,12 +906,11 @@ let chatOpenTimestamp = 0;
  * Synchronise all messages from the backend
  */
 async function init() {
-    // Check if account is selected (skip if migration pending)
+    // Check if account is selected
     try {
         await invoke("get_current_account");
     } catch (e) {
-        console.log('[Init] No account selected - migration may be pending, triggering fetch_messages to check');
-        // Call fetch_messages anyway - it will detect migration and trigger it
+        console.log('[Init] No account selected, triggering fetch_messages');
         await invoke("fetch_messages", { init: true });
         return;
     }
@@ -1143,8 +1144,9 @@ function updateChatHeaderSubtext(chat) {
     const newHasStatus = !!newStatusText;
     
     if (newHasStatus) {
-        // Show status: remove hidden class, update content
+        // Show status: remove hidden class, update content, ensure visible
         domChatContactStatus.classList.remove('status-hidden');
+        domChatContactStatus.style.display = ''; // Reset display in case it was hidden by else branch
         domChatContactStatus.textContent = newStatusText;
         domChatContactStatus.classList.toggle('text-gradient', shouldAddGradient);
         if (!shouldAddGradient) {
@@ -2132,6 +2134,12 @@ async function setupRustListeners() {
             }
         }
         
+        // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
+        const profilePreviews = document.querySelectorAll(`.msg-profile-preview[data-npub="${evt.payload.id}"]`);
+        profilePreviews.forEach(preview => {
+            updateNostrProfilePreview(preview, evt.payload);
+        });
+        
         // If this user is being viewed in the Expanded Profile View, update it
         // Note: no need to update our own, it makes editing very weird
         if (!evt.payload.mine && domProfileId.textContent === evt.payload.id) {
@@ -2343,12 +2351,40 @@ async function setupRustListeners() {
             }
         }
     });
+
+    // Note: Deep link listener is set up early in DOMContentLoaded, before login flow
+    // This ensures deep links work even when the app is opened from a closed state
 }
 
 /**
  * A flag that indicates when Vector is still in it's initiation sequence
  */
 let fInit = true;
+
+/**
+ * Execute a deep link action (profile, etc.)
+ * @param {Object} payload - The action payload with action_type and target
+ */
+async function executeDeepLinkAction(payload) {
+    const { action_type, target } = payload;
+    if (action_type === 'profile') {
+        // Open the profile for the given npub
+        // First, try to find an existing profile in our cache
+        let profile = arrProfiles.find(p => p.id === target);
+        
+        if (!profile) {
+            // Profile not in cache - create a minimal profile object
+            // The openProfile function will trigger a refresh from the network
+            profile = { id: target };
+        }
+        
+        // Store the current chat so we can return to it
+        previousChatBeforeProfile = strOpenChat;
+        
+        // Open the profile view
+        await openProfile(profile);
+    }
+}
 
 /**
  * A flag that indicates when the initial sync is complete
@@ -2509,19 +2545,6 @@ async function login() {
             }
         });
 
-        // Setup database migration listener
-        await listen('migration_needed', async (evt) => {
-            console.log('Database migration needed - starting automatically');
-            try {
-                // Trigger migration
-                await invoke('perform_database_migration');
-                console.log('Migration completed successfully');
-            } catch (error) {
-                console.error('Migration failed:', error);
-                domLoginEncryptTitle.textContent = `Migration failed: ${error}`;
-                domLoginEncryptTitle.style.color = 'red';
-            }
-        }, { once: true });
 
         // Setup a Rust Listener for the backend's init finish
         await listen('init_finished', async (evt) => {
@@ -2602,6 +2625,20 @@ async function login() {
                 
                 // Initialize the updater
                 initializeUpdater();
+                
+                // Execute any pending deep link action that was received before login
+                // The Rust backend stores deep links received before the frontend was ready
+                setTimeout(async () => {
+                    try {
+                        const pendingAction = await invoke('get_pending_deep_link');
+                        if (pendingAction) {
+                            console.log('Executing pending deep link action:', pendingAction);
+                            await executeDeepLinkAction(pendingAction);
+                        }
+                    } catch (e) {
+                        console.error('Failed to check for pending deep link:', e);
+                    }
+                }, 1000);
             }, { once: true });
         });
 
@@ -2675,8 +2712,8 @@ function renderProfileTab(cProfile) {
     domHeaderAvatar.classList.add('btn');
     domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
 
-    // Display Name
-    domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || strPubkey.substring(0, 10) + '…';
+    // Display Name - use profile's npub as fallback
+    domProfileName.innerHTML = cProfile?.nickname || cProfile?.name || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
 
     // Status
@@ -2725,8 +2762,8 @@ function renderProfileTab(cProfile) {
     domProfileAvatar.onclick = cProfile.mine ? askForAvatar : null;
     if (cProfile.mine) domProfileAvatar.classList.add('btn');
 
-    // Secondary Display Name
-    const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : '';
+    // Secondary Display Name - use profile's npub as fallback
+    const strNamePlaceholder = cProfile.mine ? 'Set a Display Name' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
     domProfileNameSecondary.innerHTML = cProfile?.nickname || cProfile?.name || strNamePlaceholder;
     if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
 
@@ -2773,7 +2810,9 @@ function renderProfileTab(cProfile) {
     document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
-            navigator.clipboard.writeText(npub).then(() => {
+            // Copy the full profile URL for easy sharing
+            const profileUrl = `https://vectorapp.io/profile/${npub}`;
+            navigator.clipboard.writeText(profileUrl).then(() => {
                 const copyBtn = e.target.closest('.profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
@@ -3416,6 +3455,12 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         }
     } else {
         // Probably a 'New Chat', as such, we'll mostly render an empty chat
+        // Clear existing messages when opening a new chat (fClicked = true)
+        // This prevents messages from the previous chat from showing
+        if (fClicked) {
+            domChatMessages.innerHTML = '';
+        }
+        
         // Render chat header avatar
         domChatHeaderAvatarContainer.innerHTML = '';
         let domChatAvatar;
@@ -3773,11 +3818,19 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         }
     }
 
+    // Pre-detect npub to potentially modify displayed content
+    // If npub is at the end of the message, we'll strip it from the text display
+    const npubInfoEarly = detectNostrProfile(msg.content);
+    let displayContent = msg.content;
+    if (npubInfoEarly && npubInfoEarly.isAtEnd && npubInfoEarly.textWithoutNpub) {
+        displayContent = npubInfoEarly.textWithoutNpub;
+    }
+    
     // Render the text - if it's emoji-only and/or file-only, and less than four emojis, format them nicely
     const spanMessage = document.createElement('span');
     if (fEmojiOnly) {
         // Preserve linebreaks for creative emoji rendering (tophats on wolves)
-        spanMessage.textContent = msg.content;
+        spanMessage.textContent = displayContent;
         spanMessage.style.whiteSpace = `pre-wrap`;
         // Add an emoji-only CSS format
         pMessage.classList.add('emoji-only');
@@ -3786,7 +3839,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         spanMessage.style.textAlign = msg.mine ? 'right' : 'left';
     } else {
         // Render their text content (using our custom Markdown renderer)
-        spanMessage.innerHTML = parseMarkdown(msg.content.trim());
+        spanMessage.innerHTML = parseMarkdown(displayContent.trim());
         
         // Make URLs clickable (after markdown parsing, before twemojify)
         linkifyUrls(spanMessage);
@@ -4216,8 +4269,71 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.appendChild(renderCryptoAddress(cAddress));
     }
 
+    // Append Nostr Profile Previews (for shared npubs and vectorapp.io profile links)
+    // Reuse the early detection result if available
+    const npubInfo = npubInfoEarly;
+    if (npubInfo) {
+        // Check if the message is ONLY an npub (with optional whitespace)
+        // If so, hide the text span since the preview shows all the info
+        const isOnlyNpub = msg.content.trim() === npubInfo.originalMatch;
+        if (isOnlyNpub) {
+            const msgSpan = pMessage.querySelector('span');
+            if (msgSpan) {
+                msgSpan.style.display = 'none';
+            }
+            // Remove padding from the message bubble when it's only an npub
+            pMessage.style.padding = '0';
+        }
+        
+        // Check if we already have the profile cached
+        const cachedProfile = getProfile(npubInfo.npub);
+        const profilePreview = renderNostrProfilePreview(npubInfo, cachedProfile, isOnlyNpub);
+        
+        // Add click handler for the "View Profile" button
+        const btnViewProfile = profilePreview.querySelector('.msg-profile-btn');
+        if (btnViewProfile) {
+            btnViewProfile.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const npub = btnViewProfile.getAttribute('data-npub');
+                // openProfile accepts a profile object with at least an 'id' field
+                // If we have a cached profile, use it; otherwise create a minimal one
+                openProfile(getProfile(npub) || { id: npub });
+            });
+        }
+        
+        // Add click handler for the copy button
+        const btnCopy = profilePreview.querySelector('.msg-profile-copy-btn');
+        if (btnCopy) {
+            btnCopy.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const npub = btnCopy.getAttribute('data-npub');
+                // Always copy the full profile URL for easy sharing
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                await navigator.clipboard.writeText(profileUrl);
+                // Show checkmark feedback
+                btnCopy.innerHTML = '<span class="icon icon-check"></span>';
+                setTimeout(() => {
+                    btnCopy.innerHTML = '<span class="icon icon-copy"></span>';
+                }, 2000);
+            });
+        }
+        
+        // If we don't have the profile yet, queue a high-priority fetch
+        if (!cachedProfile) {
+            invoke('queue_profile_sync', {
+                npub: npubInfo.npub,
+                priority: 'high',
+                forceRefresh: false
+            }).catch(err => console.warn('Failed to queue profile sync for npub preview:', err));
+        }
+        
+        pMessage.appendChild(profilePreview);
+    }
+
     // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled) {
+    // Skip web preview if we already rendered a profile preview (e.g., vectorapp.io/profile links)
+    const skipWebPreview = npubInfoEarly && npubInfoEarly.type === 'link';
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview) {
         // Check if we have metadata with either an image OR a title/description
         const hasMetadata = msg.preview_metadata && (
             msg.preview_metadata.og_image ||
@@ -4457,8 +4573,10 @@ function selectReplyingMessage(e) {
     domChatMessageInputCancel.style.display = '';
     // Display a replying placeholder
     domChatMessageInput.setAttribute('placeholder', 'Enter reply...');
-    // Focus the message input
-    domChatMessageInput.focus();
+    // Focus the message input (desktop only - mobile keyboards are disruptive)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
     // Add a reply-focus
     e.target.parentElement.parentElement.querySelector('p').style.borderColor = `#ffffff`;
 }
@@ -4472,8 +4590,10 @@ function cancelReply() {
     domChatMessageInputCancel.style.display = 'none';
     domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
 
-    // Focus the message input
-    domChatMessageInput.focus();
+    // Focus the message input (desktop only - mobile keyboards are disruptive)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
 
     // Cancel any existing reply-focus
     if (strCurrentReplyReference) {
@@ -5692,6 +5812,53 @@ let strPubkey;
 let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
+
+/**
+ * Auto-resize the chat input textarea based on content.
+ * Expands up to max-height defined in CSS (150px), then scrolls.
+ * Only expands when content actually needs more space (multi-line).
+ */
+function autoResizeChatInput() {
+    // Get actual computed styles
+    const computed = window.getComputedStyle(domChatMessageInput);
+    const lineHeight = parseFloat(computed.lineHeight) || 24;
+    const paddingTop = parseFloat(computed.paddingTop) || 10;
+    const paddingBottom = parseFloat(computed.paddingBottom) || 10;
+    const padding = paddingTop + paddingBottom;
+    
+    // Single line scrollHeight = lineHeight + padding
+    const singleLineScrollHeight = lineHeight + padding;
+    
+    // Track previous state for scroll adjustment
+    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
+    
+    // Reset height and ensure overflow is hidden for accurate measurement
+    // Setting overflow:hidden before measuring prevents scrollbar space from affecting layout
+    domChatMessageInput.style.overflowY = 'hidden';
+    domChatMessageInput.style.height = '0';
+    
+    // Get scrollHeight - this tells us how much space content actually needs
+    const scrollHeight = domChatMessageInput.scrollHeight;
+    
+    // Only expand if content needs more than single line
+    if (scrollHeight > singleLineScrollHeight) {
+        // Set height to content needs minus padding (CSS height is content-box)
+        domChatMessageInput.style.height = (scrollHeight - padding) + 'px';
+        domChatMessageInput.style.overflowY = 'auto';
+        
+        // Soft scroll to keep chat at bottom when expanding
+        softChatScroll();
+    } else {
+        // Single line - use default CSS height, keep overflow hidden
+        domChatMessageInput.style.height = '';
+        
+        // If we just collapsed from multi-line, also soft scroll
+        if (wasExpanded) {
+            softChatScroll();
+        }
+    }
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
     // Once login fade-in animation ends, remove it
     domLogin.addEventListener('animationend', () => domLogin.classList.remove('fadein-anim'), { once: true });
@@ -5699,10 +5866,35 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
+    // Set up early deep link listener BEFORE login flow
+    // This handles deep link events that arrive while the app is running
+    // Note: Deep links received before JS loads are stored in Rust and retrieved after login
+    await listen('deep_link_action', async (evt) => {
+        // If user is not logged in yet (fInit is true), ignore - Rust already stored it
+        if (fInit) {
+            console.log('Deep link received before login, Rust backend has stored it');
+            return;
+        }
+        
+        // User is logged in, execute the action immediately
+        await executeDeepLinkAction(evt.payload);
+    });
+
     // Immediately load and apply theme settings (visual only, don't save)
     const strTheme = await invoke('get_theme');
     if (strTheme) {
         applyTheme(strTheme);
+    }
+
+    // Show the main window now that content is ready (prevents white flash on startup)
+    // The window starts hidden via tauri.conf.json and Rust setup hides it explicitly
+    // Only needed on desktop - mobile doesn't have this issue
+    if (!platformFeatures.is_mobile) {
+        try {
+            await getCurrentWebviewWindow().show();
+        } catch (e) {
+            console.warn('Failed to show main window:', e);
+        }
     }
 
     // [DEBUG MODE] Check if backend already has state from a previous session (hot-reload scenario)
@@ -5941,44 +6133,6 @@ async function sendMessage(messageText) {
         });
     }
 
-/**
- * Auto-resize the chat input textarea based on content.
- * Expands up to max-height defined in CSS (150px), then scrolls.
- * Only expands when content actually needs more space (multi-line).
- */
-function autoResizeChatInput() {
-    // The default single-line scrollHeight is ~44px (varies slightly by browser)
-    // Only expand when we truly need a second line
-    const expandThreshold = 50; // A bit above single-line to avoid premature expansion
-    const paddingOffset = 20; // 10px top + 10px bottom padding included in scrollHeight
-    
-    // Always reset first to measure true content needs
-    domChatMessageInput.style.height = '';
-    
-    // Track if we're expanding
-    const needsExpansion = domChatMessageInput.scrollHeight > expandThreshold;
-    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
-    
-    // Only set explicit height if content needs more than one line
-    if (needsExpansion) {
-        // Subtract padding since scrollHeight includes it but CSS height doesn't need it doubled
-        domChatMessageInput.style.height = (domChatMessageInput.scrollHeight - paddingOffset) + 'px';
-        // Enable scrolling for multi-line content
-        domChatMessageInput.style.overflowY = 'auto';
-        
-        // If we just expanded or height changed, soft scroll to keep chat at bottom
-        softChatScroll();
-    } else {
-        // Single line - hide overflow
-        domChatMessageInput.style.overflowY = 'hidden';
-        
-        // If we just collapsed from multi-line, also soft scroll
-        if (wasExpanded) {
-            softChatScroll();
-        }
-    }
-}
-
     // Hook up an 'input' listener on the Message Box for typing indicators
 domChatMessageInput.oninput = async () => {
     // Auto-resize the textarea based on content
@@ -6025,8 +6179,31 @@ domChatMessageInput.oninput = async () => {
     }
 };
 
-    // Hook up the send button click handler
+    // Hook up the send button click handler (handles both text and voice messages)
     domChatMessageInputSend.onclick = async () => {
+        // Check if we're in voice preview mode first
+        if (recorder.isInPreview) {
+            const wavData = recorder.send();
+            if (wavData && strOpenChat) {
+                domChatMessageInput.setAttribute('placeholder', 'Sending...');
+                try {
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await invoke('voice_message', {
+                        receiver: strOpenChat,
+                        repliedTo: strReplyRef,
+                        bytes: wavData
+                    });
+                } catch (e) {
+                    popupConfirm(e, '', true, '', 'vector_warning.svg');
+                }
+                domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+                nLastTypingIndicator = 0;
+            }
+            return;
+        }
+        
+        // Otherwise, handle normal text message send
         const messageText = domChatMessageInput.value;
         if (messageText && messageText.trim()) {
             await sendMessage(messageText);
@@ -6071,56 +6248,27 @@ domChatMessageInput.oninput = async () => {
         });
     }
 
-    // Hook up our voice message recorder listener
-    const recorder = new VoiceRecorder(domChatMessageInputVoice);
-    recorder.button.addEventListener('click', async () => {
-        if (recorder.isRecording) {
-            // Stop the recording and retrieve our WAV data
-            const wavData = await recorder.stop();
-
-            // Unhide our messaging UI
-            if (wavData) {
-                // Placeholder
-                domChatMessageInput.value = '';
-                domChatMessageInput.style.height = ''; // Reset textarea height
-                domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
-                domChatMessageInput.setAttribute('placeholder', 'Sending...');
-
-                // Send raw bytes to Rust, if the chat is still open
-                // Note: since the user could, for some reason, close the chat while recording - we need to check that it's still open
-                if (strOpenChat) {
-                    try {
-                        // Reset reply selection while passing a copy of the reference to the backend
-                        const strReplyRef = strCurrentReplyReference;
-                        cancelReply();
-                        await invoke('voice_message', {
-                            receiver: strOpenChat,
-                            repliedTo: strReplyRef,
-                            bytes: wavData
-                        });
-                    } catch (e) {
-                        // Notify of an attachment send failure
-                        popupConfirm(e, '', true, '', 'vector_warning.svg');
-                    }
-
-                    nLastTypingIndicator = 0;
-                }
-            }
-        } else {
-            // Display our recording status
+    // Hook up our voice message recorder with Telegram-like UX
+    const recorder = new VoiceRecorder(domChatMessageInputVoice, domChatInputContainer);
+    
+    // Handle state changes for UI updates
+    recorder.onStateChange = (newState, oldState) => {
+        if (newState === 'idle') {
+            // Reset placeholder when returning to idle
+            domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+        } else if (newState === 'recording' || newState === 'locked') {
+            // Clear input and show recording status
             domChatMessageInput.value = '';
-            domChatMessageInput.style.height = ''; // Reset textarea height
-            domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
-            domChatMessageInput.setAttribute('placeholder', 'Recording...');
-
-            // Start recording
-            if (await recorder.start() === false) {
-                // An error likely occured: reset the UI
-                cancelReply();
-                await recorder.stop();
-            }
+            domChatMessageInput.style.height = '';
+            domChatMessageInput.style.overflowY = 'hidden';
         }
-    });
+    };
+    
+    // Handle cancel callback
+    recorder.onCancel = () => {
+        domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+        cancelReply();
+    };
 
     // Initialize voice transcription with default model
     window.cTranscriber = new VoiceTranscriptionUI();
@@ -6217,7 +6365,9 @@ domChatMessageInput.oninput = async () => {
     document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('share-npub')?.textContent;
         if (npub) {
-            navigator.clipboard.writeText(npub).then(() => {
+            // Copy the full profile URL for easy sharing
+            const profileUrl = `https://vectorapp.io/profile/${npub}`;
+            navigator.clipboard.writeText(profileUrl).then(() => {
                 const copyBtn = e.target.closest('.profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
@@ -6356,7 +6506,8 @@ function adjustSize() {
     const nNavbarHeight = domNavbar.getBoundingClientRect().height;
     domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
 
-    // Chat layout is now handled by flexbox - no manual height calculation needed
+    // Re-calculate chat input size on window resize (text may reflow)
+    autoResizeChatInput();
 
     // New Chat interface in widescreen - ensure proper sizing
     if (isWidescreen) {

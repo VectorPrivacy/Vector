@@ -96,15 +96,6 @@ pub async fn download<R: tauri::Runtime>(
     download_with_reporter(content_url, &reporter, timeout).await
 }
 
-/// Downloads the file in-memory at the given URL without progress reporting
-pub async fn download_silent(
-    content_url: &str, 
-    timeout: Option<std::time::Duration>,
-) -> Result<Vec<u8>, &'static str> {
-    let reporter = NoOpProgressReporter::new();
-    download_with_reporter(content_url, &reporter, timeout).await
-}
-
 /// Generic download function that works with any progress reporter
 pub async fn download_with_reporter(
     content_url: &str,

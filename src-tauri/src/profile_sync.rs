@@ -3,29 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use lazy_static::lazy_static;
 use tokio::sync::Mutex;
-use crate::{profile, STATE, Status, ChatState};
-
-/// Reset all profile metadata (internal function for testing)
-pub fn reset_all_profile_metadata_internal(state: &mut ChatState) -> usize {
-    let mut reset_count = 0;
-    
-    for profile in &mut state.profiles {
-        // Reset all metadata fields (including our own profile to detect changes from other apps)
-        profile.name = String::new();
-        profile.display_name = String::new();
-        profile.avatar = String::new();
-        profile.banner = String::new();
-        profile.about = String::new();
-        profile.nip05 = String::new();
-        profile.lud16 = String::new();
-        profile.last_updated = 0;
-        profile.status = Status::new();
-        
-        reset_count += 1;
-    }
-    
-    reset_count
-}
+use crate::{profile, STATE};
 
 /// Priority levels for profile syncing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

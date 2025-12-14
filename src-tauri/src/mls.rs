@@ -1,46 +1,20 @@
 //! MLS (Message Layer Security) Module
-//! 
+//!
 //! This module provides MLS group messaging capabilities using the nostr-mls crate.
 //! We use nostr-mls defaults and communicate exclusively through TRUSTED_RELAY.
-//! 
+//!
 //! ## Storage Schema
 //!
-//! This module manages the following JSON store keys:
+//! This module manages the following SQL tables:
 //!
-//! ### Encrypted Keys (use crypto::internal_encrypt/decrypt)
-//! - "mls_groups": Array of group metadata objects
-//!   ```json
-//!   [{
-//!     "group_id": "...",
-//!     "creator_pubkey": "...",
-//!     "name": "...",
-//!     "avatar_ref": "...",
-//!     "created_at": 1234567890,
-//!     "updated_at": 1234567890
-//!   }]
-//!   ```
+//! ### mls_groups table (encrypted metadata)
+//! - group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted
 //!
-//! ### Plaintext Keys
-//! - "mls_keypackage_index": Array tracking device keypackages
-//!   ```json
-//!   [{
-//!     "owner_pubkey": "...",
-//!     "device_id": "...",
-//!     "keypackage_ref": "...",
-//!     "fetched_at": 1234567890,
-//!     "expires_at": 1234567890
-//!   }]
-//!   ```
+//! ### mls_keypackages table (plaintext)
+//! - owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at
 //!
-//! - "mls_event_cursors": Object mapping group_id to sync state
-//!   ```json
-//!   {
-//!     "group_id": {
-//!       "last_seen_event_id": "...",
-//!       "last_seen_at": 1234567890
-//!     }
-//!   }
-//!   ```
+//! ### mls_event_cursors table (plaintext)
+//! - group_id, last_seen_event_id, last_seen_at
 //!
 //! ### Messages
 //! Messages are stored in the unified Chat storage (see chat.rs), not in MLS-specific storage.
@@ -54,7 +28,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Runtime, Emitter};
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAY, STATE};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
-use crate::db_migration::{save_chat, save_chat_messages};
+use crate::db::{save_chat, save_chat_messages};
 
 /// MLS-specific error types following this crate's error style
 #[derive(Debug)]
@@ -228,8 +202,8 @@ impl MlsService {
       • MlsError::NotInitialized: Nostr client/app handle not ready.
       • MlsError::NetworkError: signer resolution, relay parsing, or network fetch/publish failures.
       • MlsError::NostrMlsError: engine create_group/create_message failures (e.g., storage/codec issues).
-      • MlsError::StorageError: reading/writing JSON store or sqlite engine initialization paths.
-      • MlsError::CryptoError: bech32 conversions or encrypted store (de)serialization.
+      • MlsError::StorageError: reading/writing SQL database or sqlite engine initialization paths.
+      • MlsError::CryptoError: bech32 conversions or encrypted data (de)serialization.
       These are returned as Err(String) up to [rust.create_group_chat()](src-tauri/src/lib.rs:3108) and surfaced verbatim by the UI.
 
     - Persistence & discoverability:
@@ -1235,7 +1209,7 @@ impl MlsService {
                             RumorProcessingResult::TextMessage(msg) | RumorProcessingResult::FileAttachment(msg) => {
                                 // Check if message already exists in database (important for sync with partial message loading)
                                 if let Some(handle) = TAURI_APP.get() {
-                                    if let Ok(exists) = crate::db_migration::message_exists_in_db(&handle, &msg.id).await {
+                                    if let Ok(exists) = crate::db::message_exists_in_db(&handle, &msg.id).await {
                                         if exists {
                                             // Message already in DB, skip processing
                                             continue;
@@ -1262,7 +1236,7 @@ impl MlsService {
                                     
                                     // Save the new message to database immediately
                                     if let Some(handle) = TAURI_APP.get() {
-                                        let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &msg).await;
+                                        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
                                     }
                                 }
                             }
@@ -1298,7 +1272,7 @@ impl MlsService {
                                             };
                                             
                                             if let Some(msg) = updated_message {
-                                                let _ = crate::db_migration::save_message(handle.clone(), &chat_id, &msg).await;
+                                                let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
                                             }
                                         }
                                     }
@@ -1412,7 +1386,7 @@ impl MlsService {
         // 2. If we found the group, update only that specific group
         if let Some(group_to_update) = marked_group {
             let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-            if let Err(e) = crate::db_migration::save_mls_group(handle, &group_to_update).await {
+            if let Err(e) = crate::db::save_mls_group(handle, &group_to_update).await {
                 eprintln!("[MLS] Failed to mark group as evicted: {}", e);
             }
         }
@@ -1425,7 +1399,7 @@ impl MlsService {
         
         // 4. Delete from database
         if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = crate::db_migration::delete_chat(handle.clone(), group_id).await {
+            if let Err(e) = crate::db::delete_chat(handle.clone(), group_id).await {
                 eprintln!("[MLS] Failed to delete chat from storage: {}", e);
             }
         }
@@ -1442,30 +1416,30 @@ impl MlsService {
         Ok(())
     }
 
-    // Internal helper methods for store access
+    // Internal helper methods for database access
     // These follow the read/modify/write pattern used in the codebase
     
-    /// Read and decrypt group metadata from SQL/store
+    /// Read and decrypt group metadata from database
     pub async fn read_groups(&self) -> Result<Vec<MlsGroupMetadata>, MlsError> {
         let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db_migration::load_mls_groups(&handle)
+        crate::db::load_mls_groups(&handle)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
 
-    /// Write encrypted group metadata to SQL/store
+    /// Write encrypted group metadata to database
     pub async fn write_groups(&self, groups: &[MlsGroupMetadata]) -> Result<(), MlsError> {
         let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db_migration::save_mls_groups(handle, groups)
+        crate::db::save_mls_groups(handle, groups)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
 
-    /// Read keypackage index from SQL/store
+    /// Read keypackage index from database
     #[allow(dead_code)]
     async fn read_keypackage_index(&self) -> Result<Vec<KeyPackageIndexEntry>, MlsError> {
         let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        let packages = crate::db_migration::load_mls_keypackages(&handle)
+        let packages = crate::db::load_mls_keypackages(&handle)
             .await
             .map_err(|e| MlsError::StorageError(e))?;
         
@@ -1477,7 +1451,7 @@ impl MlsService {
         Ok(entries)
     }
 
-    /// Write keypackage index to SQL/store
+    /// Write keypackage index to database
     #[allow(dead_code)]
     async fn write_keypackage_index(&self, index: &[KeyPackageIndexEntry]) -> Result<(), MlsError> {
         let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
@@ -1487,25 +1461,25 @@ impl MlsService {
             .filter_map(|entry| serde_json::to_value(entry).ok())
             .collect();
         
-        crate::db_migration::save_mls_keypackages(handle, &packages)
+        crate::db::save_mls_keypackages(handle, &packages)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
 
-    /// Read event cursors from SQL/store
+    /// Read event cursors from database
     #[allow(dead_code)]
     pub async fn read_event_cursors(&self) -> Result<HashMap<String, EventCursor>, MlsError> {
         let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db_migration::load_mls_event_cursors(&handle)
+        crate::db::load_mls_event_cursors(&handle)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
 
-    /// Write event cursors to SQL/store
+    /// Write event cursors to database
     #[allow(dead_code)]
     pub async fn write_event_cursors(&self, cursors: &HashMap<String, EventCursor>) -> Result<(), MlsError> {
         let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db_migration::save_mls_event_cursors(handle, cursors)
+        crate::db::save_mls_event_cursors(handle, cursors)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
@@ -1854,7 +1828,7 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                                 let msg_clone = msg.clone();
                                 drop(state);
                                 if let Some(handle) = TAURI_APP.get() {
-                                    let _ = crate::db_migration::save_message(handle.clone(), &group_id, &msg_clone).await;
+                                    let _ = crate::db::save_message(handle.clone(), &group_id, &msg_clone).await;
                                 }
                             }
                         }
