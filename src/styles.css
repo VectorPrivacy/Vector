@@ -184,6 +184,14 @@
   mask-image: url("./icons/send.svg");
 }
 
+.icon-users {
+  mask-image: url("./icons/users.svg");
+}
+
+.icon-chevron-double-right {
+  mask-image: url("./icons/chevron-double-right.svg");
+}
+
 .icon-message {
   mask-image: url("./icons/message.svg");
 }
@@ -1046,7 +1054,7 @@ html, body {
   display: block;
   max-width: 60%;
   font-weight: bold;
-  margin-top: 8px;
+  margin-top: 12px; 
   margin-bottom: 0;
   margin-left: auto;
   margin-right: auto;
@@ -1081,6 +1089,7 @@ html, body {
   width: 60%;
   margin-left: auto;
   margin-right: auto;
+  padding-bottom: 0;
   margin-top: -1px;
   transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1), max-height 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
   max-height: 30px;
@@ -1813,7 +1822,7 @@ html, body {
 
 .emoji-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(6, 1fr); 
   gap: 4px;
   margin-top: -12px;
 }
@@ -4133,6 +4142,25 @@ select:disabled:hover {
   appearance: checkbox;
 }
 
+.icon-users {
+  background-color: var(--icon-color-primary) !important;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.icon-chevron-double-right {
+  background-color: var(--icon-color-primary) !important;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.icon-bookmark {
+  background-color: var(--icon-color-primary) !important;
+  margin-top: -10px;
+  width: 28px !important;
+  height: 28px !important;
+}
+
 /* Image Viewer Modal */
 .image-viewer-overlay {
   position: fixed;
@@ -4486,6 +4514,488 @@ hr {
   border: none;
   border-top: 1px solid rgba(255, 255, 255, 0.2);
   margin: 16px 0;
+}
+
+/* Widescreen Layout */
+@media (min-width: 1024px) {
+  .container {
+    flex-direction: row;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  #login-form {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #060606;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  .login-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    max-width: 400px;
+    padding: 40px 20px;
+  }
+
+  /* Left Panel - Navigation and Content */
+  .left-panel {
+    width: 400px;
+    min-width: 400px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    background-color: #060606;
+    position: relative;
+    justify-content: flex-start;
+    overflow-x: hidden;
+  }
+
+  /* Right Panel*/
+  .right-panel {
+    flex: 1;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-color: #0a0a0a;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Widescreen emoji picker positioning */
+.emoji-picker.emoji-picker-widescreen {
+  left: auto;
+  right: 20px;
+  transform: translateX(0) translateY(100%);
+}
+
+.emoji-picker.emoji-picker-widescreen.visible {
+  transform: translateX(0) translateY(0);
+}
+
+/* Adjust position when member panel is open */
+.member-panel ~ .right-panel .emoji-picker.emoji-picker-widescreen {
+  right: 320px;
+}
+
+  #chat-new {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    height: 100%;
+    background-color: #0a0a0a;
+  }
+    
+  #chat-new.active {
+    display: flex;
+  }
+    
+  .chat-new-header {
+    background-color: #161616;
+    height: 65px;
+    display: flex;
+    align-items: center;
+    padding: 0 15px;
+    flex-shrink: 0;
+  }
+    
+  .chat-new-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+    overflow-y: auto;
+  }
+    
+  .chat-new-center-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    margin-top: -50px; 
+  }
+    
+  .chat-new-input-box {
+    position: relative;
+    width: 100%;
+    padding: 5px;
+    background-color: #0a0a0a;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    flex-shrink: 0;
+  }
+    
+  .chat-new-center-content {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+    
+  .chat-new-input-box {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+
+  #create-group {
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+  
+  #create-group .chat-new-center-content {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+  
+  #create-group .chat-new-input-box {
+    position: relative;
+    bottom: auto;
+    width: 100%;
+  }
+  
+  /* Improve create group form layout */
+  #create-group-name {
+    width: 75%;
+    margin: 0 auto;
+  }
+  
+  #create-group-filter {
+    width: 75%;
+    margin: 0 auto;
+  }
+  
+  #create-group-list {
+    width: 75%;
+    margin: 10px auto;
+  }
+  
+  #create-group-create-btn,
+  #create-group-cancel-btn {
+    min-width: 120px;
+  }
+  
+  #chats, #profile, #settings, #invites {
+    flex: 1;
+    display: none;
+    overflow-y: auto;
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+    align-content: flex-start;
+    justify-content: flex-start;
+    overflow-x: hidden !important;
+  }
+
+  #chats.active, #profile.active, #settings.active, #invites.active {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Hello Screen */
+  .hello-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .hello-title {
+    font-size: 32px;
+    margin-bottom: 15px;
+    color: #59fcb3;
+  }
+
+  .hello-subtitle {
+    font-size: 16px;
+    opacity: 0.7;
+    line-height: 1.5;
+    max-width: 400px;
+  }
+
+  /* Chat in right panel */
+  #chat {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    padding-top: 0 !important;
+  }
+
+  #chat.active {
+    display: flex;
+  }
+
+  .navbar {
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+    margin-top: auto;
+  }
+  
+  #profile {
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  #profile > div:first-child {
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: auto !important;
+    height: auto !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  #profile-name {
+    margin-top: 15px !important;
+    margin-bottom: 5px !important;
+    width: 100% !important;
+  }
+
+  #profile-secondary-name {
+    margin-top: 5px !important;
+    margin-bottom: 10px !important;
+    width: 100% !important;
+  }
+
+  #chats {
+    padding: 0 !important;
+    margin: 0 !important;
+    position: relative;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  .chat-bookmarks-btn {
+    position: absolute;
+    top: 10px !important; 
+    right: 15px;
+    z-index: 10;
+    margin: 0 !important;
+    padding-top: 30px;
+  }
+
+  #chat-list {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+    padding-left: 15px !important;
+    padding-right: 15px !important;
+    width: auto !important;
+    overflow-x: hidden !important;
+  }
+
+  #chats > div:nth-child(3) {
+    margin-top: 0 !important;
+    margin-bottom: 15px !important;
+    margin-left: 15px !important;
+    margin-right: 15px !important;
+    width: auto !important;
+    display: flex !important;
+    justify-content: center !important;
+    overflow-x: hidden !important;
+  }
+
+  .new-chat-btn {
+    width: 50% !important;
+    margin-left: 5px !important;
+    margin-right: 5px !important;
+    overflow: hidden !important;
+  }
+
+  .sync-line {
+    margin-top: 0 !important;
+    margin-bottom: 10px !important;
+  }
+
+  .chat-new-header,
+  .chat-new-content,
+  .chat-new-center-content,
+  .chat-new-input-box {
+    position: relative;
+    bottom: auto;
+    width: auto;
+  }
+
+  .chat-new-center-content {
+    margin-top: 20px;
+  }
+
+  /* Create Group adjustments */
+  #create-group {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  /* Member Panel */
+  .member-panel {
+    width: 240px;
+    background: #000000;
+    border-left: 1px solid #333;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .member-header {
+    padding: 16px 8px 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #8e9297;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 0;
+    border-bottom: 1px solid #333;
+  }
+
+  /* Member list styles */
+  .member-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 8px 0 8px;
+    overflow-x: hidden;
+  }
+
+  .member-item {
+    display: flex;
+    align-items: center;
+    padding: 8px;
+    border-radius: 4px;
+    margin-bottom: 2px;
+  }
+
+  .member-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    overflow: hidden;
+    margin-right: 12px;
+  }
+
+  .member-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .member-name {
+    font-size: 14px;
+    color: #ffffff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .member-count {
+    margin-top: 20px;
+    text-align: left;
+    margin-left: 15px;
+  }
+
+  /* Panel toggle button */
+  .panel-toggle {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+  }
+
+  #profile > div:first-child > div {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  #profile-status {
+    margin-top: 0 !important;
+    margin-bottom: 10px !important;
+    width: 100% !important;
+  }
+
+  .chats {
+    padding: 0 !important;
+    margin: 0 !important;
+    align-items: stretch !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  .mls-invites-section {
+    margin-top: 0 !important;
+    margin-bottom: 20px !important;
+    margin-left: 15px !important;
+    margin-right: 15px !important;
+    width: auto !important;
+    overflow-x: hidden !important;
+  }
+
+  .chatlist-contact {
+    width: auto !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .left-panel > * {
+    max-width: 100% !important;
+    overflow-x: hidden !important;
+  }
+}
+
+/* Smooth transitions for layout changes */
+.layout-transition {
+  transition: all 0.3s ease-in-out;
+}
+
+/* Mobile view (default) */
+@media (max-width: 1023px) {
+  .left-panel,
+  .right-panel,
+  .member-panel {
+    width: 100% !important;
+    min-width: auto !important;
+  }
+  
+  .hello-screen {
+    display: none !important;
+  }
+
+  .panel-toggle {
+    display: none !important;
+  }
+  
+  .member-panel {
+    display: none !important;
+  }
 }
 
 /* Spoilers */
