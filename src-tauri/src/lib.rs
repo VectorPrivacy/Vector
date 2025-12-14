@@ -3114,11 +3114,17 @@ async fn logout<R: Runtime>(handle: AppHandle<R>) {
     // Lock the state to ensure nothing is added to the DB before restart
     let _guard = STATE.lock().await;
 
-    // Delete the current account's profile directory (SQL database)
+    // Close the database connection pool BEFORE attempting to delete files
+    // This is critical on Windows where open file handles prevent deletion
+    account_manager::close_db_connection();
+
+    // Delete the current account's profile directory (SQL database and MLS data)
     if let Ok(npub) = account_manager::get_current_account() {
         if let Ok(profile_dir) = account_manager::get_profile_directory(&handle, &npub) {
             if profile_dir.exists() {
-                let _ = std::fs::remove_dir_all(&profile_dir);
+                if let Err(e) = std::fs::remove_dir_all(&profile_dir) {
+                    eprintln!("[Logout] Failed to remove profile directory: {}", e);
+                }
             }
         }
     }
@@ -3136,7 +3142,7 @@ async fn logout<R: Runtime>(handle: AppHandle<R>) {
         }
     }
 
-    // Delete the MLS folder in AppData
+    // Delete the legacy MLS folder in AppData (for backwards compatibility)
     if let Ok(mls_dir) = handle.path().resolve("mls", tauri::path::BaseDirectory::AppData) {
         if mls_dir.exists() {
             let _ = std::fs::remove_dir_all(&mls_dir);
