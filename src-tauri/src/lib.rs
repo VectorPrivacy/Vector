@@ -32,12 +32,8 @@ mod util;
 use util::{get_file_type_description, calculate_file_hash, format_bytes};
 
 #[cfg(target_os = "android")]
-mod android {
-    pub mod clipboard;
-    pub mod filesystem;
-    pub mod permissions;
-    pub mod utils;
-}
+#[path = "android/mod.rs"]
+mod android;
 
 #[cfg(all(not(target_os = "android"), feature = "whisper"))]
 mod whisper;
@@ -4841,6 +4837,24 @@ pub fn run() {
             message::paste_message,
             message::voice_message,
             message::file_message,
+            message::file_message_compressed,
+            message::get_file_info,
+            message::cache_android_file,
+            message::cache_file_bytes,
+            message::get_cached_file_info,
+            message::get_cached_image_preview,
+            message::start_cached_bytes_compression,
+            message::get_cached_bytes_compression_status,
+            message::send_cached_file,
+            message::send_file_bytes,
+            message::clear_cached_file,
+            message::clear_android_file_cache,
+            message::clear_all_android_file_cache,
+            message::get_image_preview_base64,
+            message::start_image_precompression,
+            message::get_compression_status,
+            message::clear_compression_cache,
+            message::send_cached_compressed_file,
             message::react_to_message,
             message::fetch_msg_metadata,
             fetch_messages,

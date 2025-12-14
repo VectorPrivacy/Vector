@@ -311,3 +311,30 @@ select:disabled {
   background-color: #b188e2;
   color: black;
 }
+
+/* File Preview Overlay Theme */
+.file-preview-container {
+  border-color: rgba(177, 136, 226, 0.2);
+}
+
+.file-preview-icon-container {
+  background: rgba(177, 136, 226, 0.1);
+  border: 1px solid rgba(177, 136, 226, 0.2);
+}
+
+.file-preview-icon {
+  background-color: #b188e2;
+}
+
+.file-preview-option {
+  background: rgba(177, 136, 226, 0.05);
+  border: 1px solid rgba(177, 136, 226, 0.1);
+}
+
+.file-preview-btn-send {
+  background: linear-gradient(90deg, #9b6dd3, #b188e2);
+}
+
+.file-preview-btn-send:hover {
+  opacity: 0.9;
+}

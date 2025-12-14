@@ -4001,8 +4001,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             // If the message is mine, and pending: display an uploading status
             if (msg.mine && msg.pending) {
-                // Lower the attachment opacity
-                pMessage.lastElementChild.style.opacity = 0.25;
+                // Lower the attachment opacity (if element exists - may be async for Android videos)
+                if (pMessage.lastElementChild) {
+                    pMessage.lastElementChild.style.opacity = 0.25;
+                }
 
                 // Create the Progress Bar
                 const divBar = document.createElement('div');
@@ -5887,41 +5889,96 @@ window.addEventListener("DOMContentLoaded", async () => {
     createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 })
 
     // Hook up an in-chat File Upload listener
-    domChatMessageInputFile.onclick = async () => {
-        let filepath = await selectFile();
-        if (filepath) {
-            // Reset reply selection while passing a copy of the reference to the backend
-            const strReplyRef = strCurrentReplyReference;
-            cancelReply();
-            await sendFile(strOpenChat, strReplyRef, filepath);
-        }
-    };
+    const isAndroid = platformFeatures.os === 'android';
+    
+    if (isAndroid) {
+        // On Android, use a hidden file input to leverage WebView's built-in file picker
+        // This handles content URI permissions correctly
+        const androidFileInput = document.createElement('input');
+        androidFileInput.type = 'file';
+        androidFileInput.style.display = 'none';
+        androidFileInput.accept = '*/*';
+        document.body.appendChild(androidFileInput);
+        
+        androidFileInput.onchange = async (e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+                // Reset reply selection while passing a copy of the reference to the backend
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
+                
+                const fileName = file.name;
+                const ext = fileName.split('.').pop()?.toLowerCase() || '';
+                
+                // Open preview with the File object directly (more efficient)
+                await openFilePreviewWithFile(file, fileName, ext, strOpenChat, strReplyRef);
+            }
+            // Reset the input so the same file can be selected again
+            androidFileInput.value = '';
+        };
+        
+        domChatMessageInputFile.onclick = () => {
+            androidFileInput.click();
+        };
+    } else {
+        // On desktop, use Tauri dialog
+        domChatMessageInputFile.onclick = async () => {
+            let filepath = await selectFile();
+            if (filepath) {
+                // Reset reply selection while passing a copy of the reference to the backend
+                const strReplyRef = strCurrentReplyReference;
+                cancelReply();
+                // Show file preview instead of sending directly
+                await openFilePreview(filepath, strOpenChat, strReplyRef);
+            }
+        };
+    }
 
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
         if (strOpenChat) {
             // Check if the clipboard data contains an image
             const arrItems = Array.from(evt.clipboardData.items);
-            if (arrItems.some(item => item.type.startsWith('image/'))) {
+            const imageItem = arrItems.find(item => item.type.startsWith('image/'));
+            if (imageItem) {
                 evt.preventDefault();
 
-                // Determine if this image supports Transparency or not
-                // Note: this is necessary to account for the accidental "zeroing" of Alpha values
-                // ... in non-PNG/GIF formats, which led to completely blank JPEGs.
-                const fTransparent = arrItems.some(item => item.type.includes('png') || item.type.includes('gif'));
+                // Get the image as a blob
+                const blob = imageItem.getAsFile();
+                if (!blob) return;
 
-                // Reset reply selection while passing a copy of the reference to the backend
+                // Read the blob as bytes
+                const arrayBuffer = await blob.arrayBuffer();
+                const bytes = new Uint8Array(arrayBuffer);
+
+                // Determine file extension from MIME type
+                const mimeType = imageItem.type;
+                let ext = 'png'; // Default
+                if (mimeType.includes('jpeg') || mimeType.includes('jpg')) {
+                    ext = 'jpg';
+                } else if (mimeType.includes('gif')) {
+                    ext = 'gif';
+                } else if (mimeType.includes('webp')) {
+                    ext = 'webp';
+                } else if (mimeType.includes('png')) {
+                    ext = 'png';
+                } else if (mimeType.includes('tiff')) {
+                    ext = 'tiff';
+                } else if (mimeType.includes('bmp')) {
+                    ext = 'bmp';
+                }
+
+                // Generate a filename
+                const fileName = `pasted_image.${ext}`;
+
+                // Get reply reference before opening preview
                 const strReplyRef = strCurrentReplyReference;
+                
+                // Cancel the reply UI (the reference is passed to the preview)
                 cancelReply();
 
-                // Tell the Rust backend to acquire the image from clipboard and send it to the current chat
-                await invoke('paste_message', {
-                    receiver: strOpenChat,
-                    repliedTo: strReplyRef,
-                    transparent: fTransparent
-                });
-
-                nLastTypingIndicator = 0;
+                // Open the file preview dialog with the pasted image bytes
+                openFilePreviewWithBytes(bytes, fileName, ext, bytes.length, strOpenChat, strReplyRef);
             }
         }
     };
@@ -6058,10 +6115,17 @@ domChatMessageInput.oninput = async () => {
                 if (event.payload.type === 'over') {
                     // TODO: add hover effects
                 } else if (event.payload.type === 'drop') {
+                    // Bring window to foreground when file is dropped
+                    try {
+                        await getCurrentWindow().setFocus();
+                    } catch (e) {
+                        console.warn('Failed to focus window:', e);
+                    }
                     // Reset reply selection while passing a copy of the reference to the backend
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
-                    await sendFile(strOpenChat, strReplyRef, event.payload.paths[0]);
+                    // Show file preview instead of sending directly
+                    await openFilePreview(event.payload.paths[0], strOpenChat, strReplyRef);
                 } else {
                     // TODO: remove hover effects
                 }

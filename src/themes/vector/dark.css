@@ -299,3 +299,30 @@ select:disabled {
   color: #59fcb3;
   text-shadow: 0 0 5px rgba(89, 252, 179, 0.5);
 }
+
+/* File Preview Overlay Theme */
+.file-preview-container {
+  border-color: rgba(89, 252, 179, 0.2);
+}
+
+.file-preview-icon-container {
+  background: rgba(89, 252, 179, 0.1);
+  border: 1px solid rgba(89, 252, 179, 0.2);
+}
+
+.file-preview-icon {
+  background-color: #59fcb3;
+}
+
+.file-preview-option {
+  background: rgba(89, 252, 179, 0.05);
+  border: 1px solid rgba(89, 252, 179, 0.1);
+}
+
+.file-preview-btn-send {
+  background: linear-gradient(90deg, #33db98, #00ff9d);
+}
+
+.file-preview-btn-send:hover {
+  opacity: 0.9;
+}

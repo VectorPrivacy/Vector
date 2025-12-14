@@ -385,6 +385,46 @@ pub fn calculate_file_hash(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Ultra-fast nearest-neighbor downsampling for RGBA8 pixel data
+///
+/// This is significantly faster than image crate's resize functions because:
+/// - No interpolation calculations (just picks nearest pixel)
+/// - No filter kernel convolutions
+/// - Simple memory access pattern
+///
+/// # Arguments
+/// * `pixels` - Source RGBA8 pixel data (4 bytes per pixel)
+/// * `src_width` - Source image width
+/// * `src_height` - Source image height
+/// * `dst_width` - Target width
+/// * `dst_height` - Target height
+///
+/// # Returns
+/// Downsampled RGBA8 pixel data
+pub fn nearest_neighbor_downsample(
+    pixels: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Vec<u8> {
+    let mut result = Vec::with_capacity((dst_width * dst_height * 4) as usize);
+    
+    let x_ratio = src_width as f32 / dst_width as f32;
+    let y_ratio = src_height as f32 / dst_height as f32;
+    
+    for ty in 0..dst_height {
+        let sy = (ty as f32 * y_ratio) as u32;
+        for tx in 0..dst_width {
+            let sx = (tx as f32 * x_ratio) as u32;
+            let src_idx = ((sy * src_width + sx) * 4) as usize;
+            result.extend_from_slice(&pixels[src_idx..src_idx + 4]);
+        }
+    }
+    
+    result
+}
+
 /// Generate a blurhash from RGBA8 image data with adaptive downscaling for optimal performance
 ///
 /// This function uses adaptive downscaling based on image size:
@@ -410,20 +450,8 @@ pub fn generate_blurhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Op
     let thumbnail_width = (width as f32 * scale_factor).max(1.0) as u32;
     let thumbnail_height = (height as f32 * scale_factor).max(1.0) as u32;
     
-    // Fast manual nearest-neighbor downsampling
-    let mut thumbnail_pixels = Vec::with_capacity((thumbnail_width * thumbnail_height * 4) as usize);
-    
-    let x_ratio = width as f32 / thumbnail_width as f32;
-    let y_ratio = height as f32 / thumbnail_height as f32;
-    
-    for ty in 0..thumbnail_height {
-        let sy = (ty as f32 * y_ratio) as u32;
-        for tx in 0..thumbnail_width {
-            let sx = (tx as f32 * x_ratio) as u32;
-            let src_idx = ((sy * width + sx) * 4) as usize;
-            thumbnail_pixels.extend_from_slice(&pixels[src_idx..src_idx + 4]);
-        }
-    }
+    // Use fast nearest-neighbor downsampling
+    let thumbnail_pixels = nearest_neighbor_downsample(pixels, width, height, thumbnail_width, thumbnail_height);
     
     blurhash::encode(4, 3, thumbnail_width, thumbnail_height, &thumbnail_pixels).ok()
 }
@@ -485,7 +513,12 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
     let estimated_size = (rgba_data.len() / 2).max(1024);
     let mut png_data = Vec::with_capacity(estimated_size);
     
-    let encoder = image::codecs::png::PngEncoder::new(&mut png_data);
+    // Use best compression for smaller output
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut png_data,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
     if let Err(e) = encoder.write_image(
         img.as_raw(),
         width,
@@ -504,6 +537,18 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
     general_purpose::STANDARD.encode_string(&png_data, &mut result);
     
     result
+}
+
+/// Check if RGBA pixel data contains any meaningful transparency (alpha < 255)
+/// Returns true if any pixel has alpha less than 255, indicating the image uses transparency
+#[inline]
+pub fn has_alpha_transparency(rgba_pixels: &[u8]) -> bool {
+    // Check every 4th byte (alpha channel) for any value less than 255
+    rgba_pixels
+        .iter()
+        .skip(3)
+        .step_by(4)
+        .any(|&alpha| alpha < 255)
 }
 
 

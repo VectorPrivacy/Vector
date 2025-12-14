@@ -4562,3 +4562,235 @@ hr {
     text-shadow: none;
   }
 }
+
+/* File Preview Overlay */
+.file-preview-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.file-preview-overlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.file-preview-container {
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 24px;
+  width: min(500px, calc(100vw - 40px));
+  height: min(650px, calc(100vh - 40px));
+  height: min(650px, calc(100dvh - 40px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.file-preview-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.file-preview-image-container {
+  max-width: 100%;
+  max-height: 40vh;
+  min-height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  flex-shrink: 1;
+}
+
+.file-preview-image {
+  max-width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.file-preview-video-container {
+  max-width: 100%;
+  max-height: 40vh;
+  min-height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  flex-shrink: 1;
+}
+
+.file-preview-video {
+  max-width: 100%;
+  max-height: 40vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #000;
+}
+
+.file-preview-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+.file-preview-icon-container {
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  margin-bottom: 8px;
+}
+
+.file-preview-icon {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+
+.file-preview-icon.icon {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  background-color: rgba(255, 255, 255, 0.7);
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+}
+
+.file-preview-info {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
+}
+
+.file-preview-name {
+  font-size: 18px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  word-break: break-word;
+  max-width: 400px;
+}
+
+.file-preview-details {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.file-preview-detail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-preview-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 300px;
+  flex-shrink: 0;
+}
+
+.file-preview-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.file-preview-option-label {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 16px;
+}
+
+.file-preview-option-sublabel {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-top: 2px;
+  line-height: 16px;
+}
+
+.file-preview-buttons {
+  display: flex;
+  gap: 12px;
+  margin-top: auto;
+  flex-shrink: 0;
+}
+
+.file-preview-btn {
+  padding: 12px 32px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.file-preview-btn-cancel {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.file-preview-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.file-preview-btn-send {
+  background: linear-gradient(90deg, #33db98, #00ff9d);
+  color: #000;
+}
+
+.file-preview-btn-send:hover {
+  opacity: 0.9;
+}
+
+.file-preview-btn-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+

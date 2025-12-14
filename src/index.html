@@ -16,6 +16,7 @@
     <script src="/js/voice.js" defer></script>
     <script src="/js/updater.js" defer></script>
     <script src="/js/previewer.js" defer></script>
+    <script src="/js/file-preview.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <!-- DOMPurify - HTML sanitization -->
     <script src="/js/dompurify.min.js"></script>
@@ -257,6 +258,7 @@
         <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
             <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
+            <input type="file" id="chat-input-file-hidden" style="display: none;" accept="*/*">
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
             <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>

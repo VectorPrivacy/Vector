@@ -564,7 +564,8 @@ async function askForStatus() {
 async function selectFile() {
     const file = await open({
         multiple: false,
-        directory: false,
+        directory: false
+        // No filters = allow all file types
     });
     return file || "";
 }
