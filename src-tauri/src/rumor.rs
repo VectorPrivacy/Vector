@@ -298,6 +298,12 @@ async fn process_file_attachment(
     // Extract millisecond-precision timestamp
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
     
+    // Extract webxdc-topic for Mini Apps (realtime channel isolation)
+    let webxdc_topic = rumor.tags
+        .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
+        .and_then(|tag| tag.content())
+        .map(|s| s.to_string());
+    
     // Create the attachment
     let attachment = Attachment {
         id: file_hash,
@@ -310,6 +316,7 @@ async fn process_file_attachment(
         img_meta,
         downloading: false,
         downloaded,
+        webxdc_topic,
     };
     
     // Create the message with attachment

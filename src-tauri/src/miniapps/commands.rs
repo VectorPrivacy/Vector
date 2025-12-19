@@ -1,0 +1,695 @@
+//! Tauri commands for Mini Apps
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::ipc::Channel;
+use log::{info, warn, error, trace};
+use serde::{Deserialize, Serialize};
+
+use super::error::Error;
+use super::state::{MiniAppInstance, MiniAppsState, MiniAppPackage, RealtimeChannelState};
+use super::realtime::{RealtimeEvent, encode_topic_id};
+
+// Network isolation proxy is only used on non-macOS platforms
+#[cfg(not(target_os = "macos"))]
+use super::network_isolation::DUMMY_LOCALHOST_PROXY_URL;
+
+/// Information about a Mini App for the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiniAppInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub has_icon: bool,
+    /// Base64-encoded icon data URL (e.g., "data:image/png;base64,...")
+    pub icon_data: Option<String>,
+}
+
+impl MiniAppInfo {
+    pub fn from_package(pkg: &super::state::MiniAppPackage) -> Self {
+        let icon_data = pkg.get_icon().map(|bytes| {
+            // Detect MIME type from bytes
+            let mime = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+                "image/png"
+            } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+                "image/jpeg"
+            } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+                "image/svg+xml"
+            } else if bytes.starts_with(b"GIF") {
+                "image/gif"
+            } else {
+                "application/octet-stream"
+            };
+            
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            format!("data:{};base64,{}", mime, b64)
+        });
+        
+        Self {
+            id: pkg.id.clone(),
+            name: pkg.manifest.name.clone(),
+            description: pkg.manifest.description.clone(),
+            version: pkg.manifest.version.clone(),
+            has_icon: icon_data.is_some(),
+            icon_data,
+        }
+    }
+}
+
+/// Initialization script - runs in all frames
+/// Based on DeltaChat's implementation
+const INIT_SCRIPT: &str = r#"
+// Mini App initialization script
+// This runs in all frames to ensure security
+
+console.log("Mini App INIT_SCRIPT running");
+
+// Disable WebRTC to prevent IP leaks
+try {
+    window.RTCPeerConnection = () => {};
+    RTCPeerConnection = () => {};
+} catch (e) {
+    console.error("Failed to disable RTCPeerConnection:", e);
+}
+try {
+    window.webkitRTCPeerConnection = () => {};
+    webkitRTCPeerConnection = () => {};
+} catch (e) {}
+
+// Mock Tauri's __TAURI__ API to prevent errors when Mini Apps try to use it
+try {
+    if (!window.__TAURI__) {
+        window.__TAURI__ = {};
+    }
+    // Mock the notification plugin
+    window.__TAURI__.notification = {
+        isPermissionGranted: async () => false,
+        requestPermission: async () => 'denied',
+        sendNotification: () => {},
+    };
+    // Mock the core invoke to reject all calls except our allowed ones
+    const originalInvoke = window.__TAURI__.core?.invoke;
+    if (!window.__TAURI__.core) {
+        window.__TAURI__.core = {};
+    }
+    window.__TAURI__.core.invoke = async (cmd, args) => {
+        // Allow our miniapp commands
+        if (cmd === 'miniapp_get_updates' || cmd === 'miniapp_send_update') {
+            if (originalInvoke) {
+                return originalInvoke(cmd, args);
+            }
+        }
+        console.warn('Mini App tried to invoke blocked Tauri command:', cmd);
+        throw new Error('Tauri command not available in Mini Apps: ' + cmd);
+    };
+} catch (e) {
+    console.warn("Failed to mock Tauri API:", e);
+}
+"#;
+
+/// Get the base URL for Mini Apps based on platform
+fn get_miniapp_base_url() -> Result<tauri::Url, Error> {
+    // URI format:
+    // mac/linux:         webxdc://dummy.host/<path>
+    // windows/android:   http://webxdc.localhost/<path>
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    {
+        "http://webxdc.localhost/"
+            .parse()
+            .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    {
+        "webxdc://dummy.host/"
+            .parse()
+            .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
+    }
+}
+
+/// Get Chromium hardening browser args for Windows
+/// This disables WebRTC, blocks DNS queries, and sets up the dummy proxy
+#[cfg(target_os = "windows")]
+fn get_chromium_hardening_browser_args(dummy_proxy_url: &url::Url) -> String {
+    // Hardening: (partially?) disable WebRTC, prohibit all DNS queries,
+    // and practically almost (or completely?) disable internet access.
+    // See https://delta.chat/en/2023-05-22-webxdc-security.
+
+    // These are default parameters from Tauri's wry
+    let default_tauri_browser_args = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-features=RemoveRedirectionBitmap";
+
+    // The `~NOTFOUND` string blocks DNS resolution
+    let host_rules = "MAP * ~NOTFOUND";
+
+    // `host-resolver-rules` and `host-rules` primarily block DNS prefetching
+    // but also block `fetch()` requests.
+    //
+    // Specifying `--proxy-url` should make WebRTC try to use this proxy,
+    // since IP handling policy is `disable_non_proxied_udp`.
+    // However, since the proxy won't work, this should effectively disable WebRTC.
+    [
+        default_tauri_browser_args,
+        &format!("--host-resolver-rules=\"{host_rules}\""),
+        &format!("--host-rules=\"{host_rules}\""),
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        &format!("--proxy-server=\"{dummy_proxy_url}\""),
+    ]
+    .join(" ")
+}
+
+/// Load Mini App info from a file path
+#[tauri::command]
+pub async fn miniapp_load_info(
+    app: AppHandle,
+    file_path: String,
+) -> Result<MiniAppInfo, Error> {
+    let path = PathBuf::from(&file_path);
+    
+    // Generate ID from file path hash
+    let id = format!("miniapp_{:x}", md5_hash(&file_path));
+    
+    let state = app.state::<MiniAppsState>();
+    let package = state.get_or_load_package(&id, path).await?;
+    
+    Ok(MiniAppInfo::from_package(package.as_ref()))
+}
+
+/// Load Mini App info from bytes (in-memory, no file needed)
+/// This is more efficient for preview when the file is already cached in memory
+#[tauri::command]
+pub async fn miniapp_load_info_from_bytes(
+    bytes: Vec<u8>,
+    file_name: String,
+) -> Result<MiniAppInfo, Error> {
+    // Extract name without extension for fallback
+    let fallback_name = file_name
+        .rsplit('.')
+        .skip(1)
+        .next()
+        .unwrap_or(&file_name)
+        .to_string();
+    
+    let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback_name)?;
+    
+    // Convert icon bytes to base64 data URL
+    let icon_data = icon_bytes.map(|bytes| {
+        // Detect MIME type from bytes
+        let mime = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+            "image/png"
+        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "image/jpeg"
+        } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+            "image/svg+xml"
+        } else if bytes.starts_with(b"GIF") {
+            "image/gif"
+        } else {
+            "application/octet-stream"
+        };
+        
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        format!("data:{};base64,{}", mime, b64)
+    });
+    
+    Ok(MiniAppInfo {
+        id: format!("miniapp_preview_{}", md5_hash(&file_name)),
+        name: manifest.name,
+        description: manifest.description,
+        version: manifest.version,
+        has_icon: icon_data.is_some(),
+        icon_data,
+    })
+}
+
+/// Open a Mini App in a new window
+///
+/// If `href` is provided (from update.href), it will be appended to the root URL
+/// as per WebXDC spec: "the webxdc app MUST be started with the root URL for the
+/// webview with the value of update.href appended"
+#[tauri::command]
+pub async fn miniapp_open(
+    app: AppHandle,
+    file_path: String,
+    chat_id: String,
+    message_id: String,
+    href: Option<String>,
+    topic_id: Option<String>,
+) -> Result<(), Error> {
+    let path = PathBuf::from(&file_path);
+    
+    // Generate unique ID from file hash
+    let id = format!("miniapp_{:x}", md5_hash(&file_path));
+    let window_label = format!("miniapp:{}:{}", chat_id, message_id);
+    
+    trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
+    
+    let state = app.state::<MiniAppsState>();
+    
+    // Check if already open
+    if let Some((existing_label, _existing_instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
+        // Focus existing window
+        if let Some(window) = app.get_webview_window(&existing_label) {
+            // If href is provided, navigate to it
+            if let Some(ref href_value) = href {
+                let mut nav_url = get_miniapp_base_url()?;
+                // Append href to the base URL (href should start with / or be a relative path)
+                let href_path = href_value.trim_start_matches('/');
+                nav_url.set_path(&format!("/{}", href_path));
+                trace!("Navigating existing Mini App to: {}", nav_url);
+                window.navigate(nav_url)?;
+            }
+            window.show()?;
+            window.set_focus()?;
+            return Ok(());
+        } else {
+            // Window was closed but instance still exists, clean up
+            warn!("Instance exists but window missing, cleaning up: {}", existing_label);
+            state.remove_instance(&existing_label).await;
+        }
+    }
+    
+    // Load the package
+    let package = state.get_or_load_package(&id, path).await?;
+    
+    // Parse the topic ID if provided (from the message's webxdc-topic tag)
+    let realtime_topic = if let Some(ref topic_str) = topic_id {
+        match super::realtime::decode_topic_id(topic_str) {
+            Ok(topic) => Some(topic),
+            Err(e) => {
+                warn!("Failed to decode topic ID '{}': {}", topic_str, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    
+    // Create the instance
+    let instance = MiniAppInstance {
+        package: (*package).clone(),
+        chat_id: chat_id.clone(),
+        message_id: message_id.clone(),
+        window_label: window_label.clone(),
+        realtime_topic,
+    };
+    
+    // Register the instance before creating the window
+    state.add_instance(instance.clone()).await;
+    
+    // Build the initial URL - append href if provided
+    let mut initial_url = get_miniapp_base_url()?;
+    if let Some(ref href_value) = href {
+        // Append href to the base URL (href should start with / or be a relative path)
+        let href_path = href_value.trim_start_matches('/');
+        initial_url.set_path(&format!("/{}", href_path));
+        trace!("Mini App will open at: {}", initial_url);
+    }
+    let initial_url_clone = initial_url.clone();
+    
+    // Get the dummy proxy URL for network isolation (non-macOS platforms)
+    #[cfg(not(target_os = "macos"))]
+    let dummy_proxy_url = DUMMY_LOCALHOST_PROXY_URL
+        .as_ref()
+        .map_err(|_| Error::BlackholeProxyUnavailable)?;
+    
+    let mut window_builder = WebviewWindowBuilder::new(
+        &app,
+        &window_label,
+        WebviewUrl::CustomProtocol(initial_url.clone()),
+    )
+    .title(&package.manifest.name)
+    .inner_size(480.0, 640.0)
+    .min_inner_size(320.0, 480.0)
+    .resizable(true)
+    // Use initialization_script_for_all_frames like DeltaChat does
+    .initialization_script_for_all_frames(INIT_SCRIPT)
+    // Enable devtools in debug mode only
+    .devtools(cfg!(debug_assertions))
+    .on_navigation(move |url| {
+        // Only allow navigation within the webxdc:// scheme or webxdc.localhost
+        let scheme = url.scheme();
+        let allowed = scheme == "webxdc" || (scheme == "http" && url.host_str() == Some("webxdc.localhost"));
+        if !allowed {
+            warn!("Blocked navigation to: {}", url);
+        }
+        allowed
+    });
+    
+    // Platform-specific security settings
+    
+    // macOS: Disable link preview
+    #[cfg(target_os = "macos")]
+    {
+        window_builder = window_builder.allow_link_preview(false);
+    }
+    
+    // Non-macOS: Use dummy proxy for network isolation
+    // Note: On macOS, proxy_url increases minimum version to 14, so we skip it
+    #[cfg(not(target_os = "macos"))]
+    {
+        window_builder = window_builder.proxy_url(dummy_proxy_url.clone());
+    }
+    
+    // Windows: Additional Chromium hardening via browser args
+    #[cfg(target_os = "windows")]
+    {
+        window_builder = window_builder.additional_browser_args(
+            &get_chromium_hardening_browser_args(dummy_proxy_url),
+        );
+    }
+    
+    let window = Arc::new(window_builder.build()?);
+    
+    // Set up window close handler
+    let window_label_for_handler = window_label.clone();
+    let app_handle_for_handler = app.app_handle().clone();
+    let window_clone = Arc::clone(&window);
+    
+    // Track if we're already closing
+    let is_closing = std::sync::atomic::AtomicBool::new(false);
+    
+    // URL for navigating before close (to trigger unload events)
+    let webxdc_js_url = {
+        let mut url = initial_url_clone.clone();
+        url.set_path("/webxdc.js");
+        url
+    };
+    
+    window.on_window_event(move |event| {
+        match event {
+            tauri::WindowEvent::Destroyed => {
+                info!("Mini App window destroyed: {}", window_label_for_handler);
+                let app_handle = app_handle_for_handler.clone();
+                let label = window_label_for_handler.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<MiniAppsState>();
+                    state.remove_instance(&label).await;
+                });
+            }
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                // Handle close gracefully to allow sendUpdate() calls to complete
+                // This is a workaround for https://github.com/deltachat/deltachat-desktop/issues/3321
+                let is_closing_already = is_closing.swap(true, std::sync::atomic::Ordering::Relaxed);
+                if is_closing_already {
+                    trace!("Second CloseRequested event, closing now");
+                    return;
+                }
+                
+                trace!("CloseRequested on Mini App window, will delay close");
+                
+                // Navigate to webxdc.js to trigger unload events
+                // This allows sendUpdate() calls in visibilitychange/unload handlers to complete
+                if let Err(err) = window_clone.navigate(webxdc_js_url.clone()) {
+                    error!("Failed to navigate before close: {err}");
+                    return;
+                }
+                
+                // Hide the window immediately for better UX
+                window_clone.hide()
+                    .inspect_err(|err| warn!("Failed to hide window: {err}"))
+                    .ok();
+                
+                api.prevent_close();
+                
+                let window_clone2 = Arc::clone(&window_clone);
+                tauri::async_runtime::spawn(async move {
+                    // Wait a bit for any pending sendUpdate() calls
+                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                    trace!("Delay elapsed, closing Mini App window");
+                    window_clone2.close()
+                        .inspect_err(|err| error!("Failed to close window: {err}"))
+                        .ok();
+                });
+            }
+            _ => {}
+        }
+    });
+    
+    info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
+    
+    Ok(())
+}
+
+/// Close a Mini App window
+#[tauri::command]
+pub async fn miniapp_close(
+    app: AppHandle,
+    chat_id: String,
+    message_id: String,
+) -> Result<(), Error> {
+    let state = app.state::<MiniAppsState>();
+    
+    if let Some((label, _)) = state.get_instance_by_message(&chat_id, &message_id).await {
+        if let Some(window) = app.get_webview_window(&label) {
+            window.close()?;
+        }
+        state.remove_instance(&label).await;
+    }
+    
+    Ok(())
+}
+
+/// Get updates for a Mini App (called from the Mini App itself)
+#[tauri::command]
+pub async fn miniapp_get_updates(
+    window: WebviewWindow,
+    _state: State<'_, MiniAppsState>,
+    last_known_serial: u32,
+) -> Result<String, Error> {
+    let label = window.label();
+    
+    if !label.starts_with("miniapp:") {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+    
+    // TODO: Implement actual update storage and retrieval
+    // For now, return empty array
+    trace!("Mini App {} requesting updates since serial {}", label, last_known_serial);
+    
+    Ok("[]".to_string())
+}
+
+/// Send an update from a Mini App
+#[tauri::command]
+pub async fn miniapp_send_update(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, MiniAppsState>,
+    update: serde_json::Value,
+    description: String,
+) -> Result<(), Error> {
+    let label = window.label();
+    
+    if !label.starts_with("miniapp:") {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+    
+    let instance = state.get_instance(label).await
+        .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
+    
+    info!(
+        "Mini App {} sending update: {} ({})",
+        instance.package.manifest.name,
+        description,
+        serde_json::to_string(&update).unwrap_or_default()
+    );
+    
+    // TODO: Store the update and broadcast to other participants
+    // For now, just emit to the main window for display
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit("miniapp_update_sent", serde_json::json!({
+            "chat_id": instance.chat_id,
+            "message_id": instance.message_id,
+            "update": update,
+            "description": description,
+        }));
+    }
+    
+    Ok(())
+}
+
+/// List all open Mini App instances
+#[tauri::command]
+pub async fn miniapp_list_open(
+    _state: State<'_, MiniAppsState>,
+) -> Result<Vec<MiniAppInfo>, Error> {
+    // This is a simplified version - in a full implementation,
+    // we'd return more detailed instance info
+    Ok(vec![])
+}
+
+/// Simple MD5-like hash for generating IDs (not cryptographic)
+fn md5_hash(input: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    hasher.finish()
+}
+
+// ============================================================================
+// Realtime Channel Commands (Iroh P2P)
+// ============================================================================
+
+/// Join the realtime channel for a Mini App
+/// Returns the topic ID that can be shared with other participants
+#[tauri::command]
+pub async fn miniapp_join_realtime_channel(
+    window: WebviewWindow,
+    state: State<'_, MiniAppsState>,
+    channel: Channel<RealtimeEvent>,
+) -> Result<String, Error> {
+    let label = window.label();
+    
+    if !label.starts_with("miniapp:") {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+    
+    // Check if already has an active channel
+    if state.has_realtime_channel(label).await {
+        return Err(Error::RealtimeChannelAlreadyActive);
+    }
+    
+    // Get the instance to get the topic from the webxdc-topic tag
+    let instance = state.get_instance(label).await
+        .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
+    
+    // Use the topic from the Nostr event's webxdc-topic tag
+    // This was set when the Mini App was sent and ensures all recipients use the same topic
+    let topic = instance.realtime_topic
+        .ok_or_else(|| Error::RealtimeError("No realtime topic available for this Mini App".to_string()))?;
+    
+    // Get the realtime manager and join the channel
+    let iroh = state.realtime.get_or_init().await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    // Join the Iroh gossip channel with no initial peers
+    // Peers will be added via advertisements
+    iroh.join_channel(topic, vec![], channel.clone()).await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    info!("Joined realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&topic));
+    
+    // Store the channel state
+    let channel_state = RealtimeChannelState {
+        topic,
+        event_channel: Some(channel),
+        active: true,
+    };
+    state.set_realtime_channel(label, channel_state).await;
+    
+    Ok(encode_topic_id(&topic))
+}
+
+/// Send data through the realtime channel
+#[tauri::command]
+pub async fn miniapp_send_realtime_data(
+    window: WebviewWindow,
+    state: State<'_, MiniAppsState>,
+    data: Vec<u8>,
+) -> Result<(), Error> {
+    let label = window.label();
+    
+    if !label.starts_with("miniapp:") {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+    
+    // Check data size (max 128 KB as per WebXDC spec)
+    if data.len() > 128_000 {
+        return Err(Error::RealtimeDataTooLarge(data.len()));
+    }
+    
+    // Get the topic for this instance
+    let topic = state.get_realtime_channel(label).await
+        .ok_or(Error::RealtimeChannelNotActive)?;
+    
+    // Send the data
+    let iroh = state.realtime.get_or_init().await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    iroh.send_data(topic, data).await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    trace!("Sent realtime data for Mini App: {}", label);
+    
+    Ok(())
+}
+
+/// Leave the realtime channel
+#[tauri::command]
+pub async fn miniapp_leave_realtime_channel(
+    window: WebviewWindow,
+    state: State<'_, MiniAppsState>,
+) -> Result<(), Error> {
+    let label = window.label();
+    
+    if !label.starts_with("miniapp:") {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+    
+    // Get and remove the channel state
+    if let Some(channel_state) = state.remove_realtime_channel(label).await {
+        // Leave the Iroh channel
+        let iroh = state.realtime.get_or_init().await
+            .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        
+        iroh.leave_channel(channel_state.topic).await
+            .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        
+        info!("Left realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&channel_state.topic));
+    }
+    
+    Ok(())
+}
+
+/// Add a peer to the realtime channel (called when receiving peer advertisement via Nostr)
+#[tauri::command]
+pub async fn miniapp_add_realtime_peer(
+    window: WebviewWindow,
+    state: State<'_, MiniAppsState>,
+    peer_addr: String,
+) -> Result<(), Error> {
+    let label = window.label();
+    
+    if !label.starts_with("miniapp:") {
+        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    }
+    
+    // Get the topic for this instance
+    let topic = state.get_realtime_channel(label).await
+        .ok_or(Error::RealtimeChannelNotActive)?;
+    
+    // Decode the peer address
+    let peer = super::realtime::decode_node_addr(&peer_addr)
+        .map_err(|e| Error::RealtimeError(format!("Invalid peer address: {}", e)))?;
+    
+    // Add the peer
+    let iroh = state.realtime.get_or_init().await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    iroh.add_peer(topic, peer).await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    info!("Added peer to realtime channel for Mini App: {}", label);
+    
+    Ok(())
+}
+
+/// Get our node address for sharing with peers (via Nostr)
+#[tauri::command]
+pub async fn miniapp_get_realtime_node_addr(
+    state: State<'_, MiniAppsState>,
+) -> Result<String, Error> {
+    let iroh = state.realtime.get_or_init().await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    let addr = iroh.get_node_addr().await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    
+    super::realtime::encode_node_addr(&addr)
+        .map_err(|e| Error::RealtimeError(e.to_string()))
+}

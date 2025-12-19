@@ -54,6 +54,9 @@ pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationTyp
 
 mod deep_link;
 
+// Mini Apps (WebXDC-compatible) support
+mod miniapps;
+
 /// # Trusted Relay
 ///
 /// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
@@ -1027,6 +1030,86 @@ async fn start_typing(receiver: String) -> bool {
                         .unwrap()
                         .as_secs()
                         + 30,
+                )))
+                .build(my_public_key);
+
+            // Send via MLS
+            match mls::send_mls_message(&group_id, rumor, None).await {
+                Ok(_) => true,
+                Err(_e) => false,
+            }
+        }
+    }
+}
+
+/// Send a WebXDC peer advertisement to chat participants
+/// This announces our Iroh node address for realtime channel peer discovery
+#[tauri::command]
+async fn send_webxdc_peer_advertisement(
+    receiver: String,
+    topic_id: String,
+    node_addr: String,
+) -> bool {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
+    // Check if this is a group chat (group IDs are hex, not bech32)
+    match PublicKey::from_bech32(receiver.as_str()) {
+        Ok(pubkey) => {
+            // This is a DM - use NIP-17 gift wrapping
+            
+            // Build the peer advertisement rumor
+            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
+                .tag(Tag::public_key(pubkey))
+                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
+                .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
+                .tag(Tag::expiration(Timestamp::from_secs(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + 300, // 5 minute expiry
+                )))
+                .build(my_public_key);
+
+            // Gift Wrap and send to receiver via our Trusted Relay
+            let expiry_time = Timestamp::from_secs(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 300,
+            );
+            match client
+                .gift_wrap_to(
+                    [TRUSTED_RELAY],
+                    &pubkey,
+                    rumor,
+                    [Tag::expiration(expiry_time)],
+                )
+                .await
+            {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        }
+        Err(_) => {
+            // This is a group chat - use MLS
+            let group_id = receiver.clone();
+            
+            // Build the peer advertisement rumor
+            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
+                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
+                .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
+                .tag(Tag::expiration(Timestamp::from_secs(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + 300,
                 )))
                 .build(my_public_key);
 
@@ -4718,7 +4801,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_deep_link::init());
+        .plugin(tauri_plugin_deep_link::init())
+        // Register the webxdc:// custom protocol for Mini Apps
+        .register_uri_scheme_protocol("webxdc", miniapps::scheme::miniapp_protocol)
+        // Register Mini Apps state
+        .manage(miniapps::state::MiniAppsState::new());
 
     // Desktop-only plugins
     #[cfg(desktop)]
@@ -4880,6 +4967,7 @@ pub fn run() {
             get_media_servers,
             monitor_relay_connections,
             start_typing,
+            send_webxdc_peer_advertisement,
             connect,
             encrypt,
             decrypt,
@@ -4930,6 +5018,20 @@ pub fn run() {
             account_manager::list_all_accounts,
             account_manager::check_any_account_exists,
             account_manager::switch_account,
+            // Mini Apps commands
+            miniapps::commands::miniapp_load_info,
+            miniapps::commands::miniapp_load_info_from_bytes,
+            miniapps::commands::miniapp_open,
+            miniapps::commands::miniapp_close,
+            miniapps::commands::miniapp_get_updates,
+            miniapps::commands::miniapp_send_update,
+            miniapps::commands::miniapp_list_open,
+            // Mini Apps realtime channel commands (Iroh P2P)
+            miniapps::commands::miniapp_join_realtime_channel,
+            miniapps::commands::miniapp_send_realtime_data,
+            miniapps::commands::miniapp_leave_realtime_channel,
+            miniapps::commands::miniapp_add_realtime_peer,
+            miniapps::commands::miniapp_get_realtime_node_addr,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

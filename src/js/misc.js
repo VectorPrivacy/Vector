@@ -704,7 +704,10 @@ function getFileTypeInfo(extension) {
       "eot": { description: "Embedded OpenType", icon: "file" },
       "ics": { description: "Calendar File", icon: "file" },
       "vcf": { description: "vCard Contact", icon: "file" },
-      "torrent": { description: "Torrent File", icon: "file" }
+      "torrent": { description: "Torrent File", icon: "file" },
+      
+      // Mini Apps (WebXDC)
+      "xdc": { description: "Mini App", icon: "gift", isMiniApp: true }
     };
   
     // Normalize the extension to lowercase

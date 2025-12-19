@@ -112,6 +112,40 @@ function getFileIcon(filepath) {
 }
 
 /**
+ * Check if file is a Mini App (.xdc file)
+ * @param {string} ext - File extension
+ * @returns {boolean}
+ */
+function isMiniAppExtension(ext) {
+    return ext === 'xdc';
+}
+
+/**
+ * Display Mini App preview in the content area
+ * @param {HTMLElement} contentArea - The content area element
+ * @param {object} miniAppInfo - Mini App info from loadMiniAppInfo
+ * @param {string} fileName - Fallback file name if no Mini App info
+ */
+function displayMiniAppPreview(contentArea, miniAppInfo, fileName) {
+    if (miniAppInfo && miniAppInfo.icon_data) {
+        // Show Mini App icon
+        contentArea.innerHTML = `
+            <div class="file-preview-image-container file-preview-miniapp">
+                <img src="${miniAppInfo.icon_data}" class="file-preview-image file-preview-miniapp-icon" alt="${miniAppInfo.name || 'Mini App'}">
+            </div>
+        `;
+    } else {
+        // Show generic Mini App icon
+        contentArea.innerHTML = `
+            <div class="file-preview-icon-container file-preview-miniapp">
+                <div class="icon icon-file file-preview-icon"></div>
+                <span class="file-preview-miniapp-badge">Mini App</span>
+            </div>
+        `;
+    }
+}
+
+/**
  * Create the file preview overlay element
  */
 function createFilePreviewOverlay() {
@@ -221,9 +255,22 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     // Determine file type using the resolved extension
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const isMiniApp = isMiniAppExtension(ext);
     
-    // Update file name
-    document.getElementById('file-preview-name').textContent = fileName;
+    // For Mini Apps, try to load the app info to get name and icon
+    let miniAppInfo = null;
+    if (isMiniApp) {
+        try {
+            miniAppInfo = await loadMiniAppInfo(filepath);
+            console.log('Mini App info:', miniAppInfo);
+        } catch (e) {
+            console.error('Failed to load Mini App info:', e);
+        }
+    }
+    
+    // Update file name - use Mini App name if available
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    document.getElementById('file-preview-name').textContent = displayName;
     
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
@@ -231,7 +278,10 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     // Update content area
     const contentArea = document.getElementById('file-preview-content');
     
-    if (isImage) {
+    if (isMiniApp) {
+        // Show Mini App preview with icon
+        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+    } else if (isImage) {
         // Show image preview
         const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
         
@@ -298,9 +348,10 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     }
     
     // Only show compress option for images larger than 25KB (excluding GIFs to preserve animation)
+    // Mini Apps don't get compression option
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
     const isGif = ext === 'gif';
-    if (isImage && !isGif && fileSize > MIN_COMPRESS_SIZE) {
+    if (isImage && !isGif && !isMiniApp && fileSize > MIN_COMPRESS_SIZE) {
         // Show compress option for images with loading state
         optionsArea.innerHTML = `
             <label class="file-preview-option">
@@ -404,6 +455,7 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
     // Determine file type
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const isMiniApp = isMiniAppExtension(ext);
     
     // Store the File object for later use when sending
     pendingFileObject = file;
@@ -414,8 +466,22 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     
-    // Update file name
-    document.getElementById('file-preview-name').textContent = fileName;
+    // For Mini Apps, try to load the app info directly from bytes (no temp file needed)
+    let miniAppInfo = null;
+    if (isMiniApp) {
+        try {
+            // Read file bytes and load Mini App info directly
+            const bytes = await file.arrayBuffer();
+            miniAppInfo = await loadMiniAppInfoFromBytes(new Uint8Array(bytes), fileName);
+            console.log('Mini App info:', miniAppInfo);
+        } catch (e) {
+            console.error('Failed to load Mini App info:', e);
+        }
+    }
+    
+    // Update file name - use Mini App name if available
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    document.getElementById('file-preview-name').textContent = displayName;
     
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(file.size);
@@ -434,7 +500,12 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
         compressionPollingInterval = null;
     }
     
-    if (isImage) {
+    if (isMiniApp) {
+        // Show Mini App preview with icon
+        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+        optionsArea.innerHTML = '';
+        optionsArea.style.display = 'none';
+    } else if (isImage) {
         // Show loading state first
         contentArea.innerHTML = `
             <div class="file-preview-image-container">
@@ -517,6 +588,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     // Determine file type
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const isMiniApp = isMiniAppExtension(ext);
     
     // Cache bytes in Rust immediately - Rust will generate a thumbnail preview for images
     let preview = null;
@@ -535,6 +607,17 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         return;
     }
     
+    // For Mini Apps, try to load the app info directly from bytes (no temp file needed)
+    let miniAppInfo = null;
+    if (isMiniApp) {
+        try {
+            miniAppInfo = await loadMiniAppInfoFromBytes(bytes, fileName);
+            console.log('Mini App info:', miniAppInfo);
+        } catch (e) {
+            console.error('Failed to load Mini App info:', e);
+        }
+    }
+    
     // Mark that we're using bytes mode (no file path)
     pendingFileBytes = true; // Flag to indicate bytes mode
     pendingFileObject = null; // Clear File object since we're using cached bytes
@@ -544,8 +627,9 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     
-    // Update file name
-    document.getElementById('file-preview-name').textContent = fileName;
+    // Update file name - use Mini App name if available
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    document.getElementById('file-preview-name').textContent = displayName;
     
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
@@ -564,7 +648,11 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         compressionPollingInterval = null;
     }
     
-    if (isImage) {
+    if (isMiniApp) {
+        // Show Mini App preview with icon
+        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+        optionsArea.innerHTML = '';
+    } else if (isImage) {
         // Use the preview from Rust (already a base64 data URL)
         if (preview) {
             contentArea.innerHTML = `
@@ -700,21 +788,19 @@ async function startCachedBytesCompression() {
  * @param {boolean} startCompression - Whether to start compression after caching
  */
 async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, startCompression) {
-    const infoElement = document.getElementById('file-preview-compress-info');
-    
     try {
-        // Read file bytes
+        // Read file as ArrayBuffer
         const arrayBuffer = await file.arrayBuffer();
-        const bytes = Array.from(new Uint8Array(arrayBuffer));
+        const bytes = new Uint8Array(arrayBuffer);
         
-        // Cache bytes in Rust - this also generates a base64 preview for images
+        // Cache in Rust and get preview
         const result = await invoke('cache_file_bytes', {
-            bytes: bytes,
+            bytes: Array.from(bytes),
             fileName: fileName,
             extension: ext
         });
         
-        // Display the preview from Rust (base64 data URL - works on all Android versions)
+        // Display preview
         if (result.preview) {
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
@@ -722,7 +808,7 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
                 </div>
             `;
         } else {
-            // Fallback to icon if no preview
+            // Fallback to icon
             contentArea.innerHTML = `
                 <div class="file-preview-icon-container">
                     <div class="icon icon-image file-preview-icon"></div>
@@ -732,47 +818,15 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
         
         // Start compression if requested
         if (startCompression) {
-            compressionInProgress = true;
-            compressionComplete = false;
-            
-            await invoke('start_cached_bytes_compression');
-            
-            // Poll for completion
-            compressionPollingInterval = setInterval(async () => {
-                try {
-                    const status = await invoke('get_cached_bytes_compression_status');
-                    if (status) {
-                        clearInterval(compressionPollingInterval);
-                        compressionPollingInterval = null;
-                        compressionComplete = true;
-                        compressionInProgress = false;
-                        
-                        // Update UI with compression info
-                        if (infoElement) {
-                            if (status.savings_percent > 0) {
-                                infoElement.textContent = `~${formatFileSize(status.estimated_size)} (${status.savings_percent}% smaller)`;
-                            } else {
-                                infoElement.textContent = 'No significant savings';
-                            }
-                        }
-                    }
-                } catch (e) {
-                    // Still compressing or error
-                }
-            }, 200);
+            startCachedBytesCompression();
         }
     } catch (e) {
         console.error('Failed to cache file:', e);
-        // Show error state
         contentArea.innerHTML = `
             <div class="file-preview-icon-container">
                 <div class="icon icon-image file-preview-icon"></div>
             </div>
         `;
-        if (infoElement) {
-            infoElement.textContent = 'Failed to load';
-        }
-        compressionInProgress = false;
     }
 }
 
@@ -782,79 +836,72 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
 function closeFilePreview() {
     if (!filePreviewOverlay) return;
     
-    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-    
-    // Stop polling
+    // Stop compression polling
     if (compressionPollingInterval) {
         clearInterval(compressionPollingInterval);
         compressionPollingInterval = null;
     }
     
-    // Clear caches if we're cancelling
-    if (pendingFile) {
-        invoke('clear_compression_cache', { filePath: pendingFile }).catch(() => {});
-        // On Android, also clear the file cache since we cached the bytes
-        if (isAndroid) {
-            invoke('clear_android_file_cache', { filePath: pendingFile }).catch(() => {});
-        }
-    }
-    if (pendingFileBytes || pendingFileObject) {
-        // Clear cached bytes (used for clipboard paste or File object compression)
-        invoke('clear_cached_file').catch(() => {});
-    }
-    
-    // Stop and clean up any video element
-    const video = filePreviewOverlay.querySelector('video');
-    if (video) {
-        video.pause();
-        video.src = '';
-        video.load();
-    }
-    
-    // Clean up any blob URLs
+    // Clean up blob URLs if any
     const contentArea = document.getElementById('file-preview-content');
     if (contentArea && contentArea.dataset.blobUrl) {
         URL.revokeObjectURL(contentArea.dataset.blobUrl);
         delete contentArea.dataset.blobUrl;
     }
     
+    // Cancel any pending compression
+    if (pendingFile) {
+        invoke('cancel_compression', { filePath: pendingFile }).catch(() => {});
+    }
+    if (pendingFileBytes) {
+        invoke('cancel_cached_bytes_compression').catch(() => {});
+    }
+    
     filePreviewOverlay.classList.remove('active');
     setTimeout(() => {
         filePreviewOverlay.style.display = 'none';
-        // Clear content after animation
-        if (contentArea) {
-            contentArea.innerHTML = '';
-        }
+        
+        // Clear pending state
+        pendingFile = null;
+        pendingFileBytes = null;
+        pendingFileObject = null;
+        pendingFileName = null;
+        pendingFileExt = null;
+        pendingReceiver = null;
+        pendingReplyRef = null;
+        compressionInProgress = false;
+        compressionComplete = false;
+        
+        // Clear content
+        const contentArea = document.getElementById('file-preview-content');
+        if (contentArea) contentArea.innerHTML = '';
+        
+        const optionsArea = document.getElementById('file-preview-options');
+        if (optionsArea) optionsArea.innerHTML = '';
     }, 200);
-    
-    // Reset state
-    compressionInProgress = false;
-    compressionComplete = false;
-    pendingFile = null;
-    pendingFileBytes = null;
-    pendingFileObject = null;
-    pendingFileName = null;
-    pendingFileExt = null;
-    pendingReceiver = null;
-    pendingReplyRef = null;
 }
 
 /**
  * Send the previewed file
  */
 async function sendPreviewedFile() {
-    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
+    if (!pendingReceiver) {
+        console.error('No receiver set for file preview');
+        closeFilePreview();
+        return;
+    }
     
-    // Check if we have either a file path, cached bytes, or File object
-    if ((!pendingFile && !pendingFileBytes && !pendingFileObject) || !pendingReceiver) return;
-    
-    // Capture values before closing
-    const filePath = pendingFile;
-    const usingBytes = pendingFileBytes; // Flag indicating bytes mode
-    const fileObject = pendingFileObject; // File object for Android optimized flow
+    // Capture all values we need before closing dialog
     const receiver = pendingReceiver;
-    const replyRef = pendingReplyRef;
+    const replyRef = pendingReplyRef || '';
+    const filePath = pendingFile;
+    const fileBytes = pendingFileBytes;
+    const fileObject = pendingFileObject;
+    const fileName = pendingFileName;
     const ext = pendingFileExt;
+    const usingBytes = !!fileBytes;
+    
+    // Check if this is an image for compression logic
     const isImage = (usingBytes || fileObject)
         ? SUPPORTED_IMAGE_EXTENSIONS.includes(ext)
         : isSupportedImage(filePath);
@@ -900,6 +947,9 @@ async function sendPreviewedFile() {
     compressionInProgress = false;
     compressionComplete = false;
     
+    // Determine if this is a group or DM
+    const isGroup = receiver.startsWith('group:');
+    
     // Send file in background
     try {
         if (fileObject) {
@@ -909,7 +959,7 @@ async function sendPreviewedFile() {
             if (shouldCompress || compressionWasStarted) {
                 // Use cached bytes (compression was started, so bytes are cached)
                 await invoke("send_cached_file", {
-                    receiver: receiver,
+                    receiver: isGroup ? receiver.replace('group:', '') : receiver,
                     repliedTo: replyRef,
                     useCompression: shouldCompress
                 });
@@ -918,7 +968,7 @@ async function sendPreviewedFile() {
                 const arrayBuffer = await fileObject.arrayBuffer();
                 const bytes = Array.from(new Uint8Array(arrayBuffer));
                 await invoke("send_file_bytes", {
-                    receiver: receiver,
+                    receiver: isGroup ? receiver.replace('group:', '') : receiver,
                     repliedTo: replyRef,
                     fileBytes: bytes,
                     fileName: fileObject.name,
@@ -928,14 +978,14 @@ async function sendPreviewedFile() {
         } else if (usingBytes) {
             // Legacy flow: use cached bytes from JS (clipboard paste)
             await invoke("send_cached_file", {
-                receiver: receiver,
+                receiver: isGroup ? receiver.replace('group:', '') : receiver,
                 repliedTo: replyRef,
                 useCompression: shouldCompress
             });
         } else if (shouldCompress) {
             // Desktop: use cached compressed file (will wait if still compressing)
             await invoke("send_cached_compressed_file", {
-                receiver: receiver,
+                receiver: isGroup ? receiver.replace('group:', '') : receiver,
                 repliedTo: replyRef,
                 filePath: filePath
             });
@@ -943,7 +993,7 @@ async function sendPreviewedFile() {
             // Desktop: send without compression, but clear the cache first
             await invoke("clear_compression_cache", { filePath: filePath });
             await invoke("file_message", {
-                receiver: receiver,
+                receiver: isGroup ? receiver.replace('group:', '') : receiver,
                 repliedTo: replyRef,
                 filePath: filePath
             });

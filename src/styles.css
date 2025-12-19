@@ -4794,3 +4794,26 @@ hr {
   cursor: not-allowed;
 }
 
+
+/* Mini App Preview Styles */
+.file-preview-miniapp {
+  position: relative;
+}
+
+.file-preview-miniapp-icon {
+  border-radius: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.file-preview-miniapp-badge {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.file-preview-icon-container.file-preview-miniapp {
+  flex-direction: column;
+}

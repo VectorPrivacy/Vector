@@ -3936,9 +3936,13 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // File Attachment
                 const ext = cAttachment.extension.toLowerCase();
                 const fileTypeInfo = getFileTypeInfo(ext);
+                const isMiniApp = fileTypeInfo.isMiniApp === true;
                 
                 const fileDiv = document.createElement('div');
                 fileDiv.setAttribute('filepath', cAttachment.path);
+                if (isMiniApp) {
+                    fileDiv.classList.add('miniapp-attachment');
+                }
 
                 // Create the main container
                 const btnDiv = document.createElement('div');
@@ -3948,17 +3952,31 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 btnDiv.style.padding = '10px';
                 btnDiv.style.paddingRight = '15px';
 
-                // Create the icon span
-                const iconSpan = document.createElement('span');
-                iconSpan.className = `icon icon-${fileTypeInfo.icon}`;
-                iconSpan.style.marginLeft = '5px';
-                iconSpan.style.width = '50px';
-                iconSpan.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+                // Create the icon element (span for regular files, img for Mini Apps with icons)
+                let iconElement;
+                if (isMiniApp) {
+                    // For Mini Apps, create an img element that will be populated with the icon
+                    iconElement = document.createElement('img');
+                    iconElement.style.marginLeft = '5px';
+                    iconElement.style.width = '40px';
+                    iconElement.style.height = '40px';
+                    iconElement.style.borderRadius = '8px';
+                    iconElement.style.objectFit = 'cover';
+                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+                    // Set a placeholder initially
+                    iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+                } else {
+                    iconElement = document.createElement('span');
+                    iconElement.className = `icon icon-${fileTypeInfo.icon}`;
+                    iconElement.style.marginLeft = '5px';
+                    iconElement.style.width = '50px';
+                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+                }
 
                 // Create the text container span
                 const textContainerSpan = document.createElement('span');
                 textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-                textContainerSpan.style.marginLeft = '50px';
+                textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
                 textContainerSpan.style.lineHeight = '1.2';
 
                 // Create the description span
@@ -3971,29 +3989,68 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // Create the small element for file details
                 const smallElement = document.createElement('small');
 
-                // Create the extension span
-                const extSpan = document.createElement('span');
-                extSpan.style.color = 'white';
-                extSpan.style.fontWeight = '400';
-                extSpan.innerText = `.${ext}`;
+                if (isMiniApp) {
+                    // Mini App: show "Click to Play" instead of file details
+                    const playSpan = document.createElement('span');
+                    playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                    playSpan.style.fontWeight = '400';
+                    playSpan.innerText = 'Click to Play';
+                    smallElement.appendChild(playSpan);
+                    
+                    // Load Mini App info asynchronously to get name and icon
+                    loadMiniAppInfo(cAttachment.path).then(info => {
+                        if (info) {
+                            // Update the name
+                            descriptionSpan.innerText = info.name || 'Mini App';
+                            
+                            // Update the icon if available
+                            if (info.icon_data) {
+                                iconElement.src = info.icon_data;
+                            }
+                        }
+                    }).catch(err => {
+                        console.warn('Failed to load Mini App info:', err);
+                    });
+                } else {
+                    // Regular file: show extension and size
+                    const extSpan = document.createElement('span');
+                    extSpan.style.color = 'white';
+                    extSpan.style.fontWeight = '400';
+                    extSpan.innerText = `.${ext}`;
 
-                // Create the size span
-                const sizeSpan = document.createElement('span');
-                sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+                    const sizeSpan = document.createElement('span');
+                    sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+
+                    smallElement.appendChild(extSpan);
+                    smallElement.appendChild(sizeSpan);
+                }
 
                 // Assemble the structure
-                smallElement.appendChild(extSpan);
-                smallElement.appendChild(sizeSpan);
                 textContainerSpan.appendChild(descriptionSpan);
                 textContainerSpan.appendChild(smallElement);
-                btnDiv.appendChild(iconSpan);
+                btnDiv.appendChild(iconElement);
                 btnDiv.appendChild(textContainerSpan);
                 fileDiv.appendChild(btnDiv);
 
-                // Click to reveal in explorer
-                fileDiv.addEventListener('click', (e) => {
+                // Click handler
+                fileDiv.addEventListener('click', async (e) => {
                     const path = e.currentTarget.getAttribute('filepath');
-                    if (path) revealItemInDir(path);
+                    if (!path) return;
+                    
+                    if (isMiniApp) {
+                        // Open Mini App in a new window
+                        try {
+                            // Find the attachment to get the webxdc_topic
+                            const attachment = msg.attachments.find(a => a.path === path);
+                            const topicId = attachment?.webxdc_topic || null;
+                            await openMiniApp(path, msg.chat_id, msg.id, null, topicId);
+                        } catch (err) {
+                            console.error('Failed to open Mini App:', err);
+                        }
+                    } else {
+                        // Regular file: reveal in explorer
+                        revealItemInDir(path);
+                    }
                 });
 
                 pMessage.appendChild(fileDiv);

@@ -59,6 +59,21 @@ hound = "3.5.1"
 rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Mini Apps (WebXDC) support
+zip = "2.1"
+toml = "0.8"
+thiserror = "1.0"
+anyhow = "1.0"
+log = "0.4"
+http = "1.1"
+url = "2.5"
+mime_guess = "2.0"
+# Realtime peer channels (Iroh P2P)
+iroh = "0.34"
+iroh-gossip = "0.34"
+parking_lot = "0.12"
+data-encoding = "2.6"
+rand = "0.8"
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

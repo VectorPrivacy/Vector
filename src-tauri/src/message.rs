@@ -14,6 +14,7 @@ use crate::STATE;
 use crate::util::{self, calculate_file_hash};
 use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
+use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
 /// Cached compressed image data
 #[derive(Clone)]
@@ -144,6 +145,10 @@ pub struct Attachment {
     pub downloading: bool,
     /// Whether the file has been downloaded or not
     pub downloaded: bool,
+    /// WebXDC topic ID for realtime channels (Mini Apps only)
+    /// This is transmitted in the Nostr event and used to derive the realtime channel topic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webxdc_topic: Option<String>,
 }
 
 impl Default for Attachment {
@@ -159,6 +164,7 @@ impl Default for Attachment {
             img_meta: None,
             downloading: false,
             downloaded: true,
+            webxdc_topic: None,
         }
     }
 }
@@ -365,6 +371,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                             img_meta: None,
                             downloading: false,
                             downloaded: false,
+                            webxdc_topic: None, // Not stored in attachment index
                         }));
                     }
                 }
@@ -399,6 +406,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let params = crypto::generate_encryption_params();
             let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
             (params, enc_file)
+        };
+
+        // For WebXDC (.xdc) files, generate topic ID upfront so it's available immediately
+        // This needs to be outside the block so it's available when building the Nostr event
+        let webxdc_topic = if attached_file.extension.to_lowercase() == "xdc" {
+            let topic_id = generate_topic_id();
+            Some(encode_topic_id(&topic_id))
+        } else {
+            None
         };
 
         // Update the attachment in-state
@@ -457,7 +473,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 size: file_size,
                 img_meta: attached_file.img_meta.clone(),
                 downloading: false,
-                downloaded: true
+                downloaded: true,
+                webxdc_topic: webxdc_topic.clone(),
             });
 
             // Send the pending file upload to our frontend with appropriate event
@@ -535,6 +552,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
                 }
 
+                // For WebXDC (.xdc) files, use the topic ID from the attachment (generated earlier)
+                if let Some(ref topic_encoded) = webxdc_topic {
+                    attachment_rumor = attachment_rumor
+                        .tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic_encoded.clone()]));
+                }
+
                 attachment_rumor
             } else {
                 // URL is dead, need to upload
@@ -604,6 +627,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         attachment_rumor = attachment_rumor
                             .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
                             .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
+                    }
+
+                    // For WebXDC (.xdc) files, use the topic ID from the attachment (generated earlier)
+                    if let Some(ref topic_encoded) = webxdc_topic {
+                        attachment_rumor = attachment_rumor
+                            .tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic_encoded.clone()]));
                     }
 
                     attachment_rumor
