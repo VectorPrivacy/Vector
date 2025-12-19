@@ -634,6 +634,7 @@ static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("dmg", "application/x-apple-diskimage");
     m.insert("apk", "application/vnd.android.package-archive");
     m.insert("jar", "application/java-archive");
+    m.insert("xdc", "application/vnd.webxdc+zip"); // WebXDC Mini Apps
 
     // 3D
     m.insert("obj", "model/obj");
@@ -758,6 +759,7 @@ static MIME_TO_EXT: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("application/x-apple-diskimage", "dmg");
     m.insert("application/vnd.android.package-archive", "apk");
     m.insert("application/java-archive", "jar");
+    m.insert("application/vnd.webxdc+zip", "xdc"); // WebXDC Mini Apps
 
     // 3D
     m.insert("model/obj", "obj");
