@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-notifs"
+description = "Enables the notifs command without any pre-configured scope."
+commands.allow = ["notifs"]
+
+[[permission]]
+identifier = "deny-notifs"
+description = "Denies the notifs command without any pre-configured scope."
+commands.deny = ["notifs"]

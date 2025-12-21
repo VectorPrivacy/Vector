@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-messages"
+description = "Enables the fetch_messages command without any pre-configured scope."
+commands.allow = ["fetch_messages"]
+
+[[permission]]
+identifier = "deny-fetch-messages"
+description = "Denies the fetch_messages command without any pre-configured scope."
+commands.deny = ["fetch_messages"]

@@ -1298,6 +1298,10 @@ impl MlsService {
                                     }));
                                 }
                             }
+                            RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
+                                // Handle WebXDC peer advertisement - add peer to realtime channel
+                                crate::handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
+                            }
                             RumorProcessingResult::Ignored => {
                                 // Rumor was ignored (e.g., unknown kind)
                             }

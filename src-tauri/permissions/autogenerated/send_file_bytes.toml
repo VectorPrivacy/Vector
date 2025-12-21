@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-file-bytes"
+description = "Enables the send_file_bytes command without any pre-configured scope."
+commands.allow = ["send_file_bytes"]
+
+[[permission]]
+identifier = "deny-send-file-bytes"
+description = "Denies the send_file_bytes command without any pre-configured scope."
+commands.deny = ["send_file_bytes"]

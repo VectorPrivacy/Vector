@@ -2311,6 +2311,23 @@ async function setupRustListeners() {
         }
     });
 
+    // Listen for Mini App realtime status updates (peer count changes)
+    await listen('miniapp_realtime_status', (evt) => {
+        const { topic, peer_count, is_active, has_pending_peers } = evt.payload;
+        console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'pending:', has_pending_peers);
+        
+        // Find all Mini App attachments with this topic and update their status
+        const attachments = document.querySelectorAll(`.miniapp-attachment[data-webxdc-topic="${topic}"]`);
+        console.log('[MINIAPP] Found', attachments.length, 'attachments for topic', topic);
+        
+        attachments.forEach(attachment => {
+            // Use the stored update function if available
+            if (attachment._updateMiniAppStatus) {
+                attachment._updateMiniAppStatus(is_active, peer_count);
+            }
+        });
+    });
+
     // Note: Deep link listener is set up early in DOMContentLoaded, before login flow
     // This ensures deep links work even when the app is opened from a closed state
 }
@@ -3990,12 +4007,85 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 const smallElement = document.createElement('small');
 
                 if (isMiniApp) {
-                    // Mini App: show "Click to Play" instead of file details
+                    // Mini App: show status and optionally peer count
+                    // Make smallElement a flex container for proper alignment
+                    smallElement.style.display = 'flex';
+                    smallElement.style.alignItems = 'center';
+                    smallElement.style.gap = '10px';
+                    
                     const playSpan = document.createElement('span');
                     playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
                     playSpan.style.fontWeight = '400';
                     playSpan.innerText = 'Click to Play';
                     smallElement.appendChild(playSpan);
+                    
+                    // Create peer count badge (hidden by default)
+                    const peerBadge = document.createElement('span');
+                    peerBadge.style.padding = '2px 8px';
+                    peerBadge.style.borderRadius = '10px';
+                    peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.3)';
+                    peerBadge.style.color = '#2ed573';
+                    peerBadge.style.fontSize = '0.85em';
+                    peerBadge.style.fontWeight = '500';
+                    peerBadge.style.display = 'none';
+                    smallElement.appendChild(peerBadge);
+                    
+                    // Store topic for event updates
+                    const topicId = cAttachment.webxdc_topic;
+                    if (topicId) {
+                        fileDiv.setAttribute('data-webxdc-topic', topicId);
+                    }
+                    
+                    // Helper function to update the peer badge
+                    const updatePeerBadge = (peerCount, isPlaying) => {
+                        const totalPlayers = isPlaying ? peerCount + 1 : peerCount;
+                        if (totalPlayers > 0) {
+                            // Create inline icon
+                            const groupIcon = document.createElement('img');
+                            groupIcon.src = 'icons/group-placeholder.svg';
+                            groupIcon.style.width = '14px';
+                            groupIcon.style.height = '14px';
+                            groupIcon.style.verticalAlign = 'middle';
+                            groupIcon.style.marginRight = '4px';
+                            
+                            // Clear and rebuild badge content
+                            peerBadge.innerHTML = '';
+                            peerBadge.appendChild(groupIcon);
+                            const label = isPlaying ? 'player' : 'online';
+                            peerBadge.appendChild(document.createTextNode(`${totalPlayers} ${label}${totalPlayers !== 1 ? 's' : ''}`));
+                            peerBadge.style.display = 'inline-flex';
+                            peerBadge.style.alignItems = 'center';
+                        } else {
+                            peerBadge.style.display = 'none';
+                        }
+                    };
+                    
+                    // Helper function to update the UI based on status
+                    const updateMiniAppStatus = (isPlaying, peerCount) => {
+                        if (isPlaying) {
+                            // We're playing - show "Playing" and make unclickable
+                            playSpan.innerText = 'Playing';
+                            playSpan.style.color = '#2ed573';
+                            fileDiv.style.cursor = 'default';
+                            fileDiv.style.opacity = '0.9';
+                            fileDiv.setAttribute('data-playing', 'true');
+                        } else if (peerCount > 0) {
+                            // Others are playing - show "Click to Join"
+                            playSpan.innerText = 'Click to Join';
+                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                            fileDiv.style.cursor = 'pointer';
+                            fileDiv.style.opacity = '1';
+                            fileDiv.removeAttribute('data-playing');
+                        } else {
+                            // No one playing - show "Click to Play"
+                            playSpan.innerText = 'Click to Play';
+                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                            fileDiv.style.cursor = 'pointer';
+                            fileDiv.style.opacity = '1';
+                            fileDiv.removeAttribute('data-playing');
+                        }
+                        updatePeerBadge(peerCount, isPlaying);
+                    };
                     
                     // Load Mini App info asynchronously to get name and icon
                     loadMiniAppInfo(cAttachment.path).then(info => {
@@ -4011,6 +4101,28 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     }).catch(err => {
                         console.warn('Failed to load Mini App info:', err);
                     });
+                    
+                    // Check for realtime channel status if we have a topic
+                    if (topicId) {
+                        invoke('miniapp_get_realtime_status', { topicId })
+                            .then(status => {
+                                console.log('[MiniApp] Realtime status:', status);
+                                // Use peer_count if we have a channel, otherwise use pending_peer_count
+                                // peer_count is from active Iroh channel, pending_peer_count is from advertisements
+                                const peerCount = (status?.peer_count || 0) > 0
+                                    ? status.peer_count
+                                    : (status?.pending_peer_count || 0);
+                                updateMiniAppStatus(status?.active || false, peerCount);
+                            })
+                            .catch(err => {
+                                // Silently ignore - realtime status is optional
+                                console.debug('Could not get realtime status:', err);
+                            });
+                        
+                        // Listen for realtime events to update the UI
+                        // Store the update function on the element for event handler access
+                        fileDiv._updateMiniAppStatus = updateMiniAppStatus;
+                    }
                 } else {
                     // Regular file: show extension and size
                     const extSpan = document.createElement('span');
@@ -4038,12 +4150,34 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     if (!path) return;
                     
                     if (isMiniApp) {
+                        // Check if we're already playing
+                        if (e.currentTarget.getAttribute('data-playing') === 'true') {
+                            console.log('[MiniApp] Already playing, ignoring click');
+                            return;
+                        }
+                        
                         // Open Mini App in a new window
                         try {
                             // Find the attachment to get the webxdc_topic
                             const attachment = msg.attachments.find(a => a.path === path);
                             const topicId = attachment?.webxdc_topic || null;
-                            await openMiniApp(path, msg.chat_id, msg.id, null, topicId);
+                            await openMiniApp(path, strOpenChat, msg.id, null, topicId);
+                            
+                            // Update UI to show "Playing" after opening
+                            if (e.currentTarget._updateMiniAppStatus) {
+                                // Get current peer count and update status
+                                if (topicId) {
+                                    invoke('miniapp_get_realtime_status', { topicId })
+                                        .then(status => {
+                                            e.currentTarget._updateMiniAppStatus(true, status?.peer_count || 0);
+                                        })
+                                        .catch(() => {
+                                            e.currentTarget._updateMiniAppStatus(true, 0);
+                                        });
+                                } else {
+                                    e.currentTarget._updateMiniAppStatus(true, 0);
+                                }
+                            }
                         } catch (err) {
                             console.error('Failed to open Mini App:', err);
                         }

@@ -88,6 +88,11 @@ pub enum RumorProcessingResult {
         profile_id: String,
         until: u64,
     },
+    /// A WebXDC peer advertisement for realtime channels
+    WebxdcPeerAdvertisement {
+        topic_id: String,
+        node_addr: String,
+    },
     /// Event was ignored (unknown type or invalid)
     Ignored,
 }
@@ -376,7 +381,7 @@ async fn process_reaction(
 /// Currently handles typing indicators for real-time status updates.
 async fn process_app_specific(
     rumor: RumorEvent,
-    _context: RumorContext,
+    context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
     // Check if this is a typing indicator
     if is_typing_indicator(&rumor) {
@@ -411,8 +416,65 @@ async fn process_app_specific(
         });
     }
     
+    // Check if this is a WebXDC peer advertisement
+    if is_webxdc_peer_advertisement(&rumor) {
+        println!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
+            context.is_mine,
+            rumor.pubkey.to_bech32().unwrap_or_else(|_| "unknown".to_string()));
+        
+        // Skip our own peer advertisements - we don't need to connect to ourselves
+        if context.is_mine {
+            println!("[WEBXDC] Ignoring our own peer advertisement");
+            return Ok(RumorProcessingResult::Ignored);
+        }
+        
+        println!("[WEBXDC] Detected peer advertisement in rumor from another device");
+        
+        // Extract topic ID and node address
+        let topic_id = rumor.tags
+            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic")))
+            .and_then(|tag| tag.content())
+            .ok_or("Peer advertisement missing webxdc-topic tag")?
+            .to_string();
+        
+        let node_addr = rumor.tags
+            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr")))
+            .and_then(|tag| tag.content())
+            .ok_or("Peer advertisement missing webxdc-node-addr tag")?
+            .to_string();
+        
+        // Validate expiration (peer advertisements should be short-lived)
+        if let Some(expiry_tag) = rumor.tags.find(TagKind::Expiration) {
+            if let Some(expiry_str) = expiry_tag.content() {
+                if let Ok(expiry_timestamp) = expiry_str.parse::<u64>() {
+                    let current_timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|e| format!("System time error: {}", e))?
+                        .as_secs();
+                    
+                    // Reject expired advertisements
+                    if expiry_timestamp <= current_timestamp {
+                        return Ok(RumorProcessingResult::Ignored);
+                    }
+                }
+            }
+        }
+        
+        return Ok(RumorProcessingResult::WebxdcPeerAdvertisement {
+            topic_id,
+            node_addr,
+        });
+    }
+    
     // Unknown application-specific data
     Ok(RumorProcessingResult::Ignored)
+}
+
+/// Check if a rumor is a WebXDC peer advertisement
+fn is_webxdc_peer_advertisement(rumor: &RumorEvent) -> bool {
+    rumor.content == "peer-advertisement"
+        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
+        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr"))).is_some()
 }
 
 // ============================================================================

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-cached-file"
+description = "Enables the send_cached_file command without any pre-configured scope."
+commands.allow = ["send_cached_file"]
+
+[[permission]]
+identifier = "deny-send-cached-file"
+description = "Denies the send_cached_file command without any pre-configured scope."
+commands.deny = ["send_cached_file"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-or-create-invite-code"
+description = "Enables the get_or_create_invite_code command without any pre-configured scope."
+commands.allow = ["get_or_create_invite_code"]
+
+[[permission]]
+identifier = "deny-get-or-create-invite-code"
+description = "Denies the get_or_create_invite_code command without any pre-configured scope."
+commands.deny = ["get_or_create_invite_code"]

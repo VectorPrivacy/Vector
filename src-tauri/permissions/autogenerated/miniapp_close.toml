@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-close"
+description = "Enables the miniapp_close command without any pre-configured scope."
+commands.allow = ["miniapp_close"]
+
+[[permission]]
+identifier = "deny-miniapp-close"
+description = "Denies the miniapp_close command without any pre-configured scope."
+commands.deny = ["miniapp_close"]

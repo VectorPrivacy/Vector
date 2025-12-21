@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-cached-bytes-compression"
+description = "Enables the start_cached_bytes_compression command without any pre-configured scope."
+commands.allow = ["start_cached_bytes_compression"]
+
+[[permission]]
+identifier = "deny-start-cached-bytes-compression"
+description = "Denies the start_cached_bytes_compression command without any pre-configured scope."
+commands.deny = ["start_cached_bytes_compression"]

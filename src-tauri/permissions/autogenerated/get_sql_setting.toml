@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-sql-setting"
+description = "Enables the get_sql_setting command without any pre-configured scope."
+commands.allow = ["get_sql_setting"]
+
+[[permission]]
+identifier = "deny-get-sql-setting"
+description = "Denies the get_sql_setting command without any pre-configured scope."
+commands.deny = ["get_sql_setting"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-monitor-relay-connections"
+description = "Enables the monitor_relay_connections command without any pre-configured scope."
+commands.allow = ["monitor_relay_connections"]
+
+[[permission]]
+identifier = "deny-monitor-relay-connections"
+description = "Denies the monitor_relay_connections command without any pre-configured scope."
+commands.deny = ["monitor_relay_connections"]

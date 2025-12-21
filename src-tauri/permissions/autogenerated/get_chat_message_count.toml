@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-chat-message-count"
+description = "Enables the get_chat_message_count command without any pre-configured scope."
+commands.allow = ["get_chat_message_count"]
+
+[[permission]]
+identifier = "deny-get-chat-message-count"
+description = "Denies the get_chat_message_count command without any pre-configured scope."
+commands.deny = ["get_chat_message_count"]

@@ -1,15 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "miniapp",
-  "description": "Capabilities for Mini App windows",
+  "description": "Capabilities for Mini App windows - RESTRICTED to miniapp commands only",
   "windows": [
     "miniapp:*"
   ],
   "permissions": [
-    "core:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
-    "notification:default"
+    "allow-miniapp-get-updates",
+    "allow-miniapp-send-update",
+    "allow-miniapp-join-realtime-channel",
+    "allow-miniapp-send-realtime-data",
+    "allow-miniapp-leave-realtime-channel"
   ],
   "platforms": ["linux", "windows", "macOS"]
 }

@@ -1053,6 +1053,11 @@ async fn send_webxdc_peer_advertisement(
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
+    let my_npub = my_public_key.to_bech32().unwrap_or_else(|_| "unknown".to_string());
+    
+    println!("[WEBXDC] Sending peer advertisement: my_npub={}, receiver={}, topic={}", my_npub, receiver, topic_id);
+    log::info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
+    log::debug!("Node address: {}", node_addr);
 
     // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
@@ -1222,9 +1227,15 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
+    println!("[WEBXDC-DEBUG] handle_event called, event kind: {:?}", event.kind);
+
     // Unwrap the gift wrap
     match client.unwrap_gift_wrap(&event).await {
         Ok(UnwrappedGift { rumor, sender }) => {
+            println!("[WEBXDC-DEBUG] Unwrapped gift, rumor kind: {:?}, sender: {}",
+                rumor.kind,
+                sender.to_bech32().unwrap_or_else(|_| "unknown".to_string()));
+            
             // Check if it's mine
             let is_mine = sender == my_public_key;
 
@@ -1373,6 +1384,10 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             }
                             
                             true
+                        }
+                        RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
+                            // Handle WebXDC peer advertisement - add peer to realtime channel
+                            handle_webxdc_peer_advertisement(&topic_id, &node_addr).await
                         }
                         RumorProcessingResult::Ignored => false,
                     }
@@ -1616,6 +1631,95 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
     }
 
     reaction_added
+}
+
+/// Handle a WebXDC peer advertisement - add the peer to our realtime channel
+async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_encoded: &str) -> bool {
+    use crate::miniapps::realtime::{decode_topic_id, decode_node_addr};
+    
+    println!("[WEBXDC] Received peer advertisement for topic {}", topic_id);
+    
+    // Decode the topic ID
+    let topic = match decode_topic_id(topic_id) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("Failed to decode topic ID in peer advertisement: {}", e);
+            return false;
+        }
+    };
+    
+    // Decode the node address
+    let node_addr = match decode_node_addr(node_addr_encoded) {
+        Ok(addr) => addr,
+        Err(e) => {
+            log::warn!("Failed to decode node address in peer advertisement: {}", e);
+            return false;
+        }
+    };
+    
+    // Get the MiniApps state and add the peer
+    if let Some(handle) = TAURI_APP.get() {
+        let state = handle.state::<miniapps::state::MiniAppsState>();
+        
+        // Check if we have an active realtime channel for this topic
+        // We need to find any instance that has this topic active
+        let has_channel = {
+            let channels = state.realtime_channels.read().await;
+            println!("[WEBXDC] Checking {} active channels for topic match", channels.len());
+            for (label, ch) in channels.iter() {
+                println!("[WEBXDC]   Channel '{}': topic={}, active={}",
+                    label,
+                    crate::miniapps::realtime::encode_topic_id(&ch.topic),
+                    ch.active);
+            }
+            channels.values().any(|ch| ch.topic == topic && ch.active)
+        };
+        
+        println!("[WEBXDC] has_channel for topic {}: {}", topic_id, has_channel);
+        
+        if has_channel {
+            println!("[WEBXDC] Found active channel for topic {}, adding peer", topic_id);
+            // Get the realtime manager and add the peer
+            match state.realtime.get_or_init().await {
+                Ok(iroh) => {
+                    match iroh.add_peer(topic, node_addr.clone()).await {
+                        Ok(_) => {
+                            println!("[WEBXDC] Successfully added peer {} to realtime channel topic {}",
+                                node_addr.node_id, topic_id);
+                            return true;
+                        }
+                        Err(e) => {
+                            println!("[WEBXDC] ERROR: Failed to add peer to realtime channel: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("[WEBXDC] ERROR: Failed to get realtime manager: {}", e);
+                }
+            }
+        } else {
+            // Store as pending peer - we'll add them when we join the channel
+            println!("[WEBXDC] Storing pending peer for topic {} (no active channel yet)", topic_id);
+            state.add_pending_peer(topic, node_addr).await;
+            
+            // Emit event to frontend so it can update the UI (show "Click to Join" and player count)
+            let pending_count = state.get_pending_peer_count(&topic).await;
+            if let Some(main_window) = handle.get_webview_window("main") {
+                use tauri::Emitter;
+                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                    "topic": topic_id,
+                    "peer_count": pending_count,
+                    "is_active": false,
+                    "has_pending_peers": true,
+                }));
+                println!("[WEBXDC] Emitted miniapp_realtime_status event: topic={}, pending_count={}", topic_id, pending_count);
+            }
+            
+            return true;
+        }
+    }
+    
+    false
 }
 
 /*
@@ -2019,6 +2123,11 @@ async fn notifs() -> Result<bool, String> {
                                                                     }));
                                                                 }
                                                                 
+                                                                None // Don't emit as message
+                                                            }
+                                                            RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
+                                                                // Handle WebXDC peer advertisement - add peer to realtime channel
+                                                                handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::Ignored => None,
@@ -5032,6 +5141,7 @@ pub fn run() {
             miniapps::commands::miniapp_leave_realtime_channel,
             miniapps::commands::miniapp_add_realtime_peer,
             miniapps::commands::miniapp_get_realtime_node_addr,
+            miniapps::commands::miniapp_get_realtime_status,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

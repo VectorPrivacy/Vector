@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-mls-groups"
+description = "Enables the list_mls_groups command without any pre-configured scope."
+commands.allow = ["list_mls_groups"]
+
+[[permission]]
+identifier = "deny-list-mls-groups"
+description = "Denies the list_mls_groups command without any pre-configured scope."
+commands.deny = ["list_mls_groups"]

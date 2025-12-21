@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accept-mls-welcome"
+description = "Enables the accept_mls_welcome command without any pre-configured scope."
+commands.allow = ["accept_mls_welcome"]
+
+[[permission]]
+identifier = "deny-accept-mls-welcome"
+description = "Denies the accept_mls_welcome command without any pre-configured scope."
+commands.deny = ["accept_mls_welcome"]

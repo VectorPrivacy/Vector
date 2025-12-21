@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-msg-metadata"
+description = "Enables the fetch_msg_metadata command without any pre-configured scope."
+commands.allow = ["fetch_msg_metadata"]
+
+[[permission]]
+identifier = "deny-fetch-msg-metadata"
+description = "Denies the fetch_msg_metadata command without any pre-configured scope."
+commands.deny = ["fetch_msg_metadata"]

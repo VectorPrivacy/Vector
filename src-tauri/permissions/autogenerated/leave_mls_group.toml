@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-leave-mls-group"
+description = "Enables the leave_mls_group command without any pre-configured scope."
+commands.allow = ["leave_mls_group"]
+
+[[permission]]
+identifier = "deny-leave-mls-group"
+description = "Denies the leave_mls_group command without any pre-configured scope."
+commands.deny = ["leave_mls_group"]

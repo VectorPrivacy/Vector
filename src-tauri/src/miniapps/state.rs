@@ -196,6 +196,13 @@ impl std::fmt::Debug for RealtimeChannelState {
 }
 
 /// Global state for managing Mini App instances
+/// A pending peer advertisement (received before we joined the channel)
+#[derive(Clone, Debug)]
+pub struct PendingPeer {
+    pub node_addr: iroh::NodeAddr,
+    pub received_at: std::time::Instant,
+}
+
 pub struct MiniAppsState {
     /// Map of window_label -> MiniAppInstance
     instances: RwLock<HashMap<String, MiniAppInstance>>,
@@ -204,7 +211,10 @@ pub struct MiniAppsState {
     /// Realtime channel manager (Iroh P2P)
     pub realtime: RealtimeManager,
     /// Map of window_label -> realtime channel state
-    realtime_channels: RwLock<HashMap<String, RealtimeChannelState>>,
+    pub realtime_channels: RwLock<HashMap<String, RealtimeChannelState>>,
+    /// Pending peer advertisements (topic -> list of peers)
+    /// These are peers that advertised before we joined the channel
+    pub pending_peers: RwLock<HashMap<TopicId, Vec<PendingPeer>>>,
 }
 
 impl MiniAppsState {
@@ -214,6 +224,7 @@ impl MiniAppsState {
             packages: RwLock::new(HashMap::new()),
             realtime: RealtimeManager::new(None),
             realtime_channels: RwLock::new(HashMap::new()),
+            pending_peers: RwLock::new(HashMap::new()),
         }
     }
     
@@ -239,6 +250,59 @@ impl MiniAppsState {
     pub async fn has_realtime_channel(&self, window_label: &str) -> bool {
         let channels = self.realtime_channels.read().await;
         channels.get(window_label).map(|s| s.active).unwrap_or(false)
+    }
+    
+    /// Add a pending peer for a topic (received before we joined)
+    pub async fn add_pending_peer(&self, topic: TopicId, node_addr: iroh::NodeAddr) {
+        let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
+        println!("[WEBXDC] add_pending_peer: Adding peer {} for topic {}", node_addr.node_id, topic_encoded);
+        
+        let mut pending = self.pending_peers.write().await;
+        let peers = pending.entry(topic).or_insert_with(Vec::new);
+        
+        // Don't add duplicates
+        if !peers.iter().any(|p| p.node_addr.node_id == node_addr.node_id) {
+            peers.push(PendingPeer {
+                node_addr: node_addr.clone(),
+                received_at: std::time::Instant::now(),
+            });
+            println!("[WEBXDC] add_pending_peer: Stored pending peer {} for topic {}", node_addr.node_id, topic_encoded);
+        } else {
+            println!("[WEBXDC] add_pending_peer: Peer {} already exists for topic {}", node_addr.node_id, topic_encoded);
+        }
+    }
+    
+    /// Get and clear pending peers for a topic
+    pub async fn take_pending_peers(&self, topic: &TopicId) -> Vec<PendingPeer> {
+        let topic_encoded = crate::miniapps::realtime::encode_topic_id(topic);
+        println!("[WEBXDC] take_pending_peers: Looking for peers for topic {}", topic_encoded);
+        
+        let mut pending = self.pending_peers.write().await;
+        
+        // Debug: print all pending topics
+        println!("[WEBXDC] take_pending_peers: Currently have {} topics with pending peers", pending.len());
+        for (t, peers) in pending.iter() {
+            let t_encoded = crate::miniapps::realtime::encode_topic_id(t);
+            println!("[WEBXDC] take_pending_peers:   Topic {} has {} pending peers", t_encoded, peers.len());
+        }
+        
+        let peers = pending.remove(topic).unwrap_or_default();
+        println!("[WEBXDC] take_pending_peers: Found {} peers for topic {}", peers.len(), topic_encoded);
+        
+        // Filter out peers that are too old (more than 5 minutes)
+        let now = std::time::Instant::now();
+        let filtered: Vec<PendingPeer> = peers.into_iter()
+            .filter(|p| now.duration_since(p.received_at).as_secs() < 300)
+            .collect();
+        
+        println!("[WEBXDC] take_pending_peers: After filtering, {} peers remain", filtered.len());
+        filtered
+    }
+    
+    /// Get the count of pending peers for a topic (without removing them)
+    pub async fn get_pending_peer_count(&self, topic: &TopicId) -> usize {
+        let pending = self.pending_peers.read().await;
+        pending.get(topic).map(|peers| peers.len()).unwrap_or(0)
     }
     
     /// Register a new Mini App instance
