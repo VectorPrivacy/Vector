@@ -109,9 +109,18 @@ impl IrohState {
         // The gossip protocol doesn't accept connections itself - we need to do it
         let accept_endpoint = endpoint.clone();
         let accept_gossip = gossip.clone();
-        tokio::spawn(async move {
-            println!("[WEBXDC] Starting connection accept loop");
-            loop {
+        // Use std::thread::spawn to ensure this runs on a separate OS thread
+        // This avoids potential issues with Tauri's async runtime on Windows
+        std::thread::spawn(move || {
+            // Create a new Tokio runtime for this thread
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create Tokio runtime for accept loop");
+            
+            rt.block_on(async move {
+                println!("[WEBXDC] Starting connection accept loop");
+                loop {
                 match accept_endpoint.accept().await {
                     Some(incoming) => {
                         let gossip = accept_gossip.clone();
@@ -150,6 +159,7 @@ impl IrohState {
                     }
                 }
             }
+            });
         });
 
         Ok(Self {

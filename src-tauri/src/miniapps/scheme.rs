@@ -293,6 +293,8 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
 }
 
 /// Get the current user's npub and display name
+/// Note: This function avoids locking STATE to prevent potential deadlocks
+/// when called from the protocol handler
 async fn get_user_info() -> (String, String) {
     // Get user's npub from Nostr client
     let user_npub = if let Some(client) = NOSTR_CLIENT.get() {
@@ -310,21 +312,28 @@ async fn get_user_info() -> (String, String) {
     };
     
     // Get user's display name from their profile in STATE
+    // Use try_lock to avoid blocking if STATE is locked
     let user_display_name = {
-        let state = STATE.lock().await;
-        // Find the user's own profile (where mine == true)
-        if let Some(profile) = state.profiles.iter().find(|p| p.mine) {
-            if !profile.nickname.is_empty() {
-                profile.nickname.clone()
-            } else if !profile.name.is_empty() {
-                profile.name.clone()
-            } else {
-                // Fallback to npub if no name set
+        match STATE.try_lock() {
+            Ok(state) => {
+                // Find the user's own profile (where mine == true)
+                if let Some(profile) = state.profiles.iter().find(|p| p.mine) {
+                    if !profile.nickname.is_empty() {
+                        profile.nickname.clone()
+                    } else if !profile.name.is_empty() {
+                        profile.name.clone()
+                    } else {
+                        user_npub.clone()
+                    }
+                } else {
+                    user_npub.clone()
+                }
+            }
+            Err(_) => {
+                // STATE is locked, use npub as fallback
+                trace!("STATE is locked, using npub as display name fallback");
                 user_npub.clone()
             }
-        } else {
-            // No profile found, use npub
-            user_npub.clone()
         }
     };
     

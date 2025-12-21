@@ -13,6 +13,8 @@ use super::realtime::{RealtimeEvent, encode_topic_id, encode_node_addr};
 
 // Network isolation proxy is only used on non-macOS platforms
 #[cfg(not(target_os = "macos"))]
+// Network isolation proxy - only used on Linux (not macOS due to version requirements, not Windows due to WebView2 freeze)
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 use super::network_isolation::DUMMY_LOCALHOST_PROXY_URL;
 
 /// Information about a Mini App for the frontend
@@ -154,36 +156,9 @@ fn get_miniapp_base_url() -> Result<tauri::Url, Error> {
 
 /// Get Chromium hardening browser args for Windows
 /// This disables WebRTC, blocks DNS queries, and sets up the dummy proxy
-#[cfg(target_os = "windows")]
-fn get_chromium_hardening_browser_args(dummy_proxy_url: &url::Url) -> String {
-    // Hardening: (partially?) disable WebRTC, prohibit all DNS queries,
-    // and practically almost (or completely?) disable internet access.
-    // See https://delta.chat/en/2023-05-22-webxdc-security.
-
-    // These are default parameters from Tauri's wry
-    let default_tauri_browser_args = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-features=RemoveRedirectionBitmap";
-
-    // The `~NOTFOUND` string blocks DNS resolution.
-    // Note: webxdc.localhost requests are intercepted by Tauri's custom protocol
-    // handler BEFORE the Chromium network stack, so no EXCLUDE is needed.
-    let host_rules = "MAP * ~NOTFOUND";
-
-    // `host-resolver-rules` and `host-rules` primarily block DNS prefetching
-    // but also block `fetch()` requests.
-    //
-    // Specifying `--proxy-url` should make WebRTC try to use this proxy,
-    // since IP handling policy is `disable_non_proxied_udp`.
-    // However, since the proxy won't work, this should effectively disable WebRTC.
-    [
-        default_tauri_browser_args,
-        &format!("--host-resolver-rules=\"{host_rules}\""),
-        &format!("--host-rules=\"{host_rules}\""),
-        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-        &format!("--proxy-server=\"{dummy_proxy_url}\""),
-    ]
-    .join(" ")
-}
+// Note: Chromium hardening browser args were removed for Windows because they cause WebView2 to freeze.
+// The CSP (Content Security Policy) provides the primary security layer for mini apps.
+// See: https://delta.chat/en/2023-05-22-webxdc-security for background on webxdc security.
 
 /// Load Mini App info from a file path
 #[tauri::command]
@@ -334,8 +309,10 @@ pub async fn miniapp_open(
     }
     let initial_url_clone = initial_url.clone();
     
-    // Get the dummy proxy URL for network isolation (non-macOS platforms)
-    #[cfg(not(target_os = "macos"))]
+    // Get the dummy proxy URL for network isolation (Linux only)
+    // macOS: skipped due to version requirements
+    // Windows: skipped due to WebView2 freeze issues
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let dummy_proxy_url = DUMMY_LOCALHOST_PROXY_URL
         .as_ref()
         .map_err(|_| Error::BlackholeProxyUnavailable)?;
@@ -371,19 +348,13 @@ pub async fn miniapp_open(
         window_builder = window_builder.allow_link_preview(false);
     }
     
-    // Non-macOS: Use dummy proxy for network isolation
+    // Non-macOS/non-Windows: Use dummy proxy for network isolation
     // Note: On macOS, proxy_url increases minimum version to 14, so we skip it
-    #[cfg(not(target_os = "macos"))]
+    // Note: On Windows, both proxy_url and additional_browser_args cause WebView2 to freeze
+    //       We rely on CSP for security on Windows instead
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         window_builder = window_builder.proxy_url(dummy_proxy_url.clone());
-    }
-    
-    // Windows: Additional Chromium hardening via browser args
-    #[cfg(target_os = "windows")]
-    {
-        window_builder = window_builder.additional_browser_args(
-            &get_chromium_hardening_browser_args(dummy_proxy_url),
-        );
     }
     
     let window = Arc::new(window_builder.build()?);
