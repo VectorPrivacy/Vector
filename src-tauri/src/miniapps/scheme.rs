@@ -223,10 +223,22 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
 
     let app_handle = ctx.app_handle().clone();
     
-    // Handle the request synchronously using block_on
-    // This is necessary because the protocol handler must be synchronous
-    tauri::async_runtime::block_on(async move {
-        handle_miniapp_request(&app_handle, &webview_label, &request).await
+    // On Windows, using block_on directly can cause a deadlock because the WebView2
+    // runs on the main thread. We spawn a new thread to run the async code and
+    // use a channel to get the result back.
+    // See: https://github.com/nicholasrice/tauri-v2-webview-deadlock
+    let (tx, rx) = std::sync::mpsc::channel();
+    
+    std::thread::spawn(move || {
+        let result = tauri::async_runtime::block_on(async move {
+            handle_miniapp_request(&app_handle, &webview_label, &request).await
+        });
+        let _ = tx.send(result);
+    });
+    
+    // Wait for the result from the spawned thread
+    rx.recv().unwrap_or_else(|_| {
+        make_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to handle request")
     })
 }
 
