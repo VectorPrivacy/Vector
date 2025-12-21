@@ -4911,8 +4911,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
-        // Register the webxdc:// custom protocol for Mini Apps
-        .register_uri_scheme_protocol("webxdc", miniapps::scheme::miniapp_protocol)
+        // Register the webxdc:// custom protocol for Mini Apps (async to avoid deadlocks on Windows)
+        .register_asynchronous_uri_scheme_protocol("webxdc", miniapps::scheme::miniapp_protocol)
         // Register Mini Apps state
         .manage(miniapps::state::MiniAppsState::new());
 

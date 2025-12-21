@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use tauri::{
     utils::config::{Csp, CspDirectiveSources},
-    Manager, UriSchemeContext,
+    Manager, UriSchemeContext, UriSchemeResponder,
 };
 use log::{error, trace};
 use nostr_sdk::prelude::ToBech32;
@@ -196,11 +196,13 @@ const PERMISSIONS_POLICY_DENY_ALL: &str = concat!(
     "window-placement=()",
 );
 
-/// Handle requests to the webxdc:// protocol (synchronous version for Tauri 2)
+/// Handle requests to the webxdc:// protocol (async version for Tauri 2)
+/// Uses UriSchemeResponder to avoid blocking the WebView thread on Windows
 pub fn miniapp_protocol<R: tauri::Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: http::Request<Vec<u8>>,
-) -> http::Response<Cow<'static, [u8]>> {
+    responder: UriSchemeResponder,
+) {
     trace!(
         "webxdc_protocol: {} {}",
         request.uri(),
@@ -218,28 +220,18 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
         error!(
             "Prevented non-miniapp window from accessing webxdc:// scheme (webview label: {webview_label})"
         );
-        return make_error_response(http::StatusCode::FORBIDDEN, "Access denied");
+        responder.respond(make_error_response(http::StatusCode::FORBIDDEN, "Access denied"));
+        return;
     }
 
     let app_handle = ctx.app_handle().clone();
     
-    // On Windows, using block_on directly can cause a deadlock because the WebView2
-    // runs on the main thread. We spawn a new thread to run the async code and
-    // use a channel to get the result back.
-    // See: https://github.com/nicholasrice/tauri-v2-webview-deadlock
-    let (tx, rx) = std::sync::mpsc::channel();
-    
-    std::thread::spawn(move || {
-        let result = tauri::async_runtime::block_on(async move {
-            handle_miniapp_request(&app_handle, &webview_label, &request).await
-        });
-        let _ = tx.send(result);
+    // Spawn an async task to handle the request without blocking
+    // This is the pattern used by DeltaChat to avoid deadlocks on Windows
+    tauri::async_runtime::spawn(async move {
+        let response = handle_miniapp_request(&app_handle, &webview_label, &request).await;
+        responder.respond(response);
     });
-    
-    // Wait for the result from the spawned thread
-    rx.recv().unwrap_or_else(|_| {
-        make_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to handle request")
-    })
 }
 
 async fn handle_miniapp_request<R: tauri::Runtime>(

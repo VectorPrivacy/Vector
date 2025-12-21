@@ -163,7 +163,9 @@ fn get_chromium_hardening_browser_args(dummy_proxy_url: &url::Url) -> String {
     // These are default parameters from Tauri's wry
     let default_tauri_browser_args = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-features=RemoveRedirectionBitmap";
 
-    // The `~NOTFOUND` string blocks DNS resolution
+    // The `~NOTFOUND` string blocks DNS resolution.
+    // Note: webxdc.localhost requests are intercepted by Tauri's custom protocol
+    // handler BEFORE the Chromium network stack, so no EXCLUDE is needed.
     let host_rules = "MAP * ~NOTFOUND";
 
     // `host-resolver-rules` and `host-rules` primarily block DNS prefetching
