@@ -259,8 +259,38 @@ impl IrohState {
 
     /// Add a peer to an existing channel
     pub async fn add_peer(&self, topic: TopicId, peer: NodeAddr) -> Result<()> {
+        self.add_peer_with_retry(topic, peer, 3).await
+    }
+    
+    /// Add a peer to a gossip topic with retry logic
+    /// Retries with exponential backoff: 1s, 2s, 4s
+    async fn add_peer_with_retry(&self, topic: TopicId, peer: NodeAddr, max_retries: u32) -> Result<()> {
+        let mut last_error = None;
+        
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                // Exponential backoff: 1s, 2s, 4s...
+                let delay = std::time::Duration::from_secs(1 << (attempt - 1));
+                info!("[WEBXDC] add_peer: Retry {} for peer {} after {:?}", attempt, peer.node_id, delay);
+                tokio::time::sleep(delay).await;
+            }
+            
+            match self.try_add_peer(&topic, &peer).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!("[WEBXDC] add_peer: Attempt {} failed for peer {}: {}", attempt + 1, peer.node_id, e);
+                    last_error = Some(e);
+                }
+            }
+        }
+        
+        Err(last_error.unwrap_or_else(|| anyhow!("Failed to add peer after {} retries", max_retries)))
+    }
+    
+    /// Single attempt to add a peer (internal helper)
+    async fn try_add_peer(&self, topic: &TopicId, peer: &NodeAddr) -> Result<()> {
         // First, add the node address to the endpoint so we can connect to it
-        println!("[WEBXDC] add_peer: Adding node addr for peer {}, relay_url={:?}, direct_addrs={}",
+        trace!("[WEBXDC] add_peer: Adding node addr for peer {}, relay_url={:?}, direct_addrs={}",
             peer.node_id,
             peer.relay_url(),
             peer.direct_addresses.len());
@@ -268,22 +298,21 @@ impl IrohState {
         
         // Verify the node address was added by checking if we can get connection info
         if let Some(info) = self.endpoint.remote_info(peer.node_id) {
-            println!("[WEBXDC] add_peer: Remote info for peer {}: relay_url={:?}, addrs={:?}",
+            trace!("[WEBXDC] add_peer: Remote info for peer {}: relay_url={:?}, addrs={:?}",
                 peer.node_id,
                 info.relay_url,
                 info.addrs);
         } else {
-            println!("[WEBXDC] add_peer: WARNING - Could not get remote info for peer {}", peer.node_id);
+            trace!("[WEBXDC] add_peer: WARNING - Could not get remote info for peer {}", peer.node_id);
         }
         
         // Then, use the existing channel's sender to join the peer
         let channels = self.channels.read().await;
-        if let Some(channel_state) = channels.get(&topic) {
-            println!("[WEBXDC] add_peer: Joining peer {} via existing channel sender", peer.node_id);
+        if let Some(channel_state) = channels.get(topic) {
+            trace!("[WEBXDC] add_peer: Joining peer {} via existing channel sender", peer.node_id);
             channel_state.sender.join_peers(vec![peer.node_id]).await?;
-            println!("[WEBXDC] add_peer: Successfully joined peer {} to topic (join_peers returned)", peer.node_id);
+            info!("[WEBXDC] add_peer: Successfully joined peer {} to topic", peer.node_id);
         } else {
-            println!("[WEBXDC] add_peer: Channel not found for topic, cannot add peer");
             return Err(anyhow!("Channel not found for topic"));
         }
         Ok(())
@@ -456,7 +485,6 @@ async fn run_subscribe_loop(
                         // Skip messages from ourselves
                         if let Ok(sender_key) = PublicKey::try_from(sender_key_bytes.as_slice()) {
                             if sender_key == our_public_key {
-                                println!("[WEBXDC] Skipping message from ourselves");
                                 continue;
                             }
                         }

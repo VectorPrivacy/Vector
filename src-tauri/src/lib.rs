@@ -1227,15 +1227,9 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
-    println!("[WEBXDC-DEBUG] handle_event called, event kind: {:?}", event.kind);
-
     // Unwrap the gift wrap
     match client.unwrap_gift_wrap(&event).await {
         Ok(UnwrappedGift { rumor, sender }) => {
-            println!("[WEBXDC-DEBUG] Unwrapped gift, rumor kind: {:?}, sender: {}",
-                rumor.kind,
-                sender.to_bech32().unwrap_or_else(|_| "unknown".to_string()));
-            
             // Check if it's mine
             let is_mine = sender == my_public_key;
 
@@ -5004,6 +4998,21 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 profile_sync::start_profile_sync_processor().await;
             });
+            
+            // Start the Mini Apps pending peer cleanup task (runs every 5 minutes)
+            {
+                let handle_for_cleanup = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        // Wait 5 minutes between cleanups
+                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                        
+                        // Get the MiniAppsState and run cleanup
+                        let state = handle_for_cleanup.state::<miniapps::state::MiniAppsState>();
+                        state.cleanup_expired_pending_peers().await;
+                    }
+                });
+            }
 
             // Setup deep link listener for macOS/iOS/Android
             // On these platforms, deep links are received as events rather than CLI args

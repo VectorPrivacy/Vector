@@ -305,6 +305,29 @@ impl MiniAppsState {
         pending.get(topic).map(|peers| peers.len()).unwrap_or(0)
     }
     
+    /// Clean up expired pending peers (older than 5 minutes)
+    /// This should be called periodically to prevent memory leaks
+    pub async fn cleanup_expired_pending_peers(&self) {
+        let now = std::time::Instant::now();
+        let mut pending = self.pending_peers.write().await;
+        
+        // Remove expired peers from each topic
+        pending.retain(|topic, peers| {
+            let before_count = peers.len();
+            peers.retain(|p| now.duration_since(p.received_at).as_secs() < 300);
+            let after_count = peers.len();
+            
+            if before_count != after_count {
+                let topic_encoded = crate::miniapps::realtime::encode_topic_id(topic);
+                log::debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
+                    before_count - after_count, topic_encoded);
+            }
+            
+            // Keep the topic entry only if it still has peers
+            !peers.is_empty()
+        });
+    }
+    
     /// Register a new Mini App instance
     pub async fn add_instance(&self, instance: MiniAppInstance) {
         let mut instances = self.instances.write().await;

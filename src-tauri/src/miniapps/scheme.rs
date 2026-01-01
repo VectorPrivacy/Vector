@@ -495,16 +495,11 @@ fn serve_webxdc_js(
             
             // Set up event handler
             eventChannel.onmessage = function(message) {{
-                console.log('Realtime channel message:', JSON.stringify(message));
-                if (channel._trashed) {{
-                    console.log('Channel is trashed, ignoring message');
-                    return;
-                }}
+                if (channel._trashed) return;
                 
                 if (message.event === 'data' && message.data) {{
                     // Convert array back to Uint8Array
                     const data = new Uint8Array(message.data);
-                    console.log('Received realtime data, length:', data.length);
                     if (channel._listener) {{
                         channel._listener(data);
                     }} else {{
@@ -516,8 +511,6 @@ fn serve_webxdc_js(
                     console.log('Peer joined:', message.data);
                 }} else if (message.event === 'peerLeft') {{
                     console.log('Peer left:', message.data);
-                }} else {{
-                    console.log('Unknown realtime event:', message.event);
                 }}
             }};
             

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri::ipc::Channel;
+use futures_util::future::join_all;
 use log::{info, warn, error, trace};
 use serde::{Deserialize, Serialize};
 
@@ -643,22 +644,39 @@ pub async fn miniapp_join_realtime_channel(
     // Check for pending peers that advertised before we joined
     let pending_peers = state.take_pending_peers(&topic).await;
     let pending_peer_count = pending_peers.len();
-    println!("[WEBXDC] Checking for pending peers for topic {}: found {}", topic_encoded, pending_peer_count);
+    info!("[WEBXDC] Checking for pending peers for topic {}: found {}", topic_encoded, pending_peer_count);
     if !pending_peers.is_empty() {
-        println!("[WEBXDC] Found {} pending peers for topic {}", pending_peer_count, topic_encoded);
-        for pending in pending_peers {
-            println!("[WEBXDC] Adding pending peer {} to channel", pending.node_addr.node_id);
-            match iroh.add_peer(topic, pending.node_addr.clone()).await {
-                Ok(_) => {
-                    println!("[WEBXDC] Successfully added pending peer {} to realtime channel", pending.node_addr.node_id);
-                }
-                Err(e) => {
-                    println!("[WEBXDC] ERROR: Failed to add pending peer: {}", e);
+        info!("[WEBXDC] Found {} pending peers for topic {}, adding concurrently", pending_peer_count, topic_encoded);
+        
+        // Add all pending peers concurrently for faster connection establishment
+        let add_peer_futures: Vec<_> = pending_peers.into_iter().map(|pending| {
+            let iroh_ref = &iroh;
+            async move {
+                let node_id = pending.node_addr.node_id;
+                match iroh_ref.add_peer(topic, pending.node_addr).await {
+                    Ok(_) => {
+                        info!("[WEBXDC] Successfully added pending peer {} to realtime channel", node_id);
+                        Ok(node_id)
+                    }
+                    Err(e) => {
+                        warn!("[WEBXDC] Failed to add pending peer {}: {}", node_id, e);
+                        Err((node_id, e))
+                    }
                 }
             }
+        }).collect();
+        
+        let results = join_all(add_peer_futures).await;
+        let success_count = results.iter().filter(|r| r.is_ok()).count();
+        let fail_count = results.len() - success_count;
+        
+        if fail_count > 0 {
+            warn!("[WEBXDC] Added {}/{} pending peers ({} failed)", success_count, results.len(), fail_count);
+        } else {
+            info!("[WEBXDC] Successfully added all {} pending peers", success_count);
         }
     } else {
-        println!("[WEBXDC] No pending peers found for topic {}", topic_encoded);
+        trace!("[WEBXDC] No pending peers found for topic {}", topic_encoded);
     }
     
     // Get our node address and send a peer advertisement to the chat
