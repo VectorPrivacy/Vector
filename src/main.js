@@ -87,6 +87,18 @@ const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
+const domAttachmentPanel = document.getElementById('attachment-panel');
+const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
+const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
+const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
+const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
+const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
+const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
+const domMiniAppLaunchIconContainer = document.getElementById('miniapp-launch-icon-container');
+const domMiniAppLaunchName = document.getElementById('miniapp-launch-name');
+const domMiniAppLaunchCancel = document.getElementById('miniapp-launch-cancel');
+const domMiniAppLaunchSolo = document.getElementById('miniapp-launch-solo');
+const domMiniAppLaunchInvite = document.getElementById('miniapp-launch-invite');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMessageInputSend = document.getElementById('chat-input-send');
 const domChatInputContainer = document.querySelector('.chat-input-container');
@@ -156,6 +168,11 @@ function openEmojiPanel(e) {
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
+        // Close attachment panel if open
+        if (domAttachmentPanel.classList.contains('visible')) {
+            closeAttachmentPanel();
+        }
+
         // Reset the emoji picker state first
         resetEmojiPicker();
 
@@ -206,6 +223,488 @@ function openEmojiPanel(e) {
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
     }
+}
+
+/**
+ * Opens or closes the Attachment Panel
+ *
+ * The panel slides up from behind the chat box, similar to the emoji panel.
+ */
+function toggleAttachmentPanel() {
+    if (!domAttachmentPanel.classList.contains('visible')) {
+        // Close emoji panel if open
+        if (picker.classList.contains('visible')) {
+            picker.classList.remove('visible');
+            picker.style.bottom = '';
+            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+        }
+
+        // Display the attachment panel
+        domAttachmentPanel.classList.add('visible');
+
+        // Position attachment panel dynamically above the chat-box
+        const chatBox = document.getElementById('chat-box');
+        if (chatBox) {
+            const chatBoxHeight = chatBox.getBoundingClientRect().height;
+            domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
+        }
+        
+        // Animate items when panel opens
+        animateAttachmentPanelItems(domAttachmentPanelMain);
+    } else {
+        // Hide the attachment panel
+        closeAttachmentPanel();
+    }
+}
+
+/**
+ * Closes the Attachment Panel
+ */
+function closeAttachmentPanel() {
+    domAttachmentPanel.classList.remove('visible');
+    domAttachmentPanel.style.bottom = '';
+    // Reset to main view when closing
+    showAttachmentPanelMain();
+}
+
+/**
+ * Shows a global tooltip above the target element
+ * @param {string} text - The tooltip text
+ * @param {HTMLElement} targetElement - The element to position the tooltip above
+ */
+function showGlobalTooltip(text, targetElement) {
+    const tooltip = document.getElementById('global-tooltip');
+    if (!tooltip) return;
+    
+    tooltip.textContent = text;
+    
+    // Get the target element's position
+    const rect = targetElement.getBoundingClientRect();
+    
+    // Position tooltip above the element, centered horizontally
+    tooltip.style.left = `${rect.left + rect.width / 2}px`;
+    tooltip.style.top = `${rect.top - 8}px`;
+    tooltip.style.transform = 'translate(-50%, -100%)';
+    
+    // Show the tooltip
+    tooltip.classList.add('visible');
+}
+
+/**
+ * Hides the global tooltip
+ */
+function hideGlobalTooltip() {
+    const tooltip = document.getElementById('global-tooltip');
+    if (!tooltip) return;
+    tooltip.classList.remove('visible');
+}
+
+/**
+ * Shows the main attachment panel view (File, Mini Apps buttons)
+ */
+function showAttachmentPanelMain() {
+    domAttachmentPanelMain.style.display = 'flex';
+    domAttachmentPanelMiniAppsView.style.display = 'none';
+    
+    // Animate items with staggered delay
+    animateAttachmentPanelItems(domAttachmentPanelMain);
+}
+
+/**
+ * Shows the Mini Apps list view
+ */
+async function showAttachmentPanelMiniApps() {
+    domAttachmentPanelMain.style.display = 'none';
+    domAttachmentPanelMiniAppsView.style.display = 'flex';
+    
+    // Load Mini Apps history from backend
+    await loadMiniAppsHistory();
+    
+    // Animate items with staggered delay
+    animateAttachmentPanelItems(domAttachmentPanelMiniAppsView);
+}
+
+/**
+ * Animate attachment panel items with staggered fade-in effect
+ */
+function animateAttachmentPanelItems(container) {
+    const items = container.querySelectorAll('.attachment-panel-item');
+    const staggerDelay = 0.08; // 80ms delay between each item
+    
+    items.forEach((item, index) => {
+        // Remove any existing animation
+        item.classList.remove('animate-in');
+        item.style.animationDelay = '';
+        
+        // Force reflow to restart animation
+        void item.offsetWidth;
+        
+        // Add animation with staggered delay
+        item.style.animationDelay = `${index * staggerDelay}s`;
+        item.classList.add('animate-in');
+    });
+}
+
+/**
+ * Loads and renders the Mini Apps history in the panel
+ */
+async function loadMiniAppsHistory() {
+    try {
+        const history = await invoke('miniapp_get_history', { limit: 20 });
+        
+        // Clear existing Mini App items (keep the Back button)
+        const existingItems = domAttachmentPanelMiniAppsView.querySelectorAll('.attachment-panel-item:not(#attachment-panel-back), .attachment-panel-empty');
+        existingItems.forEach(item => item.remove());
+        
+        // Add Mini App items
+        for (const app of history) {
+            const item = document.createElement('button');
+            item.className = 'attachment-panel-item attachment-panel-miniapp';
+            
+            // Start with a placeholder icon, then load the actual icon
+            item.innerHTML = `
+                <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                    <span class="icon icon-play"></span>
+                </div>
+                <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
+            `;
+            
+            // Add tooltip on hover for the entire item
+            item.addEventListener('mouseenter', (e) => {
+                showGlobalTooltip(app.name, item);
+            });
+            item.addEventListener('mouseleave', () => {
+                hideGlobalTooltip();
+            });
+            
+            item.onclick = async () => {
+                hideGlobalTooltip();
+                closeAttachmentPanel();
+                // Open the Mini App using the stored attachment reference
+                await openMiniAppFromHistory(app);
+            };
+            domAttachmentPanelMiniAppsView.appendChild(item);
+            
+            // Load the Mini App icon asynchronously
+            loadMiniAppIcon(app, item.querySelector('.attachment-panel-btn'));
+        }
+        
+        // If no history, show a message
+        if (history.length === 0) {
+            const emptyMsg = document.createElement('div');
+            emptyMsg.className = 'attachment-panel-empty';
+            emptyMsg.textContent = 'No recent Mini Apps';
+            domAttachmentPanelMiniAppsView.appendChild(emptyMsg);
+        }
+    } catch (e) {
+        console.error('Failed to load Mini Apps history:', e);
+    }
+}
+
+/**
+ * Load Mini App icon asynchronously and update the button
+ */
+async function loadMiniAppIcon(app, btnElement) {
+    try {
+        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
+        if (info && info.icon_data) {
+            // Replace the placeholder icon with the actual Mini App icon
+            btnElement.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}" class="attachment-panel-miniapp-icon">`;
+        }
+    } catch (e) {
+        // Keep the placeholder icon if loading fails
+        console.debug('Failed to load Mini App icon:', e);
+    }
+}
+
+/**
+ * Opens a Mini App from history
+ */
+// Store the pending Mini App for the launch dialog
+let pendingMiniAppLaunch = null;
+
+/**
+ * Show the Mini App launch dialog
+ */
+async function showMiniAppLaunchDialog(app) {
+    pendingMiniAppLaunch = app;
+    
+    // Set the app name
+    domMiniAppLaunchName.textContent = app.name;
+    
+    // Try to load the Mini App icon
+    try {
+        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
+        if (info && info.icon_data) {
+            domMiniAppLaunchIconContainer.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}">`;
+        } else {
+            domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+        }
+    } catch (e) {
+        // Fallback to generic icon
+        domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+    }
+    
+    // Show the overlay
+    domMiniAppLaunchOverlay.classList.add('active');
+}
+
+/**
+ * Close the Mini App launch dialog
+ */
+function closeMiniAppLaunchDialog() {
+    domMiniAppLaunchOverlay.classList.remove('active');
+    pendingMiniAppLaunch = null;
+}
+
+/**
+ * Play Mini App solo (from original attachment)
+ */
+async function playMiniAppSolo() {
+    if (!pendingMiniAppLaunch) return;
+    
+    const app = pendingMiniAppLaunch;
+    closeMiniAppLaunchDialog();
+    
+    try {
+        // Open the Mini App directly using the cached file path
+        // Use a placeholder chat_id and message_id for solo play
+        await invoke('miniapp_open', {
+            filePath: app.src_url,
+            chatId: 'solo',
+            messageId: `solo_${Date.now()}`,
+            href: null,
+            topicId: null,
+        });
+    } catch (e) {
+        console.error('Failed to open Mini App:', e);
+    }
+}
+
+/**
+ * Play Mini App and invite (send to current chat, then open from the new message)
+ */
+async function playMiniAppAndInvite() {
+    if (!pendingMiniAppLaunch) return;
+    
+    const app = pendingMiniAppLaunch;
+    const targetChatId = strOpenChat;
+    
+    // Check if we have an active chat
+    if (!targetChatId) {
+        console.error('No active chat to send Mini App to');
+        closeMiniAppLaunchDialog();
+        // Fallback to solo play
+        await playMiniAppSoloInternal(app);
+        return;
+    }
+    
+    // Show loading state on the invite button
+    const inviteBtn = domMiniAppLaunchInvite;
+    const originalText = inviteBtn.textContent;
+    inviteBtn.disabled = true;
+    inviteBtn.innerHTML = '<span class="icon icon-loading"></span>';
+    
+    // Helper to reset button and close dialog
+    const finishAndClose = () => {
+        inviteBtn.disabled = false;
+        inviteBtn.textContent = originalText;
+        closeMiniAppLaunchDialog();
+    };
+    
+    // Determine if this is a group chat (MLS) or DM
+    const chat = arrChats.find(c => c.id === targetChatId);
+    const isGroupChat = chat && chat.type === 'GroupChat';
+    const eventName = isGroupChat ? 'mls_message_new' : 'message_new';
+    
+    // Set up a one-time listener to catch the new message and open the Mini App
+    let unlisten = null;
+    const timeoutId = setTimeout(() => {
+        // Timeout after 30 seconds - just in case the message doesn't arrive
+        if (unlisten) unlisten();
+        console.warn('Timeout waiting for Mini App message to be sent');
+        finishAndClose();
+    }, 30000);
+    
+    unlisten = await listen(eventName, async (evt) => {
+        const message = isGroupChat ? evt.payload?.message : evt.payload?.message;
+        const chatId = isGroupChat ? evt.payload?.group_id : evt.payload?.chat_id;
+        
+        console.log('Play & Invite: Received message event', { chatId, targetChatId, messageId: message?.id, attachments: message?.attachments });
+        
+        // Log full attachment details for debugging
+        if (message?.attachments) {
+            message.attachments.forEach((a, i) => {
+                console.log(`Play & Invite: Attachment ${i}:`, { name: a.name, filename: a.filename, path: a.path, mime: a.mime, ext: a.ext });
+            });
+        }
+        
+        // Check if this is our message in the target chat with a .miniapp or .xdc attachment
+        if (chatId === targetChatId && message && message.attachments) {
+            const miniAppAttachment = message.attachments.find(a => {
+                const filename = a.name || a.filename || '';
+                const path = a.path || '';
+                const ext = a.ext || '';
+                // Check for .xdc extensions
+                const isMiniApp = filename.toLowerCase().endsWith('.xdc') ||
+                                  path.toLowerCase().endsWith('.xdc') ||
+                                  ext.toLowerCase() === 'xdc';
+                return isMiniApp;
+            });
+            
+            console.log('Play & Invite: Found miniapp attachment?', miniAppAttachment);
+            
+            if (miniAppAttachment) {
+                // Found our Mini App message - clean up the message listener
+                clearTimeout(timeoutId);
+                if (unlisten) unlisten();
+                
+                const filePath = miniAppAttachment.path || app.src_url;
+                
+                // Check if this is a pending message - if so, wait for the real ID
+                if (message.id.startsWith('pending')) {
+                    console.log('Play & Invite: Message is pending, waiting for real ID...');
+                    
+                    // Track if we've already handled the update
+                    let updateHandled = false;
+                    let updateTimeoutId = null;
+                    
+                    // Set up a listener for the message_update event to get the real ID
+                    const updateUnlisten = await listen('message_update', async (updateEvt) => {
+                        if (updateHandled) return;
+                        if (updateEvt.payload.old_id === message.id && updateEvt.payload.chat_id === targetChatId) {
+                            updateHandled = true;
+                            const realMessage = updateEvt.payload.message;
+                            console.log('Play & Invite: Got real message ID:', realMessage.id);
+                            
+                            // Clear timeout and unlisten
+                            if (updateTimeoutId) clearTimeout(updateTimeoutId);
+                            updateUnlisten();
+                            
+                            // Get the topic ID from the real message's attachment
+                            let topicId = null;
+                            if (realMessage.attachments && realMessage.attachments.length > 0) {
+                                const miniappAttachment = realMessage.attachments.find(a =>
+                                    a.extension === 'xdc' || a.path?.endsWith('.xdc')
+                                );
+                                if (miniappAttachment) {
+                                    topicId = miniappAttachment.webxdc_topic;
+                                    console.log('Play & Invite: Got topic ID from attachment:', topicId);
+                                }
+                            }
+                            
+                            // Open the Mini App with the real message ID and topic
+                            try {
+                                await invoke('miniapp_open', {
+                                    filePath: filePath,
+                                    chatId: targetChatId,
+                                    messageId: realMessage.id,
+                                    href: null,
+                                    topicId: topicId,
+                                });
+                            } catch (e) {
+                                console.error('Failed to open Mini App from forwarded message:', e);
+                            }
+                            
+                            finishAndClose();
+                        }
+                    });
+                    
+                    // Set a timeout for the update listener too
+                    updateTimeoutId = setTimeout(() => {
+                        if (updateHandled) return;
+                        updateUnlisten();
+                        console.warn('Timeout waiting for message update');
+                        finishAndClose();
+                    }, 30000);
+                } else {
+                    // Message already has a real ID, open immediately
+                    console.log('Opening Mini App from forwarded message:', message.id, 'path:', filePath);
+                    
+                    // Get the topic ID from the message's attachment
+                    let topicId = null;
+                    if (message.attachments && message.attachments.length > 0) {
+                        const miniappAttachment = message.attachments.find(a =>
+                            a.extension === 'xdc' || a.path?.endsWith('.xdc')
+                        );
+                        if (miniappAttachment) {
+                            topicId = miniappAttachment.webxdc_topic;
+                            console.log('Play & Invite: Got topic ID from attachment:', topicId);
+                        }
+                    }
+                    
+                    try {
+                        await invoke('miniapp_open', {
+                            filePath: filePath,
+                            chatId: targetChatId,
+                            messageId: message.id,
+                            href: null,
+                            topicId: topicId,
+                        });
+                    } catch (e) {
+                        console.error('Failed to open Mini App from forwarded message:', e);
+                    }
+                    
+                    finishAndClose();
+                }
+            }
+        }
+    });
+    
+    try {
+        // Send the Mini App file to the current chat
+        await invoke('file_message', {
+            receiver: targetChatId,
+            repliedTo: '',
+            filePath: app.src_url,
+        });
+        
+        console.log('Mini App sent to chat successfully');
+    } catch (e) {
+        console.error('Failed to send Mini App to chat:', e);
+        // Clean up listener
+        clearTimeout(timeoutId);
+        if (unlisten) unlisten();
+        // Close dialog and reset button
+        finishAndClose();
+        // Fallback to solo play if sending fails
+        await playMiniAppSoloInternal(app);
+    }
+}
+
+/**
+ * Internal function to play Mini App solo
+ */
+async function playMiniAppSoloInternal(app) {
+    try {
+        // Open the Mini App directly using the cached file path
+        await invoke('miniapp_open', {
+            filePath: app.src_url,
+            chatId: 'solo',
+            messageId: `solo_${Date.now()}`,
+            href: null,
+            topicId: null,
+        });
+    } catch (e) {
+        console.error('Failed to open Mini App:', e);
+    }
+}
+
+/**
+ * Open Mini App from history - shows the launch dialog
+ */
+async function openMiniAppFromHistory(app) {
+    closeAttachmentPanel();
+    await showMiniAppLaunchDialog(app);
+}
+
+/**
+ * Helper function to escape HTML
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 /**
@@ -509,13 +1008,24 @@ emojiSearch.onkeydown = async (e) => {
             domChatMessageInput.focus();
         }
     } else if (e.code === 'Escape') {
-        // Close the dialog - use class instead of inline style
+        // Close the Mini App launch dialog if open
+        if (domMiniAppLaunchOverlay.classList.contains('active')) {
+            closeMiniAppLaunchDialog();
+            return;
+        }
+
+        // Close the emoji dialog - use class instead of inline style
         emojiSearch.value = '';
         picker.classList.remove('visible');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+
+        // Close the attachment panel if open
+        if (domAttachmentPanel.classList.contains('visible')) {
+            closeAttachmentPanel();
+        }
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -4164,7 +4674,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                             await openMiniApp(path, strOpenChat, msg.id, null, topicId);
                             
                             // Update UI to show "Playing" after opening
-                            if (e.currentTarget._updateMiniAppStatus) {
+                            // Safety check: e.currentTarget may be null when called from non-click context
+                            if (e.currentTarget && e.currentTarget._updateMiniAppStatus) {
                                 // Get current peer count and update status
                                 if (topicId) {
                                     invoke('miniapp_get_realtime_status', { topicId })
@@ -6108,12 +6619,25 @@ window.addEventListener("DOMContentLoaded", async () => {
             androidFileInput.value = '';
         };
         
+        // Toggle attachment panel when clicking the add-file button
         domChatMessageInputFile.onclick = () => {
+            toggleAttachmentPanel();
+        };
+
+        // Handle File button in attachment panel (Android)
+        domAttachmentPanelFile.onclick = () => {
+            closeAttachmentPanel();
             androidFileInput.click();
         };
     } else {
-        // On desktop, use Tauri dialog
-        domChatMessageInputFile.onclick = async () => {
+        // Toggle attachment panel when clicking the add-file button
+        domChatMessageInputFile.onclick = () => {
+            toggleAttachmentPanel();
+        };
+
+        // Handle File button in attachment panel (Desktop - use Tauri dialog)
+        domAttachmentPanelFile.onclick = async () => {
+            closeAttachmentPanel();
             let filepath = await selectFile();
             if (filepath) {
                 // Reset reply selection while passing a copy of the reference to the backend
@@ -6124,6 +6648,28 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
         };
     }
+
+    // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
+    domAttachmentPanelMiniApps.onclick = async () => {
+        await showAttachmentPanelMiniApps();
+    };
+
+    // Handle Back button in Mini Apps view - returns to main attachment panel
+    domAttachmentPanelBack.onclick = () => {
+        showAttachmentPanelMain();
+    };
+
+    // Mini App Launch Dialog event handlers
+    domMiniAppLaunchCancel.onclick = closeMiniAppLaunchDialog;
+    domMiniAppLaunchSolo.onclick = playMiniAppSolo;
+    domMiniAppLaunchInvite.onclick = playMiniAppAndInvite;
+    
+    // Close dialog when clicking outside
+    domMiniAppLaunchOverlay.onclick = (e) => {
+        if (e.target === domMiniAppLaunchOverlay) {
+            closeMiniAppLaunchDialog();
+        }
+    };
 
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
@@ -6578,6 +7124,15 @@ document.addEventListener('click', (e) => {
 
     // Run the emoji panel open/close logic
     openEmojiPanel(e);
+
+    // Close attachment panel when clicking outside of it
+    if (domAttachmentPanel.classList.contains('visible')) {
+        const clickedInsidePanel = domAttachmentPanel.contains(e.target);
+        const clickedFileButton = domChatMessageInputFile.contains(e.target);
+        if (!clickedInsidePanel && !clickedFileButton) {
+            closeAttachmentPanel();
+        }
+    }
 });
 
 /**

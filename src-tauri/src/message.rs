@@ -2709,3 +2709,46 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     }
     false
 }
+
+/// Forward an attachment from one message to a different chat
+/// This is used for "Play & Invite" functionality in Mini Apps
+/// Returns the new message ID if successful
+#[tauri::command]
+pub async fn forward_attachment(
+    source_msg_id: String,
+    source_attachment_id: String,
+    target_chat_id: String,
+) -> Result<String, String> {
+    // Find the source message and attachment
+    let attachment_path = {
+        let state = STATE.lock().await;
+        
+        // Search through all chats to find the message
+        let mut found_path: Option<String> = None;
+        for chat in &state.chats {
+            if let Some(msg) = chat.messages.iter().find(|m| m.id == source_msg_id) {
+                // Find the attachment in the message
+                if let Some(attachment) = msg.attachments.iter().find(|a| a.id == source_attachment_id) {
+                    if !attachment.path.is_empty() && attachment.downloaded {
+                        found_path = Some(attachment.path.clone());
+                    }
+                }
+                break;
+            }
+        }
+        
+        found_path.ok_or_else(|| "Attachment not found or not downloaded".to_string())?
+    };
+    
+    // Verify the file exists
+    if !std::path::Path::new(&attachment_path).exists() {
+        return Err("Attachment file not found on disk".to_string());
+    }
+    
+    // Send the file to the target chat using the existing file_message function
+    // The hash-based reuse will automatically avoid re-uploading
+    file_message(target_chat_id, String::new(), attachment_path).await?;
+    
+    // Return success - the new message ID will be emitted via the normal message flow
+    Ok("forwarded".to_string())
+}

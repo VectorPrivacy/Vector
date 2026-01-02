@@ -80,6 +80,12 @@
   border-color: rgba(90, 252, 180, 0.36);
 }
 
+.attachment-panel {
+  background: #0a0a0a;
+  border-width: 1px;
+  border-color: rgba(90, 252, 180, 0.36);
+}
+
 .input-box {
   background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
   -webkit-box-shadow: 

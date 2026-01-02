@@ -34,6 +34,7 @@
     "allow-voice-message",
     "allow-file-message",
     "allow-file-message-compressed",
+    "allow-forward-attachment",
     "allow-get-file-info",
     "allow-cache-android-file",
     "allow-cache-file-bytes",
@@ -126,6 +127,10 @@
     "allow-miniapp-add-realtime-peer",
     "allow-miniapp-get-realtime-node-addr",
     "allow-miniapp-get-realtime-status",
+    "allow-miniapp-record-opened",
+    "allow-miniapp-get-history",
+    "allow-miniapp-toggle-favorite",
+    "allow-miniapp-set-favorite",
     "allow-delete-whisper-model",
     "allow-list-models",
     "allow-debug-hot-reload-sync"

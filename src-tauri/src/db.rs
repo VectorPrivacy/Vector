@@ -1467,3 +1467,133 @@ pub async fn check_and_vacuum_if_needed<R: Runtime>(handle: &AppHandle<R>) -> Re
 
     Ok(())
 }
+
+// ============================================================================
+// Mini Apps History Functions
+// ============================================================================
+
+/// Mini App history entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiniAppHistoryEntry {
+    pub id: i64,
+    pub name: String,
+    pub src_url: String,
+    pub attachment_ref: String,
+    pub open_count: i64,
+    pub last_opened_at: i64,
+    pub is_favorite: bool,
+}
+
+/// Record a Mini App being opened (upsert - insert or update)
+/// If the same name+src_url combo exists, update the attachment_ref, increment count, and update timestamp
+pub fn record_miniapp_opened<R: Runtime>(
+    handle: &AppHandle<R>,
+    name: String,
+    src_url: String,
+    attachment_ref: String,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Use INSERT OR REPLACE with a subquery to preserve/increment open_count
+    // Uses UNIQUE(name) constraint - same app name always updates the existing entry
+    conn.execute(
+        r#"
+        INSERT INTO miniapps_history (name, src_url, attachment_ref, open_count, last_opened_at)
+        VALUES (?1, ?2, ?3, 1, ?4)
+        ON CONFLICT(name) DO UPDATE SET
+            src_url = excluded.src_url,
+            attachment_ref = excluded.attachment_ref,
+            open_count = open_count + 1,
+            last_opened_at = excluded.last_opened_at
+        "#,
+        rusqlite::params![name, src_url, attachment_ref, now],
+    ).map_err(|e| format!("Failed to record Mini App opened: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Get Mini Apps history sorted by last opened (most recent first)
+pub fn get_miniapps_history<R: Runtime>(
+    handle: &AppHandle<R>,
+    limit: Option<i64>,
+) -> Result<Vec<MiniAppHistoryEntry>, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let limit_val = limit.unwrap_or(50);
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, name, src_url, attachment_ref, open_count, last_opened_at, is_favorite
+        FROM miniapps_history
+        ORDER BY is_favorite DESC, last_opened_at DESC
+        LIMIT ?1
+        "#
+    ).map_err(|e| format!("Failed to prepare Mini Apps history query: {}", e))?;
+
+    let result: Vec<MiniAppHistoryEntry> = {
+        let entries = stmt.query_map(rusqlite::params![limit_val], |row| {
+            Ok(MiniAppHistoryEntry {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                src_url: row.get(2)?,
+                attachment_ref: row.get(3)?,
+                open_count: row.get(4)?,
+                last_opened_at: row.get(5)?,
+                is_favorite: row.get::<_, i64>(6)? != 0,
+            })
+        }).map_err(|e| format!("Failed to query Mini Apps history: {}", e))?;
+
+        entries.filter_map(|e| e.ok()).collect()
+    };
+
+    drop(stmt);
+    crate::account_manager::return_db_connection(conn);
+    Ok(result)
+}
+
+/// Toggle the favorite status of a Mini App by its ID
+pub fn toggle_miniapp_favorite<R: Runtime>(
+    handle: &AppHandle<R>,
+    id: i64,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Toggle the is_favorite value and return the new state
+    conn.execute(
+        "UPDATE miniapps_history SET is_favorite = NOT is_favorite WHERE id = ?1",
+        rusqlite::params![id],
+    ).map_err(|e| format!("Failed to toggle Mini App favorite: {}", e))?;
+
+    // Get the new favorite state
+    let new_state: bool = conn.query_row(
+        "SELECT is_favorite FROM miniapps_history WHERE id = ?1",
+        rusqlite::params![id],
+        |row| row.get::<_, i64>(0).map(|v| v != 0)
+    ).map_err(|e| format!("Failed to get Mini App favorite state: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(new_state)
+}
+
+/// Set the favorite status of a Mini App by its ID
+pub fn set_miniapp_favorite<R: Runtime>(
+    handle: &AppHandle<R>,
+    id: i64,
+    is_favorite: bool,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "UPDATE miniapps_history SET is_favorite = ?1 WHERE id = ?2",
+        rusqlite::params![if is_favorite { 1 } else { 0 }, id],
+    ).map_err(|e| format!("Failed to set Mini App favorite: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}

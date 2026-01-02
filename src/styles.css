@@ -116,6 +116,10 @@
   mask-image: url("./icons/user-circle.svg");
 }
 
+.icon-plus {
+  mask-image: url("./icons/plus.svg");
+}
+
 .icon-reply {
   mask-image: url("./icons/reply.svg");
 }
@@ -1904,6 +1908,185 @@ html, body {
   height: 30px;
   border-radius: 100%;
   display: inline-block;
+}
+
+/* Attachment Panel Styles */
+.attachment-panel {
+  position: fixed;
+  bottom: 65px;
+  left: 50%;
+  transform: translateX(-50%) translateY(100%);
+  background: #0a0a0a;
+  border: 1px solid var(--icon-color-primary);
+  border-radius: 12px;
+  padding: 16px;
+  z-index: 2000;
+  width: calc(100% - 55px);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+  pointer-events: none;
+  opacity: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.attachment-panel.visible {
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.attachment-panel-content {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: flex-start;
+  align-items: flex-start;
+}
+
+/* Mini Apps view - simple centered flexbox */
+#attachment-panel-miniapps-view {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.attachment-panel-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.2s ease;
+}
+
+.attachment-panel-item:hover {
+  transform: scale(1.05);
+}
+
+.attachment-panel-item:hover .attachment-panel-btn {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: var(--icon-color-primary);
+}
+
+.attachment-panel-item:active {
+  transform: scale(0.95);
+}
+
+.attachment-panel-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid transparent;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  pointer-events: none;
+}
+
+.attachment-panel-btn .icon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 26px;
+  height: 26px;
+  margin: auto;
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
+.attachment-panel-label {
+  position: relative;
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 500;
+  text-align: center;
+  white-space: nowrap;
+  max-width: 64px;
+}
+
+.attachment-panel-label.cutoff {
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+/* Global tooltip - positioned absolutely in the viewport */
+.global-tooltip {
+  position: fixed;
+  background-color: rgba(0, 0, 0, 0.9);
+  color: white;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--icon-color-primary);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 100000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.global-tooltip.visible {
+  opacity: 1;
+}
+
+/* Empty state for attachment panel views */
+.attachment-panel-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 16px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  text-align: center;
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
+/* Mini App icon in attachment panel - fills the entire button */
+.attachment-panel-miniapp-btn {
+  overflow: hidden;
+  padding: 0;
+}
+
+.attachment-panel-miniapp-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 12px;
+}
+
+/* Staggered fade-in animation for attachment panel items */
+@keyframes attachmentPanelItemFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.attachment-panel-item.animate-in {
+  opacity: 0;
+  animation: attachmentPanelItemFadeIn 0.3s ease forwards;
 }
 
 .row {
@@ -4817,3 +5000,123 @@ hr {
 .file-preview-icon-container.file-preview-miniapp {
   flex-direction: column;
 }
+
+/* Mini App Launch Dialog */
+.miniapp-launch-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.miniapp-launch-overlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.miniapp-launch-container {
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 24px;
+  width: min(360px, calc(100vw - 40px));
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.miniapp-launch-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.miniapp-launch-icon-container {
+  width: 100px;
+  height: 100px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.miniapp-launch-icon-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 20px;
+}
+
+.miniapp-launch-icon-container .icon {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  width: 50px;
+  height: 50px;
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
+.miniapp-launch-info {
+  text-align: center;
+}
+
+.miniapp-launch-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  word-break: break-word;
+}
+
+/* Scoped button styles for Mini App launch dialog */
+.miniapp-launch-container .file-preview-btn {
+  padding: 10px 16px;
+}
+
+#miniapp-launch-cancel {
+  opacity: 0.6;
+}
+
+#miniapp-launch-cancel:hover {
+  opacity: 0.8;
+}
+
+/* Loading spinner inside Mini App launch buttons */
+.miniapp-launch-container .file-preview-btn .icon {
+  display: inline-block;
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  width: 18px;
+  height: 18px;
+  background-color: #000;
+  animation: spin 1s linear infinite;
+}
+

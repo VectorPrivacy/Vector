@@ -5049,6 +5049,7 @@ pub fn run() {
             message::voice_message,
             message::file_message,
             message::file_message_compressed,
+            message::forward_attachment,
             message::get_file_info,
             message::cache_android_file,
             message::cache_file_bytes,
@@ -5151,6 +5152,11 @@ pub fn run() {
             miniapps::commands::miniapp_add_realtime_peer,
             miniapps::commands::miniapp_get_realtime_node_addr,
             miniapps::commands::miniapp_get_realtime_status,
+            // Mini Apps history commands
+            miniapps::commands::miniapp_record_opened,
+            miniapps::commands::miniapp_get_history,
+            miniapps::commands::miniapp_toggle_favorite,
+            miniapps::commands::miniapp_set_favorite,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

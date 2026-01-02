@@ -116,6 +116,17 @@ CREATE TABLE IF NOT EXISTS mls_event_cursors (
     last_seen_event_id TEXT NOT NULL,
     last_seen_at INTEGER NOT NULL
 );
+
+-- Mini Apps history table (tracks recently used Mini Apps)
+CREATE TABLE IF NOT EXISTS miniapps_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    src_url TEXT NOT NULL,
+    attachment_ref TEXT NOT NULL,
+    open_count INTEGER NOT NULL DEFAULT 1,
+    last_opened_at INTEGER NOT NULL,
+    is_favorite INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Get the profile directory for a given npub (full npub, no truncation)
@@ -427,6 +438,34 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         ).map_err(|e| format!("Failed to create wrapper_event_id index: {}", e))?;
 
         println!("[Migration] wrapper_event_id column added successfully");
+    }
+
+    // Migration 2: Create miniapps_history table if it doesn't exist
+    let has_miniapps_history: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapps_history'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_miniapps_history {
+        println!("[Migration] Creating miniapps_history table...");
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS miniapps_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                src_url TEXT NOT NULL,
+                attachment_ref TEXT,
+                open_count INTEGER DEFAULT 1,
+                last_opened_at INTEGER NOT NULL,
+                is_favorite INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+            []
+        ).map_err(|e| format!("Failed to create miniapps_history table: {}", e))?;
+
+        println!("[Migration] miniapps_history table created successfully");
     }
 
     Ok(())

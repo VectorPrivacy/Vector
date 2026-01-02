@@ -98,6 +98,54 @@
   </div>
 </div>
 
+<!-- The Attachment panel popup -->
+<div class="attachment-panel" id="attachment-panel" tabindex="-1">
+  <!-- Main attachment options view -->
+  <div class="attachment-panel-content" id="attachment-panel-main">
+    <button class="attachment-panel-item" id="attachment-panel-file">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-file"></span>
+      </div>
+      <span class="attachment-panel-label">File</span>
+    </button>
+    <button class="attachment-panel-item" id="attachment-panel-miniapps">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-play"></span>
+      </div>
+      <span class="attachment-panel-label">Mini Apps</span>
+    </button>
+  </div>
+  <!-- Mini Apps list view (hidden by default) -->
+  <div class="attachment-panel-content" id="attachment-panel-miniapps-view" style="display: none;">
+    <button class="attachment-panel-item" id="attachment-panel-back">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-chevron-double-left"></span>
+      </div>
+      <span class="attachment-panel-label">Back</span>
+    </button>
+    <!-- Mini Apps will be dynamically inserted here -->
+  </div>
+</div>
+
+<!-- Mini App Launch Dialog -->
+<div class="miniapp-launch-overlay" id="miniapp-launch-overlay">
+  <div class="miniapp-launch-container">
+    <div class="miniapp-launch-inner">
+      <div class="miniapp-launch-icon-container" id="miniapp-launch-icon-container">
+        <!-- Icon will be inserted here -->
+      </div>
+      <div class="miniapp-launch-info">
+        <div class="miniapp-launch-name" id="miniapp-launch-name"></div>
+      </div>
+    </div>
+    <div class="file-preview-buttons">
+      <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-cancel">Cancel</button>
+      <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-solo">Play</button>
+      <button class="file-preview-btn file-preview-btn-send" id="miniapp-launch-invite">Play & Invite</button>
+    </div>
+  </div>
+</div>
+
 <div id="profile" class="chats" style="display: none;">
   <div class="profile-header">
     <div id="profile-back-btn" class="btn nav-back-btn">
@@ -258,7 +306,7 @@
 
         <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
-            <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
+            <button id="chat-input-file"><span class="icon icon-plus"></span></button>
             <input type="file" id="chat-input-file-hidden" style="display: none;" accept="*/*">
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
@@ -661,5 +709,8 @@
       </div>
 
     </main>
+  
+  <!-- Global tooltip element -->
+  <div id="global-tooltip" class="global-tooltip"></div>
   </body>
 </html>

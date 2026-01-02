@@ -45,6 +45,9 @@ pub enum Error {
     
     #[error("Realtime channel error: {0}")]
     RealtimeError(String),
+    
+    #[error("Database error: {0}")]
+    DatabaseError(String),
 }
 
 impl serde::Serialize for Error {

@@ -457,6 +457,18 @@ pub async fn miniapp_open(
     
     info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
     
+    // Record to Mini Apps history
+    // Use file_path as attachment_ref since it uniquely identifies the Mini App
+    let attachment_ref = file_path.clone();
+    if let Err(e) = crate::db::record_miniapp_opened(
+        &app,
+        package.manifest.name.clone(),
+        file_path.clone(),
+        attachment_ref,
+    ) {
+        warn!("Failed to record Mini App to history: {}", e);
+    }
+    
     Ok(())
 }
 
@@ -915,4 +927,51 @@ pub async fn miniapp_get_realtime_status(
             })
         }
     }
+}
+
+// ============================================================================
+// Mini Apps History Commands
+// ============================================================================
+
+/// Record that a Mini App was opened
+/// This tracks the app name, source URL, and the attachment reference for quick re-opening
+#[tauri::command]
+pub async fn miniapp_record_opened(
+    app: AppHandle,
+    name: String,
+    src_url: String,
+    attachment_ref: String,
+) -> Result<(), Error> {
+    crate::db::record_miniapp_opened(&app, name, src_url, attachment_ref)
+        .map_err(|e| Error::DatabaseError(e))
+}
+
+/// Get the Mini Apps history (recently used apps)
+/// Returns a list of Mini Apps sorted by last opened time (most recent first)
+#[tauri::command]
+pub async fn miniapp_get_history(
+    app: AppHandle,
+    limit: Option<i64>,
+) -> Result<Vec<crate::db::MiniAppHistoryEntry>, Error> {
+    crate::db::get_miniapps_history(&app, limit)
+        .map_err(|e| Error::DatabaseError(e))
+}
+
+#[tauri::command]
+pub async fn miniapp_toggle_favorite(
+    app: AppHandle,
+    id: i64,
+) -> Result<bool, Error> {
+    crate::db::toggle_miniapp_favorite(&app, id)
+        .map_err(|e| Error::DatabaseError(e))
+}
+
+#[tauri::command]
+pub async fn miniapp_set_favorite(
+    app: AppHandle,
+    id: i64,
+    is_favorite: bool,
+) -> Result<(), Error> {
+    crate::db::set_miniapp_favorite(&app, id, is_favorite)
+        .map_err(|e| Error::DatabaseError(e))
 }
