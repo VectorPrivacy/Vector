@@ -26,6 +26,9 @@ pub struct MiniAppManifest {
     /// Optional version string
     #[serde(default)]
     pub version: String,
+    /// Optional source code URL (e.g., GitHub repository)
+    #[serde(default)]
+    pub source_code_url: Option<String>,
 }
 
 /// Represents a Mini App package (a .xdc file which is a ZIP archive)

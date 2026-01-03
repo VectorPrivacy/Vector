@@ -93,6 +93,11 @@ const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
 const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
 const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
 const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
+const domAttachmentPanelMarketplace = document.getElementById('attachment-panel-marketplace');
+const domMarketplacePanel = document.getElementById('marketplace-panel');
+const domMarketplaceBackBtn = document.getElementById('marketplace-back-btn');
+const domMarketplaceRefreshBtn = document.getElementById('marketplace-refresh-btn');
+const domMarketplaceContent = document.getElementById('marketplace-content');
 const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
 const domMiniAppLaunchIconContainer = document.getElementById('miniapp-launch-icon-container');
 const domMiniAppLaunchName = document.getElementById('miniapp-launch-name');
@@ -325,6 +330,37 @@ async function showAttachmentPanelMiniApps() {
 }
 
 /**
+ * Shows the marketplace panel
+ */
+function showMarketplacePanel() {
+    if (domMarketplacePanel) {
+        domMarketplacePanel.style.display = 'flex';
+        // Initialize marketplace on first show
+        initMarketplace(domMarketplaceContent);
+    }
+}
+
+/**
+ * Hides the marketplace panel with fade out animation
+ * @returns {Promise<void>} Resolves when the animation completes
+ */
+function hideMarketplacePanel() {
+    return new Promise((resolve) => {
+        if (domMarketplacePanel && domMarketplacePanel.style.display !== 'none') {
+            domMarketplacePanel.classList.add('closing');
+            domMarketplacePanel.addEventListener('animationend', function handler() {
+                domMarketplacePanel.removeEventListener('animationend', handler);
+                domMarketplacePanel.style.display = 'none';
+                domMarketplacePanel.classList.remove('closing');
+                resolve();
+            });
+        } else {
+            resolve();
+        }
+    });
+}
+
+/**
  * Animate attachment panel items with staggered fade-in effect
  */
 function animateAttachmentPanelItems(container) {
@@ -352,8 +388,8 @@ async function loadMiniAppsHistory() {
     try {
         const history = await invoke('miniapp_get_history', { limit: 20 });
         
-        // Clear existing Mini App items (keep the Back button)
-        const existingItems = domAttachmentPanelMiniAppsView.querySelectorAll('.attachment-panel-item:not(#attachment-panel-back), .attachment-panel-empty');
+        // Clear existing Mini App items (keep the Back button and Marketplace button)
+        const existingItems = domAttachmentPanelMiniAppsView.querySelectorAll('.attachment-panel-item:not(#attachment-panel-back):not(#attachment-panel-marketplace), .attachment-panel-empty');
         existingItems.forEach(item => item.remove());
         
         // Add Mini App items
@@ -424,6 +460,31 @@ async function loadMiniAppIcon(app, btnElement) {
 let pendingMiniAppLaunch = null;
 
 /**
+ * Check if a Mini App is a game based on its categories
+ * @param {Object} app - The app object with categories field
+ * @returns {boolean} True if the app is a game
+ */
+function isMiniAppGame(app) {
+    // If no categories, default to game
+    if (!app.categories) {
+        return true;
+    }
+    
+    // Categories can be a comma-separated string or an array
+    let cats = app.categories;
+    if (typeof cats === 'string') {
+        cats = cats.split(',').map(c => c.trim().toLowerCase()).filter(c => c);
+    } else if (Array.isArray(cats)) {
+        cats = cats.map(c => c.toLowerCase());
+    } else {
+        return true; // Default to game
+    }
+    
+    // It's a game if it has "game" tag OR doesn't have "app" tag
+    return cats.includes('game') || !cats.includes('app');
+}
+
+/**
  * Show the Mini App launch dialog
  */
 async function showMiniAppLaunchDialog(app) {
@@ -431,6 +492,12 @@ async function showMiniAppLaunchDialog(app) {
     
     // Set the app name
     domMiniAppLaunchName.textContent = app.name;
+    
+    // Determine if this is a game or app and update button text accordingly
+    const isGame = isMiniAppGame(app);
+    const actionText = isGame ? 'Play' : 'Open';
+    domMiniAppLaunchSolo.textContent = actionText;
+    domMiniAppLaunchInvite.textContent = `${actionText} & Invite`;
     
     // Try to load the Mini App icon
     try {
@@ -5480,6 +5547,7 @@ async function openProfile(cProfile) {
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
     domChat.style.display = 'none'; // Hide the chat view when opening profile
+    domSettingsBtn.style.display = ''; // Ensure settings button is visible (may have been hidden by openChat)
 
     // Render our own profile by default, but otherwise; the given one
     if (!cProfile) {
@@ -6671,6 +6739,31 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     };
 
+    // Marketplace event handlers
+    if (domAttachmentPanelMarketplace) {
+        domAttachmentPanelMarketplace.onclick = async () => {
+            closeAttachmentPanel();
+            showMarketplacePanel();
+        };
+    }
+
+    if (domMarketplaceBackBtn) {
+        domMarketplaceBackBtn.onclick = () => {
+            hideMarketplacePanel();
+        };
+    }
+
+    if (domMarketplaceRefreshBtn) {
+        domMarketplaceRefreshBtn.onclick = async () => {
+            domMarketplaceRefreshBtn.classList.add('loading');
+            try {
+                await refreshMarketplace(domMarketplaceContent);
+            } finally {
+                domMarketplaceRefreshBtn.classList.remove('loading');
+            }
+        };
+    }
+
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
         if (strOpenChat) {
@@ -7153,6 +7246,9 @@ function adjustSize() {
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     softChatScroll();
+
+    // Re-truncate marketplace category tags on resize
+    truncateAllCategoryTags();
 }
 
 /**

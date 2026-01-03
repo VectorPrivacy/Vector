@@ -18,6 +18,7 @@
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
     <script src="/js/miniapps.js" defer></script>
+    <script src="/js/marketplace.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <!-- DOMPurify - HTML sanitization -->
     <script src="/js/dompurify.min.js"></script>
@@ -123,7 +124,57 @@
       </div>
       <span class="attachment-panel-label">Back</span>
     </button>
+    <button class="attachment-panel-item" id="attachment-panel-marketplace">
+      <div class="attachment-panel-btn attachment-panel-marketplace-btn">
+        <span class="icon icon-star"></span>
+      </div>
+      <span class="attachment-panel-label">Marketplace</span>
+    </button>
     <!-- Mini Apps will be dynamically inserted here -->
+  </div>
+</div>
+
+<!-- Mini Apps Marketplace Panel -->
+<div class="marketplace-panel" id="marketplace-panel" style="display: none;">
+  <div class="marketplace-header">
+    <div class="btn nav-back-btn marketplace-back-btn" id="marketplace-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <h2 class="marketplace-title">Marketplace</h2>
+    <div class="btn marketplace-refresh-btn" id="marketplace-refresh-btn">
+      <span class="icon icon-loading nav-icon"></span>
+    </div>
+  </div>
+  <div class="marketplace-search-container">
+    <span class="marketplace-search-icon icon icon-search"></span>
+    <input type="text" id="marketplace-search-input" placeholder="Search apps..." autocomplete="off">
+  </div>
+  <div class="marketplace-filters" id="marketplace-filters" style="display: none;">
+    <div class="marketplace-active-filters" id="marketplace-active-filters">
+      <!-- Active filter tags will be inserted here -->
+    </div>
+  </div>
+  <div class="marketplace-scroll-container">
+    <div class="marketplace-featured" id="marketplace-featured">
+      <!-- Featured categories with card-spread previews will be inserted here -->
+    </div>
+    <div class="marketplace-content" id="marketplace-content">
+      <!-- Marketplace apps will be dynamically inserted here -->
+    </div>
+  </div>
+</div>
+
+<!-- App Details Panel -->
+<div class="app-details-panel" id="app-details-panel" style="display: none;">
+  <div class="app-details-header">
+    <div class="btn nav-back-btn app-details-back-btn" id="app-details-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <h2 class="app-details-title">App Details</h2>
+    <div class="app-details-header-spacer"></div>
+  </div>
+  <div class="app-details-content" id="app-details-content">
+    <!-- App details will be dynamically inserted here -->
   </div>
 </div>
 

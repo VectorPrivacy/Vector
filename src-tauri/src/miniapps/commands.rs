@@ -28,6 +28,8 @@ pub struct MiniAppInfo {
     pub has_icon: bool,
     /// Base64-encoded icon data URL (e.g., "data:image/png;base64,...")
     pub icon_data: Option<String>,
+    /// Optional source code URL from manifest
+    pub source_code_url: Option<String>,
 }
 
 impl MiniAppInfo {
@@ -58,6 +60,7 @@ impl MiniAppInfo {
             version: pkg.manifest.version.clone(),
             has_icon: icon_data.is_some(),
             icon_data,
+            source_code_url: pkg.manifest.source_code_url.clone(),
         }
     }
 }
@@ -222,6 +225,7 @@ pub async fn miniapp_load_info_from_bytes(
         version: manifest.version,
         has_icon: icon_data.is_some(),
         icon_data,
+        source_code_url: manifest.source_code_url,
     })
 }
 
@@ -974,4 +978,196 @@ pub async fn miniapp_set_favorite(
 ) -> Result<(), Error> {
     crate::db::set_miniapp_favorite(&app, id, is_favorite)
         .map_err(|e| Error::DatabaseError(e))
+}
+
+// ============================================================================
+// Mini Apps Marketplace Commands
+// ============================================================================
+
+use super::marketplace::{MarketplaceApp, InstallStatus, MARKETPLACE_STATE};
+
+/// Fetch available apps from the marketplace
+/// If trusted_only is true, only apps from trusted publishers are returned
+#[tauri::command]
+pub async fn marketplace_fetch_apps(
+    trusted_only: Option<bool>,
+) -> Result<Vec<MarketplaceApp>, Error> {
+    let trusted = trusted_only.unwrap_or(true);
+    super::marketplace::fetch_marketplace_apps(trusted)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Get cached marketplace apps (without fetching from network)
+#[tauri::command]
+pub async fn marketplace_get_cached_apps() -> Result<Vec<MarketplaceApp>, Error> {
+    let state = MARKETPLACE_STATE.read().await;
+    Ok(state.get_apps())
+}
+
+/// Get a specific marketplace app by ID
+#[tauri::command]
+pub async fn marketplace_get_app(
+    app_id: String,
+) -> Result<Option<MarketplaceApp>, Error> {
+    let state = MARKETPLACE_STATE.read().await;
+    Ok(state.get_app(&app_id).cloned())
+}
+
+/// Get the installation status of a marketplace app
+#[tauri::command]
+pub async fn marketplace_get_install_status(
+    app_id: String,
+) -> Result<InstallStatus, Error> {
+    let state = MARKETPLACE_STATE.read().await;
+    Ok(state.get_install_status(&app_id))
+}
+
+/// Install a marketplace app (download from Blossom)
+#[tauri::command]
+pub async fn marketplace_install_app(
+    app: AppHandle,
+    app_id: String,
+) -> Result<String, Error> {
+    super::marketplace::install_marketplace_app(&app, &app_id)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Check if a marketplace app is already installed locally
+#[tauri::command]
+pub async fn marketplace_check_installed(
+    app: AppHandle,
+    app_id: String,
+) -> Result<Option<String>, Error> {
+    Ok(super::marketplace::check_app_installed(&app, &app_id).await)
+}
+
+/// Sync installation status for all cached apps
+/// This checks which apps are already downloaded locally
+#[tauri::command]
+pub async fn marketplace_sync_install_status(
+    app: AppHandle,
+) -> Result<(), Error> {
+    let app_ids: Vec<String> = {
+        let state = MARKETPLACE_STATE.read().await;
+        state.get_apps().iter().map(|a| a.id.clone()).collect()
+    };
+
+    for app_id in app_ids {
+        if let Some(path) = super::marketplace::check_app_installed(&app, &app_id).await {
+            let mut state = MARKETPLACE_STATE.write().await;
+            state.set_install_status(&app_id, InstallStatus::Installed { path });
+        } else {
+            // File doesn't exist, mark as not installed
+            let mut state = MARKETPLACE_STATE.write().await;
+            state.set_install_status(&app_id, InstallStatus::NotInstalled);
+        }
+    }
+
+    Ok(())
+}
+
+/// Add a trusted publisher to the marketplace
+#[tauri::command]
+pub async fn marketplace_add_trusted_publisher(
+    npub: String,
+) -> Result<(), Error> {
+    let mut state = MARKETPLACE_STATE.write().await;
+    state.add_trusted_publisher(npub);
+    Ok(())
+}
+
+/// Open a marketplace app (install if needed, then launch)
+#[tauri::command]
+pub async fn marketplace_open_app(
+    app: AppHandle,
+    app_id: String,
+) -> Result<(), Error> {
+    // Check if already installed
+    let local_path = super::marketplace::check_app_installed(&app, &app_id).await;
+    
+    let file_path = match local_path {
+        Some(path) => path,
+        None => {
+            // Install first
+            super::marketplace::install_marketplace_app(&app, &app_id)
+                .await
+                .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))?
+        }
+    };
+
+    // Open the Mini App
+    // Use empty chat_id and message_id for marketplace apps (solo play)
+    miniapp_open(
+        app,
+        file_path,
+        "".to_string(),
+        "".to_string(),
+        None,
+        None,
+    ).await
+}
+
+/// Uninstall a marketplace app
+#[tauri::command]
+pub async fn marketplace_uninstall_app(
+    app: AppHandle,
+    app_id: String,
+    app_name: String,
+) -> Result<(), Error> {
+    super::marketplace::uninstall_marketplace_app(&app, &app_id, &app_name)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Publish a Mini App to the marketplace
+/// This uploads the .xdc file to Blossom and publishes a Nostr event with the metadata
+#[tauri::command]
+pub async fn marketplace_publish_app(
+    _app: AppHandle,
+    file_path: String,
+    app_id: String,
+    name: String,
+    description: String,
+    version: String,
+    categories: Vec<String>,
+    changelog: Option<String>,
+    developer: Option<String>,
+    source_url: Option<String>,
+) -> Result<String, Error> {
+    use crate::{NOSTR_CLIENT, get_blossom_servers};
+    
+    let client = NOSTR_CLIENT.get()
+        .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("Nostr client not initialized")))?;
+    
+    let signer = client.signer().await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to get signer: {}", e)))?;
+    
+    let blossom_servers = get_blossom_servers();
+    
+    // Convert categories to &str for the function
+    let category_refs: Vec<&str> = categories.iter().map(|s| s.as_str()).collect();
+    
+    super::marketplace::publish_to_marketplace(
+        signer,
+        &file_path,
+        &app_id,
+        &name,
+        &description,
+        &version,
+        category_refs,
+        changelog.as_deref(),
+        developer.as_deref(),
+        source_url.as_deref(),
+        blossom_servers,
+    )
+    .await
+    .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Get the trusted publisher npub for the marketplace
+#[tauri::command]
+pub async fn marketplace_get_trusted_publisher() -> Result<String, Error> {
+    Ok(super::marketplace::TRUSTED_PUBLISHER.to_string())
 }

@@ -14,6 +14,7 @@ let pendingReplyRef = null;
 let compressionInProgress = false;
 let compressionComplete = false;
 let compressionPollingInterval = null;
+let pendingMiniAppInfo = null; // For marketplace publishing: stores Mini App info
 
 // Image extensions supported by the image crate
 const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
@@ -164,6 +165,9 @@ function createFilePreviewOverlay() {
                 <div class="file-preview-options" id="file-preview-options"></div>
             </div>
             <div class="file-preview-buttons">
+                <button class="file-preview-btn file-preview-btn-publish" id="file-preview-publish" style="display: none;">
+                    <span class="icon icon-star"></span> Publish
+                </button>
                 <button class="file-preview-btn file-preview-btn-cancel" id="file-preview-cancel">Cancel</button>
                 <button class="file-preview-btn file-preview-btn-send" id="file-preview-send">Send</button>
             </div>
@@ -175,6 +179,7 @@ function createFilePreviewOverlay() {
     // Event listeners
     document.getElementById('file-preview-cancel').addEventListener('click', closeFilePreview);
     document.getElementById('file-preview-send').addEventListener('click', sendPreviewedFile);
+    document.getElementById('file-preview-publish').addEventListener('click', openPublishDialog);
     
     // Close on background click
     filePreviewOverlay.addEventListener('click', (e) => {
@@ -189,6 +194,21 @@ function createFilePreviewOverlay() {
             closeFilePreview();
         }
     });
+}
+
+/**
+ * Open the publish dialog for marketplace publishing
+ */
+async function openPublishDialog() {
+    if (!pendingFile || !pendingMiniAppInfo) {
+        return console.error('No pending file or Mini App info for publishing');
+    }
+    
+    // Close the file preview first
+    closeFilePreview();
+    
+    // Open the publish dialog
+    await showPublishAppDialog(pendingFile, pendingMiniAppInfo);
 }
 
 /**
@@ -370,9 +390,45 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         optionsArea.innerHTML = '';
     }
     
+    // Store Mini App info for potential publishing
+    pendingMiniAppInfo = miniAppInfo;
+    
+    // Show/hide publish button for trusted publishers with Mini Apps
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) {
+        if (isMiniApp) {
+            // Check if current user is a trusted publisher
+            checkAndShowPublishButton(publishBtn);
+        } else {
+            publishBtn.style.display = 'none';
+        }
+    }
+    
     // Show overlay
     filePreviewOverlay.style.display = 'flex';
     setTimeout(() => filePreviewOverlay.classList.add('active'), 10);
+}
+
+/**
+ * Check if current user is trusted publisher and show publish button
+ * @param {HTMLElement} publishBtn - The publish button element
+ */
+async function checkAndShowPublishButton(publishBtn) {
+    console.log('[FilePreview] Checking if user is trusted publisher...');
+    try {
+        // Check if isCurrentUserTrustedPublisher is available from marketplace.js
+        if (typeof isCurrentUserTrustedPublisher === 'function') {
+            const isTrusted = await isCurrentUserTrustedPublisher();
+            console.log('[FilePreview] isTrusted:', isTrusted);
+            publishBtn.style.display = isTrusted ? 'flex' : 'none';
+        } else {
+            console.log('[FilePreview] isCurrentUserTrustedPublisher function not available');
+            publishBtn.style.display = 'none';
+        }
+    } catch (e) {
+        console.error('Failed to check trusted publisher status:', e);
+        publishBtn.style.display = 'none';
+    }
 }
 
 /**

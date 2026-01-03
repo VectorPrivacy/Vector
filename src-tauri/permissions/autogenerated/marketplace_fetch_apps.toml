@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-marketplace-fetch-apps"
+description = "Enables the marketplace_fetch_apps command without any pre-configured scope."
+commands.allow = ["marketplace_fetch_apps"]
+
+[[permission]]
+identifier = "deny-marketplace-fetch-apps"
+description = "Denies the marketplace_fetch_apps command without any pre-configured scope."
+commands.deny = ["marketplace_fetch_apps"]

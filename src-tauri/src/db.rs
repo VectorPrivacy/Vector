@@ -1482,6 +1482,10 @@ pub struct MiniAppHistoryEntry {
     pub open_count: i64,
     pub last_opened_at: i64,
     pub is_favorite: bool,
+    /// Comma-separated list of categories (e.g., "game" or "app")
+    pub categories: String,
+    /// Optional marketplace app ID for linking to marketplace
+    pub marketplace_id: Option<String>,
 }
 
 /// Record a Mini App being opened (upsert - insert or update)
@@ -1491,6 +1495,18 @@ pub fn record_miniapp_opened<R: Runtime>(
     name: String,
     src_url: String,
     attachment_ref: String,
+) -> Result<(), String> {
+    record_miniapp_opened_with_metadata(handle, name, src_url, attachment_ref, String::new(), None)
+}
+
+/// Record a Mini App being opened with additional metadata (categories and marketplace_id)
+pub fn record_miniapp_opened_with_metadata<R: Runtime>(
+    handle: &AppHandle<R>,
+    name: String,
+    src_url: String,
+    attachment_ref: String,
+    categories: String,
+    marketplace_id: Option<String>,
 ) -> Result<(), String> {
     let conn = crate::account_manager::get_db_connection(handle)?;
 
@@ -1503,15 +1519,17 @@ pub fn record_miniapp_opened<R: Runtime>(
     // Uses UNIQUE(name) constraint - same app name always updates the existing entry
     conn.execute(
         r#"
-        INSERT INTO miniapps_history (name, src_url, attachment_ref, open_count, last_opened_at)
-        VALUES (?1, ?2, ?3, 1, ?4)
+        INSERT INTO miniapps_history (name, src_url, attachment_ref, open_count, last_opened_at, categories, marketplace_id)
+        VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)
         ON CONFLICT(name) DO UPDATE SET
             src_url = excluded.src_url,
             attachment_ref = excluded.attachment_ref,
             open_count = open_count + 1,
-            last_opened_at = excluded.last_opened_at
+            last_opened_at = excluded.last_opened_at,
+            categories = CASE WHEN excluded.categories != '' THEN excluded.categories ELSE categories END,
+            marketplace_id = CASE WHEN excluded.marketplace_id IS NOT NULL THEN excluded.marketplace_id ELSE marketplace_id END
         "#,
-        rusqlite::params![name, src_url, attachment_ref, now],
+        rusqlite::params![name, src_url, attachment_ref, now, categories, marketplace_id],
     ).map_err(|e| format!("Failed to record Mini App opened: {}", e))?;
 
     crate::account_manager::return_db_connection(conn);
@@ -1529,7 +1547,7 @@ pub fn get_miniapps_history<R: Runtime>(
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, name, src_url, attachment_ref, open_count, last_opened_at, is_favorite
+        SELECT id, name, src_url, attachment_ref, open_count, last_opened_at, is_favorite, categories, marketplace_id
         FROM miniapps_history
         ORDER BY is_favorite DESC, last_opened_at DESC
         LIMIT ?1
@@ -1546,6 +1564,8 @@ pub fn get_miniapps_history<R: Runtime>(
                 open_count: row.get(4)?,
                 last_opened_at: row.get(5)?,
                 is_favorite: row.get::<_, i64>(6)? != 0,
+                categories: row.get(7)?,
+                marketplace_id: row.get(8)?,
             })
         }).map_err(|e| format!("Failed to query Mini Apps history: {}", e))?;
 
@@ -1593,6 +1613,22 @@ pub fn set_miniapp_favorite<R: Runtime>(
         "UPDATE miniapps_history SET is_favorite = ?1 WHERE id = ?2",
         rusqlite::params![if is_favorite { 1 } else { 0 }, id],
     ).map_err(|e| format!("Failed to set Mini App favorite: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Remove a Mini App from history by name
+pub fn remove_miniapp_from_history<R: Runtime>(
+    handle: &AppHandle<R>,
+    name: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "DELETE FROM miniapps_history WHERE name = ?1",
+        rusqlite::params![name],
+    ).map_err(|e| format!("Failed to remove Mini App from history: {}", e))?;
 
     crate::account_manager::return_db_connection(conn);
     Ok(())

@@ -266,7 +266,7 @@ html, body {
 }
 
 .popup-container {
-  z-index: 9999;
+  z-index: 10002;
   width: 100%;
   height: 100%;
   display: flex;
@@ -288,7 +288,7 @@ html, body {
 
 .popup {
   position: fixed;
-  z-index: 10000;
+  z-index: 10001;
   /* Too many weird WebKit filter issues - disabling and going solid for now */
   /* backdrop-filter: blur(10px); */
   border-style: solid;
@@ -416,6 +416,11 @@ html, body {
 
 @keyframes fadeInWithoutTransform {
   0% { opacity: 0; }
+}
+
+@keyframes fadeOutWithoutTransform {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .intro-anim-widen {
@@ -4977,6 +4982,25 @@ hr {
   cursor: not-allowed;
 }
 
+.file-preview-btn-publish {
+  background-color: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.file-preview-btn-publish .icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  background-color: #fff;
+}
+
+.file-preview-btn-publish:hover {
+  background-color: rgba(255, 255, 255, 0.25);
+}
 
 /* Mini App Preview Styles */
 .file-preview-miniapp {
@@ -5119,4 +5143,1248 @@ hr {
   background-color: #000;
   animation: spin 1s linear infinite;
 }
+
+/* ============================================================================
+   Mini Apps Marketplace Styles
+   ============================================================================ */
+
+/* Marketplace button in attachment panel */
+.attachment-panel-marketplace-btn {
+  background-color: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* Marketplace Panel */
+.marketplace-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #0a0a0a;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  animation: fadeInWithoutTransform 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+.marketplace-panel.closing {
+  animation: fadeOutWithoutTransform 0.3s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+.marketplace-header {
+  position: relative;
+  height: 60px;
+  min-height: 60px;
+  background-color: rgba(22, 22, 22, 0.85);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  z-index: 100;
+}
+
+.marketplace-header .marketplace-back-btn {
+  /* Uses nav-back-btn styles */
+}
+
+.marketplace-refresh-btn {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  top: 10px;
+  right: 0;
+  margin-right: 5px;
+  padding: 5px;
+}
+
+.marketplace-refresh-btn .icon {
+  animation: none;
+}
+
+.marketplace-refresh-btn.loading .icon {
+  animation: spin 1s linear infinite;
+}
+
+.marketplace-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  text-align: center;
+}
+
+/* Marketplace Search */
+.marketplace-search-container {
+  margin: 12px 16px 16px;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.marketplace-search-icon {
+  position: relative;
+  margin-left: 12px;
+  width: 20px;
+  height: 20px;
+  background-color: rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+.marketplace-search-container input {
+  flex: 1;
+  background-color: transparent;
+  border: 1px solid rgba(57, 57, 57, 0.5);
+  border-radius: 8px;
+  padding: 10px 14px 10px 40px;
+  font-size: 14px;
+  color: #fff;
+  font-family: inherit;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  margin-left: -32px;
+  width: 100%;
+}
+
+.marketplace-search-container input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.marketplace-search-container input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Marketplace Filters */
+.marketplace-filters {
+  padding: 8px 16px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.marketplace-active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.marketplace-filter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.marketplace-filter-tag:hover {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+.marketplace-filter-tag .icon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  background-color: rgba(255, 255, 255, 0.6);
+}
+
+.marketplace-filter-tag .icon:hover {
+  background-color: rgba(255, 255, 255, 0.9);
+}
+
+/* Featured Categories Section */
+.marketplace-featured {
+  padding: 16px;
+  padding-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.marketplace-featured:empty {
+  display: none;
+}
+
+.marketplace-featured-category {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.03) 100%);
+  border-radius: 16px;
+  padding: 16px;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.marketplace-featured-category:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.marketplace-featured-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.marketplace-featured-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.marketplace-featured-count {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 400;
+}
+
+.marketplace-featured-description {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+/* Card Spread Preview */
+.marketplace-card-spread {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  position: relative;
+  height: 72px;
+}
+
+.marketplace-card-spread-item {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: absolute;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.marketplace-card-spread-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.marketplace-card-spread-item .icon {
+  width: 28px;
+  height: 28px;
+  background-color: rgba(255, 255, 255, 0.5);
+}
+
+/* Card spread positions - stacked with subtle rainbow arc curve */
+.marketplace-card-spread-item:nth-child(1) {
+  transform: translateX(-24px) translateY(6px) rotate(-6deg);
+  z-index: 1;
+}
+
+.marketplace-card-spread-item:nth-child(2) {
+  transform: translateX(-8px) translateY(-2px) rotate(-2deg);
+  z-index: 2;
+}
+
+.marketplace-card-spread-item:nth-child(3) {
+  transform: translateX(8px) translateY(-2px) rotate(2deg);
+  z-index: 3;
+}
+
+.marketplace-card-spread-item:nth-child(4) {
+  transform: translateX(24px) translateY(6px) rotate(6deg);
+  z-index: 4;
+}
+
+/* Hover effect - cards fan out while maintaining rainbow curve */
+.marketplace-featured-category:hover .marketplace-card-spread-item:nth-child(1) {
+  transform: translateX(-48px) translateY(8px) rotate(-10deg);
+}
+
+.marketplace-featured-category:hover .marketplace-card-spread-item:nth-child(2) {
+  transform: translateX(-16px) translateY(-4px) rotate(-3deg);
+}
+
+.marketplace-featured-category:hover .marketplace-card-spread-item:nth-child(3) {
+  transform: translateX(16px) translateY(-4px) rotate(3deg);
+}
+
+.marketplace-featured-category:hover .marketplace-card-spread-item:nth-child(4) {
+  transform: translateX(48px) translateY(8px) rotate(10deg);
+}
+
+/* Popular Categories Pills */
+.marketplace-popular-categories {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 0 16px 12px 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.marketplace-popular-categories::-webkit-scrollbar {
+  height: 4px;
+}
+
+.marketplace-popular-categories::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.marketplace-popular-categories::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.446);
+  border-radius: 2px;
+}
+
+.marketplace-popular-categories::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.689);
+}
+
+.marketplace-popular-category {
+  padding: 6px 14px;
+  background-color: rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.15s, transform 0.15s;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.marketplace-popular-category:hover {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Scrollable container for featured + content */
+.marketplace-scroll-container {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.marketplace-content {
+  flex: 1;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Section Title */
+.marketplace-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  padding-bottom: 4px;
+}
+
+.marketplace-section-title .icon {
+  width: 16px;
+  height: 16px;
+  background-color: rgba(255, 255, 255, 0.5);
+  position: relative;
+  margin: 0;
+}
+
+/* Switch to grid layout on larger screens */
+@media (min-width: 800px) {
+  .marketplace-content {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    align-content: start;
+  }
+  
+  .marketplace-section-title {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Marketplace App Card */
+.marketplace-app-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  background-color: #161616;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.marketplace-app-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.marketplace-app-card:active {
+  transform: translateY(0);
+}
+
+.marketplace-app-icon-container {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.marketplace-app-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 12px;
+}
+
+.marketplace-app-icon-placeholder {
+  width: 28px;
+  height: 28px;
+  background-color: rgba(255, 255, 255, 0.5);
+}
+
+.marketplace-app-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.marketplace-app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.marketplace-app-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.marketplace-app-version {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
+}
+
+.marketplace-app-description {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: left;
+}
+
+.marketplace-app-categories {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.marketplace-app-category {
+  font-size: 11px;
+  padding: 2px 8px;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+  border-radius: 10px;
+  text-transform: capitalize;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.marketplace-app-category:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+  transform: scale(1.05);
+}
+
+.marketplace-app-category-overflow {
+  font-size: 11px;
+  padding: 2px 8px;
+  background-color: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.8);
+  border-radius: 10px;
+  cursor: default;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.marketplace-app-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  margin-top: 4px;
+}
+
+/* Install/Play Button */
+.marketplace-install-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.marketplace-install-btn:hover {
+  transform: scale(1.05);
+}
+
+.marketplace-install-btn:active {
+  transform: scale(0.98);
+}
+
+.marketplace-install-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.marketplace-install-btn.installed {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.marketplace-install-btn.installing {
+  background-color: rgba(255, 200, 100, 0.3);
+}
+
+.marketplace-install-btn.failed {
+  background-color: rgba(255, 100, 100, 0.3);
+}
+
+/* Loading State */
+.marketplace-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  gap: 16px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.marketplace-loading-icon {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  background-color: rgba(255, 255, 255, 0.6);
+  animation: spin 1s linear infinite;
+}
+
+/* Empty State */
+.marketplace-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  gap: 12px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.marketplace-empty-icon {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
+.marketplace-empty-hint {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Error State */
+.marketplace-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  gap: 12px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.marketplace-error-icon {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  background-color: #f45c43;
+}
+
+.marketplace-error-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  max-width: 300px;
+  word-break: break-word;
+}
+
+.marketplace-retry-btn {
+  margin-top: 8px;
+  padding: 10px 24px;
+  border: none;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background-color: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  transition: transform 0.2s, background-color 0.2s;
+}
+
+.marketplace-retry-btn:hover {
+  transform: scale(1.05);
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+/* Mobile Responsive */
+@media (max-width: 480px) {
+  .marketplace-app-card {
+    padding: 12px;
+  }
+
+  .marketplace-app-icon-container {
+    width: 48px;
+    height: 48px;
+  }
+
+  .marketplace-app-name {
+    font-size: 15px;
+  }
+
+  .marketplace-app-description {
+    font-size: 12px;
+    -webkit-line-clamp: 1;
+  }
+
+  .marketplace-install-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+  }
+}
+
+/* Publish App Dialog */
+.publish-app-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: none;
+  justify-content: center;
+  align-items: center;
+  z-index: 10000;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.publish-app-overlay.active {
+  opacity: 1;
+}
+
+.publish-app-container {
+  background-color: #161616;
+  border-radius: 16px;
+  width: 90%;
+  max-width: 500px;
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transform: scale(0.9);
+  transition: transform 0.3s ease;
+}
+
+.publish-app-overlay.active .publish-app-container {
+  transform: scale(1);
+}
+
+.publish-app-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.publish-app-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.publish-app-content {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.publish-app-icon-container {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.publish-app-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 16px;
+  object-fit: cover;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.publish-app-icon-placeholder {
+  width: 80px;
+  height: 80px;
+  border-radius: 16px;
+  background-color: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.publish-app-icon-placeholder .icon {
+  position: relative;
+  width: 40px;
+  height: 40px;
+}
+
+.publish-app-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.publish-app-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.publish-app-field label {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.publish-app-field input,
+.publish-app-field textarea {
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 14px;
+  color: #fff;
+  font-family: inherit;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.publish-app-field input:focus,
+.publish-app-field textarea:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.publish-app-field input::placeholder,
+.publish-app-field textarea::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.publish-app-field textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+.publish-app-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* Toggle field styling for publish dialog */
+.publish-app-toggle-field {
+  padding: 8px 0;
+}
+
+.publish-app-toggle-field .toggle-container {
+  margin-bottom: 4px;
+}
+
+.publish-app-toggle-field .toggle-container span:first-child {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.publish-app-buttons {
+  display: flex;
+  gap: 12px;
+  padding: 20px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  justify-content: flex-end;
+}
+
+.publish-app-buttons button {
+  min-width: 100px;
+}
+
+.publish-app-buttons .file-preview-btn-send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.publish-app-buttons .file-preview-btn-send .icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+}
+@media (max-width: 480px) {
+  .publish-app-container {
+    width: 95%;
+    max-height: 90vh;
+  }
+
+  .publish-app-header {
+    padding: 16px 20px;
+  }
+
+  .publish-app-content {
+    padding: 20px;
+  }
+
+  .publish-app-buttons {
+    padding: 16px 20px;
+  }
+}
+
+/* ============================================================================
+   App Details Panel
+   ============================================================================ */
+
+.app-details-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #0a0a0a;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  animation: fadeInWithoutTransform 0.3s cubic-bezier(.46,.03,.52,.96);
+}
+
+.app-details-panel.closing {
+  animation: fadeOutWithoutTransform 0.3s cubic-bezier(.46,.03,.52,.96) forwards;
+}
+
+.app-details-header {
+  position: relative;
+  height: 60px;
+  min-height: 60px;
+  background-color: rgba(22, 22, 22, 0.85);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 15px;
+  width: 100%;
+  box-sizing: border-box;
+  z-index: 100;
+}
+
+.app-details-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.app-details-header-spacer {
+  width: 40px;
+}
+
+.app-details-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+/* App Details Hero Section */
+.app-details-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 20px 30px;
+  text-align: center;
+}
+
+.app-details-icon-container {
+  width: 120px;
+  height: 120px;
+  border-radius: 24px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  margin-bottom: 20px;
+}
+
+.app-details-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.app-details-icon-placeholder {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
+.app-details-name {
+  font-size: 24px;
+  font-weight: 700;
+  color: #fff;
+  margin: 0 0 8px 0;
+}
+
+.app-details-version {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-bottom: 16px;
+}
+
+.app-details-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+
+.app-details-category {
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.app-details-category:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+  transform: scale(1.05);
+}
+
+/* App Details Action Button */
+.app-details-action-btn {
+  padding: 14px 48px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.app-details-action-btn:hover {
+  transform: scale(1.05);
+}
+
+.app-details-action-btn:active {
+  transform: scale(0.98);
+}
+
+.app-details-action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.app-details-action-btn.installed {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.app-details-action-btn.installing {
+  background-color: rgba(255, 200, 100, 0.3);
+}
+
+/* App Details Actions Container */
+.app-details-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  width: 100%;
+}
+
+/* App Details Play Button */
+.app-details-play-btn {
+  flex: 1;
+  background-color: #58fcb3;
+  color: #000;
+}
+
+.app-details-play-btn:hover {
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+/* App Details Uninstall Button */
+.app-details-uninstall-btn {
+  flex: 1;
+  background-color: rgba(255, 100, 100, 0.3);
+  color: #ff6464;
+  border: 1px solid rgba(255, 100, 100, 0.5);
+}
+
+.app-details-uninstall-btn:hover {
+  background-color: rgba(255, 100, 100, 0.4);
+  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.3);
+}
+
+/* App Details Info Sections */
+.app-details-section {
+  padding: 24px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.app-details-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 12px 0;
+}
+
+.app-details-description {
+  font-size: 15px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.app-details-changelog {
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* App Details Meta Info */
+.app-details-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.app-details-meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.app-details-meta-label {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.app-details-meta-value {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 500;
+}
+
+/* Publisher Section */
+.app-details-publisher {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.app-details-publisher:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-details-publisher-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.app-details-publisher-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.app-details-publisher-avatar .icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  background-color: rgba(255, 255, 255, 0.4);
+}
+
+.app-details-publisher-info {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.app-details-publisher-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-details-publisher-npub {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+.app-details-publisher-arrow-container {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-details-publisher-arrow-container .icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  background-color: rgba(255, 255, 255, 0.3);
+  transform: rotate(180deg);
+}
+
+/* Developer Section */
+.app-details-developer {
+  padding: 10px 12px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+}
+
+.app-details-developer-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Source Link */
+.app-details-meta-link {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.app-details-meta-link:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+/* Mobile Responsive */
+@media (max-width: 480px) {
+  .app-details-hero {
+    padding: 30px 16px 24px;
+  }
+
+  .app-details-icon-container {
+    width: 100px;
+    height: 100px;
+    border-radius: 20px;
+  }
+
+  .app-details-name {
+    font-size: 22px;
+  }
+
+  .app-details-action-btn {
+    padding: 12px 40px;
+    font-size: 15px;
+  }
+
+  .app-details-section {
+    padding: 20px 16px;
+  }
+}
+
 

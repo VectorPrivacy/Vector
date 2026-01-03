@@ -5157,6 +5157,19 @@ pub fn run() {
             miniapps::commands::miniapp_get_history,
             miniapps::commands::miniapp_toggle_favorite,
             miniapps::commands::miniapp_set_favorite,
+            // Mini Apps marketplace commands
+            miniapps::commands::marketplace_fetch_apps,
+            miniapps::commands::marketplace_get_cached_apps,
+            miniapps::commands::marketplace_get_app,
+            miniapps::commands::marketplace_get_install_status,
+            miniapps::commands::marketplace_install_app,
+            miniapps::commands::marketplace_check_installed,
+            miniapps::commands::marketplace_sync_install_status,
+            miniapps::commands::marketplace_add_trusted_publisher,
+            miniapps::commands::marketplace_open_app,
+            miniapps::commands::marketplace_uninstall_app,
+            miniapps::commands::marketplace_publish_app,
+            miniapps::commands::marketplace_get_trusted_publisher,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

@@ -125,7 +125,9 @@ CREATE TABLE IF NOT EXISTS miniapps_history (
     attachment_ref TEXT NOT NULL,
     open_count INTEGER NOT NULL DEFAULT 1,
     last_opened_at INTEGER NOT NULL,
-    is_favorite INTEGER NOT NULL DEFAULT 0
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    categories TEXT NOT NULL DEFAULT '',
+    marketplace_id TEXT DEFAULT NULL
 );
 "#;
 
@@ -459,7 +461,9 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
                 attachment_ref TEXT,
                 open_count INTEGER DEFAULT 1,
                 last_opened_at INTEGER NOT NULL,
-                is_favorite INTEGER NOT NULL DEFAULT 0
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                categories TEXT NOT NULL DEFAULT '',
+                marketplace_id TEXT DEFAULT NULL
             )
             "#,
             []
