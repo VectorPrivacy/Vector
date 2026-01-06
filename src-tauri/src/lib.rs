@@ -5168,6 +5168,7 @@ pub fn run() {
             miniapps::commands::marketplace_add_trusted_publisher,
             miniapps::commands::marketplace_open_app,
             miniapps::commands::marketplace_uninstall_app,
+            miniapps::commands::marketplace_update_app,
             miniapps::commands::marketplace_publish_app,
             miniapps::commands::marketplace_get_trusted_publisher,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

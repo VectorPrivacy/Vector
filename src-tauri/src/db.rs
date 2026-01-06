@@ -1486,6 +1486,8 @@ pub struct MiniAppHistoryEntry {
     pub categories: String,
     /// Optional marketplace app ID for linking to marketplace
     pub marketplace_id: Option<String>,
+    /// Installed version of the app (for marketplace apps)
+    pub installed_version: Option<String>,
 }
 
 /// Record a Mini App being opened (upsert - insert or update)
@@ -1496,10 +1498,10 @@ pub fn record_miniapp_opened<R: Runtime>(
     src_url: String,
     attachment_ref: String,
 ) -> Result<(), String> {
-    record_miniapp_opened_with_metadata(handle, name, src_url, attachment_ref, String::new(), None)
+    record_miniapp_opened_with_metadata(handle, name, src_url, attachment_ref, String::new(), None, None)
 }
 
-/// Record a Mini App being opened with additional metadata (categories and marketplace_id)
+/// Record a Mini App being opened with additional metadata (categories, marketplace_id, and version)
 pub fn record_miniapp_opened_with_metadata<R: Runtime>(
     handle: &AppHandle<R>,
     name: String,
@@ -1507,6 +1509,7 @@ pub fn record_miniapp_opened_with_metadata<R: Runtime>(
     attachment_ref: String,
     categories: String,
     marketplace_id: Option<String>,
+    installed_version: Option<String>,
 ) -> Result<(), String> {
     let conn = crate::account_manager::get_db_connection(handle)?;
 
@@ -1519,17 +1522,18 @@ pub fn record_miniapp_opened_with_metadata<R: Runtime>(
     // Uses UNIQUE(name) constraint - same app name always updates the existing entry
     conn.execute(
         r#"
-        INSERT INTO miniapps_history (name, src_url, attachment_ref, open_count, last_opened_at, categories, marketplace_id)
-        VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)
+        INSERT INTO miniapps_history (name, src_url, attachment_ref, open_count, last_opened_at, categories, marketplace_id, installed_version)
+        VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)
         ON CONFLICT(name) DO UPDATE SET
             src_url = excluded.src_url,
             attachment_ref = excluded.attachment_ref,
             open_count = open_count + 1,
             last_opened_at = excluded.last_opened_at,
             categories = CASE WHEN excluded.categories != '' THEN excluded.categories ELSE categories END,
-            marketplace_id = CASE WHEN excluded.marketplace_id IS NOT NULL THEN excluded.marketplace_id ELSE marketplace_id END
+            marketplace_id = CASE WHEN excluded.marketplace_id IS NOT NULL THEN excluded.marketplace_id ELSE marketplace_id END,
+            installed_version = CASE WHEN excluded.installed_version IS NOT NULL THEN excluded.installed_version ELSE installed_version END
         "#,
-        rusqlite::params![name, src_url, attachment_ref, now, categories, marketplace_id],
+        rusqlite::params![name, src_url, attachment_ref, now, categories, marketplace_id, installed_version],
     ).map_err(|e| format!("Failed to record Mini App opened: {}", e))?;
 
     crate::account_manager::return_db_connection(conn);
@@ -1547,7 +1551,7 @@ pub fn get_miniapps_history<R: Runtime>(
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, name, src_url, attachment_ref, open_count, last_opened_at, is_favorite, categories, marketplace_id
+        SELECT id, name, src_url, attachment_ref, open_count, last_opened_at, is_favorite, categories, marketplace_id, installed_version
         FROM miniapps_history
         ORDER BY is_favorite DESC, last_opened_at DESC
         LIMIT ?1
@@ -1566,6 +1570,7 @@ pub fn get_miniapps_history<R: Runtime>(
                 is_favorite: row.get::<_, i64>(6)? != 0,
                 categories: row.get(7)?,
                 marketplace_id: row.get(8)?,
+                installed_version: row.get(9)?,
             })
         }).map_err(|e| format!("Failed to query Mini Apps history: {}", e))?;
 
@@ -1632,4 +1637,43 @@ pub fn remove_miniapp_from_history<R: Runtime>(
 
     crate::account_manager::return_db_connection(conn);
     Ok(())
+}
+
+/// Update the installed version for a marketplace app
+pub fn update_miniapp_version<R: Runtime>(
+    handle: &AppHandle<R>,
+    marketplace_id: &str,
+    version: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "UPDATE miniapps_history SET installed_version = ?1 WHERE marketplace_id = ?2",
+        rusqlite::params![version, marketplace_id],
+    ).map_err(|e| format!("Failed to update Mini App version: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Get the installed version for a marketplace app by its marketplace_id
+pub fn get_miniapp_installed_version<R: Runtime>(
+    handle: &AppHandle<R>,
+    marketplace_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let result = conn.query_row(
+        "SELECT installed_version FROM miniapps_history WHERE marketplace_id = ?1",
+        rusqlite::params![marketplace_id],
+        |row| row.get::<_, Option<String>>(0)
+    );
+
+    crate::account_manager::return_db_connection(conn);
+
+    match result {
+        Ok(version) => Ok(version),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Failed to get Mini App installed version: {}", e)),
+    }
 }

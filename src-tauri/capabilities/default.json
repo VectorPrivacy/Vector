@@ -141,6 +141,7 @@
     "allow-marketplace-add-trusted-publisher",
     "allow-marketplace-open-app",
     "allow-marketplace-uninstall-app",
+    "allow-marketplace-update-app",
     "allow-marketplace-publish-app",
     "allow-marketplace-get-trusted-publisher",
     "allow-delete-whisper-model",

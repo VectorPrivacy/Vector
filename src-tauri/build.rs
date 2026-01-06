@@ -148,6 +148,7 @@ fn main() {
             "marketplace_add_trusted_publisher",
             "marketplace_open_app",
             "marketplace_uninstall_app",
+            "marketplace_update_app",
             "marketplace_publish_app",
             "marketplace_get_trusted_publisher",
             // Whisper commands (conditional)

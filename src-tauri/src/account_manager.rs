@@ -472,6 +472,24 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         println!("[Migration] miniapps_history table created successfully");
     }
 
+    // Migration 3: Add installed_version column to miniapps_history if it doesn't exist
+    let has_installed_version: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('miniapps_history') WHERE name='installed_version'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_installed_version {
+        println!("[Migration] Adding installed_version column to miniapps_history table...");
+        conn.execute(
+            "ALTER TABLE miniapps_history ADD COLUMN installed_version TEXT DEFAULT NULL",
+            []
+        ).map_err(|e| format!("Failed to add installed_version column: {}", e))?;
+
+        println!("[Migration] installed_version column added successfully");
+    }
+
     Ok(())
 }
 

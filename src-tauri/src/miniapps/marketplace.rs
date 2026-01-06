@@ -99,6 +99,10 @@ pub struct MarketplaceApp {
     pub installed: bool,
     /// Local file path if installed
     pub local_path: Option<String>,
+    /// Installed version (if different from marketplace version, update is available)
+    pub installed_version: Option<String>,
+    /// Whether an update is available (marketplace version != installed version)
+    pub update_available: bool,
 }
 
 /// Installation status of a marketplace app
@@ -186,6 +190,14 @@ impl MarketplaceState {
     pub fn add_trusted_publisher(&mut self, npub: String) {
         if !self.trusted_publishers.contains(&npub) {
             self.trusted_publishers.push(npub);
+        }
+    }
+
+    /// Update the installed version and update_available flag for an app
+    pub fn set_app_version_info(&mut self, id: &str, installed_version: Option<String>, update_available: bool) {
+        if let Some(app) = self.apps.get_mut(id) {
+            app.installed_version = installed_version;
+            app.update_available = update_available;
         }
     }
 }
@@ -276,6 +288,8 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
         published_at: event.created_at.as_u64(),
         installed: false,
         local_path: None,
+        installed_version: None,
+        update_available: false,
     })
 }
 
@@ -484,7 +498,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     }
 
     // Record to Mini Apps history so it appears in the Mini Apps panel
-    // Include categories and marketplace_id for proper linking
+    // Include categories, marketplace_id, and version for proper linking
     let categories_str = app.categories.join(",");
     if let Err(e) = crate::db::record_miniapp_opened_with_metadata(
         handle,
@@ -493,6 +507,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
         path_str.clone(), // attachment_ref
         categories_str,
         Some(app.id.clone()),
+        Some(app.version.clone()),
     ) {
         warn!("Failed to record installed app to history: {}", e);
         // Don't fail the install if history recording fails
@@ -556,6 +571,139 @@ pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
 
     info!("Successfully uninstalled marketplace app: {}", app_id);
     Ok(())
+}
+
+/// Update status for marketplace apps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UpdateStatus {
+    /// Downloading the update
+    Downloading { progress: u8 },
+    /// Update installed successfully
+    Updated { path: String, new_version: String },
+    /// Update failed
+    Failed { error: String },
+}
+
+/// Update a marketplace app to a new version
+/// Downloads to a temp file first, verifies hash, then replaces the old file
+/// This ensures the old version is only deleted after the new version is successfully downloaded
+pub async fn update_marketplace_app<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    app_id: &str,
+) -> Result<String, String> {
+    // Get app info from cache
+    let app = {
+        let state = MARKETPLACE_STATE.read().await;
+        state.get_app(app_id).cloned()
+    };
+
+    let app = app.ok_or_else(|| format!("App not found: {}", app_id))?;
+
+    // Update status to downloading
+    {
+        let mut state = MARKETPLACE_STATE.write().await;
+        state.set_install_status(app_id, InstallStatus::Downloading { progress: 0 });
+    }
+
+    // Get the miniapps directory
+    let app_data_dir = handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let miniapps_dir = app_data_dir.join("miniapps").join("marketplace");
+
+    // Ensure directory exists
+    std::fs::create_dir_all(&miniapps_dir)
+        .map_err(|e| format!("Failed to create miniapps directory: {}", e))?;
+
+    let file_name = format!("{}.xdc", app.id);
+    let file_path = miniapps_dir.join(&file_name);
+
+    // Create a temp file path for the new download
+    let temp_file_name = format!("{}.xdc.tmp", app.id);
+    let temp_file_path = miniapps_dir.join(&temp_file_name);
+
+    info!("Downloading update for marketplace app {} from {}", app_id, app.download_url);
+
+    // Download the new version to temp file
+    let response = reqwest::get(&app.download_url)
+        .await
+        .map_err(|e| format!("Failed to download update: {}", e))?;
+
+    if !response.status().is_success() {
+        let mut state = MARKETPLACE_STATE.write().await;
+        state.set_install_status(app_id, InstallStatus::Failed {
+            error: format!("Download failed with status: {}", response.status())
+        });
+        return Err(format!("Download failed with status: {}", response.status()));
+    }
+
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| format!("Failed to read download: {}", e))?;
+
+    // Verify the hash matches
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = hex::encode(hasher.finalize());
+
+    if hash != app.blossom_hash {
+        // Clean up temp file if it exists
+        let _ = std::fs::remove_file(&temp_file_path);
+
+        let mut state = MARKETPLACE_STATE.write().await;
+        state.set_install_status(app_id, InstallStatus::Failed {
+            error: "Hash mismatch - file may be corrupted".to_string()
+        });
+        return Err("Hash mismatch - file may be corrupted".to_string());
+    }
+
+    // Write to temp file first
+    std::fs::write(&temp_file_path, &bytes)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&temp_file_path);
+            format!("Failed to write temp file: {}", e)
+        })?;
+
+    // Now that we have verified the new file, we can safely replace the old one
+    // Remove the old file (if it exists)
+    if file_path.exists() {
+        if let Err(e) = std::fs::remove_file(&file_path) {
+            warn!("Failed to remove old app file: {}. Attempting to overwrite.", e);
+        }
+    }
+
+    // Rename temp file to final location
+    std::fs::rename(&temp_file_path, &file_path)
+        .map_err(|e| {
+            // If rename fails, try copy + delete as fallback (for cross-filesystem moves)
+            if let Err(copy_err) = std::fs::copy(&temp_file_path, &file_path) {
+                let _ = std::fs::remove_file(&temp_file_path);
+                return format!("Failed to move temp file to final location: {} (copy also failed: {})", e, copy_err);
+            }
+            let _ = std::fs::remove_file(&temp_file_path);
+            String::new() // Success via copy+delete
+        })
+        .or_else(|e| if e.is_empty() { Ok(()) } else { Err(e) })?;
+
+    let path_str = file_path.to_string_lossy().to_string();
+
+    // Update status to installed
+    {
+        let mut state = MARKETPLACE_STATE.write().await;
+        state.set_install_status(app_id, InstallStatus::Installed { path: path_str.clone() });
+
+        // Update the app's installed_version in the cache
+        state.set_app_version_info(app_id, Some(app.version.clone()), false);
+    }
+
+    // Update the version in the database
+    if let Err(e) = crate::db::update_miniapp_version(handle, app_id, &app.version) {
+        warn!("Failed to update app version in history: {}", e);
+        // Don't fail the update if version recording fails
+    }
+
+    info!("Successfully updated marketplace app {} to version {} at {}", app_id, app.version, path_str);
+    Ok(path_str)
 }
 
 /// Publish a Mini App to the marketplace (upload to Blossom + publish Nostr event)

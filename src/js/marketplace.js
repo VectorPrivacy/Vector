@@ -10,7 +10,7 @@
  * @property {string} id - Unique identifier
  * @property {string} name - Display name
  * @property {string} description - App description
- * @property {string} version - Version string
+ * @property {string} version - Version string (marketplace/latest version)
  * @property {string} blossom_hash - SHA-256 hash of the .xdc file
  * @property {string} download_url - Blossom download URL
  * @property {number} size - File size in bytes
@@ -24,6 +24,8 @@
  * @property {number} published_at - Unix timestamp
  * @property {boolean} installed - Whether the app is installed locally
  * @property {string|null} local_path - Local file path if installed
+ * @property {string|null} installed_version - Version currently installed (if installed)
+ * @property {boolean} update_available - Whether an update is available
  */
 
 /**
@@ -167,6 +169,21 @@ async function uninstallMarketplaceApp(appId, appName) {
         await invoke('marketplace_uninstall_app', { appId, appName });
     } catch (error) {
         console.error('Failed to uninstall marketplace app:', error);
+        throw error;
+    }
+}
+
+/**
+ * Update a marketplace app to the latest version
+ * Downloads to temp file first, verifies hash, then replaces old version
+ * @param {string} appId - The app ID to update
+ * @returns {Promise<string>} The local file path
+ */
+async function updateMarketplaceApp(appId) {
+    try {
+        return await invoke('marketplace_update_app', { appId });
+    } catch (error) {
+        console.error('Failed to update marketplace app:', error);
         throw error;
     }
 }
@@ -362,7 +379,11 @@ function createMarketplaceAppCard(app) {
     let installBtnText = 'Install';
     let installBtnDisabled = false;
 
-    if (app.installed) {
+    if (app.update_available) {
+        // Update available - show update button
+        installBtnClass += ' update-available';
+        installBtnText = 'Update';
+    } else if (app.installed) {
         installBtnClass += ' installed';
         installBtnText = getAppActionText(app);
     }
@@ -378,6 +399,12 @@ function createMarketplaceAppCard(app) {
         ? `<div class="marketplace-app-categories">${app.categories.map(c => `<span class="marketplace-app-category" data-category="${escapeHtml(c)}">${escapeHtml(c)}</span>`).join('')}</div>`
         : '';
 
+    // Version display - show update indicator if available
+    let versionHtml = `<span class="marketplace-app-version">v${escapeHtml(app.version)}</span>`;
+    if (app.update_available && app.installed_version) {
+        versionHtml = `<span class="marketplace-app-version update-available" title="Update available: ${escapeHtml(app.installed_version)} → ${escapeHtml(app.version)}">v${escapeHtml(app.installed_version)} → v${escapeHtml(app.version)}</span>`;
+    }
+
     card.innerHTML = `
         <div class="marketplace-app-icon-container">
             ${iconHtml}
@@ -385,7 +412,7 @@ function createMarketplaceAppCard(app) {
         <div class="marketplace-app-info">
             <div class="marketplace-app-header">
                 <span class="marketplace-app-name">${escapeHtml(app.name)}</span>
-                <span class="marketplace-app-version">v${escapeHtml(app.version)}</span>
+                ${versionHtml}
             </div>
             <div class="marketplace-app-description">${escapeHtml(app.description)}</div>
             ${categoriesHtml}
@@ -427,15 +454,63 @@ function createMarketplaceAppCard(app) {
 }
 
 /**
- * Handle install or play button click
+ * Handle install, update, or play button click
  * @param {MarketplaceApp} app - The app
  * @param {HTMLElement} btn - The button element
  */
 async function handleAppInstallOrPlay(app, btn) {
     const actionText = getAppActionText(app);
     const launchingText = getAppLaunchingText(app);
-    
-    if (app.installed || app.local_path) {
+
+    if (app.update_available) {
+        // Update available - download the update
+        btn.innerHTML = '<span class="icon icon-loading"></span>';
+        btn.disabled = true;
+        btn.classList.add('updating');
+
+        try {
+            await updateMarketplaceApp(app.id);
+
+            // Update the app state in the global marketplaceApps array
+            const globalApp = marketplaceApps.find(a => a.id === app.id);
+            if (globalApp) {
+                globalApp.installed_version = globalApp.version;
+                globalApp.update_available = false;
+            }
+
+            // Update the passed app object
+            app.installed_version = app.version;
+            app.update_available = false;
+
+            btn.innerHTML = actionText;
+            btn.classList.remove('updating', 'update-available');
+            btn.classList.add('installed');
+            btn.disabled = false;
+
+            // Update the version display in the card
+            const card = btn.closest('.marketplace-app-card');
+            if (card) {
+                const versionEl = card.querySelector('.marketplace-app-version');
+                if (versionEl) {
+                    versionEl.textContent = `v${app.version}`;
+                    versionEl.classList.remove('update-available');
+                    versionEl.removeAttribute('title');
+                }
+            }
+        } catch (error) {
+            console.error('Failed to update app:', error);
+            btn.innerHTML = 'Failed';
+            btn.classList.remove('updating');
+            btn.classList.add('failed');
+
+            // Reset after a delay
+            setTimeout(() => {
+                btn.innerHTML = 'Update';
+                btn.classList.remove('failed');
+                btn.disabled = false;
+            }, 2000);
+        }
+    } else if (app.installed || app.local_path) {
         // Already installed, just play/open
         btn.textContent = launchingText;
         btn.disabled = true;
@@ -451,23 +526,25 @@ async function handleAppInstallOrPlay(app, btn) {
         }
     } else {
         // Need to install first
-        btn.textContent = 'Installing...';
+        btn.innerHTML = '<span class="icon icon-loading"></span>';
         btn.disabled = true;
         btn.classList.add('installing');
 
         try {
             await installMarketplaceApp(app.id);
-            
+
             // Update the app state in the global marketplaceApps array
             const globalApp = marketplaceApps.find(a => a.id === app.id);
             if (globalApp) {
                 globalApp.installed = true;
+                globalApp.installed_version = globalApp.version;
             }
-            
+
             // Update the passed app object
             app.installed = true;
-            
-            btn.textContent = actionText;
+            app.installed_version = app.version;
+
+            btn.innerHTML = actionText;
             btn.classList.remove('installing');
             btn.classList.add('installed');
             btn.disabled = false;
@@ -476,13 +553,13 @@ async function handleAppInstallOrPlay(app, btn) {
             // await openMarketplaceApp(app.id);
         } catch (error) {
             console.error('Failed to install app:', error);
-            btn.textContent = 'Failed';
+            btn.innerHTML = 'Failed';
             btn.classList.remove('installing');
             btn.classList.add('failed');
-            
+
             // Reset after a delay
             setTimeout(() => {
-                btn.textContent = 'Install';
+                btn.innerHTML = 'Install';
                 btn.classList.remove('failed');
                 btn.disabled = false;
             }, 2000);
@@ -538,7 +615,19 @@ async function showAppDetails(app) {
     // Determine action buttons based on install status
     const actionText = getAppActionText(app);
     let actionButtonsHtml = '';
-    if (app.installed || app.local_path) {
+    if (app.update_available) {
+        // Update available - show Update and Uninstall buttons (no Play until updated)
+        actionButtonsHtml = `
+            <div class="app-details-actions">
+                <button class="app-details-action-btn app-details-update-btn" id="app-details-update-btn">
+                    Update
+                </button>
+                <button class="app-details-action-btn app-details-uninstall-btn" id="app-details-uninstall-btn">
+                    Uninstall
+                </button>
+            </div>
+        `;
+    } else if (app.installed || app.local_path) {
         // Show both Play/Open and Uninstall buttons for installed apps
         actionButtonsHtml = `
             <div class="app-details-actions">
@@ -564,6 +653,18 @@ async function showAppDetails(app) {
         ? app.publisher.substring(0, 12) + '...' + app.publisher.substring(app.publisher.length - 8)
         : app.publisher;
 
+    // Version display - show update info if available
+    let versionDisplayHtml = `<span class="app-details-version">Version ${escapeHtml(app.version)}</span>`;
+    if (app.update_available && app.installed_version) {
+        versionDisplayHtml = `
+            <span class="app-details-version">
+                <span class="app-details-version-installed">Installed: v${escapeHtml(app.installed_version)}</span>
+                <span class="app-details-version-arrow">→</span>
+                <span class="app-details-version-new">v${escapeHtml(app.version)}</span>
+            </span>
+        `;
+    }
+
     // Build the content HTML
     content.innerHTML = `
         <!-- Hero Section -->
@@ -572,7 +673,7 @@ async function showAppDetails(app) {
                 ${iconHtml}
             </div>
             <h1 class="app-details-name">${escapeHtml(app.name)}</h1>
-            <span class="app-details-version">Version ${escapeHtml(app.version)}</span>
+            ${versionDisplayHtml}
             ${categoriesHtml}
             ${actionButtonsHtml}
         </div>
@@ -653,6 +754,7 @@ async function showAppDetails(app) {
     const backBtn = document.getElementById('app-details-back-btn');
     const actionBtn = document.getElementById('app-details-action-btn');
     const playBtn = document.getElementById('app-details-play-btn');
+    const updateBtn = document.getElementById('app-details-update-btn');
     const uninstallBtn = document.getElementById('app-details-uninstall-btn');
     const publisherEl = document.getElementById('app-details-publisher');
 
@@ -665,6 +767,13 @@ async function showAppDetails(app) {
     if (actionBtn) {
         actionBtn.onclick = async () => {
             await handleAppDetailsAction(app, actionBtn);
+        };
+    }
+
+    // Update button handler (for apps with updates available)
+    if (updateBtn) {
+        updateBtn.onclick = async () => {
+            await handleAppDetailsUpdate(app, updateBtn);
         };
     }
 
@@ -756,42 +865,42 @@ async function handleAppDetailsAction(app, btn) {
         }
     } else {
         // Need to install first
-        btn.textContent = 'Installing...';
+        btn.innerHTML = '<span class="icon icon-loading"></span>';
         btn.disabled = true;
         btn.classList.add('installing');
 
         try {
             await installMarketplaceApp(app.id);
-            
+
             // Update the app state in the global marketplaceApps array
             const globalApp = marketplaceApps.find(a => a.id === app.id);
             if (globalApp) {
                 globalApp.installed = true;
             }
-            
+
             // Update the passed app object
             app.installed = true;
-            
+
             // Refresh the details panel to show Play/Open/Uninstall buttons
             showAppDetails(app);
-            
+
             // Also update the card in the marketplace list if visible
             const card = document.querySelector(`.marketplace-app-card[data-app-id="${app.id}"]`);
             if (card) {
                 const cardBtn = card.querySelector('.marketplace-install-btn');
                 if (cardBtn) {
-                    cardBtn.textContent = actionText;
+                    cardBtn.innerHTML = actionText;
                     cardBtn.classList.add('installed');
                 }
             }
         } catch (error) {
             console.error('Failed to install app:', error);
-            btn.textContent = 'Failed';
+            btn.innerHTML = 'Failed';
             btn.classList.remove('installing');
-            
+
             // Reset after a delay
             setTimeout(() => {
-                btn.textContent = 'Install';
+                btn.innerHTML = 'Install';
                 btn.disabled = false;
             }, 2000);
         }
@@ -806,7 +915,7 @@ async function handleAppDetailsAction(app, btn) {
 async function handleAppDetailsPlay(app, btn) {
     const actionText = getAppActionText(app);
     const launchingText = getAppLaunchingText(app);
-    
+
     btn.textContent = launchingText;
     btn.disabled = true;
     try {
@@ -818,6 +927,63 @@ async function handleAppDetailsPlay(app, btn) {
         console.error('Failed to open app:', error);
         btn.textContent = actionText;
         btn.disabled = false;
+    }
+}
+
+/**
+ * Handle the Update action from the details panel (for apps with updates)
+ * @param {MarketplaceApp} app - The app
+ * @param {HTMLElement} btn - The update button
+ */
+async function handleAppDetailsUpdate(app, btn) {
+    btn.innerHTML = '<span class="icon icon-loading"></span>';
+    btn.disabled = true;
+    btn.classList.add('updating');
+
+    try {
+        await updateMarketplaceApp(app.id);
+
+        // Update the app state in the global marketplaceApps array
+        const globalApp = marketplaceApps.find(a => a.id === app.id);
+        if (globalApp) {
+            globalApp.installed_version = globalApp.version;
+            globalApp.update_available = false;
+        }
+
+        // Update the passed app object
+        app.installed_version = app.version;
+        app.update_available = false;
+
+        // Refresh the details panel to show updated state (no more Update button)
+        showAppDetails(app);
+
+        // Also update the card in the marketplace list if visible
+        const card = document.querySelector(`.marketplace-app-card[data-app-id="${app.id}"]`);
+        if (card) {
+            const cardBtn = card.querySelector('.marketplace-install-btn');
+            if (cardBtn) {
+                const actionText = getAppActionText(app);
+                cardBtn.innerHTML = actionText;
+                cardBtn.classList.remove('update-available', 'updating');
+                cardBtn.classList.add('installed');
+            }
+            const versionEl = card.querySelector('.marketplace-app-version');
+            if (versionEl) {
+                versionEl.textContent = `v${app.version}`;
+                versionEl.classList.remove('update-available');
+                versionEl.removeAttribute('title');
+            }
+        }
+    } catch (error) {
+        console.error('Failed to update app:', error);
+        btn.innerHTML = 'Failed';
+        btn.classList.remove('updating');
+
+        // Reset after a delay
+        setTimeout(() => {
+            btn.innerHTML = 'Update';
+            btn.disabled = false;
+        }, 2000);
     }
 }
 

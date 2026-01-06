@@ -1044,24 +1044,39 @@ pub async fn marketplace_check_installed(
 }
 
 /// Sync installation status for all cached apps
-/// This checks which apps are already downloaded locally
+/// This checks which apps are already downloaded locally and if updates are available
 #[tauri::command]
 pub async fn marketplace_sync_install_status(
     app: AppHandle,
 ) -> Result<(), Error> {
-    let app_ids: Vec<String> = {
+    let apps_info: Vec<(String, String)> = {
         let state = MARKETPLACE_STATE.read().await;
-        state.get_apps().iter().map(|a| a.id.clone()).collect()
+        state.get_apps().iter().map(|a| (a.id.clone(), a.version.clone())).collect()
     };
 
-    for app_id in app_ids {
+    for (app_id, marketplace_version) in apps_info {
         if let Some(path) = super::marketplace::check_app_installed(&app, &app_id).await {
+            // App is installed, check version for updates
+            let installed_version = crate::db::get_miniapp_installed_version(&app, &app_id)
+                .unwrap_or(None);
+
+            let update_available = match &installed_version {
+                Some(installed_ver) => installed_ver != &marketplace_version,
+                None => true, // No version recorded (pre-update install), assume update needed
+            };
+
             let mut state = MARKETPLACE_STATE.write().await;
             state.set_install_status(&app_id, InstallStatus::Installed { path });
+
+            // Update version info on the cached app
+            state.set_app_version_info(&app_id, installed_version, update_available);
         } else {
             // File doesn't exist, mark as not installed
             let mut state = MARKETPLACE_STATE.write().await;
             state.set_install_status(&app_id, InstallStatus::NotInstalled);
+
+            // Clear version info
+            state.set_app_version_info(&app_id, None, false);
         }
     }
 
@@ -1117,6 +1132,19 @@ pub async fn marketplace_uninstall_app(
     app_name: String,
 ) -> Result<(), Error> {
     super::marketplace::uninstall_marketplace_app(&app, &app_id, &app_name)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Update a marketplace app to the latest version
+/// Downloads to a temp file first, verifies hash, then replaces the old file
+/// This ensures the old version is only deleted after the new version is successfully downloaded
+#[tauri::command]
+pub async fn marketplace_update_app(
+    app: AppHandle,
+    app_id: String,
+) -> Result<String, Error> {
+    super::marketplace::update_marketplace_app(&app, &app_id)
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }

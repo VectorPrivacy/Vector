@@ -5691,6 +5691,56 @@ hr {
   background-color: rgba(255, 100, 100, 0.3);
 }
 
+/* Loading spinner in install/update buttons */
+.marketplace-install-btn .icon-loading,
+.app-details-action-btn .icon-loading {
+  width: 18px;
+  height: 18px;
+  background-color: rgba(255, 255, 255, 0.8);
+  animation: spin 1s linear infinite;
+}
+
+/* Hide button styling when showing spinner */
+.marketplace-install-btn.installing,
+.marketplace-install-btn.updating {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 10px;
+}
+
+.app-details-action-btn.installing,
+.app-details-update-btn.updating {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.marketplace-install-btn.update-available {
+  background: linear-gradient(135deg, rgba(89, 252, 179, 0.3), rgba(43, 151, 108, 0.3));
+  border: 1px solid rgba(89, 252, 179, 0.5);
+  animation: update-glow 2s ease-in-out infinite;
+}
+
+.marketplace-install-btn.updating {
+  background: linear-gradient(135deg, rgba(89, 252, 179, 0.2), rgba(43, 151, 108, 0.2));
+}
+
+@keyframes update-glow {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(89, 252, 179, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(89, 252, 179, 0.5);
+  }
+}
+
+/* Version update indicator */
+.marketplace-app-version.update-available {
+  color: #59fcb3;
+  font-size: 11px;
+}
+
 /* Loading State */
 .marketplace-loading {
   display: flex;
@@ -6192,6 +6242,35 @@ hr {
 .app-details-uninstall-btn:hover {
   background-color: rgba(255, 100, 100, 0.4);
   box-shadow: 0 4px 16px rgba(255, 100, 100, 0.3);
+}
+
+/* App Details Update Button */
+.app-details-update-btn {
+  flex: 1;
+  background: linear-gradient(135deg, rgba(89, 252, 179, 0.3), rgba(43, 151, 108, 0.3));
+  color: #59fcb3;
+  border: 1px solid rgba(89, 252, 179, 0.5);
+  animation: update-glow 2s ease-in-out infinite;
+}
+
+.app-details-update-btn:hover {
+  background: linear-gradient(135deg, rgba(89, 252, 179, 0.4), rgba(43, 151, 108, 0.4));
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+/* App Details Version Update Display */
+.app-details-version-installed {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.app-details-version-arrow {
+  color: #59fcb3;
+  margin: 0 6px;
+}
+
+.app-details-version-new {
+  color: #59fcb3;
+  font-weight: 600;
 }
 
 /* App Details Info Sections */
