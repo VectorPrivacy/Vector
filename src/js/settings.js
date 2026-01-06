@@ -939,13 +939,21 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
             size: typeDistribution['ai_models']
         });
     }
-    
-    // Calculate size for other files (excluding ai_models)
+
+    // Add Cache category if cache exists in type distribution (avatars, banners, icons)
+    if (typeDistribution['cache']) {
+        categorySizes.push({
+            name: 'Cache',
+            size: typeDistribution['cache']
+        });
+    }
+
+    // Calculate size for other files (excluding special categories)
     let otherSize = 0;
     for (const ext in typeDistribution) {
         let isCategorized = false;
-        // Skip ai_models as it's already handled
-        if (ext === 'ai_models') continue;
+        // Skip special categories as they're already handled
+        if (ext === 'ai_models' || ext === 'cache') continue;
         
         for (const category of categories) {
             if (category.extensions.includes(ext)) {

@@ -1452,6 +1452,68 @@ function getProfile(npub) {
 }
 
 /**
+ * Get the best avatar URL for a profile
+ * Prefers cached local file (for offline support), falls back to remote URL
+ * @param {Profile} profile - The profile object
+ * @returns {string|null} - The avatar URL to use, or null if none available
+ */
+function getProfileAvatarSrc(profile) {
+    if (!profile) return null;
+    // Prefer cached local path for offline support
+    if (profile.avatar_cached) {
+        return convertFileSrc(profile.avatar_cached);
+    }
+    // Fall back to remote URL
+    return profile.avatar || null;
+}
+
+/**
+ * Get the best banner URL for a profile
+ * Prefers cached local file (for offline support), falls back to remote URL
+ * @param {Profile} profile - The profile object
+ * @returns {string|null} - The banner URL to use, or null if none available
+ */
+function getProfileBannerSrc(profile) {
+    if (!profile) return null;
+    // Prefer cached local path for offline support
+    if (profile.banner_cached) {
+        return convertFileSrc(profile.banner_cached);
+    }
+    // Fall back to remote URL
+    return profile.banner || null;
+}
+
+/**
+ * Create an avatar image element with automatic fallback to placeholder on error
+ * @param {string} src - The image source URL
+ * @param {number} size - The size of the avatar in pixels
+ * @param {boolean} isGroup - Whether this is a group avatar (affects placeholder)
+ * @returns {HTMLElement} - Either an img element or a placeholder div
+ */
+function createAvatarImg(src, size, isGroup = false) {
+    if (!src) {
+        return createPlaceholderAvatar(isGroup, size);
+    }
+
+    const img = document.createElement('img');
+    img.src = src;
+    img.style.width = size + 'px';
+    img.style.height = size + 'px';
+    img.style.objectFit = 'cover';
+    img.style.borderRadius = '50%';
+
+    // On error, replace with placeholder
+    img.onerror = function() {
+        const placeholder = createPlaceholderAvatar(isGroup, size);
+        // Copy over any classes from the failed img
+        placeholder.className = img.className;
+        img.replaceWith(placeholder);
+    };
+
+    return img;
+}
+
+/**
  * Tracks if we're in the initial chat open period for auto-scrolling
  */
 let chatOpenAutoScrollTimer = null;
@@ -1755,6 +1817,7 @@ function generateChatlistStateHash() {
             cLastMsg?.pending,
             profile?.nickname || profile?.name,
             profile?.avatar,
+            profile?.avatar_cached,
             chat.muted
         );
     }
@@ -1934,13 +1997,16 @@ function renderChat(chat) {
     if (isGroup) {
         // For groups, show the group placeholder SVG
         divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
-    } else if (profile?.avatar) {
-        const imgAvatar = document.createElement('img');
-        imgAvatar.src = profile?.avatar;
-        divAvatarContainer.appendChild(imgAvatar);
     } else {
-        // Otherwise, generate a placeholder avatar
-        divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        const avatarSrc = getProfileAvatarSrc(profile);
+        if (avatarSrc) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = avatarSrc;
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            // Otherwise, generate a placeholder avatar
+            divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        }
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -2648,7 +2714,11 @@ async function setupRustListeners() {
     await listen('profile_update', (evt) => {
         // Check if the frontend is already aware
         const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
+        let avatarCacheChanged = false;
         if (nProfileIdx >= 0) {
+            // Check if avatar cache changed (for triggering chatlist re-render)
+            avatarCacheChanged = arrProfiles[nProfileIdx].avatar_cached !== evt.payload.avatar_cached;
+
             // Update our frontend memory
             arrProfiles[nProfileIdx] = evt.payload;
 
@@ -2659,8 +2729,9 @@ async function setupRustListeners() {
         } else {
             // Add the new profile
             arrProfiles.push(evt.payload);
+            avatarCacheChanged = !!evt.payload.avatar_cached;
         }
-        
+
         // If this user has an open chat, then soft-update the chat header
         if (strOpenChat === evt.payload.id) {
             const chat = getDMChat(evt.payload.id);
@@ -2668,6 +2739,11 @@ async function setupRustListeners() {
             if (chat && profile) {
                 updateChat(chat, [], profile);
             }
+        }
+
+        // Re-render chatlist if avatar cache changed (so cached images show up)
+        if (avatarCacheChanged && !strOpenChat) {
+            renderChatlist();
         }
         
         // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
@@ -3211,14 +3287,8 @@ function renderCurrentProfile(cProfile) {
 
     // Clear and render avatar
     domAccountAvatarContainer.innerHTML = '';
-    let domAvatar;
-    if (cProfile?.avatar) {
-        domAvatar = document.createElement('img');
-        domAvatar.src = cProfile.avatar;
-    } else {
-        // Display our placeholder avatar
-        domAvatar = createPlaceholderAvatar(false, 22);
-    }
+    const accountAvatarSrc = getProfileAvatarSrc(cProfile);
+    const domAvatar = createAvatarImg(accountAvatarSrc, 22, false);
     domAvatar.classList.add('btn');
     domAvatar.onclick = () => openProfile();
     domAccountAvatarContainer.appendChild(domAvatar);
@@ -3245,13 +3315,8 @@ function renderCurrentProfile(cProfile) {
 function renderProfileTab(cProfile) {
     // Header Mini Avatar
     domProfileHeaderAvatarContainer.innerHTML = '';
-    let domHeaderAvatar;
-    if (cProfile?.avatar) {
-        domHeaderAvatar = document.createElement('img');
-        domHeaderAvatar.src = cProfile.avatar;
-    } else {
-        domHeaderAvatar = createPlaceholderAvatar(false, 22);
-    }
+    const headerAvatarSrc = getProfileAvatarSrc(cProfile);
+    const domHeaderAvatar = createAvatarImg(headerAvatarSrc, 22, false);
     domHeaderAvatar.classList.add('btn');
     domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
 
@@ -3269,13 +3334,26 @@ function renderProfileTab(cProfile) {
     domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
 
     // Banner - keep original structure but add click handler
-    if (cProfile.banner) {
+    const bannerSrc = getProfileBannerSrc(cProfile);
+    if (bannerSrc) {
         if (domProfileBanner.tagName === 'DIV') {
             const newBanner = document.createElement('img');
             domProfileBanner.replaceWith(newBanner);
             domProfileBanner = newBanner;
         }
-        domProfileBanner.src = cProfile.banner;
+        domProfileBanner.src = bannerSrc;
+        // On error, replace with solid color placeholder
+        domProfileBanner.onerror = function() {
+            const placeholder = document.createElement('div');
+            placeholder.style.backgroundColor = 'rgb(27, 27, 27)';
+            placeholder.classList.add('profile-banner');
+            if (cProfile.mine) {
+                placeholder.classList.add('btn');
+                placeholder.onclick = askForBanner;
+            }
+            domProfileBanner.replaceWith(placeholder);
+            domProfileBanner = placeholder;
+        };
     } else {
         if (domProfileBanner.tagName === 'IMG') {
             const newBanner = document.createElement('div');
@@ -3289,13 +3367,25 @@ function renderProfileTab(cProfile) {
     if (cProfile.mine) domProfileBanner.classList.add('btn');
 
     // Avatar - keep original structure but add click handler
-    if (cProfile.avatar) {
+    const profileAvatarSrc = getProfileAvatarSrc(cProfile);
+    if (profileAvatarSrc) {
         if (domProfileAvatar.tagName === 'DIV') {
             const newAvatar = document.createElement('img');
             domProfileAvatar.replaceWith(newAvatar);
             domProfileAvatar = newAvatar;
         }
-        domProfileAvatar.src = cProfile.avatar;
+        domProfileAvatar.src = profileAvatarSrc;
+        // On error, replace with placeholder
+        domProfileAvatar.onerror = function() {
+            const placeholder = createPlaceholderAvatar(false, 175);
+            placeholder.classList.add('profile-avatar');
+            if (cProfile.mine) {
+                placeholder.classList.add('btn');
+                placeholder.onclick = askForAvatar;
+            }
+            domProfileAvatar.replaceWith(placeholder);
+            domProfileAvatar = placeholder;
+        };
     } else {
         const newAvatar = createPlaceholderAvatar(false, 175);
         domProfileAvatar.replaceWith(newAvatar);
@@ -3786,12 +3876,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             };
         } else {
             // DM: use profile avatar or placeholder
-            if (profile?.avatar) {
-                domChatAvatar = document.createElement('img');
-                domChatAvatar.src = profile.avatar;
-            } else {
-                domChatAvatar = createPlaceholderAvatar(false, 22);
-            }
+            const chatAvatarSrc = getProfileAvatarSrc(profile);
+            domChatAvatar = createAvatarImg(chatAvatarSrc, 22, false);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 previousChatBeforeProfile = strOpenChat;
@@ -4021,12 +4107,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             };
         } else {
             // DM: use profile avatar or placeholder
-            if (profile?.avatar) {
-                domChatAvatar = document.createElement('img');
-                domChatAvatar.src = profile.avatar;
-            } else {
-                domChatAvatar = createPlaceholderAvatar(false, 22);
-            }
+            const dmAvatarSrc = getProfileAvatarSrc(profile);
+            domChatAvatar = createAvatarImg(dmAvatarSrc, 22, false);
         }
         if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
 
@@ -4153,31 +4235,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 });
             }
             
-            if (authorProfile?.avatar) {
-                const imgAvatar = document.createElement('img');
-                imgAvatar.classList.add('avatar', 'btn');
-                imgAvatar.onclick = () => {
-                    // Store the current chat so we can return to it
+            const msgAvatarSrc = getProfileAvatarSrc(authorProfile);
+            avatarEl = createAvatarImg(msgAvatarSrc, 35, false);
+            avatarEl.classList.add('avatar', 'btn');
+            // Wire profile click if we have an identifiable user
+            if (otherFullId) {
+                avatarEl.onclick = () => {
+                    const prof = getProfile(otherFullId) || authorProfile;
                     previousChatBeforeProfile = strOpenChat;
-                    openProfile(authorProfile);
+                    openProfile(prof || { id: otherFullId });
                 };
-                imgAvatar.src = authorProfile.avatar;
-                avatarEl = imgAvatar;
-            } else {
-                // Provide a deterministic placeholder when no avatar URL is available
-                const placeholder = createPlaceholderAvatar(false, 35);
-                // Ensure visual sizing and interactivity match real avatars
-                placeholder.classList.add('avatar', 'btn');
-                // Only wire profile click if we have an identifiable user
-                if (otherFullId) {
-                    placeholder.onclick = () => {
-                        const prof = getProfile(otherFullId) || authorProfile;
-                        // Store the current chat so we can return to it
-                        previousChatBeforeProfile = strOpenChat;
-                        openProfile(prof || { id: otherFullId });
-                    };
-                }
-                avatarEl = placeholder;
             }
             
             // Create a container for avatar and username
@@ -5755,16 +5822,8 @@ async function renderGroupOverview(chat) {
             
             // Member avatar
             let avatar;
-            if (memberProfile?.avatar) {
-                avatar = document.createElement('img');
-                avatar.src = memberProfile.avatar;
-                avatar.style.width = '25px';
-                avatar.style.height = '25px';
-                avatar.style.borderRadius = '50%';
-                avatar.style.objectFit = 'cover';
-            } else {
-                avatar = createPlaceholderAvatar(false, 25);
-            }
+            const memberAvatarSrc = getProfileAvatarSrc(memberProfile);
+            avatar = createAvatarImg(memberAvatarSrc, 25, false);
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
             avatar.style.zIndex = '1';
@@ -6113,16 +6172,8 @@ async function openInviteMemberToGroup(chat) {
             
             // Avatar (compact size like member list)
             let avatar;
-            if (contactProfile?.avatar) {
-                avatar = document.createElement('img');
-                avatar.src = contactProfile.avatar;
-                avatar.style.width = '25px';
-                avatar.style.height = '25px';
-                avatar.style.borderRadius = '50%';
-                avatar.style.objectFit = 'cover';
-            } else {
-                avatar = createPlaceholderAvatar(false, 25);
-            }
+            const contactAvatarSrc = getProfileAvatarSrc(contactProfile);
+            avatar = createAvatarImg(contactAvatarSrc, 25, false);
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
             avatar.style.zIndex = '1';
@@ -7376,17 +7427,8 @@ function renderCreateGroupList(filterText = '') {
         });
 
         // Avatar - compact 25px size
-        let avatar;
-        if (p.avatar) {
-            avatar = document.createElement('img');
-            avatar.src = p.avatar;
-            avatar.style.width = '25px';
-            avatar.style.height = '25px';
-            avatar.style.borderRadius = '50%';
-            avatar.style.objectFit = 'cover';
-        } else {
-            avatar = createPlaceholderAvatar(false, 25);
-        }
+        const listAvatarSrc = getProfileAvatarSrc(p);
+        const avatar = createAvatarImg(listAvatarSrc, 25, false);
         avatar.style.marginRight = '10px';
         avatar.style.position = 'relative';
         avatar.style.zIndex = '1';

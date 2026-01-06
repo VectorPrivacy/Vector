@@ -34,6 +34,8 @@ pub struct SlimProfile {
     status: Status,
     muted: bool,
     bot: bool,
+    avatar_cached: String,
+    banner_cached: String,
     // Omitting: messages, last_updated, mine
 }
 
@@ -54,6 +56,8 @@ impl Default for SlimProfile {
             status: Status::new(),
             muted: false,
             bot: false,
+            avatar_cached: String::new(),
+            banner_cached: String::new(),
         }
     }
 }
@@ -75,6 +79,8 @@ impl From<&Profile> for SlimProfile {
             status: profile.status.clone(),
             muted: profile.muted,
             bot: profile.bot,
+            avatar_cached: profile.avatar_cached.clone(),
+            banner_cached: profile.banner_cached.clone(),
         }
     }
 }
@@ -99,6 +105,8 @@ impl SlimProfile {
             mine: false,          // Default value
             muted: self.muted,
             bot: self.bot,
+            avatar_cached: self.avatar_cached.clone(),
+            banner_cached: self.banner_cached.clone(),
         }
     }
 }
@@ -107,10 +115,26 @@ impl SlimProfile {
 pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
     let conn = crate::account_manager::get_db_connection(handle)?;
 
-    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot FROM profiles")
+    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
+        // Get cached paths and validate they exist on disk
+        let avatar_cached: String = row.get(15)?;
+        let banner_cached: String = row.get(16)?;
+
+        // Only use cached paths if the files actually exist
+        let validated_avatar_cached = if !avatar_cached.is_empty() && std::path::Path::new(&avatar_cached).exists() {
+            avatar_cached
+        } else {
+            String::new()
+        };
+        let validated_banner_cached = if !banner_cached.is_empty() && std::path::Path::new(&banner_cached).exists() {
+            banner_cached
+        } else {
+            String::new()
+        };
+
         Ok(SlimProfile {
             id: row.get(0)?,  // npub column
             name: row.get(1)?,
@@ -130,6 +154,8 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
             },
             muted: row.get::<_, i32>(13)? != 0,
             bot: row.get::<_, i32>(14)? != 0,
+            avatar_cached: validated_avatar_cached,
+            banner_cached: validated_banner_cached,
         })
     })
     .map_err(|e| format!("Failed to query profiles: {}", e))?
@@ -148,8 +174,8 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
     let conn = crate::account_manager::get_db_connection(&handle)?;
 
     conn.execute(
-        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(npub) DO UPDATE SET
             name = excluded.name,
             display_name = excluded.display_name,
@@ -164,7 +190,9 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
             status_content = excluded.status_content,
             status_url = excluded.status_url,
             muted = excluded.muted,
-            bot = excluded.bot",
+            bot = excluded.bot,
+            avatar_cached = excluded.avatar_cached,
+            banner_cached = excluded.banner_cached",
         rusqlite::params![
             profile.id,  // This is the npub
             profile.name,
@@ -181,6 +209,8 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
             profile.status.url,
             profile.muted as i32,
             profile.bot as i32,
+            profile.avatar_cached,
+            profile.banner_cached,
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 

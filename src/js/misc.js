@@ -65,16 +65,10 @@ function renderNostrProfilePreview(npubInfo, profile = null, isOnlyNpub = false)
     // Avatar container
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.classList.add('msg-profile-avatar');
-    
-    // Create avatar (placeholder initially, will be updated when profile loads)
-    let imgAvatar;
-    if (profile?.avatar) {
-        imgAvatar = document.createElement('img');
-        imgAvatar.src = profile.avatar;
-        imgAvatar.alt = 'Profile avatar';
-    } else {
-        imgAvatar = createPlaceholderAvatar(false, 40);
-    }
+
+    // Create avatar with fallback to placeholder on error
+    const miscAvatarSrc = getProfileAvatarSrc(profile);
+    const imgAvatar = createAvatarImg(miscAvatarSrc, 40, false);
     divAvatarContainer.appendChild(imgAvatar);
     
     // Info container (name + npub)
@@ -133,14 +127,13 @@ function renderNostrProfilePreview(npubInfo, profile = null, isOnlyNpub = false)
  */
 function updateNostrProfilePreview(previewElement, profile) {
     if (!previewElement || !profile) return;
-    
+
     // Update avatar
     const avatarContainer = previewElement.querySelector('.msg-profile-avatar');
-    if (avatarContainer && profile.avatar) {
+    const updateAvatarSrc = getProfileAvatarSrc(profile);
+    if (avatarContainer) {
         avatarContainer.innerHTML = '';
-        const imgAvatar = document.createElement('img');
-        imgAvatar.src = profile.avatar;
-        imgAvatar.alt = 'Profile avatar';
+        const imgAvatar = createAvatarImg(updateAvatarSrc, 40, false);
         avatarContainer.appendChild(imgAvatar);
     }
     

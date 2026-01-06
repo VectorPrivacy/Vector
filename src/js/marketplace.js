@@ -388,10 +388,11 @@ function createMarketplaceAppCard(app) {
         installBtnText = getAppActionText(app);
     }
 
-    // Create icon element
+    // Create icon element - prefer cached local path for offline support
     let iconHtml = '<span class="icon icon-play marketplace-app-icon-placeholder"></span>';
-    if (app.icon_url) {
-        iconHtml = `<img src="${escapeHtml(app.icon_url)}" alt="${escapeHtml(app.name)}" class="marketplace-app-icon" onerror="this.outerHTML='<span class=\\'icon icon-play marketplace-app-icon-placeholder\\'></span>'">`;
+    const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
+    if (iconSrc) {
+        iconHtml = `<img src="${escapeHtml(iconSrc)}" alt="${escapeHtml(app.name)}" class="marketplace-app-icon" onerror="this.outerHTML='<span class=\\'icon icon-play marketplace-app-icon-placeholder\\'></span>'">`;
     }
 
     // Categories/tags - render all, will be dynamically truncated after mount
@@ -601,10 +602,11 @@ async function showAppDetails(app) {
         return;
     }
 
-    // Create icon HTML
+    // Create icon HTML - prefer cached local path for offline support
     let iconHtml = '<span class="icon icon-play app-details-icon-placeholder"></span>';
-    if (app.icon_url) {
-        iconHtml = `<img src="${escapeHtml(app.icon_url)}" alt="${escapeHtml(app.name)}" class="app-details-icon" onerror="this.outerHTML='<span class=\\'icon icon-play app-details-icon-placeholder\\'></span>'">`;
+    const detailsIconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
+    if (detailsIconSrc) {
+        iconHtml = `<img src="${escapeHtml(detailsIconSrc)}" alt="${escapeHtml(app.name)}" class="app-details-icon" onerror="this.outerHTML='<span class=\\'icon icon-play app-details-icon-placeholder\\'></span>'">`;
     }
 
     // Create categories HTML - make them clickable for filtering
@@ -1073,8 +1075,9 @@ function loadPublisherProfile(npub) {
             }
 
             // Update avatar if available
-            if (profile.avatar && avatarContainer) {
-                avatarContainer.innerHTML = `<img src="${escapeHtml(profile.avatar)}" alt="Avatar" onerror="this.outerHTML='<span class=\\'icon icon-user-circle\\'></span>'">`;
+            const marketplaceAvatarSrc = getProfileAvatarSrc(profile);
+            if (marketplaceAvatarSrc && avatarContainer) {
+                avatarContainer.innerHTML = `<img src="${escapeHtml(marketplaceAvatarSrc)}" alt="Avatar" onerror="this.outerHTML='<span class=\\'icon icon-user-circle\\'></span>'">`;
             }
         } else {
             // No profile found, show truncated npub
@@ -1187,11 +1190,12 @@ function createFeaturedCategoryCard(categoryName, description, apps, totalCount,
         card.classList.add('highlighted');
     }
     
-    // Create card spread preview
+    // Create card spread preview - prefer cached icons for offline support
     let cardSpreadHtml = '<div class="marketplace-card-spread">';
     for (const app of apps) {
-        if (app.icon_url) {
-            cardSpreadHtml += `<div class="marketplace-card-spread-item"><img src="${escapeHtml(app.icon_url)}" alt="${escapeHtml(app.name)}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'"></div>`;
+        const spreadIconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
+        if (spreadIconSrc) {
+            cardSpreadHtml += `<div class="marketplace-card-spread-item"><img src="${escapeHtml(spreadIconSrc)}" alt="${escapeHtml(app.name)}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'"></div>`;
         } else {
             cardSpreadHtml += `<div class="marketplace-card-spread-item"><span class="icon icon-play"></span></div>`;
         }

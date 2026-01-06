@@ -57,6 +57,9 @@ mod deep_link;
 // Mini Apps (WebXDC-compatible) support
 mod miniapps;
 
+// Image caching for avatars, banners, and Mini App icons
+mod image_cache;
+
 /// # Trusted Relay
 ///
 /// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
@@ -429,6 +432,11 @@ async fn fetch_messages<R: Runtime>(
                 let profiles = db::get_all_profiles(&handle).await.unwrap();
                 // Load our Profile Cache into the state
                 state.merge_db_profiles(profiles).await;
+
+                // Spawn background task to cache profile images for offline support
+                tokio::spawn(async {
+                    profile::cache_all_profile_images().await;
+                });
 
                 // Load chats and their messages from database
                 let slim_chats_result = db::get_all_chats(&handle).await;
@@ -3744,14 +3752,23 @@ async fn get_storage_info() -> Result<serde_json::Value, String> {
                 ai_models_size += (model.size as u64) * 1024 * 1024;
             }
         }
-        
+
         if ai_models_size > 0 {
             // Add AI models to type distribution
             *type_distribution.entry("ai_models".to_string()).or_insert(0) += ai_models_size;
             total_bytes += ai_models_size;
         }
     }
-    
+
+    // Calculate image cache size (avatars, banners, miniapp icons)
+    // Cache is global (not per-account) for deduplication across accounts
+    if let Ok(cache_size) = image_cache::get_cache_size(handle) {
+        if cache_size > 0 {
+            *type_distribution.entry("cache".to_string()).or_insert(0) += cache_size;
+            total_bytes += cache_size;
+        }
+    }
+
     // Return storage information with type distribution
     Ok(serde_json::json!({
         "path": vector_dir.to_string_lossy().to_string(),
@@ -3825,18 +3842,43 @@ async fn clear_storage() -> Result<serde_json::Value, String> {
         }
     }
     
+    // Clear image cache (avatars, banners, miniapp icons)
+    // Cache is global (not per-account) for deduplication across accounts
+    let mut cache_cleared = 0u64;
+    if let Ok(count) = image_cache::clear_cache(handle, image_cache::ImageType::Avatar) {
+        cache_cleared += count;
+    }
+    if let Ok(count) = image_cache::clear_cache(handle, image_cache::ImageType::Banner) {
+        cache_cleared += count;
+    }
+    if let Ok(count) = image_cache::clear_cache(handle, image_cache::ImageType::MiniAppIcon) {
+        cache_cleared += count;
+    }
+
+    // Clear cached paths from all profiles in state and database
+    for profile in &mut state.profiles {
+        if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
+            profile.avatar_cached = String::new();
+            profile.banner_cached = String::new();
+            db::set_profile(handle.clone(), profile.clone()).await.ok();
+        }
+    }
+
     // Get storage info after clearing to calculate freed space
+    // Need to drop the state lock first since get_storage_info needs it
+    drop(state);
     let storage_info_after = get_storage_info().await.map_err(|e| format!("Failed to get storage info after clearing: {}", e))?;
     let total_bytes_after = storage_info_after["total_bytes"].as_u64().unwrap_or(0);
-    
+
     // Calculate freed space
     let freed_bytes = total_bytes_before.saturating_sub(total_bytes_after);
-    
+
     // Return the freed storage information
     Ok(serde_json::json!({
         "freed_bytes": freed_bytes,
         "freed_formatted": format_bytes(freed_bytes),
-        "updated_chats": updated_chats.len()
+        "updated_chats": updated_chats.len(),
+        "cache_files_cleared": cache_cleared
     }))
 }
 
@@ -5171,6 +5213,10 @@ pub fn run() {
             miniapps::commands::marketplace_update_app,
             miniapps::commands::marketplace_publish_app,
             miniapps::commands::marketplace_get_trusted_publisher,
+            // Image cache commands
+            image_cache::get_or_cache_image,
+            image_cache::clear_image_cache,
+            image_cache::get_image_cache_stats,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

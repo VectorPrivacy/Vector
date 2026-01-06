@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     status_content TEXT NOT NULL DEFAULT '',
     status_url TEXT NOT NULL DEFAULT '',
     muted INTEGER NOT NULL DEFAULT 0,
-    bot INTEGER NOT NULL DEFAULT 0
+    bot INTEGER NOT NULL DEFAULT 0,
+    avatar_cached TEXT NOT NULL DEFAULT '',
+    banner_cached TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_npub ON profiles(npub);
 CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
@@ -488,6 +490,29 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         ).map_err(|e| format!("Failed to add installed_version column: {}", e))?;
 
         println!("[Migration] installed_version column added successfully");
+    }
+
+    // Migration 4: Add cached image path columns to profiles table
+    let has_avatar_cached: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('profiles') WHERE name='avatar_cached'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_avatar_cached {
+        println!("[Migration] Adding cached image columns to profiles table...");
+        conn.execute(
+            "ALTER TABLE profiles ADD COLUMN avatar_cached TEXT DEFAULT ''",
+            []
+        ).map_err(|e| format!("Failed to add avatar_cached column: {}", e))?;
+
+        conn.execute(
+            "ALTER TABLE profiles ADD COLUMN banner_cached TEXT DEFAULT ''",
+            []
+        ).map_err(|e| format!("Failed to add banner_cached column: {}", e))?;
+
+        println!("[Migration] Cached image columns added successfully");
     }
 
     Ok(())

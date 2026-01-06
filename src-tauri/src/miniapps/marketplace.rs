@@ -44,11 +44,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tauri::Manager;
+use tauri::{AppHandle, Manager, Runtime};
 use log::{info, warn};
 
 use crate::blossom;
 use crate::NOSTR_CLIENT;
+use crate::image_cache::{self, CacheResult, ImageType};
 
 /// The event kind for Mini App marketplace listings
 /// Kind 30078 = Parameterized Replaceable Application-Specific Data
@@ -83,6 +84,8 @@ pub struct MarketplaceApp {
     pub icon_url: Option<String>,
     /// Optional icon MIME type (e.g., "image/png", "image/svg+xml")
     pub icon_mime: Option<String>,
+    /// Locally cached icon path (for offline support)
+    pub icon_cached: Option<String>,
     /// Categories/tags
     pub categories: Vec<String>,
     /// Extended description or changelog (from content)
@@ -280,6 +283,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
         size: size.unwrap_or(0),
         icon_url,
         icon_mime,
+        icon_cached: None,
         categories,
         changelog: if event.content.is_empty() { None } else { Some(event.content.clone()) },
         developer,
@@ -404,8 +408,12 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
             if let Some(existing) = state.get_app(&app.id) {
                 app.installed = existing.installed;
                 app.local_path = existing.local_path.clone();
+                // Preserve cached icon path if it exists
+                if app.icon_cached.is_none() {
+                    app.icon_cached = existing.icon_cached.clone();
+                }
             }
-            
+
             state.upsert_app(app.clone());
             apps.push(app);
         }
@@ -417,7 +425,46 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
         .as_secs();
 
     info!("Fetched {} marketplace apps", apps.len());
+
+    // Spawn background tasks to cache icons for apps that have icon URLs but no cached path
+    // Cache is stored globally (not per-account) for deduplication across accounts
+    if let Some(handle) = crate::TAURI_APP.get() {
+        for app in &apps {
+            if app.icon_url.is_some() && app.icon_cached.is_none() {
+                let handle = handle.clone();
+                let app_id = app.id.clone();
+                let icon_url = app.icon_url.clone().unwrap();
+
+                tokio::spawn(async move {
+                    cache_miniapp_icon(&handle, &app_id, &icon_url).await;
+                });
+            }
+        }
+    }
+
     Ok(apps)
+}
+
+/// Cache a Mini App icon in the background and update the marketplace state
+/// Cache is stored globally (not per-account) for deduplication across accounts.
+async fn cache_miniapp_icon<R: Runtime>(
+    handle: &AppHandle<R>,
+    app_id: &str,
+    icon_url: &str,
+) {
+    match image_cache::cache_image(handle, icon_url, ImageType::MiniAppIcon).await {
+        CacheResult::Cached(path) | CacheResult::AlreadyCached(path) => {
+            // Update the marketplace state with the cached path
+            let mut state = MARKETPLACE_STATE.write().await;
+            if let Some(app) = state.apps.get_mut(app_id) {
+                app.icon_cached = Some(path.clone());
+                info!("[Marketplace] Cached icon for app {}: {}", app_id, path);
+            }
+        }
+        CacheResult::Failed(e) => {
+            warn!("[Marketplace] Failed to cache icon for {}: {}", app_id, e);
+        }
+    }
 }
 
 /// Download and install a marketplace app

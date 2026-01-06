@@ -5,6 +5,7 @@ use tauri_plugin_fs::FsExt;
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP};
 use crate::db;
 use crate::message::AttachmentFile;
+use crate::image_cache::{self, CacheResult};
 
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
@@ -28,6 +29,10 @@ pub struct Profile {
     pub mine: bool,
     pub muted: bool,
     pub bot: bool,
+    /// Local cached path for avatar image (for offline support)
+    pub avatar_cached: String,
+    /// Local cached path for banner image (for offline support)
+    pub banner_cached: String,
 }
 
 impl Default for Profile {
@@ -55,6 +60,8 @@ impl Profile {
             mine: false,
             muted: false,
             bot: false,
+            avatar_cached: String::new(),
+            banner_cached: String::new(),
         }
     }
 
@@ -173,6 +180,145 @@ impl Status {
             purpose: String::new(),
             url: String::new(),
         }
+    }
+}
+
+/// Cache profile images (avatar and banner) in the background
+///
+/// This downloads and caches the avatar/banner images for offline access.
+/// Cache is stored globally (not per-account) for deduplication across accounts.
+pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str) {
+    let handle = match TAURI_APP.get() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let mut avatar_cached = String::new();
+    let mut banner_cached = String::new();
+
+    // Cache avatar if URL exists
+    if !avatar_url.is_empty() {
+        match image_cache::cache_avatar(handle, avatar_url).await {
+            CacheResult::Cached(path) | CacheResult::AlreadyCached(path) => {
+                avatar_cached = path;
+            }
+            CacheResult::Failed(e) => {
+                log::warn!("[Profile] Failed to cache avatar for {}: {}", npub, e);
+            }
+        }
+    }
+
+    // Cache banner if URL exists
+    if !banner_url.is_empty() {
+        match image_cache::cache_banner(handle, banner_url).await {
+            CacheResult::Cached(path) | CacheResult::AlreadyCached(path) => {
+                banner_cached = path;
+            }
+            CacheResult::Failed(e) => {
+                log::warn!("[Profile] Failed to cache banner for {}: {}", npub, e);
+            }
+        }
+    }
+
+    // Update the profile with cached paths if we got any
+    if !avatar_cached.is_empty() || !banner_cached.is_empty() {
+        let mut state = STATE.lock().await;
+        if let Some(profile) = state.get_profile_mut(npub) {
+            let mut updated = false;
+
+            if !avatar_cached.is_empty() && profile.avatar_cached != avatar_cached {
+                profile.avatar_cached = avatar_cached;
+                updated = true;
+            }
+
+            if !banner_cached.is_empty() && profile.banner_cached != banner_cached {
+                profile.banner_cached = banner_cached;
+                updated = true;
+            }
+
+            if updated {
+                // Emit update to frontend with cached paths
+                handle.emit("profile_update", &profile).ok();
+
+                // Save to database
+                let profile_clone = profile.clone();
+                drop(state); // Release lock before async DB operation
+                db::set_profile(handle.clone(), profile_clone).await.ok();
+            }
+        }
+    }
+}
+
+/// Cache images for all profiles that have avatar/banner URLs but no cached paths
+/// Called on startup to populate the cache for existing profiles
+/// Cache is stored globally (not per-account) for deduplication across accounts.
+pub async fn cache_all_profile_images() {
+    let handle = match TAURI_APP.get() {
+        Some(h) => h,
+        None => return,
+    };
+
+    // Get all profiles that need caching
+    let profiles_to_cache: Vec<(String, String, String)> = {
+        let state = STATE.lock().await;
+        state.profiles.iter()
+            .filter(|p| {
+                // Cache if has avatar URL but no cached path
+                (!p.avatar.is_empty() && p.avatar_cached.is_empty()) ||
+                // Or has banner URL but no cached path
+                (!p.banner.is_empty() && p.banner_cached.is_empty())
+            })
+            .map(|p| (p.id.clone(), p.avatar.clone(), p.banner.clone()))
+            .collect()
+    };
+
+    if profiles_to_cache.is_empty() {
+        return;
+    }
+
+    log::info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
+
+    // Spawn caching tasks for each profile (they run concurrently with semaphore limiting)
+    for (npub, avatar_url, banner_url) in profiles_to_cache {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            // Cache avatar if needed
+            if !avatar_url.is_empty() {
+                if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
+                    image_cache::cache_avatar(&handle, &avatar_url).await
+                {
+                    // Update profile
+                    let mut state = STATE.lock().await;
+                    if let Some(profile) = state.get_profile_mut(&npub) {
+                        if profile.avatar_cached.is_empty() {
+                            profile.avatar_cached = path;
+                            handle.emit("profile_update", &profile).ok();
+                            let profile_clone = profile.clone();
+                            drop(state);
+                            db::set_profile(handle.clone(), profile_clone).await.ok();
+                        }
+                    }
+                }
+            }
+
+            // Cache banner if needed
+            if !banner_url.is_empty() {
+                if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
+                    image_cache::cache_banner(&handle, &banner_url).await
+                {
+                    let mut state = STATE.lock().await;
+                    if let Some(profile) = state.get_profile_mut(&npub) {
+                        if profile.banner_cached.is_empty() {
+                            profile.banner_cached = path;
+                            handle.emit("profile_update", &profile).ok();
+                            let profile_clone = profile.clone();
+                            drop(state);
+                            db::set_profile(handle.clone(), profile_clone).await.ok();
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -295,6 +441,14 @@ pub async fn load_profile(npub: String) -> bool {
 
                     // Cache this profile in our DB, too
                     db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
+
+                    // Cache avatar/banner images in the background for offline access
+                    let npub_clone = npub.clone();
+                    let avatar_url = profile_mutable.avatar.clone();
+                    let banner_url = profile_mutable.banner.clone();
+                    tokio::spawn(async move {
+                        cache_profile_images(&npub_clone, &avatar_url, &banner_url).await;
+                    });
                 }
                 return true;
             } else {
