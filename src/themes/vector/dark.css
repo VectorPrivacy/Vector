@@ -342,10 +342,6 @@ select:disabled {
   background-color: rgba(22, 22, 22, 0.85);
 }
 
-.marketplace-refresh-btn .icon {
-  background-color: #59fcb3;
-}
-
 /* Marketplace button in attachment panel */
 .attachment-panel-marketplace-btn {
   background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%) !important;

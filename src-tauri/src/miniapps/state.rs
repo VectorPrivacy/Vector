@@ -40,14 +40,27 @@ pub struct MiniAppPackage {
     pub path: PathBuf,
     /// Cached manifest data
     pub manifest: MiniAppManifest,
+    /// SHA-256 hash of the .xdc file (used for permission identification)
+    pub file_hash: String,
 }
 
 impl MiniAppPackage {
     /// Load a Mini App package from a .xdc file
     pub fn load(id: String, path: PathBuf) -> Result<Self, Error> {
-        let file = std::fs::File::open(&path)?;
-        let mut archive = zip::ZipArchive::new(file)?;
-        
+        // Read the entire file to compute hash
+        let file_data = std::fs::read(&path)?;
+
+        // Compute SHA-256 hash of the file
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&file_data);
+        let file_hash = hex::encode(hasher.finalize());
+
+        // Open archive from the data we already read
+        use std::io::Cursor;
+        let cursor = Cursor::new(&file_data);
+        let mut archive = zip::ZipArchive::new(cursor)?;
+
         // Try to read manifest.toml
         let manifest = match archive.by_name("manifest.toml") {
             Ok(mut file) => {
@@ -68,13 +81,13 @@ impl MiniAppPackage {
                 }
             }
         };
-        
+
         // Verify index.html exists
         if archive.by_name("index.html").is_err() {
             return Err(Error::InvalidPackage("Missing index.html".to_string()));
         }
-        
-        Ok(Self { id, path, manifest })
+
+        Ok(Self { id, path, manifest, file_hash })
     }
     
     /// Load Mini App info from bytes (in-memory, no file needed)

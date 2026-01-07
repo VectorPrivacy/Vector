@@ -30,6 +30,8 @@ pub struct MiniAppInfo {
     pub icon_data: Option<String>,
     /// Optional source code URL from manifest
     pub source_code_url: Option<String>,
+    /// SHA-256 hash of the .xdc file (used for permission identification)
+    pub file_hash: Option<String>,
 }
 
 impl MiniAppInfo {
@@ -61,6 +63,7 @@ impl MiniAppInfo {
             has_icon: icon_data.is_some(),
             icon_data,
             source_code_url: pkg.manifest.source_code_url.clone(),
+            file_hash: Some(pkg.file_hash.clone()),
         }
     }
 }
@@ -85,6 +88,312 @@ try {
     webkitRTCPeerConnection = () => {};
 } catch (e) {}
 
+// ============================================================================
+// Media API Permission Guards
+// WebKit/WKWebView ignores Permissions-Policy headers, so we must enforce
+// permissions at the JavaScript level by wrapping getUserMedia/getDisplayMedia
+// ============================================================================
+(function() {
+    'use strict';
+
+    // Store original APIs before any app code can access them
+    const originalGetUserMedia = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+    const originalGetDisplayMedia = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices);
+    const originalEnumerateDevices = navigator.mediaDevices?.enumerateDevices?.bind(navigator.mediaDevices);
+    const originalGeolocation = navigator.geolocation;
+    const originalGetCurrentPosition = navigator.geolocation?.getCurrentPosition?.bind(navigator.geolocation);
+    const originalWatchPosition = navigator.geolocation?.watchPosition?.bind(navigator.geolocation);
+    const originalClipboardReadText = navigator.clipboard?.readText?.bind(navigator.clipboard);
+    const originalClipboardWriteText = navigator.clipboard?.writeText?.bind(navigator.clipboard);
+    const originalClipboardRead = navigator.clipboard?.read?.bind(navigator.clipboard);
+    const originalClipboardWrite = navigator.clipboard?.write?.bind(navigator.clipboard);
+
+    // Permission cache to avoid repeated Tauri calls
+    let permissionCache = null;
+    let permissionCacheTime = 0;
+    const CACHE_TTL = 5000; // 5 seconds
+
+    // Helper to check permission via Tauri
+    async function checkPermission(permissionName) {
+        // Wait for Tauri to be ready
+        const waitForTauri = () => new Promise((resolve) => {
+            const check = () => {
+                if (window.__TAURI__?.core?.invoke) {
+                    resolve();
+                } else {
+                    setTimeout(check, 10);
+                }
+            };
+            check();
+        });
+
+        await waitForTauri();
+
+        // Use cached permissions if fresh
+        const now = Date.now();
+        if (permissionCache && (now - permissionCacheTime) < CACHE_TTL) {
+            return permissionCache.includes(permissionName);
+        }
+
+        try {
+            // Get granted permissions from backend
+            const granted = await window.__TAURI__.core.invoke('miniapp_get_granted_permissions_for_window');
+            permissionCache = granted ? granted.split(',').map(p => p.trim()) : [];
+            permissionCacheTime = now;
+            return permissionCache.includes(permissionName);
+        } catch (e) {
+            console.warn('[MiniApp] Failed to check permission:', e);
+            return false;
+        }
+    }
+
+    // Create a NotAllowedError like browsers do
+    function createNotAllowedError(message) {
+        const error = new DOMException(message, 'NotAllowedError');
+        return error;
+    }
+
+    // Wrap getUserMedia
+    if (navigator.mediaDevices && originalGetUserMedia) {
+        navigator.mediaDevices.getUserMedia = async function(constraints) {
+            const needsMic = constraints?.audio;
+            const needsCam = constraints?.video;
+
+            if (needsMic) {
+                const allowed = await checkPermission('microphone');
+                if (!allowed) {
+                    console.warn('[MiniApp] Microphone access denied - permission not granted');
+                    throw createNotAllowedError('Microphone permission denied by Vector');
+                }
+            }
+
+            if (needsCam) {
+                const allowed = await checkPermission('camera');
+                if (!allowed) {
+                    console.warn('[MiniApp] Camera access denied - permission not granted');
+                    throw createNotAllowedError('Camera permission denied by Vector');
+                }
+            }
+
+            // Permission granted, call original
+            return originalGetUserMedia(constraints);
+        };
+    }
+
+    // Wrap getDisplayMedia
+    if (navigator.mediaDevices && originalGetDisplayMedia) {
+        navigator.mediaDevices.getDisplayMedia = async function(constraints) {
+            const allowed = await checkPermission('display-capture');
+            if (!allowed) {
+                console.warn('[MiniApp] Screen capture denied - permission not granted');
+                throw createNotAllowedError('Screen capture permission denied by Vector');
+            }
+            return originalGetDisplayMedia(constraints);
+        };
+    }
+
+    // Wrap enumerateDevices to hide devices when no permission
+    if (navigator.mediaDevices && originalEnumerateDevices) {
+        navigator.mediaDevices.enumerateDevices = async function() {
+            const devices = await originalEnumerateDevices();
+            const hasMic = await checkPermission('microphone');
+            const hasCam = await checkPermission('camera');
+            const hasSpeaker = await checkPermission('speaker-selection');
+
+            // Filter devices based on permissions
+            return devices.filter(device => {
+                if (device.kind === 'audioinput' && !hasMic) return false;
+                if (device.kind === 'videoinput' && !hasCam) return false;
+                if (device.kind === 'audiooutput' && !hasSpeaker) return false;
+                return true;
+            }).map(device => {
+                // If permission not granted, hide device labels (like browsers do)
+                const hasPermission =
+                    (device.kind === 'audioinput' && hasMic) ||
+                    (device.kind === 'videoinput' && hasCam) ||
+                    (device.kind === 'audiooutput' && hasSpeaker);
+
+                if (!hasPermission) {
+                    return {
+                        deviceId: device.deviceId,
+                        kind: device.kind,
+                        label: '',
+                        groupId: device.groupId
+                    };
+                }
+                return device;
+            });
+        };
+    }
+
+    // Wrap Geolocation API
+    if (originalGeolocation && originalGetCurrentPosition) {
+        navigator.geolocation.getCurrentPosition = async function(success, error, options) {
+            const allowed = await checkPermission('geolocation');
+            if (!allowed) {
+                console.warn('[MiniApp] Geolocation denied - permission not granted');
+                if (error) {
+                    error({ code: 1, message: 'Geolocation permission denied by Vector', PERMISSION_DENIED: 1 });
+                }
+                return;
+            }
+            return originalGetCurrentPosition(success, error, options);
+        };
+
+        navigator.geolocation.watchPosition = async function(success, error, options) {
+            const allowed = await checkPermission('geolocation');
+            if (!allowed) {
+                console.warn('[MiniApp] Geolocation watch denied - permission not granted');
+                if (error) {
+                    error({ code: 1, message: 'Geolocation permission denied by Vector', PERMISSION_DENIED: 1 });
+                }
+                return 0;
+            }
+            return originalWatchPosition(success, error, options);
+        };
+    }
+
+    // Wrap Clipboard API (both text and binary methods)
+    if (navigator.clipboard) {
+        if (originalClipboardReadText) {
+            navigator.clipboard.readText = async function() {
+                const allowed = await checkPermission('clipboard-read');
+                if (!allowed) {
+                    console.warn('[MiniApp] Clipboard read denied - permission not granted');
+                    throw createNotAllowedError('Clipboard read permission denied by Vector');
+                }
+                return originalClipboardReadText();
+            };
+        }
+
+        if (originalClipboardWriteText) {
+            navigator.clipboard.writeText = async function(text) {
+                const allowed = await checkPermission('clipboard-write');
+                if (!allowed) {
+                    console.warn('[MiniApp] Clipboard write denied - permission not granted');
+                    throw createNotAllowedError('Clipboard write permission denied by Vector');
+                }
+                return originalClipboardWriteText(text);
+            };
+        }
+
+        // Binary clipboard methods (read/write ClipboardItem objects)
+        if (originalClipboardRead) {
+            navigator.clipboard.read = async function() {
+                const allowed = await checkPermission('clipboard-read');
+                if (!allowed) {
+                    console.warn('[MiniApp] Clipboard read denied - permission not granted');
+                    throw createNotAllowedError('Clipboard read permission denied by Vector');
+                }
+                return originalClipboardRead();
+            };
+        }
+
+        if (originalClipboardWrite) {
+            navigator.clipboard.write = async function(data) {
+                const allowed = await checkPermission('clipboard-write');
+                if (!allowed) {
+                    console.warn('[MiniApp] Clipboard write denied - permission not granted');
+                    throw createNotAllowedError('Clipboard write permission denied by Vector');
+                }
+                return originalClipboardWrite(data);
+            };
+        }
+    }
+
+    // Wrap Bluetooth API
+    if (navigator.bluetooth) {
+        const originalRequestDevice = navigator.bluetooth.requestDevice?.bind(navigator.bluetooth);
+        if (originalRequestDevice) {
+            navigator.bluetooth.requestDevice = async function(options) {
+                const allowed = await checkPermission('bluetooth');
+                if (!allowed) {
+                    console.warn('[MiniApp] Bluetooth denied - permission not granted');
+                    throw createNotAllowedError('Bluetooth permission denied by Vector');
+                }
+                return originalRequestDevice(options);
+            };
+        }
+    }
+
+    // Wrap MIDI API
+    if (navigator.requestMIDIAccess) {
+        const originalRequestMIDI = navigator.requestMIDIAccess.bind(navigator);
+        navigator.requestMIDIAccess = async function(options) {
+            const allowed = await checkPermission('midi');
+            if (!allowed) {
+                console.warn('[MiniApp] MIDI access denied - permission not granted');
+                throw createNotAllowedError('MIDI permission denied by Vector');
+            }
+            return originalRequestMIDI(options);
+        };
+    }
+
+    // Wrap Screen Wake Lock API
+    if (navigator.wakeLock) {
+        const originalWakeLockRequest = navigator.wakeLock.request?.bind(navigator.wakeLock);
+        if (originalWakeLockRequest) {
+            navigator.wakeLock.request = async function(type) {
+                const allowed = await checkPermission('screen-wake-lock');
+                if (!allowed) {
+                    console.warn('[MiniApp] Wake lock denied - permission not granted');
+                    throw createNotAllowedError('Screen wake lock permission denied by Vector');
+                }
+                return originalWakeLockRequest(type);
+            };
+        }
+    }
+
+    // Wrap navigator.permissions.query() to return Vector's permission state
+    // Many apps check this before calling getUserMedia, so we need to reflect our state
+    if (navigator.permissions && navigator.permissions.query) {
+        const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = async function(descriptor) {
+            const name = descriptor?.name;
+
+            // Map permission names to our Vector permission names
+            const permissionMap = {
+                'microphone': 'microphone',
+                'camera': 'camera',
+                'geolocation': 'geolocation',
+                'clipboard-read': 'clipboard-read',
+                'clipboard-write': 'clipboard-write',
+                'midi': 'midi',
+                'screen-wake-lock': 'screen-wake-lock',
+                'display-capture': 'display-capture',
+                'speaker-selection': 'speaker-selection',
+                'accelerometer': 'accelerometer',
+                'gyroscope': 'gyroscope',
+                'magnetometer': 'magnetometer',
+                'ambient-light-sensor': 'ambient-light-sensor',
+                'bluetooth': 'bluetooth',
+            };
+
+            const vectorPermission = permissionMap[name];
+            if (vectorPermission) {
+                const allowed = await checkPermission(vectorPermission);
+                // Return a PermissionStatus-like object
+                // We return 'granted' if allowed, 'prompt' if not (to encourage the app to try)
+                // Using 'prompt' instead of 'denied' lets apps attempt the action and get our proper error
+                const state = allowed ? 'granted' : 'prompt';
+                return {
+                    state: state,
+                    name: name,
+                    onchange: null,
+                    addEventListener: () => {},
+                    removeEventListener: () => {},
+                    dispatchEvent: () => false,
+                };
+            }
+
+            // For unknown permissions, fall through to original
+            return originalQuery(descriptor);
+        };
+    }
+
+    console.log('[MiniApp] Media API permission guards installed');
+})();
+
 // Wrap Tauri's __TAURI__ API to restrict access to only allowed commands
 // We need to wait for Tauri to initialize first
 try {
@@ -94,18 +403,11 @@ try {
             setTimeout(setupTauriRestrictions, 10);
             return;
         }
-        
-        // Mock the notification plugin
-        window.__TAURI__.notification = {
-            isPermissionGranted: async () => false,
-            requestPermission: async () => 'denied',
-            sendNotification: () => {},
-        };
-        
+
         // Wrap the core invoke to reject all calls except our allowed ones
         const originalInvoke = window.__TAURI__.core.invoke;
         const originalChannel = window.__TAURI__.core.Channel;
-        
+
         window.__TAURI__.core.invoke = async (cmd, args) => {
             // Allow our miniapp commands
             const allowedCommands = [
@@ -115,7 +417,8 @@ try {
                 'miniapp_send_realtime_data',
                 'miniapp_leave_realtime_channel',
                 'miniapp_add_realtime_peer',
-                'miniapp_get_realtime_node_addr'
+                'miniapp_get_realtime_node_addr',
+                'miniapp_get_granted_permissions_for_window'
             ];
             if (allowedCommands.includes(cmd)) {
                 return originalInvoke.call(window.__TAURI__.core, cmd, args);
@@ -123,15 +426,15 @@ try {
             console.warn('Mini App tried to invoke blocked Tauri command:', cmd);
             throw new Error('Tauri command not available in Mini Apps: ' + cmd);
         };
-        
+
         // Ensure Channel class is still available (needed for realtime)
         if (originalChannel) {
             window.__TAURI__.core.Channel = originalChannel;
         }
-        
-        console.log("Mini App Tauri restrictions applied");
+
+        console.log("[MiniApp] Tauri restrictions applied");
     };
-    
+
     // Start checking for Tauri
     setupTauriRestrictions();
 } catch (e) {
@@ -195,9 +498,15 @@ pub async fn miniapp_load_info_from_bytes(
         .next()
         .unwrap_or(&file_name)
         .to_string();
-    
+
+    // Compute SHA-256 hash of the bytes for permission identification
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let file_hash = hex::encode(hasher.finalize());
+
     let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback_name)?;
-    
+
     // Convert icon bytes to base64 data URL
     let icon_data = icon_bytes.map(|bytes| {
         // Detect MIME type from bytes
@@ -212,12 +521,12 @@ pub async fn miniapp_load_info_from_bytes(
         } else {
             "application/octet-stream"
         };
-        
+
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         format!("data:{};base64,{}", mime, b64)
     });
-    
+
     Ok(MiniAppInfo {
         id: format!("miniapp_preview_{}", md5_hash(&file_name)),
         name: manifest.name,
@@ -226,6 +535,7 @@ pub async fn miniapp_load_info_from_bytes(
         has_icon: icon_data.is_some(),
         icon_data,
         source_code_url: manifest.source_code_url,
+        file_hash: Some(file_hash),
     })
 }
 
@@ -247,7 +557,13 @@ pub async fn miniapp_open(
     
     // Generate unique ID from file hash
     let id = format!("miniapp_{:x}", md5_hash(&file_path));
-    let window_label = format!("miniapp:{}:{}", chat_id, message_id);
+    // For marketplace apps (empty chat/message), use the app id as the window label
+    // This ensures a valid label like "miniapp:solo:abc123" instead of "miniapp::"
+    let window_label = if chat_id.is_empty() && message_id.is_empty() {
+        format!("miniapp:solo:{}", id)
+    } else {
+        format!("miniapp:{}:{}", chat_id, message_id)
+    };
     
     trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
     
@@ -1014,6 +1330,17 @@ pub async fn marketplace_get_app(
     Ok(state.get_app(&app_id).cloned())
 }
 
+/// Get a marketplace app by its blossom hash (SHA-256 of the .xdc file)
+/// This is useful for looking up marketplace info for apps shared via chat
+#[tauri::command]
+pub async fn marketplace_get_app_by_hash(
+    file_hash: String,
+) -> Result<Option<MarketplaceApp>, Error> {
+    let state = MARKETPLACE_STATE.read().await;
+    // Search through cached apps to find one with matching blossom_hash
+    Ok(state.get_apps().into_iter().find(|app| app.blossom_hash == file_hash))
+}
+
 /// Get the installation status of a marketplace app
 #[tauri::command]
 pub async fn marketplace_get_install_status(
@@ -1163,20 +1490,21 @@ pub async fn marketplace_publish_app(
     changelog: Option<String>,
     developer: Option<String>,
     source_url: Option<String>,
+    permissions: Option<String>,
 ) -> Result<String, Error> {
     use crate::{NOSTR_CLIENT, get_blossom_servers};
-    
+
     let client = NOSTR_CLIENT.get()
         .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("Nostr client not initialized")))?;
-    
+
     let signer = client.signer().await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to get signer: {}", e)))?;
-    
+
     let blossom_servers = get_blossom_servers();
-    
+
     // Convert categories to &str for the function
     let category_refs: Vec<&str> = categories.iter().map(|s| s.as_str()).collect();
-    
+
     super::marketplace::publish_to_marketplace(
         signer,
         &file_path,
@@ -1188,6 +1516,7 @@ pub async fn marketplace_publish_app(
         changelog.as_deref(),
         developer.as_deref(),
         source_url.as_deref(),
+        permissions.as_deref(),
         blossom_servers,
     )
     .await
@@ -1198,4 +1527,95 @@ pub async fn marketplace_publish_app(
 #[tauri::command]
 pub async fn marketplace_get_trusted_publisher() -> Result<String, Error> {
     Ok(super::marketplace::TRUSTED_PUBLISHER.to_string())
+}
+
+// ============================================================================
+// Mini App Permissions Commands
+// ============================================================================
+
+/// Get all available Mini App permissions for UI display
+#[tauri::command]
+pub async fn miniapp_get_available_permissions() -> Result<Vec<super::permissions::PermissionInfo>, Error> {
+    Ok(super::permissions::get_all_permission_info())
+}
+
+/// Get granted permissions for a specific Mini App by file hash
+#[tauri::command]
+pub async fn miniapp_get_granted_permissions(
+    app: AppHandle,
+    file_hash: String,
+) -> Result<String, Error> {
+    crate::db::get_miniapp_granted_permissions(&app, &file_hash)
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Set a permission for a Mini App by file hash (grant or revoke)
+#[tauri::command]
+pub async fn miniapp_set_permission(
+    app: AppHandle,
+    file_hash: String,
+    permission: String,
+    granted: bool,
+) -> Result<(), Error> {
+    crate::db::set_miniapp_permission(&app, &file_hash, &permission, granted)
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Set multiple permissions at once for a Mini App by file hash
+#[tauri::command]
+pub async fn miniapp_set_permissions(
+    app: AppHandle,
+    file_hash: String,
+    permissions: Vec<(String, bool)>,
+) -> Result<(), Error> {
+    let perm_refs: Vec<(&str, bool)> = permissions.iter()
+        .map(|(p, g)| (p.as_str(), *g))
+        .collect();
+    crate::db::set_miniapp_permissions(&app, &file_hash, &perm_refs)
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Check if an app has been prompted for permissions yet (by file hash)
+#[tauri::command]
+pub async fn miniapp_has_permission_prompt(
+    app: AppHandle,
+    file_hash: String,
+) -> Result<bool, Error> {
+    crate::db::has_miniapp_permission_prompt(&app, &file_hash)
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Revoke all permissions for a Mini App by file hash
+#[tauri::command]
+pub async fn miniapp_revoke_all_permissions(
+    app: AppHandle,
+    file_hash: String,
+) -> Result<(), Error> {
+    crate::db::revoke_all_miniapp_permissions(&app, &file_hash)
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Get granted permissions for the Mini App calling this command
+/// This is called from within the Mini App's JS context to check permissions
+/// Uses the file hash from the loaded package for permission lookup
+#[tauri::command]
+pub async fn miniapp_get_granted_permissions_for_window(
+    app: AppHandle,
+    webview_window: WebviewWindow,
+) -> Result<String, Error> {
+    let label = webview_window.label();
+
+    if !label.starts_with("miniapp:") {
+        return Err(Error::Anyhow(anyhow::anyhow!("Not a Mini App window")));
+    }
+
+    // Get the app instance from state to find the package
+    let state = app.state::<MiniAppsState>();
+    if let Some(instance) = state.get_instance(label).await {
+        // Use the file hash for permission lookup - this is secure and content-based
+        crate::db::get_miniapp_granted_permissions(&app, &instance.package.file_hash)
+            .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+    } else {
+        Err(Error::Anyhow(anyhow::anyhow!("Could not find Mini App instance")))
+    }
 }

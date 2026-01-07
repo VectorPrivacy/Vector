@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-revoke-all-permissions"
+description = "Enables the miniapp_revoke_all_permissions command without any pre-configured scope."
+commands.allow = ["miniapp_revoke_all_permissions"]
+
+[[permission]]
+identifier = "deny-miniapp-revoke-all-permissions"
+description = "Denies the miniapp_revoke_all_permissions command without any pre-configured scope."
+commands.deny = ["miniapp_revoke_all_permissions"]

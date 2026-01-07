@@ -44,6 +44,7 @@ let isMarketplaceLoading = false;
 let marketplaceError = null;
 let marketplaceSearchQuery = '';
 let marketplaceActiveFilters = []; // Array of category strings
+let marketplaceShouldAnimate = false; // Only animate after initial load from loading state
 
 /**
  * Fetch apps from the marketplace
@@ -152,16 +153,150 @@ async function syncInstallStatus() {
 
 /**
  * Open a marketplace app (install if needed, then launch)
+ * Checks for permission prompt if the app requests permissions and hasn't been prompted yet.
  * @param {string} appId - The app ID
+ * @param {MarketplaceApp} [app] - Optional app object with requested_permissions
  * @returns {Promise<void>}
  */
-async function openMarketplaceApp(appId) {
+async function openMarketplaceApp(appId, app) {
     try {
+        // If app object provided and has requested permissions, check if we need to prompt
+        // Use blossom_hash as the permission identifier (content-based security)
+        if (app && app.requested_permissions && app.requested_permissions.length > 0 && app.blossom_hash) {
+            const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash: app.blossom_hash });
+
+            if (!hasBeenPrompted) {
+                // Show permission prompt before opening
+                const userGranted = await showPermissionPrompt(app);
+                if (!userGranted) {
+                    // User cancelled - don't open the app
+                    return;
+                }
+            }
+        }
+
         await invoke('marketplace_open_app', { appId });
     } catch (error) {
         console.error('Failed to open marketplace app:', error);
         throw error;
     }
+}
+
+/**
+ * Show a permission request prompt for an app
+ * @param {MarketplaceApp} app - The app requesting permissions
+ * @returns {Promise<boolean>} True if user confirmed (grant or deny), false if cancelled
+ */
+async function showPermissionPrompt(app) {
+    // Get available permissions metadata first (outside Promise to properly throw on error)
+    let availablePermissions;
+    try {
+        availablePermissions = await invoke('miniapp_get_available_permissions');
+    } catch (error) {
+        console.error('Failed to get available permissions:', error);
+        return true; // Continue anyway
+    }
+
+    // Parse requested permissions
+    const requestedPermissions = app.requested_permissions.split(',').filter(s => s.trim());
+
+    // Build permissions list HTML - using same toggle style as App Details
+    const permissionsHtml = requestedPermissions.map(permId => {
+        const permInfo = availablePermissions.find(p => p.id === permId.trim());
+        if (!permInfo) return '';
+
+        return `
+            <div class="permission-prompt-item">
+                <div class="permission-prompt-info">
+                    <span class="permission-prompt-label">${escapeHtml(permInfo.label)}</span>
+                    <span class="permission-prompt-desc">${escapeHtml(permInfo.description)}</span>
+                </div>
+                <label class="toggle-container permission-prompt-toggle">
+                    <input type="checkbox" name="permission" value="${escapeHtml(permId.trim())}">
+                    <span class="neon-toggle"></span>
+                </label>
+            </div>
+        `;
+    }).filter(h => h).join('');
+
+    // Create overlay
+    let overlay = document.getElementById('permission-prompt-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'permission-prompt-overlay';
+        overlay.className = 'permission-prompt-overlay';
+        document.body.appendChild(overlay);
+    }
+
+    overlay.innerHTML = `
+        <div class="permission-prompt-container">
+            <div class="permission-prompt-header">
+                <h2>Permission Request</h2>
+                <p class="permission-prompt-subtitle">${escapeHtml(app.name)} is requesting the following permissions:</p>
+            </div>
+            <div class="permission-prompt-content">
+                <p class="permission-prompt-hint">Select which permissions you want to grant. The app may have reduced functionality without certain permissions.</p>
+                <div class="permission-prompt-list">
+                    ${permissionsHtml}
+                </div>
+            </div>
+            <div class="permission-prompt-buttons">
+                <button class="file-preview-btn file-preview-btn-cancel" id="permission-prompt-deny">Cancel</button>
+                <button class="file-preview-btn file-preview-btn-send" id="permission-prompt-continue">Continue</button>
+            </div>
+        </div>
+    `;
+
+    overlay.style.display = 'flex';
+    setTimeout(() => overlay.classList.add('active'), 10);
+
+    // Return a Promise that resolves when the user makes a choice
+    return new Promise((resolve) => {
+        const denyBtn = document.getElementById('permission-prompt-deny');
+        const continueBtn = document.getElementById('permission-prompt-continue');
+
+        const closePrompt = () => {
+            // Clean up event handlers to prevent memory leaks
+            denyBtn.onclick = null;
+            continueBtn.onclick = null;
+            overlay.onclick = null;
+            overlay.classList.remove('active');
+            setTimeout(() => overlay.style.display = 'none', 300);
+        };
+
+        denyBtn.onclick = () => {
+            // Cancel - don't save anything, just close and cancel the app opening
+            closePrompt();
+            resolve(false);
+        };
+
+        continueBtn.onclick = async () => {
+            // Collect selected permissions
+            const checkboxes = overlay.querySelectorAll('input[name="permission"]');
+            const permissions = Array.from(checkboxes).map(cb => [cb.value, cb.checked]);
+
+            try {
+                await invoke('miniapp_set_permissions', {
+                    fileHash: app.blossom_hash,
+                    permissions: permissions
+                });
+                // Refresh the App Details permissions list if it's visible
+                loadAppPermissions(app);
+            } catch (error) {
+                console.error('Failed to save permissions:', error);
+            }
+            closePrompt();
+            resolve(true);
+        };
+
+        // Allow clicking outside to cancel
+        overlay.onclick = (e) => {
+            if (e.target === overlay) {
+                closePrompt();
+                resolve(false);
+            }
+        };
+    });
 }
 
 async function uninstallMarketplaceApp(appId, appName) {
@@ -498,6 +633,13 @@ async function handleAppInstallOrPlay(app, btn) {
                     versionEl.removeAttribute('title');
                 }
             }
+
+            // Refresh App Details panel if it's open for this app
+            const detailsPanel = document.getElementById('app-details-panel');
+            if (detailsPanel && detailsPanel.style.display !== 'none' &&
+                detailsPanel.dataset.appId === app.id) {
+                showAppDetails(app);
+            }
         } catch (error) {
             console.error('Failed to update app:', error);
             btn.innerHTML = 'Failed';
@@ -516,7 +658,7 @@ async function handleAppInstallOrPlay(app, btn) {
         btn.textContent = launchingText;
         btn.disabled = true;
         try {
-            await openMarketplaceApp(app.id);
+            await openMarketplaceApp(app.id, app);
             // Reset button state after successful launch
             btn.textContent = actionText;
             btn.disabled = false;
@@ -550,8 +692,12 @@ async function handleAppInstallOrPlay(app, btn) {
             btn.classList.add('installed');
             btn.disabled = false;
 
-            // Optionally auto-launch after install
-            // await openMarketplaceApp(app.id);
+            // Refresh App Details panel if it's open for this app
+            const detailsPanel = document.getElementById('app-details-panel');
+            if (detailsPanel && detailsPanel.style.display !== 'none' &&
+                detailsPanel.dataset.appId === app.id) {
+                showAppDetails(app);
+            }
         } catch (error) {
             console.error('Failed to install app:', error);
             btn.innerHTML = 'Failed';
@@ -596,11 +742,14 @@ function closeAppDetailsPanel() {
 async function showAppDetails(app) {
     const panel = document.getElementById('app-details-panel');
     const content = document.getElementById('app-details-content');
-    
+
     if (!panel || !content) {
         console.error('App details panel not found');
         return;
     }
+
+    // Store current app ID on panel for refresh detection
+    panel.dataset.appId = app.id;
 
     // Create icon HTML - prefer cached local path for offline support
     let iconHtml = '<span class="icon icon-play app-details-icon-placeholder"></span>';
@@ -702,6 +851,18 @@ async function showAppDetails(app) {
             <h3 class="app-details-section-title">Developer</h3>
             <div class="app-details-developer">
                 <span class="app-details-developer-name">${escapeHtml(app.developer)}</span>
+            </div>
+        </div>
+        ` : ''}
+
+        <!-- Permissions Section (only show if app requests permissions AND is installed) -->
+        ${(app.requested_permissions && app.requested_permissions.length > 0 && (app.installed || app.local_path)) ? `
+        <div class="app-details-section">
+            <h3 class="app-details-section-title">Permissions</h3>
+            <p class="app-details-permissions-hint">This app requests the following permissions. Toggle to grant or revoke access.</p>
+            <div class="app-details-permissions" id="app-details-permissions" data-app-id="${escapeHtml(app.id)}">
+                <!-- Permissions will be loaded dynamically -->
+                <div class="app-details-permissions-loading">Loading permissions...</div>
             </div>
         </div>
         ` : ''}
@@ -838,6 +999,108 @@ async function showAppDetails(app) {
 
     // Try to load publisher profile info
     loadPublisherProfile(app.publisher);
+
+    // Load permissions if this app requests any and is installed
+    if (app.requested_permissions && app.requested_permissions.length > 0 && (app.installed || app.local_path)) {
+        loadAppPermissions(app);
+    }
+}
+
+/**
+ * Load and display permissions for an installed app in the details panel
+ * @param {MarketplaceApp} app - The app
+ */
+async function loadAppPermissions(app) {
+    const permissionsContainer = document.getElementById('app-details-permissions');
+    if (!permissionsContainer) return;
+
+    // Use blossom_hash as the permission identifier (content-based security)
+    const fileHash = app.blossom_hash;
+    if (!fileHash) {
+        permissionsContainer.innerHTML = '<p class="app-details-permissions-hint">No permissions available</p>';
+        return;
+    }
+
+    try {
+        // Get available permissions metadata
+        const availablePermissions = await invoke('miniapp_get_available_permissions');
+
+        // Get granted permissions for this app by file hash
+        const grantedStr = await invoke('miniapp_get_granted_permissions', { fileHash });
+        const grantedSet = new Set(grantedStr ? grantedStr.split(',').filter(s => s) : []);
+
+        // Parse requested permissions
+        const requestedPermissions = app.requested_permissions.split(',').filter(s => s.trim());
+
+        // Build permission toggles HTML
+        const permissionsHtml = requestedPermissions.map(permId => {
+            const permInfo = availablePermissions.find(p => p.id === permId.trim());
+            if (!permInfo) return ''; // Unknown permission
+
+            const isGranted = grantedSet.has(permId.trim());
+            return `
+                <div class="app-details-permission-item">
+                    <div class="app-details-permission-info">
+                        <span class="app-details-permission-label">${escapeHtml(permInfo.label)}</span>
+                        <span class="app-details-permission-desc">${escapeHtml(permInfo.description)}</span>
+                    </div>
+                    <label class="toggle-container app-details-permission-toggle">
+                        <input type="checkbox" data-permission="${escapeHtml(permId.trim())}" ${isGranted ? 'checked' : ''}>
+                        <span class="neon-toggle"></span>
+                    </label>
+                </div>
+            `;
+        }).filter(h => h).join('');
+
+        // Add Reset Permissions button after the toggles
+        const resetButtonHtml = `
+            <button class="app-details-reset-permissions-btn" id="reset-permissions-btn">
+                Reset Permissions
+            </button>
+        `;
+
+        permissionsContainer.innerHTML = (permissionsHtml || '<p class="app-details-permissions-hint">No permissions available</p>') + resetButtonHtml;
+
+        // Set up toggle event handlers
+        const toggles = permissionsContainer.querySelectorAll('input[type="checkbox"]');
+        toggles.forEach(toggle => {
+            toggle.addEventListener('change', async (e) => {
+                const permissionId = e.target.dataset.permission;
+                const granted = e.target.checked;
+
+                try {
+                    await invoke('miniapp_set_permission', {
+                        fileHash,
+                        permission: permissionId,
+                        granted: granted
+                    });
+                    console.log(`Permission ${permissionId} ${granted ? 'granted' : 'revoked'} for app ${app.id} (hash: ${fileHash})`);
+                } catch (error) {
+                    console.error('Failed to update permission:', error);
+                    // Revert toggle on error
+                    e.target.checked = !granted;
+                }
+            });
+        });
+
+        // Set up Reset Permissions button
+        const resetBtn = document.getElementById('reset-permissions-btn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', async () => {
+                try {
+                    await invoke('miniapp_revoke_all_permissions', { fileHash });
+                    console.log(`All permissions reset for app ${app.id} (hash: ${fileHash})`);
+                    // Reload permissions to reflect reset state (toggles will be unchecked)
+                    loadAppPermissions(app);
+                } catch (error) {
+                    console.error('Failed to reset permissions:', error);
+                }
+            });
+        }
+    } catch (error) {
+        console.error('Failed to load app permissions:', error);
+        permissionsContainer.innerHTML = '<p class="app-details-permissions-hint">Failed to load permissions</p>';
+    }
 }
 
 /**
@@ -854,7 +1117,7 @@ async function handleAppDetailsAction(app, btn) {
         btn.textContent = launchingText;
         btn.disabled = true;
         try {
-            await openMarketplaceApp(app.id);
+            await openMarketplaceApp(app.id, app);
             // Reset button state after successful launch
             btn.textContent = actionText;
             btn.disabled = false;
@@ -921,7 +1184,7 @@ async function handleAppDetailsPlay(app, btn) {
     btn.textContent = launchingText;
     btn.disabled = true;
     try {
-        await openMarketplaceApp(app.id);
+        await openMarketplaceApp(app.id, app);
         // Reset button state after successful launch
         btn.textContent = actionText;
         btn.disabled = false;
@@ -1133,35 +1396,49 @@ function getAppsForCategory(apps, category, limit = 4) {
 function renderFeaturedCategories(apps) {
     const container = document.getElementById('marketplace-featured');
     if (!container) return;
-    
+
     // Don't show featured section when searching or filtering
     if (marketplaceSearchQuery.trim() || marketplaceActiveFilters.length > 0) {
         container.innerHTML = '';
         return;
     }
-    
+
     container.innerHTML = '';
-    
+
+    // Animation delay counter
+    let animationIndex = 0;
+
     // Featured category: Multiplayer (highlighted)
     const multiplayerApps = getAppsForCategory(apps, 'multiplayer', 4);
     if (multiplayerApps.length > 0) {
         const multiplayerCount = apps.filter(app =>
             app.categories.some(c => c.toLowerCase() === 'multiplayer')
         ).length;
-        
+
         const multiplayerDescription = "Team up with friends and dive into the Vectorverse together";
         const featuredCard = createFeaturedCategoryCard('Multiplayer', multiplayerDescription, multiplayerApps, multiplayerCount, true);
+        // Add fade-in animation only after initial load
+        if (marketplaceShouldAnimate) {
+            featuredCard.classList.add('marketplace-animate-in');
+            featuredCard.style.animationDelay = `${animationIndex * 0.05}s`;
+            animationIndex++;
+        }
         container.appendChild(featuredCard);
     }
-    
+
     // Popular categories pills
     const popularCategories = getPopularCategories(apps, 8)
         .filter(cat => cat.name !== 'multiplayer' && cat.name !== 'game' && cat.name !== 'app'); // Exclude generic ones
-    
+
     if (popularCategories.length > 0) {
         const pillsContainer = document.createElement('div');
         pillsContainer.className = 'marketplace-popular-categories';
-        
+        // Add fade-in animation only after initial load
+        if (marketplaceShouldAnimate) {
+            pillsContainer.classList.add('marketplace-animate-in');
+            pillsContainer.style.animationDelay = `${animationIndex * 0.05}s`;
+        }
+
         for (const category of popularCategories) {
             const pill = document.createElement('div');
             pill.className = 'marketplace-popular-category';
@@ -1169,7 +1446,7 @@ function renderFeaturedCategories(apps) {
             pill.onclick = () => addMarketplaceFilter(category.name);
             pillsContainer.appendChild(pill);
         }
-        
+
         container.appendChild(pillsContainer);
     }
 }
@@ -1344,7 +1621,7 @@ function renderMarketplaceApps(container, apps) {
     if (apps.length === 0) {
         const emptyMsg = document.createElement('div');
         emptyMsg.className = 'marketplace-empty';
-        
+
         if (hasFilters) {
             emptyMsg.innerHTML = `
                 <span class="icon icon-search marketplace-empty-icon"></span>
@@ -1370,6 +1647,9 @@ function renderMarketplaceApps(container, apps) {
     // Add section title based on current view
     const sectionTitle = document.createElement('div');
     sectionTitle.className = 'marketplace-section-title';
+    if (marketplaceShouldAnimate) {
+        sectionTitle.classList.add('marketplace-animate-in');
+    }
     if (marketplaceSearchQuery.trim()) {
         sectionTitle.innerHTML = `<span class="icon icon-search"></span> Search Results`;
     } else if (marketplaceActiveFilters.length > 0) {
@@ -1380,8 +1660,17 @@ function renderMarketplaceApps(container, apps) {
     }
     container.appendChild(sectionTitle);
 
+    // Animation delay counter (starts after featured section)
+    let animationIndex = 1;
+
     for (const app of sortedApps) {
         const card = createMarketplaceAppCard(app);
+        // Add staggered fade-in animation only after initial load
+        if (marketplaceShouldAnimate) {
+            card.classList.add('marketplace-animate-in');
+            card.style.animationDelay = `${animationIndex * 0.03}s`;
+            animationIndex++;
+        }
         container.appendChild(card);
     }
 
@@ -1399,7 +1688,8 @@ async function initMarketplace(container) {
     // Reset filters and search
     marketplaceSearchQuery = '';
     marketplaceActiveFilters = [];
-    
+    marketplaceShouldAnimate = false; // Reset animation flag
+
     // Set up search input handler
     const searchInput = document.getElementById('marketplace-search-input');
     if (searchInput) {
@@ -1408,10 +1698,10 @@ async function initMarketplace(container) {
         searchInput.removeEventListener('input', handleMarketplaceSearch);
         searchInput.addEventListener('input', handleMarketplaceSearch);
     }
-    
+
     // Update filters UI (hide it since no filters active)
     updateMarketplaceFiltersUI();
-    
+
     // Show loading state
     container.innerHTML = `
         <div class="marketplace-loading">
@@ -1424,18 +1714,22 @@ async function initMarketplace(container) {
         // First try to show cached apps (filtered)
         const cachedApps = await getCachedMarketplaceApps();
         if (cachedApps.length > 0) {
+            // We have cached data - no animation needed, show immediately
             marketplaceApps = cachedApps;
             renderFeaturedCategories(cachedApps);
             const filteredCached = filterMarketplaceApps(cachedApps);
             renderMarketplaceApps(container, filteredCached);
+        } else {
+            // No cache - we'll animate after fetch completes
+            marketplaceShouldAnimate = true;
         }
 
         // Then fetch fresh data
         const apps = await fetchMarketplaceApps(true);
-        
+
         // Sync install status (this updates the Rust state)
         await syncInstallStatus();
-        
+
         // Re-fetch to get updated install status from Rust
         const updatedApps = await getCachedMarketplaceApps();
         // Update the global marketplaceApps array with the updated data
@@ -1444,6 +1738,9 @@ async function initMarketplace(container) {
         renderFeaturedCategories(updatedApps);
         const filteredApps = filterMarketplaceApps(updatedApps);
         renderMarketplaceApps(container, filteredApps);
+
+        // Clear animation flag after render
+        marketplaceShouldAnimate = false;
     } catch (error) {
         console.error('Failed to initialize marketplace:', error);
         container.innerHTML = `
@@ -1524,9 +1821,12 @@ async function isCurrentUserTrustedPublisher() {
  * @param {string} version - Version string
  * @param {string[]} categories - Category tags
  * @param {string|null} changelog - Optional changelog
+ * @param {string|null} developer - Optional developer name
+ * @param {string|null} sourceUrl - Optional source URL
+ * @param {string|null} permissions - Optional comma-separated permissions string
  * @returns {Promise<string>} Event ID of the published event
  */
-async function publishMarketplaceApp(filePath, appId, name, description, version, categories, changelog, developer, sourceUrl) {
+async function publishMarketplaceApp(filePath, appId, name, description, version, categories, changelog, developer, sourceUrl, permissions) {
     try {
         const eventId = await invoke('marketplace_publish_app', {
             filePath,
@@ -1538,6 +1838,7 @@ async function publishMarketplaceApp(filePath, appId, name, description, version
             changelog,
             developer,
             sourceUrl,
+            permissions,
         });
         return eventId;
     } catch (error) {
@@ -1624,6 +1925,13 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
                         <label for="publish-app-changelog">Changelog (optional)</label>
                         <textarea id="publish-app-changelog" placeholder="What's new in this version..."></textarea>
                     </div>
+                    <div class="publish-app-field">
+                        <label>Requested Permissions (optional)</label>
+                        <span class="publish-app-hint">Users must explicitly grant these permissions. Leave all unchecked if your app doesn't need special access.</span>
+                        <div class="publish-app-permissions" id="publish-app-permissions">
+                            <!-- Permissions will be loaded dynamically -->
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="publish-app-buttons">
@@ -1638,6 +1946,139 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
     // Show overlay
     overlay.style.display = 'flex';
     setTimeout(() => overlay.classList.add('active'), 10);
+
+    // Add App ID change listener to pre-fill from existing published app
+    const appIdInput = document.getElementById('publish-app-id');
+    let prefillTimeout = null;
+    let permissionsLoaded = false;
+
+    const checkAndPrefillFromExisting = () => {
+        const appId = appIdInput.value.trim().toLowerCase();
+        if (!appId) return;
+
+        // Find existing app with this ID that we published
+        const existingApp = marketplaceApps.find(app =>
+            app.id === appId &&
+            typeof strPubkey !== 'undefined' &&
+            app.publisher === strPubkey
+        );
+
+        if (existingApp) {
+            console.log('[Marketplace] Found existing app to pre-fill:', existingApp);
+
+            // Pre-fill description
+            const descEl = document.getElementById('publish-app-description');
+            if (descEl && existingApp.description) {
+                descEl.value = existingApp.description;
+            }
+
+            // Pre-fill developer
+            const devEl = document.getElementById('publish-app-developer');
+            if (devEl && existingApp.developer) {
+                devEl.value = existingApp.developer;
+            }
+
+            // Pre-fill source URL
+            const sourceEl = document.getElementById('publish-app-source');
+            if (sourceEl && existingApp.source_url) {
+                sourceEl.value = existingApp.source_url;
+            }
+
+            // Pre-fill categories (excluding 'game' and 'app' tags)
+            const catEl = document.getElementById('publish-app-categories');
+            if (catEl && existingApp.categories && existingApp.categories.length > 0) {
+                const filteredCategories = existingApp.categories.filter(c => c !== 'game' && c !== 'app');
+                catEl.value = filteredCategories.join(', ');
+            }
+
+            // Pre-fill is-game toggle based on categories
+            const isGameEl = document.getElementById('publish-app-is-game');
+            if (isGameEl && existingApp.categories) {
+                isGameEl.checked = existingApp.categories.includes('game');
+            }
+
+            // Pre-fill version
+            const versionEl = document.getElementById('publish-app-version');
+            if (versionEl && existingApp.version) {
+                versionEl.value = existingApp.version;
+            }
+
+            // Pre-fill changelog
+            const changelogEl = document.getElementById('publish-app-changelog');
+            if (changelogEl && existingApp.changelog) {
+                changelogEl.value = existingApp.changelog;
+            }
+
+            // Pre-fill permissions
+            if (existingApp.requested_permissions) {
+                const requestedPerms = existingApp.requested_permissions.split(',').map(p => p.trim());
+                const permItems = document.querySelectorAll('#publish-app-permissions .publish-app-permission-item');
+                permItems.forEach(item => {
+                    const cb = item.querySelector('input[name="permissions"]');
+                    if (cb) {
+                        const shouldCheck = requestedPerms.includes(cb.value);
+                        cb.checked = shouldCheck;
+                        item.classList.toggle('checked', shouldCheck);
+                    }
+                });
+            }
+
+            // Show a subtle indicator that we pre-filled from existing
+            const hintEl = appIdInput.nextElementSibling;
+            if (hintEl && hintEl.classList.contains('publish-app-hint')) {
+                hintEl.innerHTML = '✓ Pre-filled from your existing app. Update the version and changelog!';
+                hintEl.style.color = 'var(--accent-color)';
+            }
+        }
+    };
+
+    // Check on input change (debounced)
+    appIdInput.addEventListener('input', () => {
+        // Reset hint
+        const hintEl = appIdInput.nextElementSibling;
+        if (hintEl && hintEl.classList.contains('publish-app-hint')) {
+            hintEl.innerHTML = 'Unique identifier (lowercase, no spaces)';
+            hintEl.style.color = '';
+        }
+
+        clearTimeout(prefillTimeout);
+        prefillTimeout = setTimeout(checkAndPrefillFromExisting, 500);
+    });
+
+    // Also check on blur (when user tabs/clicks away)
+    appIdInput.addEventListener('blur', checkAndPrefillFromExisting);
+
+    // Load available permissions, then check for pre-fill
+    try {
+        const availablePermissions = await invoke('miniapp_get_available_permissions');
+        const permissionsContainer = document.getElementById('publish-app-permissions');
+        permissionsContainer.innerHTML = availablePermissions.map(perm => `
+            <div class="publish-app-permission-item" data-permission="${escapeHtml(perm.id)}">
+                <input type="checkbox" name="permissions" value="${escapeHtml(perm.id)}">
+                <span class="publish-app-permission-check"></span>
+                <div class="publish-app-permission-text">
+                    <span class="publish-app-permission-label">${escapeHtml(perm.label)}</span>
+                    <span class="publish-app-permission-desc">${escapeHtml(perm.description)}</span>
+                </div>
+            </div>
+        `).join('');
+        // Add click handler to toggle checkbox and visual state
+        permissionsContainer.querySelectorAll('.publish-app-permission-item').forEach(item => {
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            item.addEventListener('click', () => {
+                checkbox.checked = !checkbox.checked;
+                item.classList.toggle('checked', checkbox.checked);
+            });
+        });
+        permissionsLoaded = true;
+        // Now that permissions are loaded, check for pre-fill
+        checkAndPrefillFromExisting();
+    } catch (error) {
+        console.error('Failed to load permissions:', error);
+        document.getElementById('publish-app-permissions').innerHTML = '<span class="publish-app-hint">Failed to load permissions</span>';
+        // Still try pre-fill for other fields even if permissions failed
+        checkAndPrefillFromExisting();
+    }
 
     // Event handlers
     const cancelBtn = document.getElementById('publish-app-cancel');
@@ -1666,6 +2107,11 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
         const sourceUrl = document.getElementById('publish-app-source').value.trim() || null;
         const changelog = document.getElementById('publish-app-changelog').value.trim() || null;
 
+        // Collect selected permissions
+        const permissionCheckboxes = document.querySelectorAll('#publish-app-permissions input[name="permissions"]:checked');
+        const selectedPermissions = Array.from(permissionCheckboxes).map(cb => cb.value);
+        const permissionsStr = selectedPermissions.length > 0 ? selectedPermissions.join(',') : null;
+
         // Validate
         if (!appId) {
             alert('App ID is required');
@@ -1680,7 +2126,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
         const categories = categoriesStr
             ? categoriesStr.toLowerCase().split(',').map(c => c.trim()).filter(c => c)
             : [];
-        
+
         // Add the game or app tag at the beginning
         categories.unshift(isGame ? 'game' : 'app');
 
@@ -1698,7 +2144,8 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
                 categories,
                 changelog,
                 developer,
-                sourceUrl
+                sourceUrl,
+                permissionsStr
             );
 
             console.log('Published app with event ID:', eventId);

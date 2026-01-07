@@ -96,7 +96,6 @@ const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
 const domAttachmentPanelMarketplace = document.getElementById('attachment-panel-marketplace');
 const domMarketplacePanel = document.getElementById('marketplace-panel');
 const domMarketplaceBackBtn = document.getElementById('marketplace-back-btn');
-const domMarketplaceRefreshBtn = document.getElementById('marketplace-refresh-btn');
 const domMarketplaceContent = document.getElementById('marketplace-content');
 const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
 const domMiniAppLaunchIconContainer = document.getElementById('miniapp-launch-icon-container');
@@ -529,10 +528,16 @@ function closeMiniAppLaunchDialog() {
  */
 async function playMiniAppSolo() {
     if (!pendingMiniAppLaunch) return;
-    
+
     const app = pendingMiniAppLaunch;
     closeMiniAppLaunchDialog();
-    
+
+    // Check permissions for marketplace apps
+    const shouldContinue = await checkMiniAppPermissions(app);
+    if (!shouldContinue) {
+        return; // User cancelled
+    }
+
     try {
         // Open the Mini App directly using the cached file path
         // Use a placeholder chat_id and message_id for solo play
@@ -553,10 +558,10 @@ async function playMiniAppSolo() {
  */
 async function playMiniAppAndInvite() {
     if (!pendingMiniAppLaunch) return;
-    
+
     const app = pendingMiniAppLaunch;
     const targetChatId = strOpenChat;
-    
+
     // Check if we have an active chat
     if (!targetChatId) {
         console.error('No active chat to send Mini App to');
@@ -565,7 +570,14 @@ async function playMiniAppAndInvite() {
         await playMiniAppSoloInternal(app);
         return;
     }
-    
+
+    // Check permissions for marketplace apps before doing anything
+    const shouldContinue = await checkMiniAppPermissions(app);
+    if (!shouldContinue) {
+        closeMiniAppLaunchDialog();
+        return; // User cancelled
+    }
+
     // Show loading state on the invite button
     const inviteBtn = domMiniAppLaunchInvite;
     const originalText = inviteBtn.textContent;
@@ -740,10 +752,93 @@ async function playMiniAppAndInvite() {
 }
 
 /**
+ * Check and show permission prompt for a Mini App from history
+ * @param {Object} app - The app from history (MiniAppHistoryEntry)
+ * @returns {Promise<boolean>} True if we should continue opening, false if cancelled
+ */
+async function checkMiniAppPermissions(app) {
+    // Only marketplace apps have permissions
+    if (!app.marketplace_id) {
+        return true;
+    }
+
+    try {
+        // Get the marketplace app info to check for requested permissions and blossom_hash
+        const marketplaceApp = await invoke('marketplace_get_app', { appId: app.marketplace_id });
+
+        if (!marketplaceApp || !marketplaceApp.requested_permissions || marketplaceApp.requested_permissions.length === 0) {
+            return true; // No permissions requested
+        }
+
+        // Use blossom_hash as the permission identifier (content-based security)
+        if (!marketplaceApp.blossom_hash) {
+            return true; // No hash available, continue
+        }
+
+        // Check if we've already prompted for permissions using the file hash
+        const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash: marketplaceApp.blossom_hash });
+
+        if (hasBeenPrompted) {
+            return true; // Already prompted, continue
+        }
+
+        // Show the permission prompt (using the function from marketplace.js)
+        const userGranted = await showPermissionPrompt(marketplaceApp);
+        return userGranted;
+    } catch (e) {
+        console.error('Failed to check Mini App permissions:', e);
+        return true; // Continue on error
+    }
+}
+
+/**
+ * Check and show permission prompt for a Mini App opened from a chat attachment
+ * Uses the file hash to look up if there's a matching marketplace app with permissions
+ * @param {string} filePath - Path to the .xdc file
+ * @returns {Promise<boolean>} True if we should continue opening, false if cancelled
+ */
+async function checkChatMiniAppPermissions(filePath) {
+    try {
+        // Load the Mini App info to get the file hash
+        const miniAppInfo = await invoke('miniapp_load_info', { filePath });
+        if (!miniAppInfo || !miniAppInfo.file_hash) {
+            return true; // No hash available, continue
+        }
+
+        const fileHash = miniAppInfo.file_hash;
+
+        // Check if we've already prompted for permissions using this file hash
+        const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash });
+        if (hasBeenPrompted) {
+            return true; // Already prompted, continue
+        }
+
+        // Look up if there's a marketplace app with this hash
+        const marketplaceApp = await invoke('marketplace_get_app_by_hash', { fileHash });
+        if (!marketplaceApp || !marketplaceApp.requested_permissions || marketplaceApp.requested_permissions.length === 0) {
+            return true; // No matching marketplace app or no permissions requested
+        }
+
+        // Show the permission prompt (using the function from marketplace.js)
+        const userGranted = await showPermissionPrompt(marketplaceApp);
+        return userGranted;
+    } catch (e) {
+        console.error('Failed to check chat Mini App permissions:', e);
+        return true; // Continue on error
+    }
+}
+
+/**
  * Internal function to play Mini App solo
  */
 async function playMiniAppSoloInternal(app) {
     try {
+        // Check permissions for marketplace apps
+        const shouldContinue = await checkMiniAppPermissions(app);
+        if (!shouldContinue) {
+            return; // User cancelled
+        }
+
         // Open the Mini App directly using the cached file path
         await invoke('miniapp_open', {
             filePath: app.src_url,
@@ -4792,19 +4887,26 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 fileDiv.addEventListener('click', async (e) => {
                     const path = e.currentTarget.getAttribute('filepath');
                     if (!path) return;
-                    
+
                     if (isMiniApp) {
                         // Check if we're already playing
                         if (e.currentTarget.getAttribute('data-playing') === 'true') {
                             console.log('[MiniApp] Already playing, ignoring click');
                             return;
                         }
-                        
+
                         // Open Mini App in a new window
                         try {
                             // Find the attachment to get the webxdc_topic
                             const attachment = msg.attachments.find(a => a.path === path);
                             const topicId = attachment?.webxdc_topic || null;
+
+                            // Check permissions before opening
+                            const shouldOpen = await checkChatMiniAppPermissions(path);
+                            if (!shouldOpen) {
+                                return; // User cancelled the permission prompt
+                            }
+
                             await openMiniApp(path, strOpenChat, msg.id, null, topicId);
                             
                             // Update UI to show "Playing" after opening
@@ -6801,17 +6903,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (domMarketplaceBackBtn) {
         domMarketplaceBackBtn.onclick = () => {
             hideMarketplacePanel();
-        };
-    }
-
-    if (domMarketplaceRefreshBtn) {
-        domMarketplaceRefreshBtn.onclick = async () => {
-            domMarketplaceRefreshBtn.classList.add('loading');
-            try {
-                await refreshMarketplace(domMarketplaceContent);
-            } finally {
-                domMarketplaceRefreshBtn.classList.remove('loading');
-            }
         };
     }
 

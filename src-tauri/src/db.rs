@@ -1707,3 +1707,155 @@ pub fn get_miniapp_installed_version<R: Runtime>(
         Err(e) => Err(format!("Failed to get Mini App installed version: {}", e)),
     }
 }
+
+// ============================================================================
+// Mini App Permissions Functions
+// ============================================================================
+
+/// Get all granted permissions for a Mini App by its file hash
+/// Returns a comma-separated string of granted permission names
+pub fn get_miniapp_granted_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+) -> Result<String, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT permission FROM miniapp_permissions WHERE file_hash = ?1 AND granted = 1"
+    ).map_err(|e| format!("Failed to prepare permission query: {}", e))?;
+
+    let permissions: Vec<String> = stmt.query_map(rusqlite::params![file_hash], |row| {
+        row.get::<_, String>(0)
+    })
+    .map_err(|e| format!("Failed to query permissions: {}", e))?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    drop(stmt);
+    crate::account_manager::return_db_connection(conn);
+
+    Ok(permissions.join(","))
+}
+
+/// Set the granted status of a permission for a Mini App by its file hash
+pub fn set_miniapp_permission<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+    permission: &str,
+    granted: bool,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    conn.execute(
+        r#"
+        INSERT INTO miniapp_permissions (file_hash, permission, granted, granted_at)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(file_hash, permission) DO UPDATE SET
+            granted = excluded.granted,
+            granted_at = CASE WHEN excluded.granted = 1 THEN excluded.granted_at ELSE granted_at END
+        "#,
+        rusqlite::params![file_hash, permission, granted as i32, if granted { Some(now) } else { None::<i64> }],
+    ).map_err(|e| format!("Failed to set Mini App permission: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Set multiple permissions at once for a Mini App by its file hash
+/// Uses a transaction to ensure all permissions are set atomically
+pub fn set_miniapp_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+    permissions: &[(&str, bool)],
+) -> Result<(), String> {
+    let mut conn = crate::account_manager::get_db_connection(handle)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let tx = conn.transaction()
+        .map_err(|e| format!("Failed to start transaction: {}", e))?;
+
+    for (permission, granted) in permissions {
+        tx.execute(
+            r#"
+            INSERT INTO miniapp_permissions (file_hash, permission, granted, granted_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(file_hash, permission) DO UPDATE SET
+                granted = excluded.granted,
+                granted_at = CASE WHEN excluded.granted = 1 THEN excluded.granted_at ELSE granted_at END
+            "#,
+            rusqlite::params![file_hash, permission, *granted as i32, if *granted { Some(now) } else { None::<i64> }],
+        ).map_err(|e| format!("Failed to set Mini App permission: {}", e))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit permission changes: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Check if an app has been prompted for permissions yet (by file hash)
+/// Returns true if any permission record exists for this hash
+pub fn has_miniapp_permission_prompt<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM miniapp_permissions WHERE file_hash = ?1)",
+        rusqlite::params![file_hash],
+        |row| row.get(0)
+    ).map_err(|e| format!("Failed to check permission prompt: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(exists)
+}
+
+/// Revoke all permissions for a Mini App by its file hash
+pub fn revoke_all_miniapp_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "DELETE FROM miniapp_permissions WHERE file_hash = ?1",
+        rusqlite::params![file_hash],
+    ).map_err(|e| format!("Failed to revoke Mini App permissions: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Copy all permissions from one file hash to another (for app updates)
+pub fn copy_miniapp_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    old_hash: &str,
+    new_hash: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Copy all permission records from old hash to new hash
+    conn.execute(
+        r#"
+        INSERT OR REPLACE INTO miniapp_permissions (file_hash, permission, granted, granted_at)
+        SELECT ?2, permission, granted, granted_at
+        FROM miniapp_permissions
+        WHERE file_hash = ?1
+        "#,
+        rusqlite::params![old_hash, new_hash],
+    ).map_err(|e| format!("Failed to copy Mini App permissions: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}

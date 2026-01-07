@@ -515,6 +515,39 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         println!("[Migration] Cached image columns added successfully");
     }
 
+    // Migration 5: Create miniapp_permissions table for storing granted permissions per-app
+    let has_permissions_table: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapp_permissions'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_permissions_table {
+        println!("[Migration] Creating miniapp_permissions table...");
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS miniapp_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                granted INTEGER NOT NULL DEFAULT 0,
+                granted_at INTEGER,
+                UNIQUE(file_hash, permission)
+            )
+            "#,
+            []
+        ).map_err(|e| format!("Failed to create miniapp_permissions table: {}", e))?;
+
+        // Create index for fast permission lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_miniapp_permissions_hash ON miniapp_permissions(file_hash)",
+            []
+        ).map_err(|e| format!("Failed to create miniapp_permissions index: {}", e))?;
+
+        println!("[Migration] miniapp_permissions table created successfully");
+    }
+
     Ok(())
 }
 

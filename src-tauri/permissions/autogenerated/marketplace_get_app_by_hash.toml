@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-marketplace-get-app-by-hash"
+description = "Enables the marketplace_get_app_by_hash command without any pre-configured scope."
+commands.allow = ["marketplace_get_app_by_hash"]
+
+[[permission]]
+identifier = "deny-marketplace-get-app-by-hash"
+description = "Denies the marketplace_get_app_by_hash command without any pre-configured scope."
+commands.deny = ["marketplace_get_app_by_hash"]

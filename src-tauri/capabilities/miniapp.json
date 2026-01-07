@@ -12,7 +12,8 @@
     "allow-miniapp-send-update",
     "allow-miniapp-join-realtime-channel",
     "allow-miniapp-send-realtime-data",
-    "allow-miniapp-leave-realtime-channel"
+    "allow-miniapp-leave-realtime-channel",
+    "allow-miniapp-get-granted-permissions-for-window"
   ],
   "platforms": ["linux", "windows", "macOS"]
 }

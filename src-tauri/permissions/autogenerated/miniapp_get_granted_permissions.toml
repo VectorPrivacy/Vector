@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-get-granted-permissions"
+description = "Enables the miniapp_get_granted_permissions command without any pre-configured scope."
+commands.allow = ["miniapp_get_granted_permissions"]
+
+[[permission]]
+identifier = "deny-miniapp-get-granted-permissions"
+description = "Denies the miniapp_get_granted_permissions command without any pre-configured scope."
+commands.deny = ["miniapp_get_granted_permissions"]

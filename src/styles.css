@@ -5188,24 +5188,6 @@ hr {
   /* Uses nav-back-btn styles */
 }
 
-.marketplace-refresh-btn {
-  display: flex;
-  align-items: center;
-  position: absolute;
-  top: 10px;
-  right: 0;
-  margin-right: 5px;
-  padding: 5px;
-}
-
-.marketplace-refresh-btn .icon {
-  animation: none;
-}
-
-.marketplace-refresh-btn.loading .icon {
-  animation: spin 1s linear infinite;
-}
-
 .marketplace-title {
   margin: 0;
   font-size: 18px;
@@ -5490,6 +5472,23 @@ hr {
   gap: 12px;
 }
 
+/* Staggered fade-in animation for marketplace items */
+@keyframes marketplaceFadeInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.marketplace-animate-in {
+  opacity: 0;
+  animation: marketplaceFadeInDown 0.3s ease forwards;
+}
+
 /* Section Title */
 .marketplace-section-title {
   display: flex;
@@ -5744,18 +5743,24 @@ hr {
 /* Loading State */
 .marketplace-loading {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
   height: 200px;
-  gap: 16px;
+  gap: 8px;
   color: rgba(255, 255, 255, 0.6);
 }
 
 .marketplace-loading-icon {
   position: relative;
-  width: 40px;
-  height: 40px;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
   background-color: rgba(255, 255, 255, 0.6);
   animation: spin 1s linear infinite;
 }
@@ -6005,6 +6010,102 @@ hr {
 .publish-app-toggle-field .toggle-container span:first-child {
   font-size: 14px;
   font-weight: 500;
+}
+
+/* Permissions selector in publish dialog */
+.publish-app-permissions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.publish-app-permission-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+  user-select: none;
+  position: relative;
+  z-index: 1;
+  opacity: 0.5;
+}
+
+.publish-app-permission-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* When checked, full opacity and green accent */
+.publish-app-permission-item.checked {
+  opacity: 1;
+}
+
+/* Hide the actual checkbox */
+.publish-app-permission-item input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Custom checkbox indicator */
+.publish-app-permission-check {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  border-radius: 4px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.publish-app-permission-item.checked .publish-app-permission-check {
+  background: var(--icon-color-primary, #59FCB3);
+  border-color: var(--icon-color-primary, #59FCB3);
+}
+
+/* Checkmark icon */
+.publish-app-permission-check::after {
+  content: '';
+  width: 6px;
+  height: 10px;
+  border: solid transparent;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translateY(-1px);
+  transition: border-color 0.15s ease;
+}
+
+.publish-app-permission-item.checked .publish-app-permission-check::after {
+  border-color: #000;
+}
+
+.publish-app-permission-text {
+  display: flex;
+  flex: 1;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.publish-app-permission-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+  min-width: 100px;
+}
+
+.publish-app-permission-desc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  flex: 1;
 }
 
 .publish-app-buttons {
@@ -6464,6 +6565,197 @@ hr {
   .app-details-section {
     padding: 20px 16px;
   }
+}
+
+/* App Details - Permissions Section */
+.app-details-permissions-hint {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-bottom: 12px;
+}
+
+.app-details-permissions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-details-permissions-loading {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.app-details-permission-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  gap: 12px;
+}
+
+.app-details-permission-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.app-details-permission-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.app-details-permission-desc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.app-details-permission-toggle {
+  flex-shrink: 0;
+}
+
+.toggle-container.app-details-permission-toggle {
+  margin-bottom: 0;
+}
+
+.app-details-reset-permissions-btn {
+  margin-top: 12px;
+  padding: 8px 16px;
+  background: rgba(255, 100, 100, 0.15);
+  border: 1px solid rgba(255, 100, 100, 0.3);
+  border-radius: 8px;
+  color: rgba(255, 150, 150, 0.9);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+.app-details-reset-permissions-btn:hover {
+  background: rgba(255, 100, 100, 0.25);
+  border-color: rgba(255, 100, 100, 0.5);
+  color: rgba(255, 180, 180, 1);
+}
+
+/* Permission Prompt Overlay */
+.permission-prompt-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10001;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.permission-prompt-overlay.active {
+  opacity: 1;
+}
+
+.permission-prompt-container {
+  background: linear-gradient(180deg, rgba(40, 40, 50, 0.98) 0%, rgba(30, 30, 40, 0.98) 100%);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  width: 90%;
+  max-width: 420px;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.permission-prompt-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.permission-prompt-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0 0 8px 0;
+}
+
+.permission-prompt-subtitle {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+}
+
+.permission-prompt-content {
+  padding: 20px 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.permission-prompt-hint {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0 0 16px 0;
+}
+
+.permission-prompt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.permission-prompt-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+}
+
+.permission-prompt-toggle {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+
+.permission-prompt-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.permission-prompt-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.permission-prompt-desc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.permission-prompt-buttons {
+  display: flex;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  justify-content: flex-end;
+}
+
+.permission-prompt-buttons button {
+  min-width: 100px;
 }
 
 

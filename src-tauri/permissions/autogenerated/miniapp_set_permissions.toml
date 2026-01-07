@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-set-permissions"
+description = "Enables the miniapp_set_permissions command without any pre-configured scope."
+commands.allow = ["miniapp_set_permissions"]
+
+[[permission]]
+identifier = "deny-miniapp-set-permissions"
+description = "Denies the miniapp_set_permissions command without any pre-configured scope."
+commands.deny = ["miniapp_set_permissions"]

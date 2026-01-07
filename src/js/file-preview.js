@@ -613,7 +613,21 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
         optionsArea.innerHTML = '';
         optionsArea.style.display = 'none';
     }
-    
+
+    // Store Mini App info for potential publishing
+    pendingMiniAppInfo = miniAppInfo;
+
+    // Show/hide publish button for trusted publishers with Mini Apps
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) {
+        if (isMiniApp) {
+            // Check if current user is a trusted publisher
+            checkAndShowPublishButton(publishBtn);
+        } else {
+            publishBtn.style.display = 'none';
+        }
+    }
+
     // Show overlay
     filePreviewOverlay.style.display = 'flex';
     requestAnimationFrame(() => {
@@ -778,10 +792,24 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
                 <span class="icon ${iconClass} file-preview-icon"></span>
             </div>
         `;
-        
+
         optionsArea.innerHTML = '';
     }
-    
+
+    // Store Mini App info for potential publishing
+    pendingMiniAppInfo = miniAppInfo;
+
+    // Show/hide publish button for trusted publishers with Mini Apps
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) {
+        if (isMiniApp) {
+            // Check if current user is a trusted publisher
+            checkAndShowPublishButton(publishBtn);
+        } else {
+            publishBtn.style.display = 'none';
+        }
+    }
+
     // Show overlay
     filePreviewOverlay.style.display = 'flex';
     requestAnimationFrame(() => {

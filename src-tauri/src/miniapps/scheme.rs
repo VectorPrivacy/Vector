@@ -110,9 +110,12 @@ static CSP: Lazy<String> = Lazy::new(|| {
     }
 });
 
-/// Permissions Policy to deny ALL sensitive APIs
+/// Base Permissions Policy that denies all sensitive APIs by default
 /// This is a comprehensive list from DeltaChat based on W3C spec
 /// https://github.com/w3c/webappsec-permissions-policy/blob/main/features.md
+///
+/// NOTE: Some permissions can be dynamically enabled if the user grants them.
+/// See `build_permissions_policy()` for dynamic generation.
 const PERMISSIONS_POLICY_DENY_ALL: &str = concat!(
     "accelerometer=(), ",
     "ambient-light-sensor=(), ",
@@ -196,6 +199,67 @@ const PERMISSIONS_POLICY_DENY_ALL: &str = concat!(
     "window-placement=()",
 );
 
+/// Permission policies that can be dynamically enabled based on user grants
+/// Maps permission name -> (policy directive name, allow value when enabled)
+const GRANTABLE_PERMISSIONS: &[(&str, &str)] = &[
+    ("microphone", "microphone"),
+    ("camera", "camera"),
+    ("geolocation", "geolocation"),
+    ("clipboard-read", "clipboard-read"),
+    ("clipboard-write", "clipboard-write"),
+    ("fullscreen", "fullscreen"),
+    ("autoplay", "autoplay"),
+    ("display-capture", "display-capture"),
+    ("midi", "midi"),
+    ("picture-in-picture", "picture-in-picture"),
+    ("screen-wake-lock", "screen-wake-lock"),
+    ("speaker-selection", "speaker-selection"),
+    ("accelerometer", "accelerometer"),
+    ("gyroscope", "gyroscope"),
+    ("magnetometer", "magnetometer"),
+    ("ambient-light-sensor", "ambient-light-sensor"),
+    ("bluetooth", "bluetooth"),
+];
+
+/// Build a dynamic Permissions-Policy header based on granted permissions
+///
+/// This takes the base deny-all policy and enables specific permissions
+/// that the user has granted for this app.
+///
+/// # Arguments
+/// * `granted_permissions` - Comma-separated string of granted permission names
+///
+/// # Returns
+/// The complete Permissions-Policy header value
+fn build_permissions_policy(granted_permissions: &str) -> String {
+    // Parse granted permissions into a set for fast lookup
+    let granted: std::collections::HashSet<&str> = granted_permissions
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // If no permissions granted, use the static deny-all policy
+    if granted.is_empty() {
+        return PERMISSIONS_POLICY_DENY_ALL.to_string();
+    }
+
+    // Build the policy by modifying the base policy
+    // For each grantable permission, if granted, change from () to (self)
+    let mut policy = PERMISSIONS_POLICY_DENY_ALL.to_string();
+
+    for (perm_name, directive) in GRANTABLE_PERMISSIONS {
+        if granted.contains(*perm_name) {
+            // Replace "directive=()" with "directive=(self)"
+            let deny_pattern = format!("{}=()", directive);
+            let allow_pattern = format!("{}=(self)", directive);
+            policy = policy.replace(&deny_pattern, &allow_pattern);
+        }
+    }
+
+    policy
+}
+
 /// Handle requests to the webxdc:// protocol (async version for Tauri 2)
 /// Uses UriSchemeResponder to avoid blocking the WebView thread on Windows
 pub fn miniapp_protocol<R: tauri::Runtime>(
@@ -220,7 +284,7 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
         error!(
             "Prevented non-miniapp window from accessing webxdc:// scheme (webview label: {webview_label})"
         );
-        responder.respond(make_error_response(http::StatusCode::FORBIDDEN, "Access denied"));
+        responder.respond(make_error_response(http::StatusCode::FORBIDDEN, "Access denied", ""));
         return;
     }
 
@@ -245,26 +309,30 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
         Some(inst) => inst,
         None => {
             error!("Mini App instance not found for window: {window_label}");
-            return make_error_response(http::StatusCode::NOT_FOUND, "Mini App not found");
+            return make_error_response(http::StatusCode::NOT_FOUND, "Mini App not found", "");
         }
     };
 
+    // Look up granted permissions for this app using the file hash (content-based security)
+    let granted_permissions = crate::db::get_miniapp_granted_permissions(app_handle, &instance.package.file_hash)
+        .unwrap_or_default();
+
     let path = request.uri().path();
-    
+
     // Handle special paths - serve webxdc.js bridge script
     if path == "/webxdc.js" {
         // Get user's npub and display name for selfAddr and selfName
         let (user_npub, user_display_name) = get_user_info().await;
-        return serve_webxdc_js(&instance, &user_npub, &user_display_name);
+        return serve_webxdc_js(&instance, &user_npub, &user_display_name, &granted_permissions);
     }
-    
+
     // Serve file from the package
     let file_path = if path == "/" || path.is_empty() {
         "index.html"
     } else {
         path.trim_start_matches('/')
     };
-    
+
     match instance.package.get_file(file_path) {
         Ok(data) => {
             let mime_type = get_mime_type(file_path);
@@ -272,9 +340,9 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
             if mime_type == "text/html" {
                 let (user_npub, user_display_name) = get_user_info().await;
                 let injected = inject_webxdc_script(&data, &user_npub, &user_display_name);
-                make_success_response(injected, &mime_type)
+                make_success_response(injected, &mime_type, &granted_permissions)
             } else {
-                make_success_response(data, &mime_type)
+                make_success_response(data, &mime_type, &granted_permissions)
             }
         }
         Err(_) => {
@@ -284,9 +352,9 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
                 Ok(data) => {
                     let (user_npub, user_display_name) = get_user_info().await;
                     let injected = inject_webxdc_script(&data, &user_npub, &user_display_name);
-                    make_success_response(injected, "text/html")
+                    make_success_response(injected, "text/html", &granted_permissions)
                 }
-                Err(_) => make_error_response(http::StatusCode::NOT_FOUND, "File not found"),
+                Err(_) => make_error_response(http::StatusCode::NOT_FOUND, "File not found", &granted_permissions),
             }
         }
     }
@@ -345,6 +413,7 @@ fn serve_webxdc_js(
     _instance: &super::state::MiniAppInstance,
     user_npub: &str,
     user_display_name: &str,
+    granted_permissions: &str,
 ) -> http::Response<Cow<'static, [u8]>> {
     let js = format!(r#"
 // Mini App Bridge for Vector
@@ -549,8 +618,8 @@ fn serve_webxdc_js(
         self_addr = serde_json::to_string(user_npub).unwrap_or_else(|_| "\"unknown\"".to_string()),
         self_name = serde_json::to_string(user_display_name).unwrap_or_else(|_| "\"Unknown\"".to_string()),
     );
-    
-    make_success_response(js.into_bytes(), "text/javascript")
+
+    make_success_response(js.into_bytes(), "text/javascript", granted_permissions)
 }
 
 /// Inject the webxdc.js script inline into HTML content
@@ -761,32 +830,34 @@ fn generate_inline_webxdc_script(user_npub: &str, user_display_name: &str) -> St
     )
 }
 
-fn make_success_response(body: Vec<u8>, content_type: &str) -> http::Response<Cow<'static, [u8]>> {
+fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions: &str) -> http::Response<Cow<'static, [u8]>> {
+    let permissions_policy = build_permissions_policy(granted_permissions);
     http::Response::builder()
         .status(http::StatusCode::OK)
         .header(http::header::CONTENT_TYPE, content_type)
         .header(http::header::CONTENT_SECURITY_POLICY, CSP.as_str())
         // Ensure that the browser doesn't try to interpret the file incorrectly
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        // Deny all permissions - comprehensive list from DeltaChat
-        .header("Permissions-Policy", PERMISSIONS_POLICY_DENY_ALL)
+        // Dynamic permissions policy based on user grants
+        .header("Permissions-Policy", permissions_policy)
         .body(Cow::Owned(body))
-        .unwrap_or_else(|_| make_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response"))
+        .unwrap_or_else(|_| make_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response", ""))
 }
 
-fn make_error_response(status: http::StatusCode, message: &str) -> http::Response<Cow<'static, [u8]>> {
+fn make_error_response(status: http::StatusCode, message: &str, granted_permissions: &str) -> http::Response<Cow<'static, [u8]>> {
     // IMPORTANT: Set CSP on ALL responses including errors
     // Failing to set CSP might result in the app being able to create
     // an <iframe> with no CSP, e.g. `<iframe src="/no_such_file.lol">`
     // within which they can then do whatever through the parent frame
     // See: "XDC-01-002 WP1: Full CSP bypass via desktop app webxdc.js"
     // https://public.opentech.fund/documents/XDC-01-report_2_1.pdf
+    let permissions_policy = build_permissions_policy(granted_permissions);
     http::Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "text/plain")
         .header(http::header::CONTENT_SECURITY_POLICY, CSP.as_str())
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header("Permissions-Policy", PERMISSIONS_POLICY_DENY_ALL)
+        .header("Permissions-Policy", permissions_policy)
         .body(Cow::Owned(message.as_bytes().to_vec()))
         .unwrap()
 }

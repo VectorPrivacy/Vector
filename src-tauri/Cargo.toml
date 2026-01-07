@@ -100,3 +100,6 @@ whisper-rs = { version = "0.13.2", optional = true }
 tauri-plugin-updater = "2.9.0"
 tauri-plugin-single-instance = { version = "2.3.6", features = ["deep-link"] }
 tauri-plugin-window-state = "2.4.1"
+
+# MCP bridge for AI-assisted debugging (only included in debug builds via cfg)
+tauri-plugin-mcp-bridge = "0.7"

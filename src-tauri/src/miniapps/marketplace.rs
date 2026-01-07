@@ -22,7 +22,8 @@
 //!     ["src", "<source-url>"],             // Optional: Source code or website URL
 //!     ["t", "miniapp"],                    // Tag for filtering
 //!     ["t", "webxdc"],                     // Additional tag
-//!     ["t", "<category>"]                  // Optional: Category tag (game, tool, etc.)
+//!     ["t", "<category>"],                 // Optional: Category tag (game, tool, etc.)
+//!     ["permissions", "microphone,camera"] // Optional: Requested permissions (comma-separated)
 //!   ],
 //!   "content": "<optional-extended-description-or-changelog>"
 //! }
@@ -106,6 +107,9 @@ pub struct MarketplaceApp {
     pub installed_version: Option<String>,
     /// Whether an update is available (marketplace version != installed version)
     pub update_available: bool,
+    /// Requested permissions (comma-separated string for easy serialization)
+    /// Format: "microphone,camera,fullscreen"
+    pub requested_permissions: String,
 }
 
 /// Installation status of a marketplace app
@@ -230,6 +234,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
     let mut categories = Vec::new();
     let mut developer = None;
     let mut source_url = None;
+    let mut requested_permissions = String::new();
 
     for tag in event.tags.iter() {
         let tag_vec: Vec<String> = tag.clone().to_vec();
@@ -254,6 +259,10 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
             }
             "dev" => developer = Some(tag_vec[1].clone()),
             "src" => source_url = Some(tag_vec[1].clone()),
+            "permissions" => {
+                // Permissions tag format: ["permissions", "microphone,camera,fullscreen"]
+                requested_permissions = tag_vec[1].clone();
+            }
             "t" => {
                 // Skip the generic "miniapp" and "webxdc" tags for categories
                 let tag_value = &tag_vec[1];
@@ -294,6 +303,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
         local_path: None,
         installed_version: None,
         update_available: false,
+        requested_permissions,
     })
 }
 
@@ -313,6 +323,7 @@ pub async fn build_marketplace_event<T: NostrSigner>(
     changelog: Option<&str>,
     developer: Option<&str>,
     source_url: Option<&str>,
+    permissions: Option<&str>, // comma-separated permissions string
 ) -> Result<Event, String> {
     let mut tags = vec![
         Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("d")), vec![app_id.to_string()]),
@@ -357,6 +368,16 @@ pub async fn build_marketplace_event<T: NostrSigner>(
     // Add category tags
     for category in categories {
         tags.push(Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("t")), vec![category.to_string()]));
+    }
+
+    // Add optional permissions tag
+    if let Some(perms) = permissions {
+        if !perms.is_empty() {
+            tags.push(Tag::custom(
+                TagKind::Custom(std::borrow::Cow::Borrowed("permissions")),
+                vec![perms.to_string()]
+            ));
+        }
     }
 
     let content = changelog.unwrap_or("");
@@ -634,6 +655,7 @@ pub enum UpdateStatus {
 /// Update a marketplace app to a new version
 /// Downloads to a temp file first, verifies hash, then replaces the old file
 /// This ensures the old version is only deleted after the new version is successfully downloaded
+/// Also migrates permissions from the old file hash to the new file hash
 pub async fn update_marketplace_app<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     app_id: &str,
@@ -664,6 +686,24 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     let file_name = format!("{}.xdc", app.id);
     let file_path = miniapps_dir.join(&file_name);
 
+    // Compute the old file's hash before we replace it (for permission migration)
+    let old_file_hash = if file_path.exists() {
+        match std::fs::read(&file_path) {
+            Ok(old_data) => {
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(&old_data);
+                Some(hex::encode(hasher.finalize()))
+            }
+            Err(e) => {
+                warn!("Failed to read old app file for hash: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create a temp file path for the new download
     let temp_file_name = format!("{}.xdc.tmp", app.id);
     let temp_file_path = miniapps_dir.join(&temp_file_name);
@@ -687,13 +727,13 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
         .await
         .map_err(|e| format!("Failed to read download: {}", e))?;
 
-    // Verify the hash matches
+    // Verify the hash matches (this is also the new file's permission hash)
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let hash = hex::encode(hasher.finalize());
+    let new_file_hash = hex::encode(hasher.finalize());
 
-    if hash != app.blossom_hash {
+    if new_file_hash != app.blossom_hash {
         // Clean up temp file if it exists
         let _ = std::fs::remove_file(&temp_file_path);
 
@@ -734,6 +774,17 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
 
     let path_str = file_path.to_string_lossy().to_string();
 
+    // Migrate permissions from old hash to new hash
+    if let Some(ref old_hash) = old_file_hash {
+        if old_hash != &new_file_hash {
+            info!("Migrating permissions from {} to {}", old_hash, new_file_hash);
+            if let Err(e) = crate::db::copy_miniapp_permissions(handle, old_hash, &new_file_hash) {
+                warn!("Failed to migrate permissions: {}", e);
+                // Don't fail the update if permission migration fails
+            }
+        }
+    }
+
     // Update status to installed
     {
         let mut state = MARKETPLACE_STATE.write().await;
@@ -766,6 +817,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     changelog: Option<&str>,
     developer: Option<&str>,
     source_url: Option<&str>,
+    permissions: Option<&str>,
     blossom_servers: Vec<String>,
 ) -> Result<String, String> {
     // Read the .xdc file
@@ -841,6 +893,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         changelog,
         developer,
         source_url,
+        permissions,
     )
     .await?;
 

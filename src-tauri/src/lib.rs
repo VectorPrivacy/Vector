@@ -4952,6 +4952,12 @@ pub fn run() {
         // Register Mini Apps state
         .manage(miniapps::state::MiniAppsState::new());
 
+    // MCP Bridge plugin for AI-assisted debugging (debug builds only)
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    }
+
     // Desktop-only plugins
     #[cfg(desktop)]
     {
@@ -5203,6 +5209,7 @@ pub fn run() {
             miniapps::commands::marketplace_fetch_apps,
             miniapps::commands::marketplace_get_cached_apps,
             miniapps::commands::marketplace_get_app,
+            miniapps::commands::marketplace_get_app_by_hash,
             miniapps::commands::marketplace_get_install_status,
             miniapps::commands::marketplace_install_app,
             miniapps::commands::marketplace_check_installed,
@@ -5213,6 +5220,14 @@ pub fn run() {
             miniapps::commands::marketplace_update_app,
             miniapps::commands::marketplace_publish_app,
             miniapps::commands::marketplace_get_trusted_publisher,
+            // Mini App permissions commands
+            miniapps::commands::miniapp_get_available_permissions,
+            miniapps::commands::miniapp_get_granted_permissions,
+            miniapps::commands::miniapp_get_granted_permissions_for_window,
+            miniapps::commands::miniapp_set_permission,
+            miniapps::commands::miniapp_set_permissions,
+            miniapps::commands::miniapp_has_permission_prompt,
+            miniapps::commands::miniapp_revoke_all_permissions,
             // Image cache commands
             image_cache::get_or_cache_image,
             image_cache::clear_image_cache,

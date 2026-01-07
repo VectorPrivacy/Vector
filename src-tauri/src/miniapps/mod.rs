@@ -15,3 +15,4 @@ pub(crate) mod commands;
 pub(crate) mod network_isolation;
 pub(crate) mod realtime;
 pub(crate) mod marketplace;
+pub(crate) mod permissions;
