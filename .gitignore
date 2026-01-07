@@ -25,3 +25,6 @@ dist-ssr
 
 # Android Signing Keystore file
 src-tauri/gen/android/keystore.properties
+
+# Claude Code local settings (keep testing.md tracked)
+.claude/settings.local.json
