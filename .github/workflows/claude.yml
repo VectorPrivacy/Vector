@@ -6,7 +6,7 @@ on:
   pull_request_review_comment:
     types: [created]
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    types: [opened, ready_for_review]
   issues:
     types: [opened, assigned]
   pull_request_review:
@@ -37,3 +37,11 @@ jobs:
           assignee_trigger: JSKitty,YuurinBee
           claude_args: |
             --model claude-opus-4-5-20250101
+          prompt: |
+            Review this pull request. Focus on:
+            - Code quality and best practices
+            - Potential bugs or edge cases
+            - Security concerns
+            - Suggestions for improvement
+
+            Provide actionable feedback with inline comments where appropriate.
