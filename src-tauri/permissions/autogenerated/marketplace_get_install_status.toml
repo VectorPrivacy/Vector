@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-marketplace-get-install-status"
+description = "Enables the marketplace_get_install_status command without any pre-configured scope."
+commands.allow = ["marketplace_get_install_status"]
+
+[[permission]]
+identifier = "deny-marketplace-get-install-status"
+description = "Denies the marketplace_get_install_status command without any pre-configured scope."
+commands.deny = ["marketplace_get_install_status"]

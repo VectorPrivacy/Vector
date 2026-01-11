@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-cached-file"
+description = "Enables the clear_cached_file command without any pre-configured scope."
+commands.allow = ["clear_cached_file"]
+
+[[permission]]
+identifier = "deny-clear-cached-file"
+description = "Denies the clear_cached_file command without any pre-configured scope."
+commands.deny = ["clear_cached_file"]

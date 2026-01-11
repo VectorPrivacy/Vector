@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-setting"
+description = "Enables the remove_setting command without any pre-configured scope."
+commands.allow = ["remove_setting"]
+
+[[permission]]
+identifier = "deny-remove-setting"
+description = "Denies the remove_setting command without any pre-configured scope."
+commands.deny = ["remove_setting"]

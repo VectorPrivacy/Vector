@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-evict-chat-messages"
+description = "Enables the evict_chat_messages command without any pre-configured scope."
+commands.allow = ["evict_chat_messages"]
+
+[[permission]]
+identifier = "deny-evict-chat-messages"
+description = "Denies the evict_chat_messages command without any pre-configured scope."
+commands.deny = ["evict_chat_messages"]

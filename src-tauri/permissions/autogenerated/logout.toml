@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-logout"
+description = "Enables the logout command without any pre-configured scope."
+commands.allow = ["logout"]
+
+[[permission]]
+identifier = "deny-logout"
+description = "Denies the logout command without any pre-configured scope."
+commands.deny = ["logout"]

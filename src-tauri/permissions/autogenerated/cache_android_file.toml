@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-android-file"
+description = "Enables the cache_android_file command without any pre-configured scope."
+commands.allow = ["cache_android_file"]
+
+[[permission]]
+identifier = "deny-cache-android-file"
+description = "Denies the cache_android_file command without any pre-configured scope."
+commands.deny = ["cache_android_file"]

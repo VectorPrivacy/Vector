@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-load-info-from-bytes"
+description = "Enables the miniapp_load_info_from_bytes command without any pre-configured scope."
+commands.allow = ["miniapp_load_info_from_bytes"]
+
+[[permission]]
+identifier = "deny-miniapp-load-info-from-bytes"
+description = "Denies the miniapp_load_info_from_bytes command without any pre-configured scope."
+commands.deny = ["miniapp_load_info_from_bytes"]

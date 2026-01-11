@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-list-promos"
+description = "Enables the pivx_list_promos command without any pre-configured scope."
+commands.allow = ["pivx_list_promos"]
+
+[[permission]]
+identifier = "deny-pivx-list-promos"
+description = "Denies the pivx_list_promos command without any pre-configured scope."
+commands.deny = ["pivx_list_promos"]

@@ -87,6 +87,32 @@ const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
+const domAttachmentPanel = document.getElementById('attachment-panel');
+const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
+const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
+const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
+const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
+const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
+const domAttachmentPanelMarketplace = document.getElementById('attachment-panel-marketplace');
+const domAttachmentPanelPivx = document.getElementById('attachment-panel-pivx');
+const domAttachmentPanelPivxView = document.getElementById('attachment-panel-pivx-view');
+const domAttachmentPanelPivxBack = document.getElementById('attachment-panel-pivx-back');
+const domPivxBalanceAmount = document.getElementById('pivx-balance-amount');
+const domPivxDepositBtn = document.getElementById('pivx-deposit-btn');
+const domPivxSendBtn = document.getElementById('pivx-send-btn');
+const domPivxSettingsBtn = document.getElementById('pivx-settings-btn');
+const domPivxDepositOverlay = document.getElementById('pivx-deposit-overlay');
+const domPivxSendOverlay = document.getElementById('pivx-send-overlay');
+const domPivxSettingsOverlay = document.getElementById('pivx-settings-overlay');
+const domMarketplacePanel = document.getElementById('marketplace-panel');
+const domMarketplaceBackBtn = document.getElementById('marketplace-back-btn');
+const domMarketplaceContent = document.getElementById('marketplace-content');
+const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
+const domMiniAppLaunchIconContainer = document.getElementById('miniapp-launch-icon-container');
+const domMiniAppLaunchName = document.getElementById('miniapp-launch-name');
+const domMiniAppLaunchCancel = document.getElementById('miniapp-launch-cancel');
+const domMiniAppLaunchSolo = document.getElementById('miniapp-launch-solo');
+const domMiniAppLaunchInvite = document.getElementById('miniapp-launch-invite');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMessageInputSend = document.getElementById('chat-input-send');
 const domChatInputContainer = document.querySelector('.chat-input-container');
@@ -156,6 +182,11 @@ function openEmojiPanel(e) {
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
+        // Close attachment panel if open
+        if (domAttachmentPanel.classList.contains('visible')) {
+            closeAttachmentPanel();
+        }
+
         // Reset the emoji picker state first
         resetEmojiPicker();
 
@@ -206,6 +237,1768 @@ function openEmojiPanel(e) {
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
     }
+}
+
+/**
+ * Opens or closes the Attachment Panel
+ *
+ * The panel slides up from behind the chat box, similar to the emoji panel.
+ */
+function toggleAttachmentPanel() {
+    if (!domAttachmentPanel.classList.contains('visible')) {
+        // Close emoji panel if open
+        if (picker.classList.contains('visible')) {
+            picker.classList.remove('visible');
+            picker.style.bottom = '';
+            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+        }
+
+        // Display the attachment panel
+        domAttachmentPanel.classList.add('visible');
+
+        // Position attachment panel dynamically above the chat-box
+        const chatBox = document.getElementById('chat-box');
+        if (chatBox) {
+            const chatBoxHeight = chatBox.getBoundingClientRect().height;
+            domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
+        }
+        
+        // Animate items when panel opens
+        animateAttachmentPanelItems(domAttachmentPanelMain);
+    } else {
+        // Hide the attachment panel
+        closeAttachmentPanel();
+    }
+}
+
+/**
+ * Closes the Attachment Panel
+ */
+function closeAttachmentPanel() {
+    domAttachmentPanel.classList.remove('visible');
+    domAttachmentPanel.style.bottom = '';
+    // Reset to main view when closing
+    showAttachmentPanelMain();
+}
+
+/**
+ * Shows a global tooltip above the target element
+ * @param {string} text - The tooltip text
+ * @param {HTMLElement} targetElement - The element to position the tooltip above
+ */
+function showGlobalTooltip(text, targetElement) {
+    const tooltip = document.getElementById('global-tooltip');
+    if (!tooltip) return;
+    
+    tooltip.textContent = text;
+    
+    // Get the target element's position
+    const rect = targetElement.getBoundingClientRect();
+    
+    // Position tooltip above the element, centered horizontally
+    tooltip.style.left = `${rect.left + rect.width / 2}px`;
+    tooltip.style.top = `${rect.top - 8}px`;
+    tooltip.style.transform = 'translate(-50%, -100%)';
+    
+    // Show the tooltip
+    tooltip.classList.add('visible');
+}
+
+/**
+ * Hides the global tooltip
+ */
+function hideGlobalTooltip() {
+    const tooltip = document.getElementById('global-tooltip');
+    if (!tooltip) return;
+    tooltip.classList.remove('visible');
+}
+
+/**
+ * Shows the main attachment panel view (File, Mini Apps buttons)
+ */
+function showAttachmentPanelMain() {
+    domAttachmentPanelMain.style.display = 'flex';
+    domAttachmentPanelMiniAppsView.style.display = 'none';
+    // Also hide PIVX wallet view if open
+    if (domAttachmentPanelPivxView) {
+        domAttachmentPanelPivxView.style.display = 'none';
+    }
+    // Remove PIVX-active border styling
+    if (domAttachmentPanel) {
+        domAttachmentPanel.classList.remove('pivx-active');
+    }
+
+    // Animate items with staggered delay
+    animateAttachmentPanelItems(domAttachmentPanelMain);
+}
+
+/**
+ * Shows the Mini Apps list view
+ */
+async function showAttachmentPanelMiniApps() {
+    domAttachmentPanelMain.style.display = 'none';
+    domAttachmentPanelMiniAppsView.style.display = 'flex';
+    // Also hide PIVX wallet view if open
+    if (domAttachmentPanelPivxView) {
+        domAttachmentPanelPivxView.style.display = 'none';
+    }
+
+    // Load Mini Apps history from backend
+    await loadMiniAppsHistory();
+    
+    // Animate items with staggered delay
+    animateAttachmentPanelItems(domAttachmentPanelMiniAppsView);
+}
+
+/**
+ * Shows the marketplace panel
+ */
+function showMarketplacePanel() {
+    if (domMarketplacePanel) {
+        domMarketplacePanel.style.display = 'flex';
+        // Initialize marketplace on first show
+        initMarketplace(domMarketplaceContent);
+    }
+}
+
+/**
+ * Hides the marketplace panel with fade out animation
+ * @returns {Promise<void>} Resolves when the animation completes
+ */
+function hideMarketplacePanel() {
+    return new Promise((resolve) => {
+        if (domMarketplacePanel && domMarketplacePanel.style.display !== 'none') {
+            domMarketplacePanel.classList.add('closing');
+            domMarketplacePanel.addEventListener('animationend', function handler() {
+                domMarketplacePanel.removeEventListener('animationend', handler);
+                domMarketplacePanel.style.display = 'none';
+                domMarketplacePanel.classList.remove('closing');
+                resolve();
+            });
+        } else {
+            resolve();
+        }
+    });
+}
+
+// ========== PIVX Wallet Functions ==========
+
+/**
+ * Shows a simple toast notification
+ * @param {string} message - The message to display
+ */
+function showToast(message) {
+    // Create toast element if it doesn't exist
+    let toast = document.getElementById('pivx-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'pivx-toast';
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            z-index: 10000;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        `;
+        document.body.appendChild(toast);
+    }
+
+    toast.textContent = message;
+    toast.style.opacity = '1';
+
+    // Hide after 3 seconds
+    clearTimeout(toast._timeout);
+    toast._timeout = setTimeout(() => {
+        toast.style.opacity = '0';
+    }, 3000);
+}
+
+/**
+ * Shows the PIVX wallet panel and hides the main Mini Apps view
+ */
+function showPivxWalletPanel() {
+    if (domAttachmentPanelMiniAppsView) {
+        domAttachmentPanelMiniAppsView.style.display = 'none';
+    }
+    if (domAttachmentPanelPivxView) {
+        domAttachmentPanelPivxView.style.display = 'flex';
+        // Animate PIVX panel elements
+        animatePivxPanelOpen(domAttachmentPanelPivxView);
+    }
+    if (domAttachmentPanel) {
+        domAttachmentPanel.classList.add('pivx-active');
+    }
+    refreshPivxWallet();
+}
+
+/**
+ * Animates PIVX panel elements when opened
+ */
+function animatePivxPanelOpen(container) {
+    const balanceSection = container.querySelector('.pivx-balance-section');
+    const dockButtons = container.querySelectorAll('.pivx-dock-btn');
+    const staggerDelay = 0.06; // 60ms delay between each button
+
+    // Reset animations (elements are opacity:0 by default in CSS)
+    if (balanceSection) {
+        balanceSection.classList.remove('pivx-panel-animate');
+        void balanceSection.offsetWidth; // Force reflow
+        balanceSection.classList.add('pivx-panel-animate');
+    }
+
+    dockButtons.forEach((btn, index) => {
+        btn.classList.remove('pivx-panel-animate');
+        btn.style.animationDelay = '';
+        void btn.offsetWidth; // Force reflow
+        btn.style.animationDelay = `${(index + 1) * staggerDelay}s`;
+        btn.classList.add('pivx-panel-animate');
+    });
+}
+
+/**
+ * Hides the PIVX wallet panel and shows the main Mini Apps view
+ */
+function hidePivxWalletPanel() {
+    if (domAttachmentPanelPivxView) {
+        // Remove animation classes so elements revert to CSS default (opacity: 0)
+        const balanceSection = domAttachmentPanelPivxView.querySelector('.pivx-balance-section');
+        const dockButtons = domAttachmentPanelPivxView.querySelectorAll('.pivx-dock-btn');
+
+        if (balanceSection) {
+            balanceSection.classList.remove('pivx-panel-animate');
+        }
+        dockButtons.forEach((btn) => {
+            btn.classList.remove('pivx-panel-animate');
+            btn.style.animationDelay = '';
+        });
+
+        domAttachmentPanelPivxView.style.display = 'none';
+    }
+    if (domAttachmentPanelMiniAppsView) {
+        domAttachmentPanelMiniAppsView.style.display = 'flex';
+        animateAttachmentPanelItems(domAttachmentPanelMiniAppsView);
+    }
+    if (domAttachmentPanel) {
+        domAttachmentPanel.classList.remove('pivx-active');
+    }
+}
+
+/**
+ * Refreshes the PIVX wallet balance by fetching from backend
+ */
+async function refreshPivxWallet() {
+    const domPivxBalanceFiat = document.getElementById('pivx-balance-fiat');
+
+    // Show loading spinner and hide fiat during load
+    if (domPivxBalanceAmount) {
+        domPivxBalanceAmount.classList.remove('pivx-fade-in');
+        domPivxBalanceAmount.innerHTML = '<div class="pivx-balance-loading"><div class="pivx-spinner"></div></div>';
+    }
+    if (domPivxBalanceFiat) {
+        domPivxBalanceFiat.classList.remove('pivx-fade-in');
+        domPivxBalanceFiat.style.display = 'none';
+    }
+
+    try {
+        // Fetch balance and price in parallel
+        const [balance, priceInfo] = await Promise.all([
+            invoke('pivx_get_wallet_balance'),
+            fetchPivxPrice()
+        ]);
+
+        // Store current balance for deposit limit check
+        pivxCurrentWalletBalance = balance;
+
+        if (domPivxBalanceAmount) {
+            domPivxBalanceAmount.innerHTML = `${balance.toFixed(2)} <span style="color: #564b8d;">PIV</span>`;
+            // Trigger fade-in animation
+            void domPivxBalanceAmount.offsetWidth; // Force reflow
+            domPivxBalanceAmount.classList.add('pivx-fade-in');
+        }
+
+        // Update deposit button state based on balance
+        if (domPivxDepositBtn) {
+            if (balance >= PIVX_MAX_BALANCE_WARNING) {
+                domPivxDepositBtn.classList.add('disabled');
+                domPivxDepositBtn.title = 'Balance too high - please withdraw first';
+            } else {
+                domPivxDepositBtn.classList.remove('disabled');
+                domPivxDepositBtn.title = '';
+            }
+        }
+
+        // Show fiat value if we have price data
+        if (domPivxBalanceFiat && priceInfo && priceInfo.value > 0) {
+            const fiatValue = balance * priceInfo.value;
+            domPivxBalanceFiat.textContent = formatFiatValue(fiatValue, priceInfo.currency.toUpperCase());
+            domPivxBalanceFiat.style.display = '';
+            // Trigger fade-in animation with slight delay
+            void domPivxBalanceFiat.offsetWidth; // Force reflow
+            domPivxBalanceFiat.classList.add('pivx-fade-in');
+        } else if (domPivxBalanceFiat) {
+            domPivxBalanceFiat.style.display = 'none';
+        }
+    } catch (err) {
+        console.error('Failed to refresh PIVX wallet:', err);
+        if (domPivxBalanceAmount) {
+            domPivxBalanceAmount.innerHTML = `0.00 <span style="color: #564b8d;">PIV</span>`;
+            void domPivxBalanceAmount.offsetWidth;
+            domPivxBalanceAmount.classList.add('pivx-fade-in');
+        }
+        if (domPivxBalanceFiat) {
+            domPivxBalanceFiat.style.display = 'none';
+        }
+    }
+}
+
+// Track deposit polling state
+let pivxDepositPollingInterval = null;
+let pivxCurrentDepositAddress = null;
+let pivxCurrentWalletBalance = 0;
+const PIVX_MAX_BALANCE_WARNING = 1000;
+
+/**
+ * Shows the deposit dialog with a new promo code and address
+ */
+async function showPivxDepositDialog() {
+    // Security check: prevent deposits if balance is too high
+    if (pivxCurrentWalletBalance >= PIVX_MAX_BALANCE_WARNING) {
+        await popupConfirm(
+            'Balance Too High',
+            `Your wallet balance is <b>${pivxCurrentWalletBalance.toFixed(2)} PIV</b>, which exceeds the recommended limit of ${PIVX_MAX_BALANCE_WARNING} PIV.<br><br>Vector is not intended to replace a proper cryptocurrency wallet. Please <b>withdraw your funds</b> to a secure wallet before depositing more.`,
+            true,
+            '',
+            'vector_warning.svg'
+        );
+        return;
+    }
+
+    // Show loading state on deposit button
+    if (domPivxDepositBtn) {
+        domPivxDepositBtn.classList.add('loading');
+        domPivxDepositBtn.disabled = true;
+    }
+
+    try {
+        // Create a new promo code for deposit
+        const promo = await invoke('pivx_create_promo');
+        pivxCurrentDepositAddress = promo.address;
+
+        const addressEl = document.getElementById('pivx-deposit-address');
+        const statusEl = document.getElementById('pivx-deposit-status');
+
+        if (addressEl) addressEl.textContent = promo.address;
+        if (statusEl) {
+            statusEl.innerHTML = `
+                <div class="pivx-awaiting-deposit">
+                    <div class="pivx-spinner"></div>
+                    <span>Awaiting Deposit...</span>
+                </div>
+            `;
+        }
+
+        if (domPivxDepositOverlay) {
+            domPivxDepositOverlay.classList.add('active');
+        }
+
+        // Start polling for incoming deposit
+        startDepositPolling(promo.address);
+    } catch (err) {
+        console.error('Failed to create deposit promo:', err);
+        showToast('Failed to create deposit address');
+    } finally {
+        // Remove loading state from deposit button
+        if (domPivxDepositBtn) {
+            domPivxDepositBtn.classList.remove('loading');
+            domPivxDepositBtn.disabled = false;
+        }
+    }
+}
+
+/**
+ * Start polling for deposits on the given address
+ */
+function startDepositPolling(address) {
+    // Clear any existing polling
+    stopDepositPolling();
+    pivxCurrentDepositAddress = address;
+
+    // Poll every 5 seconds
+    pivxDepositPollingInterval = setInterval(() => {
+        checkForDeposit(address);
+    }, 5000);
+}
+
+/**
+ * Check if a deposit has arrived at the address
+ */
+async function checkForDeposit(address) {
+    if (!pivxCurrentDepositAddress || address !== pivxCurrentDepositAddress) return;
+
+    try {
+        // We need to check balance by address - use the wallet balance refresh
+        const promos = await invoke('pivx_refresh_balances');
+        const thisPromo = promos.find(p => p.address === address);
+
+        if (thisPromo && thisPromo.balance_piv > 0) {
+            // Deposit detected!
+            stopDepositPolling();
+
+            const statusEl = document.getElementById('pivx-deposit-status');
+            if (statusEl) {
+                statusEl.innerHTML = `
+                    <div class="pivx-deposit-received">
+                        <span class="icon icon-check"></span>
+                        <span>Received ${thisPromo.balance_piv.toFixed(8)} PIV!</span>
+                    </div>
+                `;
+            }
+
+            showToast(`Received ${thisPromo.balance_piv.toFixed(8)} PIV!`);
+
+            // Close dialog after a short delay and refresh wallet
+            setTimeout(() => {
+                closePivxDepositDialog();
+                refreshPivxWallet();
+            }, 1500);
+        }
+    } catch (err) {
+        console.error('Check deposit error:', err);
+    }
+}
+
+/**
+ * Stop polling for deposits
+ */
+function stopDepositPolling() {
+    if (pivxDepositPollingInterval) {
+        clearInterval(pivxDepositPollingInterval);
+        pivxDepositPollingInterval = null;
+    }
+    pivxCurrentDepositAddress = null;
+}
+
+/**
+ * Closes the deposit dialog
+ */
+function closePivxDepositDialog() {
+    stopDepositPolling();
+    if (domPivxDepositOverlay) {
+        domPivxDepositOverlay.classList.remove('active');
+    }
+}
+
+// Track send dialog state
+let pivxSendAvailableBalance = 0;
+let pivxSendSelectedPromo = null;
+let pivxSendPromos = [];
+let pivxSendMode = 'quick'; // 'quick' or 'custom'
+
+// Currency/price tracking (session-cached)
+let pivxCurrencyList = null; // Cached currency list (fetched once per session)
+let pivxCurrentPrice = null; // Current price in preferred currency
+let pivxPreferredCurrency = null; // User's preferred currency code
+
+/**
+ * Detects the user's default currency based on their locale
+ * @returns {string} Currency code (e.g., 'USD', 'EUR', 'GBP')
+ */
+function detectDefaultCurrency() {
+    try {
+        // Get locale from browser
+        const locale = navigator.language || navigator.languages?.[0] || 'en-US';
+
+        // Map common locale regions to currencies
+        const localeCurrencyMap = {
+            'US': 'USD', 'CA': 'CAD', 'AU': 'AUD', 'NZ': 'NZD', 'GB': 'GBP', 'UK': 'GBP',
+            'IE': 'EUR', 'DE': 'EUR', 'FR': 'EUR', 'ES': 'EUR', 'IT': 'EUR', 'NL': 'EUR',
+            'BE': 'EUR', 'AT': 'EUR', 'PT': 'EUR', 'FI': 'EUR', 'GR': 'EUR', 'SK': 'EUR',
+            'SI': 'EUR', 'EE': 'EUR', 'LV': 'EUR', 'LT': 'EUR', 'MT': 'EUR', 'CY': 'EUR',
+            'LU': 'EUR', 'MC': 'EUR', 'SM': 'EUR', 'VA': 'EUR', 'AD': 'EUR', 'ME': 'EUR',
+            'XK': 'EUR', 'JP': 'JPY', 'CN': 'CNY', 'HK': 'HKD', 'TW': 'TWD', 'KR': 'KRW',
+            'IN': 'INR', 'SG': 'SGD', 'MY': 'MYR', 'TH': 'THB', 'ID': 'IDR', 'PH': 'PHP',
+            'VN': 'VND', 'PK': 'PKR', 'BD': 'BDT', 'RU': 'RUB', 'UA': 'UAH', 'PL': 'PLN',
+            'CZ': 'CZK', 'HU': 'HUF', 'RO': 'RON', 'BG': 'BGN', 'HR': 'HRK', 'RS': 'RSD',
+            'CH': 'CHF', 'SE': 'SEK', 'NO': 'NOK', 'DK': 'DKK', 'IS': 'ISK', 'TR': 'TRY',
+            'IL': 'ILS', 'AE': 'AED', 'SA': 'SAR', 'QA': 'QAR', 'KW': 'KWD', 'BH': 'BHD',
+            'OM': 'OMR', 'EG': 'EGP', 'ZA': 'ZAR', 'NG': 'NGN', 'KE': 'KES', 'GH': 'GHS',
+            'MX': 'MXN', 'BR': 'BRL', 'AR': 'ARS', 'CL': 'CLP', 'CO': 'COP', 'PE': 'PEN',
+            'VE': 'VES', 'NI': 'NIO', 'CR': 'CRC', 'PA': 'PAB', 'DO': 'DOP', 'GT': 'GTQ',
+        };
+
+        // Extract region code from locale (e.g., 'en-US' -> 'US', 'de-DE' -> 'DE')
+        const parts = locale.split('-');
+        const region = parts.length > 1 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+
+        return localeCurrencyMap[region] || 'USD';
+    } catch (err) {
+        console.error('Failed to detect default currency:', err);
+        return 'USD';
+    }
+}
+
+/**
+ * Fetches the currency list from the PIVX Oracle API (cached per session)
+ * @returns {Promise<Array>} Array of currency info objects
+ */
+async function fetchPivxCurrencies() {
+    // Return cached list if available
+    if (pivxCurrencyList) {
+        return pivxCurrencyList;
+    }
+
+    try {
+        const currencies = await invoke('pivx_get_currencies');
+        // Filter to common fiat currencies for the dropdown
+        const fiatCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'CNY',
+            'INR', 'RUB', 'BRL', 'MXN', 'KRW', 'SGD', 'HKD', 'SEK', 'NOK', 'DKK',
+            'PLN', 'CZK', 'HUF', 'TRY', 'ZAR', 'AED', 'SAR', 'THB', 'MYR', 'IDR',
+            'PHP', 'VND', 'NZD', 'ILS', 'ARS', 'CLP', 'COP', 'PEN', 'NGN', 'KES',
+            'EGP', 'PKR', 'BDT', 'TWD', 'RON', 'BGN', 'HRK', 'ISK', 'UAH'];
+
+        pivxCurrencyList = currencies.filter(c =>
+            fiatCurrencies.includes(c.currency.toUpperCase())
+        ).sort((a, b) => a.currency.localeCompare(b.currency));
+
+        return pivxCurrencyList;
+    } catch (err) {
+        console.error('Failed to fetch currencies:', err);
+        return [];
+    }
+}
+
+/**
+ * Fetches the current PIVX price in the preferred currency
+ * @returns {Promise<Object|null>} Price info or null
+ */
+async function fetchPivxPrice() {
+    if (!pivxPreferredCurrency) {
+        // Load preference from DB or use locale default
+        try {
+            const saved = await invoke('pivx_get_preferred_currency');
+            pivxPreferredCurrency = saved || detectDefaultCurrency();
+        } catch {
+            pivxPreferredCurrency = detectDefaultCurrency();
+        }
+    }
+
+    try {
+        pivxCurrentPrice = await invoke('pivx_get_price', { currency: pivxPreferredCurrency });
+        return pivxCurrentPrice;
+    } catch (err) {
+        console.error('Failed to fetch PIVX price:', err);
+        return null;
+    }
+}
+
+/**
+ * Formats a fiat value with currency symbol
+ * @param {number} value - The fiat value
+ * @param {string} currency - Currency code
+ * @returns {string} Formatted value (e.g., "$1.23", "€1.23")
+ */
+function formatFiatValue(value, currency) {
+    try {
+        return new Intl.NumberFormat(navigator.language || 'en-US', {
+            style: 'currency',
+            currency: currency,
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }).format(value);
+    } catch {
+        // Fallback if currency not supported
+        return `${value.toFixed(2)} ${currency}`;
+    }
+}
+
+/**
+ * Shows the send dialog for sending PIVX to the current chat
+ */
+async function showPivxSendDialog() {
+    if (!strOpenChat) {
+        showToast('Open a chat first to send PIVX');
+        return;
+    }
+
+    const recipientEl = document.getElementById('pivx-send-recipient');
+    const amountEl = document.getElementById('pivx-send-amount');
+    const messageEl = document.getElementById('pivx-send-message');
+    const availableEl = document.getElementById('pivx-send-available-amount');
+    const promoListEl = document.getElementById('pivx-send-promo-list');
+    const promoSectionEl = document.getElementById('pivx-send-promo-section');
+    const customSectionEl = document.getElementById('pivx-send-custom-section');
+    const confirmBtn = document.getElementById('pivx-send-confirm');
+
+    // Get the chat name for display
+    const chatName = getChatDisplayName(strOpenChat);
+    if (recipientEl) recipientEl.textContent = chatName || 'this chat';
+
+    // Reset state
+    pivxSendSelectedPromo = null;
+    pivxSendMode = 'quick';
+    if (amountEl) amountEl.value = '';
+    if (messageEl) messageEl.value = '';
+
+    // Show promo section, hide custom section
+    if (promoSectionEl) promoSectionEl.style.display = '';
+    if (customSectionEl) customSectionEl.style.display = 'none';
+
+    // Disable send button while loading
+    if (confirmBtn) {
+        confirmBtn.classList.add('loading');
+        confirmBtn.disabled = true;
+    }
+
+    // Show loading in promo list
+    if (promoListEl) {
+        promoListEl.innerHTML = `
+            <div class="pivx-send-promo-loading">
+                <div class="pivx-spinner"></div>
+                <span>Loading...</span>
+            </div>
+        `;
+    }
+
+    if (domPivxSendOverlay) {
+        domPivxSendOverlay.classList.add('active');
+    }
+
+    // Fetch promos with balances
+    try {
+        pivxSendPromos = await invoke('pivx_refresh_balances');
+        // Filter to only promos with balance, sort by amount descending
+        const promosWithBalance = pivxSendPromos
+            .filter(p => p.balance_piv > 0)
+            .sort((a, b) => b.balance_piv - a.balance_piv);
+
+        pivxSendAvailableBalance = promosWithBalance.reduce((sum, p) => sum + p.balance_piv, 0);
+        if (availableEl) availableEl.textContent = pivxSendAvailableBalance.toFixed(2);
+
+        if (promoListEl) {
+            if (promosWithBalance.length === 0) {
+                promoListEl.innerHTML = `
+                    <div class="pivx-send-promo-empty">
+                        No funds available to send.<br>
+                        Deposit PIVX first.
+                    </div>
+                `;
+            } else {
+                promoListEl.innerHTML = promosWithBalance.map(promo => `
+                    <div class="pivx-send-promo-item" data-code="${promo.gift_code}" data-amount="${promo.balance_piv}">
+                        <span class="pivx-send-promo-item-amount">${promo.balance_piv.toFixed(2)} PIV</span>
+                        <span class="pivx-send-promo-item-code">${promo.gift_code}</span>
+                    </div>
+                `).join('');
+
+                // Add click handlers and staggered animation
+                const items = promoListEl.querySelectorAll('.pivx-send-promo-item');
+                const totalAnimTime = 0.3;
+                const maxDelay = 0.06;
+                const staggerDelay = items.length > 1 ? Math.min(maxDelay, totalAnimTime / (items.length - 1)) : 0;
+
+                items.forEach((item, index) => {
+                    item.onclick = () => selectPivxSendPromo(item);
+                    item.style.animationDelay = `${index * staggerDelay}s`;
+                    item.classList.add('animate-in');
+                });
+            }
+        }
+    } catch (err) {
+        console.error('Failed to fetch promos for send:', err);
+        pivxSendAvailableBalance = 0;
+        pivxSendPromos = [];
+        if (availableEl) availableEl.textContent = '0.00';
+        if (promoListEl) {
+            promoListEl.innerHTML = `
+                <div class="pivx-send-promo-empty">
+                    Failed to load wallet.
+                </div>
+            `;
+        }
+    } finally {
+        // Re-enable send button after loading
+        if (confirmBtn) {
+            confirmBtn.classList.remove('loading');
+            confirmBtn.disabled = false;
+        }
+    }
+}
+
+/**
+ * Select a promo for quick send
+ */
+function selectPivxSendPromo(itemEl) {
+    // Deselect others
+    document.querySelectorAll('.pivx-send-promo-item').forEach(el => {
+        el.classList.remove('selected');
+    });
+
+    // Select this one
+    itemEl.classList.add('selected');
+    pivxSendSelectedPromo = {
+        gift_code: itemEl.dataset.code,
+        amount: parseFloat(itemEl.dataset.amount)
+    };
+}
+
+/**
+ * Toggle to custom amount mode
+ */
+function showPivxSendCustomMode() {
+    pivxSendMode = 'custom';
+    pivxSendSelectedPromo = null;
+
+    const promoSectionEl = document.getElementById('pivx-send-promo-section');
+    const customSectionEl = document.getElementById('pivx-send-custom-section');
+
+    if (promoSectionEl) promoSectionEl.style.display = 'none';
+    if (customSectionEl) customSectionEl.style.display = '';
+}
+
+/**
+ * Toggle back to quick send mode
+ */
+function showPivxSendQuickMode() {
+    pivxSendMode = 'quick';
+
+    const promoSectionEl = document.getElementById('pivx-send-promo-section');
+    const customSectionEl = document.getElementById('pivx-send-custom-section');
+    const amountEl = document.getElementById('pivx-send-amount');
+
+    if (promoSectionEl) promoSectionEl.style.display = '';
+    if (customSectionEl) customSectionEl.style.display = 'none';
+    if (amountEl) amountEl.value = '';
+}
+
+/**
+ * Closes the send dialog
+ */
+function closePivxSendDialog() {
+    if (domPivxSendOverlay) {
+        domPivxSendOverlay.classList.remove('active');
+    }
+}
+
+/**
+ * Shows the settings dialog with current wallet address and currency selector
+ */
+async function showPivxSettingsDialog() {
+    // Show dialog immediately
+    if (domPivxSettingsOverlay) {
+        domPivxSettingsOverlay.classList.add('active');
+    }
+
+    // Load wallet address (fast local query)
+    invoke('pivx_get_wallet_address').then(address => {
+        const addressInput = document.getElementById('pivx-wallet-address-input');
+        if (addressInput) {
+            addressInput.value = address || '';
+        }
+    }).catch(err => {
+        console.error('Failed to get wallet address:', err);
+    });
+
+    // Load currency selector (may be slow, API call)
+    const currencySelect = document.getElementById('pivx-currency-select');
+    if (currencySelect) {
+        // Show loading state
+        currencySelect.innerHTML = '<option value="">Loading...</option>';
+        currencySelect.disabled = true;
+
+        Promise.all([
+            fetchPivxCurrencies(),
+            invoke('pivx_get_preferred_currency').catch(() => null)
+        ]).then(([currencies, savedCurrency]) => {
+            const currentCurrency = savedCurrency || pivxPreferredCurrency || detectDefaultCurrency();
+            pivxPreferredCurrency = currentCurrency;
+
+            currencySelect.innerHTML = '';
+            for (const curr of currencies) {
+                const option = document.createElement('option');
+                option.value = curr.currency.toUpperCase();
+                option.textContent = curr.currency.toUpperCase();
+                if (curr.currency.toUpperCase() === currentCurrency.toUpperCase()) {
+                    option.selected = true;
+                }
+                currencySelect.appendChild(option);
+            }
+            currencySelect.disabled = false;
+        }).catch(err => {
+            console.error('Failed to load currencies:', err);
+            currencySelect.innerHTML = '<option value="USD">USD</option>';
+            currencySelect.disabled = false;
+        });
+    }
+}
+
+/**
+ * Closes the settings dialog
+ */
+function closePivxSettingsDialog() {
+    if (domPivxSettingsOverlay) {
+        domPivxSettingsOverlay.classList.remove('active');
+    }
+}
+
+// Withdraw dialog state
+let pivxWithdrawAvailableBalance = 0;
+
+/**
+ * Shows the withdraw dialog
+ */
+async function showPivxWithdrawDialog() {
+    const withdrawOverlay = document.getElementById('pivx-withdraw-overlay');
+    const addressInput = document.getElementById('pivx-withdraw-address');
+    const amountInput = document.getElementById('pivx-withdraw-amount');
+    const availableEl = document.getElementById('pivx-withdraw-available-amount');
+    const confirmBtn = document.getElementById('pivx-withdraw-confirm');
+
+    // Reset inputs
+    if (addressInput) addressInput.value = '';
+    if (amountInput) amountInput.value = '';
+    if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Withdraw';
+    }
+
+    // Get available balance
+    try {
+        pivxWithdrawAvailableBalance = await invoke('pivx_get_wallet_balance');
+        if (availableEl) {
+            availableEl.textContent = pivxWithdrawAvailableBalance.toFixed(2);
+        }
+    } catch (err) {
+        console.error('Failed to get balance:', err);
+        pivxWithdrawAvailableBalance = 0;
+        if (availableEl) availableEl.textContent = '0.00';
+    }
+
+    if (withdrawOverlay) {
+        withdrawOverlay.classList.add('active');
+    }
+}
+
+/**
+ * Closes the withdraw dialog
+ */
+function closePivxWithdrawDialog() {
+    const withdrawOverlay = document.getElementById('pivx-withdraw-overlay');
+    if (withdrawOverlay) {
+        withdrawOverlay.classList.remove('active');
+    }
+}
+
+/**
+ * Executes a PIVX withdrawal
+ */
+async function executePivxWithdraw() {
+    const addressInput = document.getElementById('pivx-withdraw-address');
+    const amountInput = document.getElementById('pivx-withdraw-amount');
+    const confirmBtn = document.getElementById('pivx-withdraw-confirm');
+
+    const address = addressInput?.value?.trim() || '';
+    const amount = parseFloat(amountInput?.value || '0');
+
+    // Validate address
+    if (!address || !address.startsWith('D') || address.length < 30 || address.length > 36) {
+        showToast('Invalid PIVX address');
+        return;
+    }
+
+    // Validate amount
+    if (amount <= 0) {
+        showToast('Enter a valid amount');
+        return;
+    }
+
+    if (amount > pivxWithdrawAvailableBalance) {
+        showToast('Insufficient balance');
+        return;
+    }
+
+    // Disable button during withdraw
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Withdrawing...';
+    }
+
+    try {
+        const result = await invoke('pivx_withdraw', {
+            destAddress: address,
+            amountPiv: amount
+        });
+
+        closePivxWithdrawDialog();
+        showToast(`Withdrawn ${amount.toFixed(2)} PIV`);
+        refreshPivxWallet();
+
+        // Log change if any
+        if (result.change_piv > 0) {
+            console.log(`Withdrawal change: ${result.change_piv} PIV saved to new promo`);
+        }
+    } catch (err) {
+        console.error('Withdrawal failed:', err);
+        showToast('Withdrawal failed: ' + (err.message || err));
+    } finally {
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Withdraw';
+        }
+    }
+}
+
+/**
+ * Sends a PIVX payment to the current chat
+ */
+async function sendPivxPayment() {
+    const messageEl = document.getElementById('pivx-send-message');
+    const confirmBtn = document.getElementById('pivx-send-confirm');
+    const message = messageEl?.value || '';
+
+    if (!strOpenChat) {
+        showToast('No chat selected');
+        return;
+    }
+
+    // Disable button during send
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Sending...';
+    }
+
+    try {
+        if (pivxSendMode === 'quick') {
+            // Quick send mode - send an existing whole promo
+            if (!pivxSendSelectedPromo) {
+                showToast('Select an amount to send');
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
+            }
+
+            await invoke('pivx_send_existing_promo', {
+                receiver: strOpenChat,
+                giftCode: pivxSendSelectedPromo.gift_code,
+                paymentMessage: message || null
+            });
+
+            closePivxSendDialog();
+            showToast(`Sent ${pivxSendSelectedPromo.amount.toFixed(2)} PIV`);
+            refreshPivxWallet();
+        } else {
+            // Custom amount mode
+            const amountEl = document.getElementById('pivx-send-amount');
+            const amount = parseFloat(amountEl?.value || '0');
+
+            if (amount <= 0) {
+                showToast('Enter a valid amount');
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
+            }
+
+            if (amount > pivxSendAvailableBalance) {
+                showToast(`Insufficient funds (max: ${pivxSendAvailableBalance.toFixed(2)} PIV)`);
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
+            }
+
+            // Send custom amount via coin selection
+            await invoke('pivx_send_payment', {
+                receiver: strOpenChat,
+                amountPiv: amount,
+                paymentMessage: message || null
+            });
+
+            closePivxSendDialog();
+            showToast(`Sent ${amount.toFixed(2)} PIV`);
+            refreshPivxWallet();
+        }
+    } catch (err) {
+        console.error('Failed to send PIVX payment:', err);
+        showToast('Failed to send: ' + (err.message || err));
+    } finally {
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Send to Chat';
+        }
+    }
+}
+
+/**
+ * Saves the PIVX wallet settings
+ */
+async function savePivxSettings() {
+    const addressInput = document.getElementById('pivx-wallet-address-input');
+    const currencySelect = document.getElementById('pivx-currency-select');
+    const address = addressInput?.value?.trim() || '';
+    const currency = currencySelect?.value || '';
+
+    // Basic validation for PIVX address (starts with D, proper length)
+    if (address && (!address.startsWith('D') || address.length < 30 || address.length > 36)) {
+        showToast('Invalid PIVX address format');
+        return;
+    }
+
+    try {
+        // Save address (empty string clears the setting)
+        await invoke('pivx_set_wallet_address', { address });
+
+        if (currency) {
+            await invoke('pivx_set_preferred_currency', { currency });
+            // Update cached preference and refresh price
+            const oldCurrency = pivxPreferredCurrency;
+            pivxPreferredCurrency = currency;
+            // Re-fetch price if currency changed
+            if (oldCurrency !== currency) {
+                pivxCurrentPrice = null;
+                fetchPivxPrice();
+            }
+        }
+
+        closePivxSettingsDialog();
+        showToast('Wallet settings saved');
+
+        // Refresh wallet to show updated fiat value
+        refreshPivxWallet();
+    } catch (err) {
+        console.error('Failed to save settings:', err);
+        showToast('Failed to save settings');
+    }
+}
+
+/**
+ * Claims a PIVX payment from a received message
+ * @param {string} giftCode - The promo code to claim
+ * @param {HTMLElement} bubbleEl - The payment bubble element
+ */
+async function claimPivxPayment(giftCode, bubbleEl) {
+    if (!giftCode) return;
+    if (bubbleEl?.classList.contains('claimed')) return;
+    if (bubbleEl?.classList.contains('claiming')) return; // Prevent double-click
+
+    // Mark as claiming to prevent multiple clicks
+    if (bubbleEl) {
+        bubbleEl.classList.add('claiming');
+    }
+
+    // Update hint to show progress
+    const hint = bubbleEl?.querySelector('.msg-pivx-payment-hint');
+    if (hint) {
+        hint.textContent = 'Claiming...';
+    }
+
+    try {
+        const result = await invoke('pivx_claim_from_message', { giftCode });
+
+        if (bubbleEl) {
+            bubbleEl.classList.remove('claiming');
+            bubbleEl.classList.add('claimed');
+        }
+        if (hint) {
+            hint.textContent = 'Claimed!';
+        }
+
+        showToast(`Claimed ${result.amount_piv?.toFixed(2) || ''} PIV`);
+        refreshPivxWallet();
+    } catch (err) {
+        console.error('Failed to claim PIVX:', err);
+        if (bubbleEl) {
+            bubbleEl.classList.remove('claiming');
+        }
+        if (hint) {
+            hint.textContent = 'Claim failed - tap to retry';
+        }
+        showToast('Failed to claim: ' + (err.message || err));
+    }
+}
+
+/**
+ * Renders a PIVX payment bubble for a message
+ * @param {string} giftCode - The promo code
+ * @param {number} amountPiv - Amount in PIV
+ * @param {string} message - Optional message
+ * @param {boolean} isMine - Whether this is my payment (sent by me)
+ * @param {string} address - Optional PIVX address for balance checking
+ * @returns {HTMLElement} The payment bubble element
+ */
+function renderPivxPaymentBubble(giftCode, amountPiv, message, isMine, address) {
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-pivx-payment';
+    bubble.dataset.giftCode = giftCode;
+    if (address) bubble.dataset.address = address;
+
+    // PIVX logo image
+    const img = document.createElement('img');
+    img.src = './icons/pivx.svg';
+    bubble.appendChild(img);
+
+    // Optional message in the middle
+    if (message) {
+        const msgText = document.createElement('div');
+        msgText.className = 'msg-pivx-payment-message';
+        msgText.textContent = message;
+        bubble.appendChild(msgText);
+    }
+
+    // Amount and hint on the right
+    const info = document.createElement('div');
+    info.className = 'msg-pivx-payment-info';
+
+    const amountDiv = document.createElement('div');
+    amountDiv.className = 'msg-pivx-payment-amount';
+    amountDiv.textContent = `${amountPiv.toFixed(2)} PIV`;
+    info.appendChild(amountDiv);
+
+    // Show fiat equivalent if we have a cached price
+    if (pivxCurrentPrice?.value && pivxPreferredCurrency) {
+        const fiatValue = amountPiv * pivxCurrentPrice.value;
+        const fiatDiv = document.createElement('div');
+        fiatDiv.className = 'msg-pivx-payment-fiat';
+        fiatDiv.textContent = `~${fiatValue.toFixed(2)} ${pivxPreferredCurrency}`;
+        info.appendChild(fiatDiv);
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'msg-pivx-payment-hint';
+
+    // If address is available, start in syncing state while we check balance
+    if (address) {
+        bubble.classList.add('syncing');
+        hint.textContent = 'Syncing...';
+    } else {
+        hint.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+    }
+    info.appendChild(hint);
+
+    bubble.appendChild(info);
+
+    // Make the whole bubble clickable (disabled if claimed/syncing)
+    bubble.onclick = () => {
+        if (!bubble.classList.contains('claimed') && !bubble.classList.contains('syncing')) {
+            claimPivxPayment(giftCode, bubble);
+        }
+    };
+
+    // If address is available, check balance to determine claimed state
+    if (address) {
+        checkPivxPaymentClaimedState(bubble, address, hint, isMine);
+    }
+
+    return bubble;
+}
+
+/**
+ * Check if a PIVX payment has been claimed by checking the address balance
+ * @param {HTMLElement} bubble - The payment bubble element
+ * @param {string} address - PIVX address to check
+ * @param {HTMLElement} hintEl - The hint element to update
+ * @param {boolean} isMine - Whether this is my payment
+ * @param {number} retryCount - Number of retries attempted (for unconfirmed tx propagation)
+ */
+async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount = 0) {
+    try {
+        // Use force=true on retries to bypass cache
+        const force = retryCount > 0;
+        const balance = await __TAURI__.core.invoke('pivx_check_address_balance', { address, force });
+        bubble.classList.remove('syncing');
+        if (balance <= 0) {
+            // Balance is 0 - could be claimed OR unconfirmed tx not yet visible
+            // Retry a few times with delay to handle tx propagation delay
+            if (retryCount < 3) {
+                bubble.classList.add('syncing');
+                hintEl.textContent = 'Confirming...';
+                setTimeout(() => {
+                    checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount + 1);
+                }, 3000); // Retry after 3 seconds
+                return;
+            }
+            // After retries, mark as claimed
+            bubble.classList.add('claimed');
+            hintEl.textContent = 'Claimed';
+        } else {
+            // Has balance - show claim option
+            hintEl.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+        }
+    } catch (err) {
+        // If balance check fails, allow claiming anyway
+        console.warn('Failed to check PIVX payment balance:', err);
+        bubble.classList.remove('syncing');
+        hintEl.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+    }
+}
+
+/**
+ * Gets the display name for a chat
+ * @param {string} chatId - The chat ID
+ * @returns {string} The display name
+ */
+function getChatDisplayName(chatId) {
+    // Check if it's a group chat
+    const chat = arrChats.find(c => c.id === chatId);
+    if (chat && chat.chat_type === 'MlsGroup') {
+        return chat.metadata?.custom_fields?.name || `Group ${chatId.substring(0, 8)}...`;
+    }
+
+    // Otherwise it's a DM - get profile name
+    const profile = getProfile(chatId);
+    if (profile?.nickname) return profile.nickname;
+    if (profile?.name) return profile.name;
+
+    // Fallback to truncated pubkey
+    return chatId.substring(0, 8) + '...';
+}
+
+// ========== End PIVX Wallet Functions ==========
+
+/**
+ * Animate attachment panel items with staggered fade-in effect
+ */
+function animateAttachmentPanelItems(container) {
+    const items = container.querySelectorAll('.attachment-panel-item');
+    const totalAnimTime = 0.35; // Total stagger duration in seconds
+    const maxDelay = 0.08; // Cap at 80ms per item for small counts
+    const staggerDelay = items.length > 1 ? Math.min(maxDelay, totalAnimTime / (items.length - 1)) : 0;
+
+    items.forEach((item, index) => {
+        // Remove any existing animation
+        item.classList.remove('animate-in');
+        item.style.animationDelay = '';
+
+        // Force reflow to restart animation
+        void item.offsetWidth;
+
+        // Add animation with staggered delay
+        item.style.animationDelay = `${index * staggerDelay}s`;
+        item.classList.add('animate-in');
+    });
+}
+
+/**
+ * Loads and renders the Mini Apps history in the panel
+ */
+async function loadMiniAppsHistory() {
+    try {
+        const history = await invoke('miniapp_get_history', { limit: 20 });
+
+        // Clear existing Mini App items (keep the Back, Marketplace, and PIVX buttons)
+        const existingItems = domAttachmentPanelMiniAppsView.querySelectorAll('.attachment-panel-item:not(#attachment-panel-back):not(#attachment-panel-marketplace):not(#attachment-panel-pivx), .attachment-panel-empty');
+        existingItems.forEach(item => item.remove());
+
+        // Ensure PIVX button exists and has click handler
+        let pivxBtn = document.getElementById('attachment-panel-pivx');
+        if (!pivxBtn) {
+            pivxBtn = document.createElement('button');
+            pivxBtn.className = 'attachment-panel-item';
+            pivxBtn.id = 'attachment-panel-pivx';
+            pivxBtn.innerHTML = `
+                <div class="attachment-panel-btn attachment-panel-pivx-btn">
+                    <span class="icon icon-pivx"></span>
+                </div>
+                <span class="attachment-panel-label">PIVX</span>
+            `;
+            // Insert after Marketplace button
+            const marketplaceBtn = document.getElementById('attachment-panel-marketplace');
+            if (marketplaceBtn && marketplaceBtn.nextSibling) {
+                domAttachmentPanelMiniAppsView.insertBefore(pivxBtn, marketplaceBtn.nextSibling);
+            } else {
+                domAttachmentPanelMiniAppsView.appendChild(pivxBtn);
+            }
+        }
+        // Always ensure click handler is attached
+        pivxBtn.onclick = () => showPivxWalletPanel();
+        
+        // Add Mini App items
+        for (const app of history) {
+            const item = document.createElement('button');
+            item.className = 'attachment-panel-item attachment-panel-miniapp';
+            
+            // Start with a placeholder icon, then load the actual icon
+            item.innerHTML = `
+                <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                    <span class="icon icon-play"></span>
+                </div>
+                <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
+            `;
+            
+            // Add tooltip on hover for the entire item
+            item.addEventListener('mouseenter', (e) => {
+                showGlobalTooltip(app.name, item);
+            });
+            item.addEventListener('mouseleave', () => {
+                hideGlobalTooltip();
+            });
+            
+            item.onclick = async () => {
+                hideGlobalTooltip();
+                closeAttachmentPanel();
+                // Open the Mini App using the stored attachment reference
+                await openMiniAppFromHistory(app);
+            };
+            domAttachmentPanelMiniAppsView.appendChild(item);
+            
+            // Load the Mini App icon asynchronously
+            loadMiniAppIcon(app, item.querySelector('.attachment-panel-btn'));
+        }
+        
+        // If no history, show a message
+        if (history.length === 0) {
+            const emptyMsg = document.createElement('div');
+            emptyMsg.className = 'attachment-panel-empty';
+            emptyMsg.textContent = 'No recent Mini Apps';
+            domAttachmentPanelMiniAppsView.appendChild(emptyMsg);
+        }
+    } catch (e) {
+        console.error('Failed to load Mini Apps history:', e);
+    }
+}
+
+/**
+ * Load Mini App icon asynchronously and update the button
+ */
+async function loadMiniAppIcon(app, btnElement) {
+    try {
+        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
+        if (info && info.icon_data) {
+            // Replace the placeholder icon with the actual Mini App icon
+            btnElement.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}" class="attachment-panel-miniapp-icon">`;
+        }
+    } catch (e) {
+        // Keep the placeholder icon if loading fails
+        console.debug('Failed to load Mini App icon:', e);
+    }
+}
+
+/**
+ * Opens a Mini App from history
+ */
+// Store the pending Mini App for the launch dialog
+let pendingMiniAppLaunch = null;
+
+/**
+ * Check if a Mini App is a game based on its categories
+ * @param {Object} app - The app object with categories field
+ * @returns {boolean} True if the app is a game
+ */
+function isMiniAppGame(app) {
+    // If no categories, default to game
+    if (!app.categories) {
+        return true;
+    }
+    
+    // Categories can be a comma-separated string or an array
+    let cats = app.categories;
+    if (typeof cats === 'string') {
+        cats = cats.split(',').map(c => c.trim().toLowerCase()).filter(c => c);
+    } else if (Array.isArray(cats)) {
+        cats = cats.map(c => c.toLowerCase());
+    } else {
+        return true; // Default to game
+    }
+    
+    // It's a game if it has "game" tag OR doesn't have "app" tag
+    return cats.includes('game') || !cats.includes('app');
+}
+
+/**
+ * Show the Mini App launch dialog
+ */
+async function showMiniAppLaunchDialog(app) {
+    pendingMiniAppLaunch = app;
+    
+    // Set the app name
+    domMiniAppLaunchName.textContent = app.name;
+    
+    // Determine if this is a game or app and update button text accordingly
+    const isGame = isMiniAppGame(app);
+    const actionText = isGame ? 'Play' : 'Open';
+    domMiniAppLaunchSolo.textContent = actionText;
+    domMiniAppLaunchInvite.textContent = `${actionText} & Invite`;
+    
+    // Try to load the Mini App icon
+    try {
+        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
+        if (info && info.icon_data) {
+            domMiniAppLaunchIconContainer.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}">`;
+        } else {
+            domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+        }
+    } catch (e) {
+        // Fallback to generic icon
+        domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+    }
+    
+    // Show the overlay
+    domMiniAppLaunchOverlay.classList.add('active');
+}
+
+/**
+ * Close the Mini App launch dialog
+ */
+function closeMiniAppLaunchDialog() {
+    domMiniAppLaunchOverlay.classList.remove('active');
+    pendingMiniAppLaunch = null;
+}
+
+/**
+ * Play Mini App solo (from original attachment)
+ */
+async function playMiniAppSolo() {
+    if (!pendingMiniAppLaunch) return;
+
+    const app = pendingMiniAppLaunch;
+    closeMiniAppLaunchDialog();
+
+    // Check permissions for marketplace apps
+    const shouldContinue = await checkMiniAppPermissions(app);
+    if (!shouldContinue) {
+        return; // User cancelled
+    }
+
+    try {
+        // Open the Mini App directly using the cached file path
+        // Use a placeholder chat_id and message_id for solo play
+        await invoke('miniapp_open', {
+            filePath: app.src_url,
+            chatId: 'solo',
+            messageId: `solo_${Date.now()}`,
+            href: null,
+            topicId: null,
+        });
+    } catch (e) {
+        console.error('Failed to open Mini App:', e);
+    }
+}
+
+/**
+ * Play Mini App and invite (send to current chat, then open from the new message)
+ */
+async function playMiniAppAndInvite() {
+    if (!pendingMiniAppLaunch) return;
+
+    const app = pendingMiniAppLaunch;
+    const targetChatId = strOpenChat;
+
+    // Check if we have an active chat
+    if (!targetChatId) {
+        console.error('No active chat to send Mini App to');
+        closeMiniAppLaunchDialog();
+        // Fallback to solo play
+        await playMiniAppSoloInternal(app);
+        return;
+    }
+
+    // Check permissions for marketplace apps before doing anything
+    const shouldContinue = await checkMiniAppPermissions(app);
+    if (!shouldContinue) {
+        closeMiniAppLaunchDialog();
+        return; // User cancelled
+    }
+
+    // Show loading state on the invite button
+    const inviteBtn = domMiniAppLaunchInvite;
+    const originalText = inviteBtn.textContent;
+    inviteBtn.disabled = true;
+    inviteBtn.innerHTML = '<span class="icon icon-loading"></span>';
+    
+    // Helper to reset button and close dialog
+    const finishAndClose = () => {
+        inviteBtn.disabled = false;
+        inviteBtn.textContent = originalText;
+        closeMiniAppLaunchDialog();
+    };
+    
+    // Determine if this is a group chat (MLS) or DM
+    const chat = arrChats.find(c => c.id === targetChatId);
+    const isGroupChat = chat && chat.type === 'GroupChat';
+    const eventName = isGroupChat ? 'mls_message_new' : 'message_new';
+    
+    // Set up a one-time listener to catch the new message and open the Mini App
+    let unlisten = null;
+    const timeoutId = setTimeout(() => {
+        // Timeout after 30 seconds - just in case the message doesn't arrive
+        if (unlisten) unlisten();
+        console.warn('Timeout waiting for Mini App message to be sent');
+        finishAndClose();
+    }, 30000);
+    
+    unlisten = await listen(eventName, async (evt) => {
+        const message = isGroupChat ? evt.payload?.message : evt.payload?.message;
+        const chatId = isGroupChat ? evt.payload?.group_id : evt.payload?.chat_id;
+        
+        console.log('Play & Invite: Received message event', { chatId, targetChatId, messageId: message?.id, attachments: message?.attachments });
+        
+        // Log full attachment details for debugging
+        if (message?.attachments) {
+            message.attachments.forEach((a, i) => {
+                console.log(`Play & Invite: Attachment ${i}:`, { name: a.name, filename: a.filename, path: a.path, mime: a.mime, ext: a.ext });
+            });
+        }
+        
+        // Check if this is our message in the target chat with a .miniapp or .xdc attachment
+        if (chatId === targetChatId && message && message.attachments) {
+            const miniAppAttachment = message.attachments.find(a => {
+                const filename = a.name || a.filename || '';
+                const path = a.path || '';
+                const ext = a.ext || '';
+                // Check for .xdc extensions
+                const isMiniApp = filename.toLowerCase().endsWith('.xdc') ||
+                                  path.toLowerCase().endsWith('.xdc') ||
+                                  ext.toLowerCase() === 'xdc';
+                return isMiniApp;
+            });
+            
+            console.log('Play & Invite: Found miniapp attachment?', miniAppAttachment);
+            
+            if (miniAppAttachment) {
+                // Found our Mini App message - clean up the message listener
+                clearTimeout(timeoutId);
+                if (unlisten) unlisten();
+                
+                const filePath = miniAppAttachment.path || app.src_url;
+                
+                // Check if this is a pending message - if so, wait for the real ID
+                if (message.id.startsWith('pending')) {
+                    console.log('Play & Invite: Message is pending, waiting for real ID...');
+                    
+                    // Track if we've already handled the update
+                    let updateHandled = false;
+                    let updateTimeoutId = null;
+                    
+                    // Set up a listener for the message_update event to get the real ID
+                    const updateUnlisten = await listen('message_update', async (updateEvt) => {
+                        if (updateHandled) return;
+                        if (updateEvt.payload.old_id === message.id && updateEvt.payload.chat_id === targetChatId) {
+                            updateHandled = true;
+                            const realMessage = updateEvt.payload.message;
+                            console.log('Play & Invite: Got real message ID:', realMessage.id);
+                            
+                            // Clear timeout and unlisten
+                            if (updateTimeoutId) clearTimeout(updateTimeoutId);
+                            updateUnlisten();
+                            
+                            // Get the topic ID from the real message's attachment
+                            let topicId = null;
+                            if (realMessage.attachments && realMessage.attachments.length > 0) {
+                                const miniappAttachment = realMessage.attachments.find(a =>
+                                    a.extension === 'xdc' || a.path?.endsWith('.xdc')
+                                );
+                                if (miniappAttachment) {
+                                    topicId = miniappAttachment.webxdc_topic;
+                                    console.log('Play & Invite: Got topic ID from attachment:', topicId);
+                                }
+                            }
+                            
+                            // Open the Mini App with the real message ID and topic
+                            try {
+                                await invoke('miniapp_open', {
+                                    filePath: filePath,
+                                    chatId: targetChatId,
+                                    messageId: realMessage.id,
+                                    href: null,
+                                    topicId: topicId,
+                                });
+                            } catch (e) {
+                                console.error('Failed to open Mini App from forwarded message:', e);
+                            }
+                            
+                            finishAndClose();
+                        }
+                    });
+                    
+                    // Set a timeout for the update listener too
+                    updateTimeoutId = setTimeout(() => {
+                        if (updateHandled) return;
+                        updateUnlisten();
+                        console.warn('Timeout waiting for message update');
+                        finishAndClose();
+                    }, 30000);
+                } else {
+                    // Message already has a real ID, open immediately
+                    console.log('Opening Mini App from forwarded message:', message.id, 'path:', filePath);
+                    
+                    // Get the topic ID from the message's attachment
+                    let topicId = null;
+                    if (message.attachments && message.attachments.length > 0) {
+                        const miniappAttachment = message.attachments.find(a =>
+                            a.extension === 'xdc' || a.path?.endsWith('.xdc')
+                        );
+                        if (miniappAttachment) {
+                            topicId = miniappAttachment.webxdc_topic;
+                            console.log('Play & Invite: Got topic ID from attachment:', topicId);
+                        }
+                    }
+                    
+                    try {
+                        await invoke('miniapp_open', {
+                            filePath: filePath,
+                            chatId: targetChatId,
+                            messageId: message.id,
+                            href: null,
+                            topicId: topicId,
+                        });
+                    } catch (e) {
+                        console.error('Failed to open Mini App from forwarded message:', e);
+                    }
+                    
+                    finishAndClose();
+                }
+            }
+        }
+    });
+    
+    try {
+        // Send the Mini App file to the current chat
+        await invoke('file_message', {
+            receiver: targetChatId,
+            repliedTo: '',
+            filePath: app.src_url,
+        });
+        
+        console.log('Mini App sent to chat successfully');
+    } catch (e) {
+        console.error('Failed to send Mini App to chat:', e);
+        // Clean up listener
+        clearTimeout(timeoutId);
+        if (unlisten) unlisten();
+        // Close dialog and reset button
+        finishAndClose();
+        // Fallback to solo play if sending fails
+        await playMiniAppSoloInternal(app);
+    }
+}
+
+/**
+ * Check and show permission prompt for a Mini App from history
+ * @param {Object} app - The app from history (MiniAppHistoryEntry)
+ * @returns {Promise<boolean>} True if we should continue opening, false if cancelled
+ */
+async function checkMiniAppPermissions(app) {
+    // Only marketplace apps have permissions
+    if (!app.marketplace_id) {
+        return true;
+    }
+
+    try {
+        // Get the marketplace app info to check for requested permissions and blossom_hash
+        const marketplaceApp = await invoke('marketplace_get_app', { appId: app.marketplace_id });
+
+        if (!marketplaceApp || !marketplaceApp.requested_permissions || marketplaceApp.requested_permissions.length === 0) {
+            return true; // No permissions requested
+        }
+
+        // Use blossom_hash as the permission identifier (content-based security)
+        if (!marketplaceApp.blossom_hash) {
+            return true; // No hash available, continue
+        }
+
+        // Check if we've already prompted for permissions using the file hash
+        const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash: marketplaceApp.blossom_hash });
+
+        if (hasBeenPrompted) {
+            return true; // Already prompted, continue
+        }
+
+        // Show the permission prompt (using the function from marketplace.js)
+        const userGranted = await showPermissionPrompt(marketplaceApp);
+        return userGranted;
+    } catch (e) {
+        console.error('Failed to check Mini App permissions:', e);
+        return true; // Continue on error
+    }
+}
+
+/**
+ * Check and show permission prompt for a Mini App opened from a chat attachment
+ * Uses the file hash to look up if there's a matching marketplace app with permissions
+ * @param {string} filePath - Path to the .xdc file
+ * @returns {Promise<boolean>} True if we should continue opening, false if cancelled
+ */
+async function checkChatMiniAppPermissions(filePath) {
+    try {
+        // Load the Mini App info to get the file hash
+        const miniAppInfo = await invoke('miniapp_load_info', { filePath });
+        if (!miniAppInfo || !miniAppInfo.file_hash) {
+            return true; // No hash available, continue
+        }
+
+        const fileHash = miniAppInfo.file_hash;
+
+        // Check if we've already prompted for permissions using this file hash
+        const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash });
+        if (hasBeenPrompted) {
+            return true; // Already prompted, continue
+        }
+
+        // Look up if there's a marketplace app with this hash
+        const marketplaceApp = await invoke('marketplace_get_app_by_hash', { fileHash });
+        if (!marketplaceApp || !marketplaceApp.requested_permissions || marketplaceApp.requested_permissions.length === 0) {
+            return true; // No matching marketplace app or no permissions requested
+        }
+
+        // Show the permission prompt (using the function from marketplace.js)
+        const userGranted = await showPermissionPrompt(marketplaceApp);
+        return userGranted;
+    } catch (e) {
+        console.error('Failed to check chat Mini App permissions:', e);
+        return true; // Continue on error
+    }
+}
+
+/**
+ * Internal function to play Mini App solo
+ */
+async function playMiniAppSoloInternal(app) {
+    try {
+        // Check permissions for marketplace apps
+        const shouldContinue = await checkMiniAppPermissions(app);
+        if (!shouldContinue) {
+            return; // User cancelled
+        }
+
+        // Open the Mini App directly using the cached file path
+        await invoke('miniapp_open', {
+            filePath: app.src_url,
+            chatId: 'solo',
+            messageId: `solo_${Date.now()}`,
+            href: null,
+            topicId: null,
+        });
+    } catch (e) {
+        console.error('Failed to open Mini App:', e);
+    }
+}
+
+/**
+ * Open Mini App from history - shows the launch dialog
+ */
+async function openMiniAppFromHistory(app) {
+    closeAttachmentPanel();
+    await showMiniAppLaunchDialog(app);
+}
+
+/**
+ * Helper function to escape HTML
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 /**
@@ -509,13 +2302,24 @@ emojiSearch.onkeydown = async (e) => {
             domChatMessageInput.focus();
         }
     } else if (e.code === 'Escape') {
-        // Close the dialog - use class instead of inline style
+        // Close the Mini App launch dialog if open
+        if (domMiniAppLaunchOverlay.classList.contains('active')) {
+            closeMiniAppLaunchDialog();
+            return;
+        }
+
+        // Close the emoji dialog - use class instead of inline style
         emojiSearch.value = '';
         picker.classList.remove('visible');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+
+        // Close the attachment panel if open
+        if (domAttachmentPanel.classList.contains('visible')) {
+            closeAttachmentPanel();
+        }
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -875,6 +2679,68 @@ function getProfile(npub) {
 }
 
 /**
+ * Get the best avatar URL for a profile
+ * Prefers cached local file (for offline support), falls back to remote URL
+ * @param {Profile} profile - The profile object
+ * @returns {string|null} - The avatar URL to use, or null if none available
+ */
+function getProfileAvatarSrc(profile) {
+    if (!profile) return null;
+    // Prefer cached local path for offline support
+    if (profile.avatar_cached) {
+        return convertFileSrc(profile.avatar_cached);
+    }
+    // Fall back to remote URL
+    return profile.avatar || null;
+}
+
+/**
+ * Get the best banner URL for a profile
+ * Prefers cached local file (for offline support), falls back to remote URL
+ * @param {Profile} profile - The profile object
+ * @returns {string|null} - The banner URL to use, or null if none available
+ */
+function getProfileBannerSrc(profile) {
+    if (!profile) return null;
+    // Prefer cached local path for offline support
+    if (profile.banner_cached) {
+        return convertFileSrc(profile.banner_cached);
+    }
+    // Fall back to remote URL
+    return profile.banner || null;
+}
+
+/**
+ * Create an avatar image element with automatic fallback to placeholder on error
+ * @param {string} src - The image source URL
+ * @param {number} size - The size of the avatar in pixels
+ * @param {boolean} isGroup - Whether this is a group avatar (affects placeholder)
+ * @returns {HTMLElement} - Either an img element or a placeholder div
+ */
+function createAvatarImg(src, size, isGroup = false) {
+    if (!src) {
+        return createPlaceholderAvatar(isGroup, size);
+    }
+
+    const img = document.createElement('img');
+    img.src = src;
+    img.style.width = size + 'px';
+    img.style.height = size + 'px';
+    img.style.objectFit = 'cover';
+    img.style.borderRadius = '50%';
+
+    // On error, replace with placeholder
+    img.onerror = function() {
+        const placeholder = createPlaceholderAvatar(isGroup, size);
+        // Copy over any classes from the failed img
+        placeholder.className = img.className;
+        img.replaceWith(placeholder);
+    };
+
+    return img;
+}
+
+/**
  * Tracks if we're in the initial chat open period for auto-scrolling
  */
 let chatOpenAutoScrollTimer = null;
@@ -1178,6 +3044,7 @@ function generateChatlistStateHash() {
             cLastMsg?.pending,
             profile?.nickname || profile?.name,
             profile?.avatar,
+            profile?.avatar_cached,
             chat.muted
         );
     }
@@ -1357,13 +3224,16 @@ function renderChat(chat) {
     if (isGroup) {
         // For groups, show the group placeholder SVG
         divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
-    } else if (profile?.avatar) {
-        const imgAvatar = document.createElement('img');
-        imgAvatar.src = profile?.avatar;
-        divAvatarContainer.appendChild(imgAvatar);
     } else {
-        // Otherwise, generate a placeholder avatar
-        divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        const avatarSrc = getProfileAvatarSrc(profile);
+        if (avatarSrc) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = avatarSrc;
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            // Otherwise, generate a placeholder avatar
+            divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        }
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -2071,7 +3941,11 @@ async function setupRustListeners() {
     await listen('profile_update', (evt) => {
         // Check if the frontend is already aware
         const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
+        let avatarCacheChanged = false;
         if (nProfileIdx >= 0) {
+            // Check if avatar cache changed (for triggering chatlist re-render)
+            avatarCacheChanged = arrProfiles[nProfileIdx].avatar_cached !== evt.payload.avatar_cached;
+
             // Update our frontend memory
             arrProfiles[nProfileIdx] = evt.payload;
 
@@ -2082,8 +3956,9 @@ async function setupRustListeners() {
         } else {
             // Add the new profile
             arrProfiles.push(evt.payload);
+            avatarCacheChanged = !!evt.payload.avatar_cached;
         }
-        
+
         // If this user has an open chat, then soft-update the chat header
         if (strOpenChat === evt.payload.id) {
             const chat = getDMChat(evt.payload.id);
@@ -2091,6 +3966,11 @@ async function setupRustListeners() {
             if (chat && profile) {
                 updateChat(chat, [], profile);
             }
+        }
+
+        // Re-render chatlist if avatar cache changed (so cached images show up)
+        if (avatarCacheChanged && !strOpenChat) {
+            renderChatlist();
         }
         
         // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
@@ -2137,12 +4017,63 @@ async function setupRustListeners() {
         const cProfile = getProfile(evt.payload.profile_id);
         if (cProfile) {
             cProfile.nickname = evt.payload.value;
-            
+
             // If this profile is Expanded, update the UI
             if (domProfileId.textContent === evt.payload.profile_id) {
                 renderProfileTab(cProfile);
             }
         }
+    });
+
+    // Listen for PIVX payment events
+    await listen('pivx_payment_received', (evt) => {
+        const { conversation_id, gift_code, amount_piv, address, message, message_id, sender, is_mine } = evt.payload;
+        console.log('PIVX payment received:', { conversation_id, gift_code, amount_piv, address, message, message_id, sender, is_mine });
+
+        // Find the chat
+        const chat = arrChats.find(c => c.id === conversation_id);
+        if (!chat) {
+            console.warn('PIVX payment: chat not found for', conversation_id);
+            return;
+        }
+
+        // Check if this payment message already exists in chat
+        const existingMsg = chat.messages?.find(m => m.id === message_id);
+        if (existingMsg) {
+            console.log('PIVX payment already exists in chat:', message_id);
+            return;
+        }
+
+        // Create a synthetic message object for the PIVX payment
+        const pivxMsg = {
+            id: message_id,
+            at: Date.now(),
+            content: '',
+            mine: is_mine,
+            attachments: [],
+            npub: sender,
+            pivx_payment: {
+                gift_code,
+                amount_piv,
+                address,
+                message
+            }
+        };
+
+        // Add to chat messages
+        if (!chat.messages) chat.messages = [];
+        chat.messages.push(pivxMsg);
+
+        // If this chat is currently open, render the payment
+        if (strOpenChat === conversation_id) {
+            const profile = chat.chat_type === 'MlsGroup' ? null : getProfile(conversation_id);
+            const msgEl = renderMessage(pivxMsg, profile);
+            domChatMessages.appendChild(msgEl);
+            softChatScroll();
+        }
+
+        // Update chatlist
+        renderChatlist();
     });
 
     // Listen for typing indicator updates (both DMs and Groups)
@@ -2302,13 +4233,40 @@ async function setupRustListeners() {
             const statusElement = relayItem.querySelector('.relay-status');
             if (statusElement) {
                 // Remove all status classes
-                statusElement.classList.remove('connected', 'connecting', 'disconnected', 'pending', 'initialized', 'terminated', 'banned');
+                statusElement.classList.remove('connected', 'connecting', 'disconnected', 'pending', 'initialized', 'terminated', 'banned', 'sleeping');
                 // Add the new status class
                 statusElement.classList.add(evt.payload.status);
                 // Update the text
                 statusElement.textContent = evt.payload.status;
             }
         }
+
+        // Also update the info dialog if it's open for this relay
+        if (currentRelayInfo && currentRelayInfo.url.toLowerCase() === evt.payload.url.toLowerCase()) {
+            const dialogStatus = document.getElementById('relay-info-status');
+            if (dialogStatus) {
+                dialogStatus.textContent = evt.payload.status;
+                dialogStatus.className = `relay-status ${evt.payload.status}`;
+            }
+            currentRelayInfo.status = evt.payload.status;
+        }
+    });
+
+    // Listen for Mini App realtime status updates (peer count changes)
+    await listen('miniapp_realtime_status', (evt) => {
+        const { topic, peer_count, is_active, has_pending_peers } = evt.payload;
+        console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'pending:', has_pending_peers);
+        
+        // Find all Mini App attachments with this topic and update their status
+        const attachments = document.querySelectorAll(`.miniapp-attachment[data-webxdc-topic="${topic}"]`);
+        console.log('[MINIAPP] Found', attachments.length, 'attachments for topic', topic);
+        
+        attachments.forEach(attachment => {
+            // Use the stored update function if available
+            if (attachment._updateMiniAppStatus) {
+                attachment._updateMiniAppStatus(is_active, peer_count);
+            }
+        });
     });
 
     // Note: Deep link listener is set up early in DOMContentLoaded, before login flow
@@ -2359,20 +4317,20 @@ async function renderRelayList() {
         const relays = await invoke('get_relays');
         const mediaServers = await invoke('get_media_servers');
         const networkList = document.getElementById('network-list');
-        
+
         // Clear existing content
         networkList.innerHTML = '';
-        
-        // Add Nostr Relays subtitle with info button - wrap in container for centering
+
+        // Add Nostr Relays header with info and add buttons
         const relaysTitleContainer = document.createElement('div');
-        relaysTitleContainer.style.textAlign = 'center';
-        
+        relaysTitleContainer.className = 'relay-section-header';
+
         const relaysTitle = document.createElement('h3');
         relaysTitle.className = 'network-section-title';
         relaysTitle.style.display = 'inline-flex';
         relaysTitle.style.alignItems = 'center';
         relaysTitle.textContent = 'Nostr Relays';
-        
+
         const relaysInfoBtn = document.createElement('span');
         relaysInfoBtn.className = 'icon icon-info btn';
         relaysInfoBtn.style.width = '16px';
@@ -2385,27 +4343,105 @@ async function renderRelayList() {
             e.stopPropagation();
             popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true);
         };
-        
+
+        const addRelayBtn = document.createElement('button');
+        addRelayBtn.className = 'relay-add-btn';
+        addRelayBtn.textContent = '+';
+        addRelayBtn.title = 'Add Custom Relay';
+        addRelayBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openAddRelayDialog();
+        };
+
         relaysTitle.appendChild(relaysInfoBtn);
         relaysTitleContainer.appendChild(relaysTitle);
+        relaysTitleContainer.appendChild(addRelayBtn);
         networkList.appendChild(relaysTitleContainer);
-        
+
         // Create relay items
         relays.forEach(relay => {
             const relayItem = document.createElement('div');
-            relayItem.className = 'relay-item';
+            relayItem.className = 'relay-item' + (relay.enabled ? '' : ' disabled');
             relayItem.setAttribute('data-relay-url', relay.url);
-            
+            relayItem.setAttribute('data-relay-is-default', relay.is_default);
+            relayItem.setAttribute('data-relay-is-custom', relay.is_custom);
+
+            // Content container (clickable area)
+            const relayContent = document.createElement('div');
+            relayContent.className = 'relay-item-content';
+            relayContent.onclick = () => openRelayInfoDialog(relay);
+
             const relayUrl = document.createElement('span');
             relayUrl.className = 'relay-url';
-            relayUrl.textContent = relay.url;
-            
+            relayUrl.textContent = relay.url.replace(/^wss?:\/\//, '');
+
+            // Mode badge (only for custom relays or non-default modes)
+            if (relay.is_custom && relay.mode !== 'both') {
+                const modeBadge = document.createElement('span');
+                modeBadge.className = 'relay-mode-badge';
+                modeBadge.textContent = relay.mode === 'read' ? 'R' : 'W';
+                relayContent.appendChild(modeBadge);
+            }
+
+            // Default badge
+            if (relay.is_default) {
+                const defaultBadge = document.createElement('span');
+                defaultBadge.className = 'relay-default-badge';
+                defaultBadge.textContent = 'default';
+                relayContent.appendChild(defaultBadge);
+            }
+
+            relayContent.appendChild(relayUrl);
+
+            // Status badge
             const relayStatus = document.createElement('span');
             relayStatus.className = `relay-status ${relay.status}`;
             relayStatus.textContent = relay.status;
-            
-            relayItem.appendChild(relayUrl);
-            relayItem.appendChild(relayStatus);
+
+            // Actions container
+            const actionsContainer = document.createElement('div');
+            actionsContainer.className = 'relay-item-actions';
+
+            // Toggle switch
+            const toggle = document.createElement('input');
+            toggle.type = 'checkbox';
+            toggle.className = 'relay-toggle';
+            toggle.checked = relay.enabled;
+            toggle.onclick = (e) => e.stopPropagation();
+            toggle.onchange = async (e) => {
+                const enabled = e.target.checked;
+                try {
+                    if (relay.is_default) {
+                        // Show warning for default relays
+                        if (!enabled) {
+                            const confirmed = await popupConfirm(
+                                'Disable Default Relay?',
+                                'This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?',
+                                false
+                            );
+                            if (!confirmed) {
+                                e.target.checked = true;
+                                return;
+                            }
+                        }
+                        await invoke('toggle_default_relay', { url: relay.url, enabled });
+                    } else {
+                        await invoke('toggle_custom_relay', { url: relay.url, enabled });
+                    }
+                    // Refresh the list
+                    renderRelayList();
+                } catch (err) {
+                    console.error('Failed to toggle relay:', err);
+                    e.target.checked = !enabled; // Revert on error
+                }
+            };
+
+            actionsContainer.appendChild(relayStatus);
+            actionsContainer.appendChild(toggle);
+
+            relayItem.appendChild(relayContent);
+            relayItem.appendChild(actionsContainer);
             networkList.appendChild(relayItem);
         });
         
@@ -2459,6 +4495,340 @@ async function renderRelayList() {
         console.error('Failed to fetch network info:', error);
     }
 }
+
+// =============================================================================
+// Relay Dialog Management
+// =============================================================================
+
+/** Currently selected relay for info dialog */
+let currentRelayInfo = null;
+/** Interval for refreshing relay info dialog data */
+let relayInfoRefreshInterval = null;
+
+/**
+ * Opens the Add Relay dialog
+ */
+function openAddRelayDialog() {
+    const overlay = document.getElementById('add-relay-overlay');
+    const urlInput = document.getElementById('add-relay-url');
+    const modeSelect = document.getElementById('add-relay-mode');
+
+    // Reset form
+    urlInput.value = '';
+    modeSelect.value = 'both';
+
+    // Show dialog
+    overlay.classList.add('active');
+    urlInput.focus();
+}
+
+/**
+ * Closes the Add Relay dialog
+ */
+function closeAddRelayDialog() {
+    const overlay = document.getElementById('add-relay-overlay');
+    overlay.classList.remove('active');
+}
+
+/**
+ * Handles adding a new relay from the dialog
+ */
+async function handleAddRelay() {
+    const urlInput = document.getElementById('add-relay-url');
+    const modeSelect = document.getElementById('add-relay-mode');
+    let url = urlInput.value.trim();
+    const mode = modeSelect.value;
+
+    if (!url) {
+        popupConfirm('Invalid URL', 'Please enter a relay URL.', true);
+        return;
+    }
+
+    // Normalize URL: strip protocol if present and add wss://
+    url = url.replace(/^wss?:\/\//i, '');
+    url = 'wss://' + url;
+
+    try {
+        await invoke('add_custom_relay', { url, mode });
+        closeAddRelayDialog();
+        renderRelayList();
+    } catch (err) {
+        popupConfirm('Failed to Add Relay', err.toString(), true);
+    }
+}
+
+/**
+ * Refreshes the data displayed in the Relay Info dialog
+ */
+async function refreshRelayInfoDialog() {
+    if (!currentRelayInfo) return;
+
+    const url = currentRelayInfo.url;
+
+    // Fetch fresh relay data
+    try {
+        const relays = await invoke('get_relays');
+        const freshRelay = relays.find(r => r.url.toLowerCase() === url.toLowerCase());
+        if (freshRelay) {
+            currentRelayInfo = freshRelay;
+
+            // Update status
+            const statusEl = document.getElementById('relay-info-status');
+            statusEl.textContent = freshRelay.status;
+            statusEl.className = `relay-status ${freshRelay.status}`;
+
+            // Update disable button text
+            const disableBtn = document.getElementById('relay-info-disable');
+            if (freshRelay.is_default) {
+                disableBtn.textContent = freshRelay.enabled ? 'Disable Relay' : 'Enable Relay';
+            }
+        }
+    } catch (err) {
+        console.error('Failed to refresh relay data:', err);
+    }
+
+    // Refresh metrics
+    try {
+        const metrics = await invoke('get_relay_metrics', { url });
+        document.getElementById('relay-info-ping').textContent = metrics.ping_ms ? `${metrics.ping_ms}ms` : '--';
+        if (metrics.last_check) {
+            const lastCheck = new Date(metrics.last_check * 1000);
+            const now = new Date();
+            const diffSecs = Math.floor((now - lastCheck) / 1000);
+            let lastCheckText;
+            if (diffSecs < 60) {
+                lastCheckText = `${diffSecs}s ago`;
+            } else if (diffSecs < 3600) {
+                lastCheckText = `${Math.floor(diffSecs / 60)}m ago`;
+            } else {
+                lastCheckText = lastCheck.toLocaleTimeString();
+            }
+            document.getElementById('relay-info-last-check').textContent = lastCheckText;
+        } else {
+            document.getElementById('relay-info-last-check').textContent = '--';
+        }
+    } catch (err) {
+        console.error('Failed to load relay metrics:', err);
+    }
+
+    // Refresh logs
+    try {
+        const logs = await invoke('get_relay_logs', { url });
+        const logsList = document.getElementById('relay-info-logs');
+        logsList.innerHTML = '';
+
+        if (logs.length === 0) {
+            const emptyLi = document.createElement('li');
+            emptyLi.className = 'relay-log-empty';
+            emptyLi.textContent = 'No activity recorded yet';
+            logsList.appendChild(emptyLi);
+        } else {
+            logs.forEach(log => {
+                const li = document.createElement('li');
+                const time = new Date(log.timestamp * 1000).toLocaleTimeString();
+                li.innerHTML = `<span class="relay-log-time">${time}</span><span class="relay-log-message ${log.level}">${log.message}</span>`;
+                logsList.appendChild(li);
+            });
+        }
+    } catch (err) {
+        console.error('Failed to load relay logs:', err);
+    }
+}
+
+/**
+ * Opens the Relay Info dialog
+ * @param {Object} relay - The relay object
+ */
+async function openRelayInfoDialog(relay) {
+    // Clear any existing interval
+    if (relayInfoRefreshInterval) {
+        clearInterval(relayInfoRefreshInterval);
+        relayInfoRefreshInterval = null;
+    }
+
+    currentRelayInfo = relay;
+    const overlay = document.getElementById('relay-info-overlay');
+    const urlEl = document.getElementById('relay-info-url');
+    const modeSelect = document.getElementById('relay-info-mode');
+
+    // Set static info (URL doesn't change)
+    urlEl.textContent = relay.url.replace(/^wss?:\/\//, '');
+
+    // Set mode (only editable for custom relays)
+    modeSelect.value = relay.mode || 'both';
+    modeSelect.disabled = relay.is_default;
+
+    // Initial data load
+    await refreshRelayInfoDialog();
+
+    // Start refresh interval (every 1 second)
+    relayInfoRefreshInterval = setInterval(refreshRelayInfoDialog, 1000);
+
+    // Show dialog
+    overlay.classList.add('active');
+}
+
+/**
+ * Closes the Relay Info dialog
+ */
+function closeRelayInfoDialog() {
+    // Clear the refresh interval
+    if (relayInfoRefreshInterval) {
+        clearInterval(relayInfoRefreshInterval);
+        relayInfoRefreshInterval = null;
+    }
+
+    const overlay = document.getElementById('relay-info-overlay');
+    overlay.classList.remove('active');
+    currentRelayInfo = null;
+}
+
+/**
+ * Handles mode change from the info dialog
+ */
+async function handleRelayModeChange() {
+    if (!currentRelayInfo || currentRelayInfo.is_default) return;
+
+    const modeSelect = document.getElementById('relay-info-mode');
+    const newMode = modeSelect.value;
+
+    try {
+        await invoke('update_relay_mode', { url: currentRelayInfo.url, mode: newMode });
+        currentRelayInfo.mode = newMode;
+        renderRelayList();
+    } catch (err) {
+        console.error('Failed to update relay mode:', err);
+        popupConfirm('Error', 'Failed to update relay mode: ' + err.toString(), true);
+    }
+}
+
+/**
+ * Handles disable/remove button from info dialog
+ */
+async function handleRelayDisable() {
+    if (!currentRelayInfo) return;
+
+    const relay = currentRelayInfo;
+
+    if (relay.is_default) {
+        // Toggle default relay
+        const newEnabled = !relay.enabled;
+        if (!newEnabled) {
+            // Show warning before disabling default relay
+            const confirmed = await popupConfirm(
+                'Disable Default Relay?',
+                'This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?',
+                false
+            );
+            if (confirmed) {
+                try {
+                    await invoke('toggle_default_relay', { url: relay.url, enabled: false });
+                    closeRelayInfoDialog();
+                    renderRelayList();
+                } catch (err) {
+                    popupConfirm('Error', 'Failed to disable relay: ' + err.toString(), true);
+                }
+            }
+        } else {
+            // Re-enable without warning
+            try {
+                await invoke('toggle_default_relay', { url: relay.url, enabled: true });
+                closeRelayInfoDialog();
+                renderRelayList();
+            } catch (err) {
+                popupConfirm('Error', 'Failed to enable relay: ' + err.toString(), true);
+            }
+        }
+    } else {
+        // Remove custom relay
+        const confirmed = await popupConfirm(
+            'Remove Relay?',
+            `Are you sure you want to remove <b>${relay.url.replace(/^wss?:\/\//, '')}</b>?`,
+            false
+        );
+        if (confirmed) {
+            try {
+                await invoke('remove_custom_relay', { url: relay.url });
+                closeRelayInfoDialog();
+                renderRelayList();
+            } catch (err) {
+                popupConfirm('Error', 'Failed to remove relay: ' + err.toString(), true);
+            }
+        }
+    }
+}
+
+/**
+ * Initialize relay dialog event listeners
+ */
+function initRelayDialogs() {
+    // Add Relay Dialog
+    document.getElementById('add-relay-close').onclick = closeAddRelayDialog;
+    document.getElementById('add-relay-cancel').onclick = closeAddRelayDialog;
+    document.getElementById('add-relay-confirm').onclick = handleAddRelay;
+    document.getElementById('add-relay-overlay').onclick = (e) => {
+        if (e.target.id === 'add-relay-overlay') closeAddRelayDialog();
+    };
+
+    // Allow Enter key to submit
+    document.getElementById('add-relay-url').onkeydown = (e) => {
+        if (e.key === 'Enter') handleAddRelay();
+    };
+
+    // Relay Info Dialog
+    document.getElementById('relay-info-close').onclick = closeRelayInfoDialog;
+    document.getElementById('relay-info-done').onclick = closeRelayInfoDialog;
+    document.getElementById('relay-info-disable').onclick = handleRelayDisable;
+    document.getElementById('relay-info-mode').onchange = handleRelayModeChange;
+    document.getElementById('relay-info-overlay').onclick = (e) => {
+        if (e.target.id === 'relay-info-overlay') closeRelayInfoDialog();
+    };
+
+    // Copy logs button
+    document.getElementById('relay-logs-copy').onclick = copyRelayLogs;
+}
+
+/**
+ * Copies relay logs to clipboard in a formatted way
+ */
+function copyRelayLogs() {
+    if (!currentRelayInfo) return;
+
+    // Read logs from the displayed DOM to avoid async clipboard permission issues
+    const logsList = document.getElementById('relay-info-logs');
+    const logItems = logsList.querySelectorAll('li:not(.relay-log-empty)');
+
+    let text;
+    if (logItems.length === 0) {
+        text = 'No activity recorded yet';
+    } else {
+        const header = `Relay Logs: ${currentRelayInfo.url.replace(/^wss?:\/\//, '')}\n${'='.repeat(50)}\n`;
+        const logs = Array.from(logItems).map(li => {
+            const time = li.querySelector('.relay-log-time')?.textContent || '';
+            const msg = li.querySelector('.relay-log-message')?.textContent || '';
+            const level = li.querySelector('.relay-log-message')?.classList.contains('error') ? 'ERROR' :
+                          li.querySelector('.relay-log-message')?.classList.contains('warn') ? 'WARN' : 'INFO';
+            return `[${time}] [${level}] ${msg}`;
+        }).join('\n');
+        text = header + logs;
+    }
+
+    navigator.clipboard.writeText(text).then(() => {
+        // Visual feedback - change icon briefly
+        const copyBtn = document.getElementById('relay-logs-copy');
+        const icon = copyBtn.querySelector('.icon');
+        icon.classList.remove('icon-copy');
+        icon.classList.add('icon-check');
+        setTimeout(() => {
+            icon.classList.remove('icon-check');
+            icon.classList.add('icon-copy');
+        }, 1500);
+    }).catch(err => {
+        console.error('Failed to copy relay logs:', err);
+    });
+}
+
+// =============================================================================
 
 /**
  * Login to the Nostr network
@@ -2617,14 +4987,8 @@ function renderCurrentProfile(cProfile) {
 
     // Clear and render avatar
     domAccountAvatarContainer.innerHTML = '';
-    let domAvatar;
-    if (cProfile?.avatar) {
-        domAvatar = document.createElement('img');
-        domAvatar.src = cProfile.avatar;
-    } else {
-        // Display our placeholder avatar
-        domAvatar = createPlaceholderAvatar(false, 22);
-    }
+    const accountAvatarSrc = getProfileAvatarSrc(cProfile);
+    const domAvatar = createAvatarImg(accountAvatarSrc, 22, false);
     domAvatar.classList.add('btn');
     domAvatar.onclick = () => openProfile();
     domAccountAvatarContainer.appendChild(domAvatar);
@@ -2651,13 +5015,8 @@ function renderCurrentProfile(cProfile) {
 function renderProfileTab(cProfile) {
     // Header Mini Avatar
     domProfileHeaderAvatarContainer.innerHTML = '';
-    let domHeaderAvatar;
-    if (cProfile?.avatar) {
-        domHeaderAvatar = document.createElement('img');
-        domHeaderAvatar.src = cProfile.avatar;
-    } else {
-        domHeaderAvatar = createPlaceholderAvatar(false, 22);
-    }
+    const headerAvatarSrc = getProfileAvatarSrc(cProfile);
+    const domHeaderAvatar = createAvatarImg(headerAvatarSrc, 22, false);
     domHeaderAvatar.classList.add('btn');
     domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
 
@@ -2675,13 +5034,26 @@ function renderProfileTab(cProfile) {
     domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
 
     // Banner - keep original structure but add click handler
-    if (cProfile.banner) {
+    const bannerSrc = getProfileBannerSrc(cProfile);
+    if (bannerSrc) {
         if (domProfileBanner.tagName === 'DIV') {
             const newBanner = document.createElement('img');
             domProfileBanner.replaceWith(newBanner);
             domProfileBanner = newBanner;
         }
-        domProfileBanner.src = cProfile.banner;
+        domProfileBanner.src = bannerSrc;
+        // On error, replace with solid color placeholder
+        domProfileBanner.onerror = function() {
+            const placeholder = document.createElement('div');
+            placeholder.style.backgroundColor = 'rgb(27, 27, 27)';
+            placeholder.classList.add('profile-banner');
+            if (cProfile.mine) {
+                placeholder.classList.add('btn');
+                placeholder.onclick = askForBanner;
+            }
+            domProfileBanner.replaceWith(placeholder);
+            domProfileBanner = placeholder;
+        };
     } else {
         if (domProfileBanner.tagName === 'IMG') {
             const newBanner = document.createElement('div');
@@ -2695,13 +5067,25 @@ function renderProfileTab(cProfile) {
     if (cProfile.mine) domProfileBanner.classList.add('btn');
 
     // Avatar - keep original structure but add click handler
-    if (cProfile.avatar) {
+    const profileAvatarSrc = getProfileAvatarSrc(cProfile);
+    if (profileAvatarSrc) {
         if (domProfileAvatar.tagName === 'DIV') {
             const newAvatar = document.createElement('img');
             domProfileAvatar.replaceWith(newAvatar);
             domProfileAvatar = newAvatar;
         }
-        domProfileAvatar.src = cProfile.avatar;
+        domProfileAvatar.src = profileAvatarSrc;
+        // On error, replace with placeholder
+        domProfileAvatar.onerror = function() {
+            const placeholder = createPlaceholderAvatar(false, 175);
+            placeholder.classList.add('profile-avatar');
+            if (cProfile.mine) {
+                placeholder.classList.add('btn');
+                placeholder.onclick = askForAvatar;
+            }
+            domProfileAvatar.replaceWith(placeholder);
+            domProfileAvatar = placeholder;
+        };
     } else {
         const newAvatar = createPlaceholderAvatar(false, 175);
         domProfileAvatar.replaceWith(newAvatar);
@@ -3148,6 +5532,16 @@ let strLastMsgID = "";
 let strCurrentReplyReference = "";
 
 /**
+ * The current Message ID being edited (if in edit mode)
+ */
+let strCurrentEditMessageId = "";
+
+/**
+ * The original content of the message being edited (for cancel restoration)
+ */
+let strCurrentEditOriginalContent = "";
+
+/**
  * Updates the current chat (to display incoming and outgoing messages)
  * @param {Chat} chat - The chat to update
  * @param {Array<Message>} arrMessages - The messages to efficiently insert into the chat
@@ -3192,12 +5586,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             };
         } else {
             // DM: use profile avatar or placeholder
-            if (profile?.avatar) {
-                domChatAvatar = document.createElement('img');
-                domChatAvatar.src = profile.avatar;
-            } else {
-                domChatAvatar = createPlaceholderAvatar(false, 22);
-            }
+            const chatAvatarSrc = getProfileAvatarSrc(profile);
+            domChatAvatar = createAvatarImg(chatAvatarSrc, 22, false);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 previousChatBeforeProfile = strOpenChat;
@@ -3427,12 +5817,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             };
         } else {
             // DM: use profile avatar or placeholder
-            if (profile?.avatar) {
-                domChatAvatar = document.createElement('img');
-                domChatAvatar.src = profile.avatar;
-            } else {
-                domChatAvatar = createPlaceholderAvatar(false, 22);
-            }
+            const dmAvatarSrc = getProfileAvatarSrc(profile);
+            domChatAvatar = createAvatarImg(dmAvatarSrc, 22, false);
         }
         if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
 
@@ -3515,7 +5901,21 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     const otherId = sender?.id || msg.npub || '';
     const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
-    
+
+    // Check for PIVX payment - render special bubble
+    if (msg.pivx_payment) {
+        divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+        const pivxBubble = renderPivxPaymentBubble(
+            msg.pivx_payment.gift_code,
+            msg.pivx_payment.amount_piv,
+            msg.pivx_payment.message,
+            msg.mine,
+            msg.pivx_payment.address
+        );
+        divMessage.appendChild(pivxBubble);
+        return divMessage;
+    }
+
     // Check if we're in a group chat
     const currentChat = arrChats.find(c => c.id === strOpenChat);
     const isGroupChat = currentChat?.chat_type === 'MlsGroup';
@@ -3559,31 +5959,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 });
             }
             
-            if (authorProfile?.avatar) {
-                const imgAvatar = document.createElement('img');
-                imgAvatar.classList.add('avatar', 'btn');
-                imgAvatar.onclick = () => {
-                    // Store the current chat so we can return to it
+            const msgAvatarSrc = getProfileAvatarSrc(authorProfile);
+            avatarEl = createAvatarImg(msgAvatarSrc, 35, false);
+            avatarEl.classList.add('avatar', 'btn');
+            // Wire profile click if we have an identifiable user
+            if (otherFullId) {
+                avatarEl.onclick = () => {
+                    const prof = getProfile(otherFullId) || authorProfile;
                     previousChatBeforeProfile = strOpenChat;
-                    openProfile(authorProfile);
+                    openProfile(prof || { id: otherFullId });
                 };
-                imgAvatar.src = authorProfile.avatar;
-                avatarEl = imgAvatar;
-            } else {
-                // Provide a deterministic placeholder when no avatar URL is available
-                const placeholder = createPlaceholderAvatar(false, 35);
-                // Ensure visual sizing and interactivity match real avatars
-                placeholder.classList.add('avatar', 'btn');
-                // Only wire profile click if we have an identifiable user
-                if (otherFullId) {
-                    placeholder.onclick = () => {
-                        const prof = getProfile(otherFullId) || authorProfile;
-                        // Store the current chat so we can return to it
-                        previousChatBeforeProfile = strOpenChat;
-                        openProfile(prof || { id: otherFullId });
-                    };
-                }
-                avatarEl = placeholder;
             }
             
             // Create a container for avatar and username
@@ -3936,9 +6321,13 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // File Attachment
                 const ext = cAttachment.extension.toLowerCase();
                 const fileTypeInfo = getFileTypeInfo(ext);
+                const isMiniApp = fileTypeInfo.isMiniApp === true;
                 
                 const fileDiv = document.createElement('div');
                 fileDiv.setAttribute('filepath', cAttachment.path);
+                if (isMiniApp) {
+                    fileDiv.classList.add('miniapp-attachment');
+                }
 
                 // Create the main container
                 const btnDiv = document.createElement('div');
@@ -3948,17 +6337,31 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 btnDiv.style.padding = '10px';
                 btnDiv.style.paddingRight = '15px';
 
-                // Create the icon span
-                const iconSpan = document.createElement('span');
-                iconSpan.className = `icon icon-${fileTypeInfo.icon}`;
-                iconSpan.style.marginLeft = '5px';
-                iconSpan.style.width = '50px';
-                iconSpan.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+                // Create the icon element (span for regular files, img for Mini Apps with icons)
+                let iconElement;
+                if (isMiniApp) {
+                    // For Mini Apps, create an img element that will be populated with the icon
+                    iconElement = document.createElement('img');
+                    iconElement.style.marginLeft = '5px';
+                    iconElement.style.width = '40px';
+                    iconElement.style.height = '40px';
+                    iconElement.style.borderRadius = '8px';
+                    iconElement.style.objectFit = 'cover';
+                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+                    // Set a placeholder initially
+                    iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+                } else {
+                    iconElement = document.createElement('span');
+                    iconElement.className = `icon icon-${fileTypeInfo.icon}`;
+                    iconElement.style.marginLeft = '5px';
+                    iconElement.style.width = '50px';
+                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+                }
 
                 // Create the text container span
                 const textContainerSpan = document.createElement('span');
                 textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-                textContainerSpan.style.marginLeft = '50px';
+                textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
                 textContainerSpan.style.lineHeight = '1.2';
 
                 // Create the description span
@@ -3971,29 +6374,192 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // Create the small element for file details
                 const smallElement = document.createElement('small');
 
-                // Create the extension span
-                const extSpan = document.createElement('span');
-                extSpan.style.color = 'white';
-                extSpan.style.fontWeight = '400';
-                extSpan.innerText = `.${ext}`;
+                if (isMiniApp) {
+                    // Mini App: show status and optionally peer count
+                    // Make smallElement a flex container for proper alignment
+                    smallElement.style.display = 'flex';
+                    smallElement.style.alignItems = 'center';
+                    smallElement.style.gap = '10px';
+                    
+                    const playSpan = document.createElement('span');
+                    playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                    playSpan.style.fontWeight = '400';
+                    playSpan.innerText = 'Click to Play';
+                    smallElement.appendChild(playSpan);
+                    
+                    // Create peer count badge (hidden by default)
+                    const peerBadge = document.createElement('span');
+                    peerBadge.style.padding = '2px 8px';
+                    peerBadge.style.borderRadius = '10px';
+                    peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.3)';
+                    peerBadge.style.color = '#2ed573';
+                    peerBadge.style.fontSize = '0.85em';
+                    peerBadge.style.fontWeight = '500';
+                    peerBadge.style.display = 'none';
+                    smallElement.appendChild(peerBadge);
+                    
+                    // Store topic for event updates
+                    const topicId = cAttachment.webxdc_topic;
+                    if (topicId) {
+                        fileDiv.setAttribute('data-webxdc-topic', topicId);
+                    }
+                    
+                    // Helper function to update the peer badge
+                    const updatePeerBadge = (peerCount, isPlaying) => {
+                        const totalPlayers = isPlaying ? peerCount + 1 : peerCount;
+                        if (totalPlayers > 0) {
+                            // Create inline icon
+                            const groupIcon = document.createElement('img');
+                            groupIcon.src = 'icons/group-placeholder.svg';
+                            groupIcon.style.width = '14px';
+                            groupIcon.style.height = '14px';
+                            groupIcon.style.verticalAlign = 'middle';
+                            groupIcon.style.marginRight = '4px';
+                            
+                            // Clear and rebuild badge content
+                            peerBadge.innerHTML = '';
+                            peerBadge.appendChild(groupIcon);
+                            peerBadge.appendChild(document.createTextNode(`${totalPlayers} online`));
+                            peerBadge.style.display = 'inline-flex';
+                            peerBadge.style.alignItems = 'center';
+                        } else {
+                            peerBadge.style.display = 'none';
+                        }
+                    };
+                    
+                    // Helper function to update the UI based on status
+                    const updateMiniAppStatus = (isPlaying, peerCount) => {
+                        if (isPlaying) {
+                            // We're playing - show "Playing" and make unclickable
+                            playSpan.innerText = 'Playing';
+                            playSpan.style.color = '#2ed573';
+                            fileDiv.style.cursor = 'default';
+                            fileDiv.style.opacity = '0.9';
+                            fileDiv.setAttribute('data-playing', 'true');
+                        } else if (peerCount > 0) {
+                            // Others are playing - show "Click to Join"
+                            playSpan.innerText = 'Click to Join';
+                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                            fileDiv.style.cursor = 'pointer';
+                            fileDiv.style.opacity = '1';
+                            fileDiv.removeAttribute('data-playing');
+                        } else {
+                            // No one playing - show "Click to Play"
+                            playSpan.innerText = 'Click to Play';
+                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                            fileDiv.style.cursor = 'pointer';
+                            fileDiv.style.opacity = '1';
+                            fileDiv.removeAttribute('data-playing');
+                        }
+                        updatePeerBadge(peerCount, isPlaying);
+                    };
+                    
+                    // Load Mini App info asynchronously to get name and icon
+                    loadMiniAppInfo(cAttachment.path).then(info => {
+                        if (info) {
+                            // Update the name
+                            descriptionSpan.innerText = info.name || 'Mini App';
+                            
+                            // Update the icon if available
+                            if (info.icon_data) {
+                                iconElement.src = info.icon_data;
+                            }
+                        }
+                    }).catch(err => {
+                        console.warn('Failed to load Mini App info:', err);
+                    });
+                    
+                    // Check for realtime channel status if we have a topic
+                    if (topicId) {
+                        invoke('miniapp_get_realtime_status', { topicId })
+                            .then(status => {
+                                console.log('[MiniApp] Realtime status:', status);
+                                // Use peer_count if we have a channel, otherwise use pending_peer_count
+                                // peer_count is from active Iroh channel, pending_peer_count is from advertisements
+                                const peerCount = (status?.peer_count || 0) > 0
+                                    ? status.peer_count
+                                    : (status?.pending_peer_count || 0);
+                                updateMiniAppStatus(status?.active || false, peerCount);
+                            })
+                            .catch(err => {
+                                // Silently ignore - realtime status is optional
+                                console.debug('Could not get realtime status:', err);
+                            });
+                        
+                        // Listen for realtime events to update the UI
+                        // Store the update function on the element for event handler access
+                        fileDiv._updateMiniAppStatus = updateMiniAppStatus;
+                    }
+                } else {
+                    // Regular file: show extension and size
+                    const extSpan = document.createElement('span');
+                    extSpan.style.color = 'white';
+                    extSpan.style.fontWeight = '400';
+                    extSpan.innerText = `.${ext}`;
 
-                // Create the size span
-                const sizeSpan = document.createElement('span');
-                sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+                    const sizeSpan = document.createElement('span');
+                    sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+
+                    smallElement.appendChild(extSpan);
+                    smallElement.appendChild(sizeSpan);
+                }
 
                 // Assemble the structure
-                smallElement.appendChild(extSpan);
-                smallElement.appendChild(sizeSpan);
                 textContainerSpan.appendChild(descriptionSpan);
                 textContainerSpan.appendChild(smallElement);
-                btnDiv.appendChild(iconSpan);
+                btnDiv.appendChild(iconElement);
                 btnDiv.appendChild(textContainerSpan);
                 fileDiv.appendChild(btnDiv);
 
-                // Click to reveal in explorer
-                fileDiv.addEventListener('click', (e) => {
+                // Click handler
+                fileDiv.addEventListener('click', async (e) => {
                     const path = e.currentTarget.getAttribute('filepath');
-                    if (path) revealItemInDir(path);
+                    if (!path) return;
+
+                    if (isMiniApp) {
+                        // Check if we're already playing
+                        if (e.currentTarget.getAttribute('data-playing') === 'true') {
+                            console.log('[MiniApp] Already playing, ignoring click');
+                            return;
+                        }
+
+                        // Open Mini App in a new window
+                        try {
+                            // Find the attachment to get the webxdc_topic
+                            const attachment = msg.attachments.find(a => a.path === path);
+                            const topicId = attachment?.webxdc_topic || null;
+
+                            // Check permissions before opening
+                            const shouldOpen = await checkChatMiniAppPermissions(path);
+                            if (!shouldOpen) {
+                                return; // User cancelled the permission prompt
+                            }
+
+                            await openMiniApp(path, strOpenChat, msg.id, null, topicId);
+                            
+                            // Update UI to show "Playing" after opening
+                            // Safety check: e.currentTarget may be null when called from non-click context
+                            if (e.currentTarget && e.currentTarget._updateMiniAppStatus) {
+                                // Get current peer count and update status
+                                if (topicId) {
+                                    invoke('miniapp_get_realtime_status', { topicId })
+                                        .then(status => {
+                                            e.currentTarget._updateMiniAppStatus(true, status?.peer_count || 0);
+                                        })
+                                        .catch(() => {
+                                            e.currentTarget._updateMiniAppStatus(true, 0);
+                                        });
+                                } else {
+                                    e.currentTarget._updateMiniAppStatus(true, 0);
+                                }
+                            }
+                        } catch (err) {
+                            console.error('Failed to open Mini App:', err);
+                        }
+                    } else {
+                        // Regular file: reveal in explorer
+                        revealItemInDir(path);
+                    }
                 });
 
                 pMessage.appendChild(fileDiv);
@@ -4394,6 +6960,20 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.style.color = 'red';
     }
 
+    // If the message has been edited, show an indicator
+    if (msg.edited) {
+        const spanEdited = document.createElement('span');
+        spanEdited.classList.add('msg-edited-indicator');
+        spanEdited.textContent = '(edited)';
+        // If there's edit history, make it clickable to show history
+        if (msg.edit_history && msg.edit_history.length > 0) {
+            spanEdited.classList.add('btn');
+            spanEdited.setAttribute('data-msg-id', msg.id);
+            spanEdited.title = 'Click to view edit history';
+        }
+        pMessage.appendChild(spanEdited);
+    }
+
     // Add message reactions
     // TODO: while currently limited to one; add support for multi-reactions with a nice UX
     const cReaction = msg.reactions[0];
@@ -4443,6 +7023,15 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             const spanReply = document.createElement('span');
             spanReply.classList.add('reply-btn', 'hideable', 'icon', 'icon-reply');
             divExtras.append(spanReply);
+        }
+
+        // Edit Icon (only for my own text messages)
+        if (msg.mine && msg.content && !msg.attachments.length) {
+            const spanEdit = document.createElement('span');
+            spanEdit.classList.add('edit-btn', 'hideable', 'icon', 'icon-edit');
+            spanEdit.setAttribute('data-msg-id', msg.id);
+            spanEdit.setAttribute('data-msg-content', msg.content);
+            divExtras.append(spanEdit);
         }
 
         // File Reveal Icon (if a file was attached)
@@ -4569,6 +7158,234 @@ function cancelReply() {
 }
 
 /**
+ * Start editing a message
+ * @param {string} messageId - The ID of the message to edit
+ * @param {string} content - The current content of the message
+ */
+function startEditMessage(messageId, content) {
+    // Cancel any existing reply first
+    if (strCurrentReplyReference) {
+        cancelReply();
+    }
+
+    // Cancel any existing edit
+    if (strCurrentEditMessageId) {
+        cancelEdit();
+    }
+
+    // Store the edit state
+    strCurrentEditMessageId = messageId;
+    strCurrentEditOriginalContent = content;
+
+    // Populate the input with the message content
+    domChatMessageInput.value = content;
+
+    // Show the cancel button, hide file button
+    domChatMessageInputFile.style.display = 'none';
+    domChatMessageInputCancel.style.display = '';
+
+    // Update placeholder
+    domChatMessageInput.setAttribute('placeholder', 'Editing message...');
+
+    // Highlight the message being edited
+    const msgElement = document.getElementById(messageId);
+    if (msgElement) {
+        const pElement = msgElement.querySelector('p');
+        if (pElement) {
+            pElement.style.borderColor = '#ffa500'; // Orange border for editing
+        }
+    }
+
+    // Show the send button (since we have text)
+    domChatMessageInputSend.classList.add('active');
+    domChatMessageInputSend.style.display = '';
+    domChatMessageInputVoice.style.display = 'none';
+
+    // Focus the input and move cursor to end
+    domChatMessageInput.focus();
+    domChatMessageInput.setSelectionRange(content.length, content.length);
+
+    // Auto-resize the input
+    autoResizeChatInput();
+}
+
+/**
+ * Cancel editing and restore the input to normal state
+ */
+function cancelEdit() {
+    // Remove the highlight from the message being edited
+    if (strCurrentEditMessageId) {
+        const msgElement = document.getElementById(strCurrentEditMessageId);
+        if (msgElement) {
+            const pElement = msgElement.querySelector('p');
+            if (pElement) {
+                pElement.style.borderColor = '';
+            }
+        }
+    }
+
+    // Clear the edit state
+    strCurrentEditMessageId = '';
+    strCurrentEditOriginalContent = '';
+
+    // Clear the input
+    domChatMessageInput.value = '';
+
+    // Reset the message UI
+    domChatMessageInputFile.style.display = '';
+    domChatMessageInputCancel.style.display = 'none';
+    domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+
+    // Reset send button state
+    domChatMessageInputSend.classList.remove('active');
+    domChatMessageInputSend.style.display = 'none';
+    domChatMessageInputVoice.style.display = '';
+
+    // Focus the input (desktop only)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
+
+    // Auto-resize the input back to normal
+    autoResizeChatInput();
+}
+
+/**
+ * Show the edit history popup for a message
+ * @param {string} messageId - The ID of the message to show history for
+ * @param {HTMLElement} targetElement - The element that was clicked (for positioning)
+ */
+let strCurrentEditHistoryMsgId = '';
+
+function showEditHistory(messageId, targetElement) {
+    const popup = document.getElementById('edit-history-popup');
+    const content = document.getElementById('edit-history-content');
+    if (!popup || !content) return;
+
+    // If clicking the same message that's already open, ignore
+    if (strCurrentEditHistoryMsgId === messageId && popup.style.display !== 'none') {
+        return;
+    }
+
+    // Find the message in the current chat
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat) return;
+
+    const msg = chat.messages.find(m => m.id === messageId);
+    if (!msg || !msg.edit_history || msg.edit_history.length === 0) {
+        return;
+    }
+
+    // Track which message's history is open
+    strCurrentEditHistoryMsgId = messageId;
+
+    // Clear previous content
+    content.innerHTML = '';
+
+    // Format date/time
+    const formatTime = (timestamp) => {
+        const date = new Date(timestamp);
+        return date.toLocaleString(undefined, {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    };
+
+    // Build edit history entries (oldest to newest)
+    const totalEntries = msg.edit_history.length;
+    const entryElements = [];
+    msg.edit_history.forEach((entry, index) => {
+        const div = document.createElement('div');
+        div.classList.add('edit-history-entry');
+
+        // Mark original and current
+        const isOriginal = index === 0;
+        const isCurrent = index === totalEntries - 1;
+        if (isOriginal) div.classList.add('original');
+        if (isCurrent) div.classList.add('current');
+
+        // Time and label
+        const timeDiv = document.createElement('div');
+        timeDiv.classList.add('edit-history-time');
+        timeDiv.textContent = formatTime(entry.edited_at);
+        if (isOriginal) {
+            const label = document.createElement('span');
+            label.classList.add('edit-history-label');
+            label.textContent = 'Original';
+            timeDiv.appendChild(label);
+        } else if (isCurrent) {
+            const label = document.createElement('span');
+            label.classList.add('edit-history-label');
+            label.textContent = 'Current';
+            timeDiv.appendChild(label);
+        }
+
+        // Content
+        const textDiv = document.createElement('div');
+        textDiv.classList.add('edit-history-text');
+        textDiv.textContent = entry.content;
+
+        div.appendChild(timeDiv);
+        div.appendChild(textDiv);
+        content.appendChild(div);
+        entryElements.push(div);
+    });
+
+    // Find the message bubble (p element) for positioning
+    const msgBubble = targetElement.closest('p');
+    const rect = msgBubble ? msgBubble.getBoundingClientRect() : targetElement.getBoundingClientRect();
+
+    // Reset position and show popup to measure its actual dimensions
+    popup.style.top = '0';
+    popup.style.left = '0';
+    popup.style.visibility = 'hidden';
+    popup.style.display = 'block';
+
+    // Force layout recalculation then measure
+    const popupHeight = popup.getBoundingClientRect().height;
+    const popupWidth = popup.getBoundingClientRect().width;
+
+    // Position above or below the bubble depending on space
+    let top = rect.top - popupHeight - 4;
+    const showBelow = top < 10;
+    if (showBelow) {
+        top = rect.bottom + 4;
+    }
+
+    // Apply staggered animation delays based on position
+    // Above: latest (bottom) fades first, oldest (top) last
+    // Below: oldest (top) fades first, latest (bottom) last
+    entryElements.forEach((el, index) => {
+        const delay = showBelow ? index * 50 : (totalEntries - 1 - index) * 50;
+        el.style.animationDelay = `${delay}ms`;
+    });
+
+    // Align horizontally with the bubble edge, keep within viewport
+    let left = rect.left;
+    left = Math.max(10, Math.min(left, window.innerWidth - popupWidth - 10));
+
+    popup.style.left = `${left}px`;
+    popup.style.top = `${top}px`;
+    popup.style.visibility = 'visible';
+
+    // Scroll to show the current (latest) entry
+    content.scrollTop = content.scrollHeight;
+}
+
+/**
+ * Hide the edit history popup
+ */
+function hideEditHistory() {
+    const popup = document.getElementById('edit-history-popup');
+    if (popup) {
+        popup.style.display = 'none';
+    }
+    strCurrentEditHistoryMsgId = '';
+}
+
+/**
  * Open a chat with a particular contact
  * @param {string} contact
  */
@@ -4624,11 +7441,43 @@ async function openChat(contact) {
         contact,
         proceduralScrollState.messagesPerBatch
     );
-    
+
+    // Load PIVX payments for this chat and merge them into messages
+    try {
+        const pivxPayments = await invoke('pivx_get_chat_payments', { conversationId: contact });
+        if (pivxPayments && pivxPayments.length > 0) {
+            // Convert PIVX payments to message format with pivx_payment property
+            for (const payment of pivxPayments) {
+                // Check if this payment already exists in messages
+                const existing = initialMessages.find(m => m.id === payment.message_id);
+                if (!existing) {
+                    initialMessages.push({
+                        id: payment.message_id,
+                        at: payment.at,
+                        content: '',
+                        mine: payment.is_mine,
+                        attachments: [],
+                        npub: payment.sender,
+                        pivx_payment: {
+                            gift_code: payment.gift_code,
+                            amount_piv: payment.amount_piv,
+                            address: payment.address,
+                            message: payment.message
+                        }
+                    });
+                }
+            }
+            // Re-sort by timestamp after adding PIVX payments
+            initialMessages.sort((a, b) => a.at - b.at);
+        }
+    } catch (e) {
+        console.warn('Failed to load PIVX payments:', e);
+    }
+
     // Get cache stats for procedural scroll
     const cacheStats = messageCache.getStats(contact);
     const totalMessages = cacheStats?.totalInDb || initialMessages.length;
-    
+
     // Update the chat object's messages array for compatibility
     // (Some parts of the code still reference chat.messages)
     if (chat) {
@@ -4778,6 +7627,7 @@ async function openProfile(cProfile) {
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
     domChat.style.display = 'none'; // Hide the chat view when opening profile
+    domSettingsBtn.style.display = ''; // Ensure settings button is visible (may have been hidden by openChat)
 
     // Render our own profile by default, but otherwise; the given one
     if (!cProfile) {
@@ -4985,16 +7835,8 @@ async function renderGroupOverview(chat) {
             
             // Member avatar
             let avatar;
-            if (memberProfile?.avatar) {
-                avatar = document.createElement('img');
-                avatar.src = memberProfile.avatar;
-                avatar.style.width = '25px';
-                avatar.style.height = '25px';
-                avatar.style.borderRadius = '50%';
-                avatar.style.objectFit = 'cover';
-            } else {
-                avatar = createPlaceholderAvatar(false, 25);
-            }
+            const memberAvatarSrc = getProfileAvatarSrc(memberProfile);
+            avatar = createAvatarImg(memberAvatarSrc, 25, false);
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
             avatar.style.zIndex = '1';
@@ -5343,16 +8185,8 @@ async function openInviteMemberToGroup(chat) {
             
             // Avatar (compact size like member list)
             let avatar;
-            if (contactProfile?.avatar) {
-                avatar = document.createElement('img');
-                avatar.src = contactProfile.avatar;
-                avatar.style.width = '25px';
-                avatar.style.height = '25px';
-                avatar.style.borderRadius = '50%';
-                avatar.style.objectFit = 'cover';
-            } else {
-                avatar = createPlaceholderAvatar(false, 25);
-            }
+            const contactAvatarSrc = getProfileAvatarSrc(contactProfile);
+            avatar = createAvatarImg(contactAvatarSrc, 25, false);
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
             avatar.style.zIndex = '1';
@@ -5704,6 +8538,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
+    // Initialize relay dialog event listeners
+    initRelayDialogs();
+
     // Set up early deep link listener BEFORE login flow
     // This handles deep link events that arrive while the app is running
     // Note: Deep links received before JS loads are stored in Rust and retrieved after login
@@ -5883,7 +8720,14 @@ window.addEventListener("DOMContentLoaded", async () => {
             domChatNewStartBtn.click();
         }
     };
-    domChatMessageInputCancel.onclick = cancelReply;
+    domChatMessageInputCancel.onclick = () => {
+        // Cancel edit mode if active, otherwise cancel reply
+        if (strCurrentEditMessageId) {
+            cancelEdit();
+        } else {
+            cancelReply();
+        }
+    };
 
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 })
@@ -5917,12 +8761,25 @@ window.addEventListener("DOMContentLoaded", async () => {
             androidFileInput.value = '';
         };
         
+        // Toggle attachment panel when clicking the add-file button
         domChatMessageInputFile.onclick = () => {
+            toggleAttachmentPanel();
+        };
+
+        // Handle File button in attachment panel (Android)
+        domAttachmentPanelFile.onclick = () => {
+            closeAttachmentPanel();
             androidFileInput.click();
         };
     } else {
-        // On desktop, use Tauri dialog
-        domChatMessageInputFile.onclick = async () => {
+        // Toggle attachment panel when clicking the add-file button
+        domChatMessageInputFile.onclick = () => {
+            toggleAttachmentPanel();
+        };
+
+        // Handle File button in attachment panel (Desktop - use Tauri dialog)
+        domAttachmentPanelFile.onclick = async () => {
+            closeAttachmentPanel();
             let filepath = await selectFile();
             if (filepath) {
                 // Reset reply selection while passing a copy of the reference to the backend
@@ -5933,6 +8790,144 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
         };
     }
+
+    // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
+    domAttachmentPanelMiniApps.onclick = async () => {
+        await showAttachmentPanelMiniApps();
+    };
+
+    // Handle Back button in Mini Apps view - returns to main attachment panel
+    domAttachmentPanelBack.onclick = () => {
+        showAttachmentPanelMain();
+    };
+
+    // Mini App Launch Dialog event handlers
+    domMiniAppLaunchCancel.onclick = closeMiniAppLaunchDialog;
+    domMiniAppLaunchSolo.onclick = playMiniAppSolo;
+    domMiniAppLaunchInvite.onclick = playMiniAppAndInvite;
+    
+    // Close dialog when clicking outside
+    domMiniAppLaunchOverlay.onclick = (e) => {
+        if (e.target === domMiniAppLaunchOverlay) {
+            closeMiniAppLaunchDialog();
+        }
+    };
+
+    // Marketplace event handlers
+    if (domAttachmentPanelMarketplace) {
+        domAttachmentPanelMarketplace.onclick = async () => {
+            closeAttachmentPanel();
+            showMarketplacePanel();
+        };
+    }
+
+    if (domMarketplaceBackBtn) {
+        domMarketplaceBackBtn.onclick = () => {
+            hideMarketplacePanel();
+        };
+    }
+
+    // PIVX Wallet event handlers
+    if (domAttachmentPanelPivx) {
+        domAttachmentPanelPivx.onclick = () => {
+            showPivxWalletPanel();
+        };
+    }
+
+    if (domAttachmentPanelPivxBack) {
+        domAttachmentPanelPivxBack.onclick = () => {
+            hidePivxWalletPanel();
+        };
+    }
+
+    if (domPivxDepositBtn) {
+        domPivxDepositBtn.onclick = () => {
+            showPivxDepositDialog();
+        };
+    }
+
+    if (domPivxSendBtn) {
+        domPivxSendBtn.onclick = () => {
+            showPivxSendDialog();
+        };
+    }
+
+    if (domPivxSettingsBtn) {
+        domPivxSettingsBtn.onclick = () => {
+            showPivxSettingsDialog();
+        };
+    }
+
+    // PIVX Withdraw button
+    const domPivxWithdrawBtn = document.getElementById('pivx-withdraw-btn');
+    if (domPivxWithdrawBtn) {
+        domPivxWithdrawBtn.onclick = () => {
+            showPivxWithdrawDialog();
+        };
+    }
+
+    // PIVX Dialog close buttons
+    document.getElementById('pivx-deposit-close')?.addEventListener('click', closePivxDepositDialog);
+    document.getElementById('pivx-send-close')?.addEventListener('click', closePivxSendDialog);
+    document.getElementById('pivx-withdraw-close')?.addEventListener('click', closePivxWithdrawDialog);
+    document.getElementById('pivx-settings-close')?.addEventListener('click', closePivxSettingsDialog);
+
+    // PIVX copy buttons
+    document.getElementById('pivx-copy-address')?.addEventListener('click', () => {
+        const address = document.getElementById('pivx-deposit-address')?.textContent;
+        if (address) {
+            navigator.clipboard.writeText(address);
+            showToast('Address copied!');
+        }
+    });
+
+    // PIVX send confirm
+    document.getElementById('pivx-send-confirm')?.addEventListener('click', sendPivxPayment);
+
+    // PIVX available balance click to prefill
+    document.getElementById('pivx-send-available')?.addEventListener('click', () => {
+        const amountEl = document.getElementById('pivx-send-amount');
+        if (amountEl && pivxSendAvailableBalance > 0) {
+            amountEl.value = pivxSendAvailableBalance.toFixed(2);
+        }
+    });
+
+    // PIVX send mode toggles
+    document.getElementById('pivx-send-custom-toggle')?.addEventListener('click', showPivxSendCustomMode);
+    document.getElementById('pivx-send-back-toggle')?.addEventListener('click', showPivxSendQuickMode);
+    document.getElementById('pivx-send-max')?.addEventListener('click', () => {
+        const amountEl = document.getElementById('pivx-send-amount');
+        if (amountEl && pivxSendAvailableBalance > 0) {
+            amountEl.value = pivxSendAvailableBalance.toFixed(2);
+        }
+    });
+
+    // PIVX withdraw handlers
+    document.getElementById('pivx-withdraw-confirm')?.addEventListener('click', executePivxWithdraw);
+    document.getElementById('pivx-withdraw-max')?.addEventListener('click', () => {
+        const amountEl = document.getElementById('pivx-withdraw-amount');
+        if (amountEl && pivxWithdrawAvailableBalance > 0) {
+            amountEl.value = pivxWithdrawAvailableBalance.toFixed(2);
+        }
+    });
+
+    // PIVX settings save
+    document.getElementById('pivx-settings-save')?.addEventListener('click', savePivxSettings);
+
+    // PIVX dialog overlay click to close
+    domPivxDepositOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxDepositOverlay) closePivxDepositDialog();
+    });
+    domPivxSendOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxSendOverlay) closePivxSendDialog();
+    });
+    const domPivxWithdrawOverlay = document.getElementById('pivx-withdraw-overlay');
+    domPivxWithdrawOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxWithdrawOverlay) closePivxWithdrawDialog();
+    });
+    domPivxSettingsOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxSettingsOverlay) closePivxSettingsDialog();
+    });
 
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
@@ -6001,6 +8996,87 @@ async function sendMessage(messageText) {
         });
     }
 
+    // Check if we're in edit mode
+    if (strCurrentEditMessageId) {
+        // Don't send if content hasn't changed
+        if (cleanedText === strCurrentEditOriginalContent) {
+            cancelEdit();
+            return;
+        }
+
+        // Clear input and show editing state
+        domChatMessageInput.value = '';
+        domChatMessageInput.style.height = '';
+        domChatMessageInput.style.overflowY = 'hidden';
+        domChatMessageInput.setAttribute('placeholder', 'Saving edit...');
+
+        try {
+            const editMsgId = strCurrentEditMessageId;
+            const originalContent = strCurrentEditOriginalContent;
+            cancelEdit();
+
+            // Instantly update the message in the DOM for responsive UX
+            const msgElement = document.getElementById(editMsgId);
+            if (msgElement) {
+                const spanMessage = msgElement.querySelector('p > span:not(.msg-edited-indicator):not(.msg-reply)');
+                if (spanMessage) {
+                    spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
+                    linkifyUrls(spanMessage);
+                    twemojify(spanMessage);
+                }
+                // Add edited indicator if not already present
+                const pMessage = msgElement.querySelector('p');
+                if (pMessage && !pMessage.querySelector('.msg-edited-indicator')) {
+                    const spanEdited = document.createElement('span');
+                    spanEdited.classList.add('msg-edited-indicator', 'btn');
+                    spanEdited.textContent = '(edited)';
+                    spanEdited.setAttribute('data-msg-id', editMsgId);
+                    spanEdited.title = 'Click to view edit history';
+                    pMessage.appendChild(spanEdited);
+                }
+            }
+
+            // Update in cache as well
+            const chat = arrChats.find(c => c.id === strOpenChat);
+            if (chat) {
+                const msg = chat.messages.find(m => m.id === editMsgId);
+                if (msg) {
+                    // Build edit history if it doesn't exist yet
+                    if (!msg.edit_history) {
+                        msg.edit_history = [];
+                        // Add original content as first entry
+                        msg.edit_history.push({
+                            content: originalContent,
+                            edited_at: msg.created_at * 1000 // Convert to milliseconds
+                        });
+                    }
+                    // Add new edit entry
+                    msg.edit_history.push({
+                        content: cleanedText,
+                        edited_at: Date.now()
+                    });
+                    msg.content = cleanedText;
+                    msg.edited = true;
+                }
+            }
+
+            // Send edit to backend (fire and forget for responsiveness)
+            invoke('edit_message', {
+                messageId: editMsgId,
+                chatId: strOpenChat,
+                newContent: cleanedText
+            }).catch(e => {
+                console.error('Failed to edit message:', e);
+                // Optionally: revert the UI change on failure
+            });
+
+            nLastTypingIndicator = 0;
+        } catch(e) {
+            console.error('Failed to edit message:', e);
+        }
+        return;
+    }
+
     // Clear input and show sending state
     domChatMessageInput.value = '';
     domChatMessageInput.style.height = ''; // Reset textarea height
@@ -6010,10 +9086,10 @@ async function sendMessage(messageText) {
     try {
         const replyRef = strCurrentReplyReference;
         cancelReply();
-        
+
         // Send message (unified function handles both DMs and MLS groups)
         await message(strOpenChat, cleanedText, replyRef);
-        
+
         nLastTypingIndicator = 0;
     } catch(e) {
         console.error('Failed to send message:', e);
@@ -6325,6 +9401,23 @@ document.addEventListener('click', (e) => {
     // If we're clicking a Reply button, begin a reply
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
 
+    // If we're clicking an Edit button, begin editing the message
+    if (e.target.classList.contains("edit-btn")) {
+        const msgId = e.target.getAttribute('data-msg-id');
+        const msgContent = e.target.getAttribute('data-msg-content');
+        if (msgId && msgContent) {
+            return startEditMessage(msgId, msgContent);
+        }
+    }
+
+    // If we're clicking an edited indicator, show the edit history
+    if (e.target.classList.contains("msg-edited-indicator")) {
+        const msgId = e.target.getAttribute('data-msg-id');
+        if (msgId) {
+            showEditHistory(msgId, e.target);
+        }
+    }
+
     // If we're clicking a File Reveal button, reveal the file with the OS File Explorer
     if (e.target.getAttribute('filepath')) {
         return revealItemInDir(e.target.getAttribute('filepath'));
@@ -6387,6 +9480,25 @@ document.addEventListener('click', (e) => {
 
     // Run the emoji panel open/close logic
     openEmojiPanel(e);
+
+    // Close attachment panel when clicking outside of it
+    if (domAttachmentPanel.classList.contains('visible')) {
+        const clickedInsidePanel = domAttachmentPanel.contains(e.target);
+        const clickedFileButton = domChatMessageInputFile.contains(e.target);
+        // Don't close if clicking inside PIVX dialogs
+        const clickedInsidePivxDialog = e.target.closest('.pivx-dialog-overlay');
+        if (!clickedInsidePanel && !clickedFileButton && !clickedInsidePivxDialog) {
+            closeAttachmentPanel();
+        }
+    }
+
+    // Close edit history popup when clicking outside of it
+    const editHistoryPopup = document.getElementById('edit-history-popup');
+    if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
+        if (!editHistoryPopup.contains(e.target) && !e.target.classList.contains('msg-edited-indicator')) {
+            hideEditHistory();
+        }
+    }
 });
 
 /**
@@ -6407,6 +9519,9 @@ function adjustSize() {
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     softChatScroll();
+
+    // Re-truncate marketplace category tags on resize
+    truncateAllCategoryTags();
 }
 
 /**
@@ -6534,17 +9649,8 @@ function renderCreateGroupList(filterText = '') {
         });
 
         // Avatar - compact 25px size
-        let avatar;
-        if (p.avatar) {
-            avatar = document.createElement('img');
-            avatar.src = p.avatar;
-            avatar.style.width = '25px';
-            avatar.style.height = '25px';
-            avatar.style.borderRadius = '50%';
-            avatar.style.objectFit = 'cover';
-        } else {
-            avatar = createPlaceholderAvatar(false, 25);
-        }
+        const listAvatarSrc = getProfileAvatarSrc(p);
+        const avatar = createAvatarImg(listAvatarSrc, 25, false);
         avatar.style.marginRight = '10px';
         avatar.style.position = 'relative';
         avatar.style.zIndex = '1';

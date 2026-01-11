@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-record-opened"
+description = "Enables the miniapp_record_opened command without any pre-configured scope."
+commands.allow = ["miniapp_record_opened"]
+
+[[permission]]
+identifier = "deny-miniapp-record-opened"
+description = "Denies the miniapp_record_opened command without any pre-configured scope."
+commands.deny = ["miniapp_record_opened"]

@@ -17,6 +17,8 @@
     <script src="/js/updater.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
+    <script src="/js/miniapps.js" defer></script>
+    <script src="/js/marketplace.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <!-- DOMPurify - HTML sanitization -->
     <script src="/js/dompurify.min.js"></script>
@@ -47,6 +49,11 @@
           <button id="popupConfirm">Confirm</button><button id="popupCancel" class="cancel-btn">Cancel</button>
         </div>
       </center>
+    </div>
+
+    <!-- Edit History Popup -->
+    <div id="edit-history-popup" class="edit-history-popup" style="display: none;">
+      <div id="edit-history-content" class="edit-history-content"></div>
     </div>
 
     <main class="container">
@@ -92,6 +99,354 @@
           <span class="icon icon-chevron-down"></span>
         </div>
         <div class="emoji-grid" id="emoji-all-grid"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- The Attachment panel popup -->
+<div class="attachment-panel" id="attachment-panel" tabindex="-1">
+  <!-- Main attachment options view -->
+  <div class="attachment-panel-content" id="attachment-panel-main">
+    <button class="attachment-panel-item" id="attachment-panel-file">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-file"></span>
+      </div>
+      <span class="attachment-panel-label">File</span>
+    </button>
+    <button class="attachment-panel-item" id="attachment-panel-miniapps">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-play"></span>
+      </div>
+      <span class="attachment-panel-label">Mini Apps</span>
+    </button>
+  </div>
+  <!-- Mini Apps list view (hidden by default) -->
+  <div class="attachment-panel-content" id="attachment-panel-miniapps-view" style="display: none;">
+    <button class="attachment-panel-item" id="attachment-panel-back">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-chevron-double-left"></span>
+      </div>
+      <span class="attachment-panel-label">Back</span>
+    </button>
+    <button class="attachment-panel-item" id="attachment-panel-marketplace">
+      <div class="attachment-panel-btn attachment-panel-marketplace-btn">
+        <span class="icon icon-star"></span>
+      </div>
+      <span class="attachment-panel-label">Marketplace</span>
+    </button>
+    <button class="attachment-panel-item" id="attachment-panel-pivx">
+      <div class="attachment-panel-btn attachment-panel-pivx-btn">
+        <span class="icon icon-pivx"></span>
+      </div>
+      <span class="attachment-panel-label">PIVX</span>
+    </button>
+    <!-- Mini Apps will be dynamically inserted here -->
+  </div>
+  <!-- PIVX Wallet view (hidden by default) -->
+  <div class="attachment-panel-content pivx-wallet-panel" id="attachment-panel-pivx-view" style="display: none;">
+    <div class="pivx-wallet-content">
+      <button class="pivx-close-btn" id="attachment-panel-pivx-back">
+        <span class="icon icon-x"></span>
+      </button>
+      <!-- Balance Display -->
+      <div class="pivx-balance-section">
+        <div class="pivx-balance-logo">
+          <img src="./icons/pivx.svg" alt="PIVX" />
+        </div>
+        <div class="pivx-balance-info">
+          <div class="pivx-balance-amount" id="pivx-balance-amount">0.00 PIV</div>
+          <div class="pivx-balance-fiat" id="pivx-balance-fiat" style="display: none;"></div>
+        </div>
+      </div>
+      <!-- Action Buttons (compact dock style) -->
+      <div class="pivx-actions-dock">
+        <button class="pivx-dock-btn pivx-dock-btn-primary" id="pivx-send-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-send"></span></div>
+          <span class="pivx-dock-label">Send</span>
+        </button>
+        <button class="pivx-dock-btn" id="pivx-deposit-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-plus-circle"></span></div>
+          <span class="pivx-dock-label">Deposit</span>
+        </button>
+        <button class="pivx-dock-btn" id="pivx-withdraw-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-withdraw"></span></div>
+          <span class="pivx-dock-label">Withdraw</span>
+        </button>
+        <button class="pivx-dock-btn" id="pivx-settings-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-settings"></span></div>
+          <span class="pivx-dock-label">Settings</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Mini Apps Marketplace Panel -->
+<div class="marketplace-panel" id="marketplace-panel" style="display: none;">
+  <div class="marketplace-header">
+    <div class="btn nav-back-btn marketplace-back-btn" id="marketplace-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <h2 class="marketplace-title">Marketplace</h2>
+  </div>
+  <div class="marketplace-search-container">
+    <span class="marketplace-search-icon icon icon-search"></span>
+    <input type="text" id="marketplace-search-input" placeholder="Search apps..." autocomplete="off">
+  </div>
+  <div class="marketplace-filters" id="marketplace-filters" style="display: none;">
+    <div class="marketplace-active-filters" id="marketplace-active-filters">
+      <!-- Active filter tags will be inserted here -->
+    </div>
+  </div>
+  <div class="marketplace-scroll-container">
+    <div class="marketplace-featured" id="marketplace-featured">
+      <!-- Featured categories with card-spread previews will be inserted here -->
+    </div>
+    <div class="marketplace-content" id="marketplace-content">
+      <!-- Marketplace apps will be dynamically inserted here -->
+    </div>
+  </div>
+</div>
+
+<!-- App Details Panel -->
+<div class="app-details-panel" id="app-details-panel" style="display: none;">
+  <div class="app-details-header">
+    <div class="btn nav-back-btn app-details-back-btn" id="app-details-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <h2 class="app-details-title">App Details</h2>
+    <div class="app-details-header-spacer"></div>
+  </div>
+  <div class="app-details-content" id="app-details-content">
+    <!-- App details will be dynamically inserted here -->
+  </div>
+</div>
+
+<!-- Mini App Launch Dialog -->
+<div class="miniapp-launch-overlay" id="miniapp-launch-overlay">
+  <div class="miniapp-launch-container">
+    <div class="miniapp-launch-inner">
+      <div class="miniapp-launch-icon-container" id="miniapp-launch-icon-container">
+        <!-- Icon will be inserted here -->
+      </div>
+      <div class="miniapp-launch-info">
+        <div class="miniapp-launch-name" id="miniapp-launch-name"></div>
+      </div>
+    </div>
+    <div class="file-preview-buttons">
+      <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-cancel">Cancel</button>
+      <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-solo">Play</button>
+      <button class="file-preview-btn file-preview-btn-send" id="miniapp-launch-invite">Play & Invite</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Deposit Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-deposit-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>Deposit PIVX</h3>
+      <button class="pivx-dialog-close" id="pivx-deposit-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <p class="pivx-deposit-instructions">Send PIVX to this address to deposit:</p>
+      <div class="pivx-address-display" id="pivx-deposit-address"></div>
+      <button class="pivx-copy-btn" id="pivx-copy-address">
+        <span class="icon icon-copy"></span>
+        Copy Address
+      </button>
+      <div class="pivx-deposit-status" id="pivx-deposit-status">
+        <div class="pivx-awaiting-deposit">
+          <div class="pivx-spinner"></div>
+          <span>Awaiting Deposit...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Send Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-send-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>Send PIVX</h3>
+      <button class="pivx-dialog-close" id="pivx-send-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <!-- Promo Selector (default view) -->
+      <div class="pivx-send-promo-section" id="pivx-send-promo-section">
+        <div class="pivx-send-promo-label">Select amount to send:</div>
+        <div class="pivx-send-promo-list" id="pivx-send-promo-list">
+          <div class="pivx-send-promo-loading">
+            <div class="pivx-spinner"></div>
+            <span>Loading...</span>
+          </div>
+        </div>
+        <div class="pivx-send-custom-toggle" id="pivx-send-custom-toggle">
+          Send custom amount
+        </div>
+      </div>
+
+      <!-- Custom Amount (hidden by default) -->
+      <div class="pivx-send-custom-section" id="pivx-send-custom-section" style="display: none;">
+        <div class="pivx-send-custom-warning">
+          Custom amounts require on-chain confirmation and may take longer to send.
+        </div>
+        <div class="pivx-amount-input-container">
+          <input type="number" id="pivx-send-amount" placeholder="0.00" step="0.01" min="0">
+          <span class="pivx-amount-label">PIV</span>
+        </div>
+        <div class="pivx-send-available" id="pivx-send-available">
+          Available: <span id="pivx-send-available-amount">0.00</span> PIV
+          <span class="pivx-withdraw-max-btn" id="pivx-send-max">MAX</span>
+        </div>
+        <div class="pivx-send-back-toggle" id="pivx-send-back-toggle">
+          ← Back to quick send
+        </div>
+      </div>
+
+      <textarea id="pivx-send-message" placeholder="Optional message..."></textarea>
+      <div class="pivx-send-info">
+        Sending to: <span id="pivx-send-recipient"></span>
+      </div>
+      <button class="pivx-send-confirm-btn" id="pivx-send-confirm">Send to Chat</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Withdraw Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-withdraw-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>Withdraw PIVX</h3>
+      <button class="pivx-dialog-close" id="pivx-withdraw-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <div class="pivx-withdraw-section">
+        <label class="pivx-settings-label">Destination Address</label>
+        <input type="text" id="pivx-withdraw-address" placeholder="D..." class="pivx-settings-input">
+      </div>
+      <div class="pivx-withdraw-section">
+        <label class="pivx-settings-label">Amount</label>
+        <div class="pivx-amount-input-container">
+          <input type="number" id="pivx-withdraw-amount" placeholder="0.00" step="0.01" min="0">
+          <span class="pivx-amount-label">PIV</span>
+        </div>
+        <div class="pivx-withdraw-available">
+          Available: <span id="pivx-withdraw-available-amount">0.00</span> PIV
+          <span class="pivx-withdraw-max-btn" id="pivx-withdraw-max">MAX</span>
+        </div>
+      </div>
+      <div class="pivx-withdraw-fee-info" id="pivx-withdraw-fee-info">
+        Network fee: ~0.0001 PIV
+      </div>
+      <button class="pivx-settings-save-btn" id="pivx-withdraw-confirm">Withdraw</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Settings Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-settings-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>PIVX Wallet Settings</h3>
+      <button class="pivx-dialog-close" id="pivx-settings-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <div class="pivx-settings-section">
+        <label class="pivx-settings-label">Auto Withdraw Address</label>
+        <input type="text" id="pivx-wallet-address-input" placeholder="D..." class="pivx-settings-input">
+        <p class="pivx-settings-hint">If set, claimed PIVX will be sent directly to this address. Leave empty to keep funds in your Vector wallet.</p>
+      </div>
+      <div class="pivx-settings-section">
+        <label class="pivx-settings-label">Display Currency</label>
+        <select id="pivx-currency-select" class="pivx-settings-select">
+          <option value="">Loading currencies...</option>
+        </select>
+        <p class="pivx-settings-hint">Choose your preferred fiat currency for balance display.</p>
+      </div>
+      <button class="pivx-settings-save-btn" id="pivx-settings-save">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Relay Dialog -->
+<div class="relay-dialog-overlay" id="add-relay-overlay">
+  <div class="relay-dialog">
+    <div class="relay-dialog-header">
+      <h3>Add Custom Relay</h3>
+      <button class="relay-dialog-close" id="add-relay-close">&times;</button>
+    </div>
+    <div class="relay-dialog-content">
+      <div class="relay-form-group">
+        <label class="relay-form-label">Relay URL</label>
+        <input type="text" id="add-relay-url" placeholder="relay.example.com" class="relay-form-input">
+        <p class="relay-form-hint">Enter the relay domain (wss:// is added automatically)</p>
+      </div>
+      <div class="relay-form-group">
+        <label class="relay-form-label">Mode</label>
+        <select id="add-relay-mode" class="relay-form-select" style="margin-bottom: 0;">
+          <option value="both">Read & Write</option>
+          <option value="read">Read Only</option>
+          <option value="write">Write Only</option>
+        </select>
+        <p class="relay-form-hint">Choose how Vector uses this relay.</p>
+      </div>
+      <div class="relay-dialog-buttons">
+        <button class="btn cancel-btn" id="add-relay-cancel">Cancel</button>
+        <button class="btn primary-btn" id="add-relay-confirm">Add Relay</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Relay Info Dialog -->
+<div class="relay-dialog-overlay" id="relay-info-overlay">
+  <div class="relay-dialog relay-info-dialog">
+    <div class="relay-dialog-header">
+      <h3 id="relay-info-url">Relay URL</h3>
+      <button class="relay-dialog-close" id="relay-info-close">&times;</button>
+    </div>
+    <div class="relay-dialog-content">
+      <div class="relay-form-group">
+        <label class="relay-form-label">Mode</label>
+        <select id="relay-info-mode" class="relay-form-select">
+          <option value="both">Read & Write</option>
+          <option value="read">Read Only</option>
+          <option value="write">Write Only</option>
+        </select>
+      </div>
+      <div class="relay-metrics-section">
+        <div class="relay-metrics-header">
+          <h4>Connection Info</h4>
+          <span class="relay-status relay-status-small" id="relay-info-status">connected</span>
+        </div>
+        <div class="relay-metrics-grid">
+          <div class="relay-metric">
+            <span class="relay-metric-value" id="relay-info-ping">--</span>
+            <span class="relay-metric-label">Ping</span>
+          </div>
+          <div class="relay-metric">
+            <span class="relay-metric-value" id="relay-info-last-check">--</span>
+            <span class="relay-metric-label">Last Check</span>
+          </div>
+        </div>
+      </div>
+      <div class="relay-logs-section">
+        <div class="relay-logs-header">
+          <h4>Recent Activity</h4>
+          <button class="relay-logs-copy-btn" id="relay-logs-copy" title="Copy logs to clipboard">
+            <span class="icon icon-copy"></span>
+          </button>
+        </div>
+        <ul class="relay-logs-list" id="relay-info-logs">
+          <li class="relay-log-empty">No activity recorded yet</li>
+        </ul>
+      </div>
+      <div class="relay-dialog-buttons">
+        <button class="btn danger-btn" id="relay-info-disable">Disable Relay</button>
+        <button class="btn primary-btn" id="relay-info-done">Done</button>
       </div>
     </div>
   </div>
@@ -257,7 +612,7 @@
 
         <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
-            <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
+            <button id="chat-input-file"><span class="icon icon-plus"></span></button>
             <input type="file" id="chat-input-file-hidden" style="display: none;" accept="*/*">
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
@@ -660,5 +1015,8 @@
       </div>
 
     </main>
+  
+  <!-- Global tooltip element -->
+  <div id="global-tooltip" class="global-tooltip"></div>
   </body>
 </html>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-status"
+description = "Enables the update_status command without any pre-configured scope."
+commands.allow = ["update_status"]
+
+[[permission]]
+identifier = "deny-update-status"
+description = "Denies the update_status command without any pre-configured scope."
+commands.deny = ["update_status"]

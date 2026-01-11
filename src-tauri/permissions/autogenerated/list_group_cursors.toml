@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-group-cursors"
+description = "Enables the list_group_cursors command without any pre-configured scope."
+commands.allow = ["list_group_cursors"]
+
+[[permission]]
+identifier = "deny-list-group-cursors"
+description = "Denies the list_group_cursors command without any pre-configured scope."
+commands.deny = ["list_group_cursors"]

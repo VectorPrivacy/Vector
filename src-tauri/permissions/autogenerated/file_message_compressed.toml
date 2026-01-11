@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-message-compressed"
+description = "Enables the file_message_compressed command without any pre-configured scope."
+commands.allow = ["file_message_compressed"]
+
+[[permission]]
+identifier = "deny-file-message-compressed"
+description = "Denies the file_message_compressed command without any pre-configured scope."
+commands.deny = ["file_message_compressed"]

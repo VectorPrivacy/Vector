@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-is-scanning"
+description = "Enables the is_scanning command without any pre-configured scope."
+commands.allow = ["is_scanning"]
+
+[[permission]]
+identifier = "deny-is-scanning"
+description = "Denies the is_scanning command without any pre-configured scope."
+commands.deny = ["is_scanning"]

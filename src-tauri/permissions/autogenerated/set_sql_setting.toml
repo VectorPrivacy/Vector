@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-sql-setting"
+description = "Enables the set_sql_setting command without any pre-configured scope."
+commands.allow = ["set_sql_setting"]
+
+[[permission]]
+identifier = "deny-set-sql-setting"
+description = "Denies the set_sql_setting command without any pre-configured scope."
+commands.deny = ["set_sql_setting"]

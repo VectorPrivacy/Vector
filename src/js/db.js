@@ -140,3 +140,99 @@ async function saveSendTypingIndicators(bool) {
 async function hasAccount() {
     return await invoke('check_any_account_exists');
 }
+
+// ============================================================================
+// Custom Relay Management
+// ============================================================================
+
+/**
+ * @typedef {Object} CustomRelay
+ * @property {string} url - The relay WebSocket URL
+ * @property {boolean} enabled - Whether the relay is enabled
+ */
+
+/**
+ * Get the list of user's custom relays
+ * @returns {Promise<CustomRelay[]>}
+ */
+async function loadCustomRelays() {
+    return await invoke('get_custom_relays');
+}
+
+/**
+ * Add a new custom relay
+ * @param {string} url - The relay WebSocket URL (must start with wss://)
+ * @param {string} [mode='both'] - The relay mode: 'read', 'write', or 'both'
+ * @returns {Promise<CustomRelay>} - The newly created relay entry
+ * @throws {Error} If the URL is invalid or relay already exists
+ */
+async function addCustomRelay(url, mode = 'both') {
+    return await invoke('add_custom_relay', { url, mode });
+}
+
+/**
+ * Remove a custom relay
+ * @param {string} url - The relay URL to remove
+ * @returns {Promise<boolean>} - True if removed, false if not found
+ */
+async function removeCustomRelay(url) {
+    return await invoke('remove_custom_relay', { url });
+}
+
+/**
+ * Toggle a custom relay's enabled state
+ * @param {string} url - The relay URL
+ * @param {boolean} enabled - Whether to enable or disable the relay
+ * @returns {Promise<boolean>} - True if successful
+ */
+async function toggleCustomRelay(url, enabled) {
+    return await invoke('toggle_custom_relay', { url, enabled });
+}
+
+/**
+ * Toggle a default relay's enabled state
+ * @param {string} url - The relay URL
+ * @param {boolean} enabled - Whether to enable or disable the relay
+ * @returns {Promise<boolean>} - True if successful
+ */
+async function toggleDefaultRelay(url, enabled) {
+    return await invoke('toggle_default_relay', { url, enabled });
+}
+
+/**
+ * Update a custom relay's mode
+ * @param {string} url - The relay URL
+ * @param {string} mode - The new mode: 'read', 'write', or 'both'
+ * @returns {Promise<boolean>} - True if successful
+ */
+async function updateRelayMode(url, mode) {
+    return await invoke('update_relay_mode', { url, mode });
+}
+
+/**
+ * Validate a relay URL format without saving
+ * @param {string} url - The relay URL to validate
+ * @returns {Promise<string>} - The normalized URL if valid
+ * @throws {Error} If the URL is invalid
+ */
+async function validateRelayUrl(url) {
+    return await invoke('validate_relay_url_cmd', { url });
+}
+
+/**
+ * Get metrics for a specific relay
+ * @param {string} url - The relay URL
+ * @returns {Promise<RelayMetrics>} - The relay metrics
+ */
+async function getRelayMetrics(url) {
+    return await invoke('get_relay_metrics', { url });
+}
+
+/**
+ * Get recent logs for a specific relay
+ * @param {string} url - The relay URL
+ * @returns {Promise<RelayLog[]>} - Array of recent log entries
+ */
+async function getRelayLogs(url) {
+    return await invoke('get_relay_logs', { url });
+}

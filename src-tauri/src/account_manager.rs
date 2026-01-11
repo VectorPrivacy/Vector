@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     status_content TEXT NOT NULL DEFAULT '',
     status_url TEXT NOT NULL DEFAULT '',
     muted INTEGER NOT NULL DEFAULT 0,
-    bot INTEGER NOT NULL DEFAULT 0
+    bot INTEGER NOT NULL DEFAULT 0,
+    avatar_cached TEXT NOT NULL DEFAULT '',
+    banner_cached TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_npub ON profiles(npub);
 CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
@@ -116,6 +118,61 @@ CREATE TABLE IF NOT EXISTS mls_event_cursors (
     last_seen_event_id TEXT NOT NULL,
     last_seen_at INTEGER NOT NULL
 );
+
+-- Mini Apps history table (tracks recently used Mini Apps)
+CREATE TABLE IF NOT EXISTS miniapps_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    src_url TEXT NOT NULL,
+    attachment_ref TEXT NOT NULL,
+    open_count INTEGER NOT NULL DEFAULT 1,
+    last_opened_at INTEGER NOT NULL,
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    categories TEXT NOT NULL DEFAULT '',
+    marketplace_id TEXT DEFAULT NULL
+);
+
+-- Events table: flat, protocol-aligned storage for all Nostr events
+-- Every event (message, reaction, attachment, etc.) is a separate row
+-- This is the PRIMARY storage for all message data
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    kind INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER,
+    content TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
+    reference_id TEXT,
+    created_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL,
+    mine INTEGER NOT NULL DEFAULT 0,
+    pending INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    wrapper_event_id TEXT,
+    npub TEXT,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
+CREATE INDEX IF NOT EXISTS idx_events_reference ON events(reference_id) WHERE reference_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_wrapper ON events(wrapper_event_id) WHERE wrapper_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
+
+-- PIVX Promos table (for addressless PIVX payments via promo codes)
+CREATE TABLE IF NOT EXISTS pivx_promos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gift_code TEXT NOT NULL UNIQUE,
+    address TEXT NOT NULL,
+    privkey_encrypted TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    amount_piv REAL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_pivx_promos_code ON pivx_promos(gift_code);
+CREATE INDEX IF NOT EXISTS idx_pivx_promos_address ON pivx_promos(address);
+CREATE INDEX IF NOT EXISTS idx_pivx_promos_status ON pivx_promos(status);
 "#;
 
 /// Get the profile directory for a given npub (full npub, no truncation)
@@ -404,30 +461,459 @@ pub async fn init_profile_database<R: Runtime>(
 /// Run database migrations for schema updates
 /// This handles adding new columns to existing tables
 fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
-    // Migration 1: Add wrapper_event_id column to messages table
-    // This column stores the public giftwrap event ID for fast duplicate detection
-    let has_wrapper_column: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'wrapper_event_id'",
+    // Check if messages table exists (it may have been dropped after full migration to events)
+    let has_messages_table: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
         [],
         |row| row.get::<_, i32>(0)
     ).map(|count| count > 0)
     .unwrap_or(false);
 
-    if !has_wrapper_column {
-        println!("[Migration] Adding wrapper_event_id column to messages table...");
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
-            []
-        ).map_err(|e| format!("Failed to add wrapper_event_id column: {}", e))?;
+    // Migration 1: Add wrapper_event_id column to messages table (only if table exists)
+    // This column stores the public giftwrap event ID for fast duplicate detection
+    if has_messages_table {
+        let has_wrapper_column: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'wrapper_event_id'",
+            [],
+            |row| row.get::<_, i32>(0)
+        ).map(|count| count > 0)
+        .unwrap_or(false);
 
-        // Create index for fast lookups
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id)",
-            []
-        ).map_err(|e| format!("Failed to create wrapper_event_id index: {}", e))?;
+        if !has_wrapper_column {
+            println!("[Migration] Adding wrapper_event_id column to messages table...");
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
+                []
+            ).map_err(|e| format!("Failed to add wrapper_event_id column: {}", e))?;
 
-        println!("[Migration] wrapper_event_id column added successfully");
+            // Create index for fast lookups
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id)",
+                []
+            ).map_err(|e| format!("Failed to create wrapper_event_id index: {}", e))?;
+
+            println!("[Migration] wrapper_event_id column added successfully");
+        }
     }
+
+    // Migration 2: Create miniapps_history table if it doesn't exist
+    let has_miniapps_history: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapps_history'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_miniapps_history {
+        println!("[Migration] Creating miniapps_history table...");
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS miniapps_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                src_url TEXT NOT NULL,
+                attachment_ref TEXT,
+                open_count INTEGER DEFAULT 1,
+                last_opened_at INTEGER NOT NULL,
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                categories TEXT NOT NULL DEFAULT '',
+                marketplace_id TEXT DEFAULT NULL
+            )
+            "#,
+            []
+        ).map_err(|e| format!("Failed to create miniapps_history table: {}", e))?;
+
+        println!("[Migration] miniapps_history table created successfully");
+    }
+
+    // Migration 3: Add installed_version column to miniapps_history if it doesn't exist
+    let has_installed_version: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('miniapps_history') WHERE name='installed_version'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_installed_version {
+        println!("[Migration] Adding installed_version column to miniapps_history table...");
+        conn.execute(
+            "ALTER TABLE miniapps_history ADD COLUMN installed_version TEXT DEFAULT NULL",
+            []
+        ).map_err(|e| format!("Failed to add installed_version column: {}", e))?;
+
+        println!("[Migration] installed_version column added successfully");
+    }
+
+    // Migration 4: Add cached image path columns to profiles table
+    let has_avatar_cached: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('profiles') WHERE name='avatar_cached'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_avatar_cached {
+        println!("[Migration] Adding cached image columns to profiles table...");
+        conn.execute(
+            "ALTER TABLE profiles ADD COLUMN avatar_cached TEXT DEFAULT ''",
+            []
+        ).map_err(|e| format!("Failed to add avatar_cached column: {}", e))?;
+
+        conn.execute(
+            "ALTER TABLE profiles ADD COLUMN banner_cached TEXT DEFAULT ''",
+            []
+        ).map_err(|e| format!("Failed to add banner_cached column: {}", e))?;
+
+        println!("[Migration] Cached image columns added successfully");
+    }
+
+    // Migration 5: Create miniapp_permissions table for storing granted permissions per-app
+    let has_permissions_table: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapp_permissions'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_permissions_table {
+        println!("[Migration] Creating miniapp_permissions table...");
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS miniapp_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_hash TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                granted INTEGER NOT NULL DEFAULT 0,
+                granted_at INTEGER,
+                UNIQUE(file_hash, permission)
+            )
+            "#,
+            []
+        ).map_err(|e| format!("Failed to create miniapp_permissions table: {}", e))?;
+
+        // Create index for fast permission lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_miniapp_permissions_hash ON miniapp_permissions(file_hash)",
+            []
+        ).map_err(|e| format!("Failed to create miniapp_permissions index: {}", e))?;
+
+        println!("[Migration] miniapp_permissions table created successfully");
+    }
+
+    // Migration 6: Create events table for flat event-based storage
+    // This is the new protocol-aligned storage format where all events (messages, reactions,
+    // attachments, etc.) are stored as flat rows rather than nested JSON.
+    let has_events_table: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_events_table {
+        println!("[Migration 6] Creating events table for flat event storage...");
+
+        // Create the events table
+        conn.execute_batch(r#"
+            -- Events table: flat, protocol-aligned storage for all Nostr events
+            -- Every event (message, reaction, attachment, etc.) is a separate row
+            CREATE TABLE IF NOT EXISTS events (
+                -- Identity
+                id TEXT PRIMARY KEY,              -- Event ID (hex, 64 chars)
+                kind INTEGER NOT NULL,            -- Nostr kind (14=DM, 7=reaction, 15=file, etc.)
+
+                -- Context
+                chat_id INTEGER NOT NULL,         -- FK to chats table
+                user_id INTEGER,                  -- FK to profiles table (sender)
+
+                -- Content
+                content TEXT NOT NULL DEFAULT '', -- Event content (encrypted for messages)
+                tags TEXT NOT NULL DEFAULT '[]',  -- JSON array of Nostr tags
+
+                -- Parsed fields for efficient queries (Vector-optimized)
+                reference_id TEXT,                -- For reactions/attachments: parent message ID
+
+                -- Timestamps
+                created_at INTEGER NOT NULL,      -- Event creation (Unix seconds)
+                received_at INTEGER NOT NULL,     -- When we received it (Unix ms)
+
+                -- State flags
+                mine INTEGER NOT NULL DEFAULT 0,  -- Is this from current user
+                pending INTEGER NOT NULL DEFAULT 0, -- Awaiting send confirmation
+                failed INTEGER NOT NULL DEFAULT 0,  -- Send failed
+
+                -- Deduplication
+                wrapper_event_id TEXT,            -- Outer giftwrap ID for sync dedup
+
+                -- Sender info (for group chats)
+                npub TEXT,                        -- Sender's npub
+
+                -- Foreign keys
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
+            );
+
+            -- Indexes for efficient queries
+            CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
+            CREATE INDEX IF NOT EXISTS idx_events_reference ON events(reference_id) WHERE reference_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_events_wrapper ON events(wrapper_event_id) WHERE wrapper_event_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
+        "#).map_err(|e| format!("Failed to create events table: {}", e))?;
+
+        println!("[Migration 6] Events table created successfully");
+
+        // Migrate existing messages to events table
+        migrate_messages_to_events(conn)?;
+    }
+
+    // Migration 7: Backfill attachment metadata into event tags
+    // Migration 6 didn't copy attachment JSON into tags, so kind=15 events need updating
+    // NOTE: This migration requires the messages table to exist - skip if already dropped
+    let storage_version: String = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'storage_version'",
+        [],
+        |row| row.get(0)
+    ).unwrap_or_else(|_| "0".to_string());
+
+    if storage_version == "2" && has_messages_table {
+        // Check if there are any kind=15 events without attachment tags
+        let needs_migration: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM events e
+            WHERE e.kind = 15
+            AND NOT EXISTS (
+                SELECT 1 FROM json_each(e.tags)
+                WHERE json_extract(value, '$[0]') = 'attachments'
+            )
+            "#,
+            [],
+            |row| row.get(0)
+        ).unwrap_or(0);
+
+        if needs_migration > 0 {
+            println!("[Migration 7] Backfilling {} attachment events with metadata from messages table...", needs_migration);
+            migrate_attachments_to_event_tags(conn)?;
+        }
+    } else if storage_version == "2" && !has_messages_table {
+        // Messages table already dropped, just update version
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
+            []
+        ).map_err(|e| format!("Failed to update storage version: {}", e))?;
+        println!("[Migration 7] Messages table already dropped, skipping attachment backfill. Storage version set to 3.");
+    }
+
+    // Migration 8: Create pivx_promos table for addressless PIVX payments
+    let has_pivx_table: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pivx_promos'",
+        [],
+        |row| row.get::<_, i32>(0)
+    ).map(|count| count > 0)
+    .unwrap_or(false);
+
+    if !has_pivx_table {
+        println!("[Migration 8] Creating pivx_promos table...");
+        conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS pivx_promos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gift_code TEXT NOT NULL UNIQUE,
+                address TEXT NOT NULL,
+                privkey_encrypted TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                claimed_at INTEGER,
+                amount_piv REAL,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE INDEX IF NOT EXISTS idx_pivx_promos_code ON pivx_promos(gift_code);
+            CREATE INDEX IF NOT EXISTS idx_pivx_promos_address ON pivx_promos(address);
+            CREATE INDEX IF NOT EXISTS idx_pivx_promos_status ON pivx_promos(status);
+        "#).map_err(|e| format!("Failed to create pivx_promos table: {}", e))?;
+
+        println!("[Migration 8] pivx_promos table created successfully");
+    }
+
+    Ok(())
+}
+
+/// Migration 7: Copy attachment metadata from messages table into event tags
+/// This completes the migration to fully self-contained events
+fn migrate_attachments_to_event_tags(conn: &rusqlite::Connection) -> Result<(), String> {
+    // Find all kind=15 events that don't have attachment tags yet
+    let mut stmt = conn.prepare(r#"
+        SELECT e.id, e.tags, m.attachments
+        FROM events e
+        JOIN messages m ON e.id = m.id
+        WHERE e.kind = 15
+        AND m.attachments IS NOT NULL
+        AND m.attachments != '[]'
+        AND NOT EXISTS (
+            SELECT 1 FROM json_each(e.tags)
+            WHERE json_extract(value, '$[0]') = 'attachments'
+        )
+    "#).map_err(|e| format!("Failed to prepare attachment query: {}", e))?;
+
+    let events_to_update: Vec<(String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query attachments: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    drop(stmt);
+
+    let mut updated_count = 0;
+    for (event_id, existing_tags, attachments_json) in events_to_update {
+        // Parse existing tags and add attachments tag
+        let mut tags: Vec<Vec<String>> = serde_json::from_str(&existing_tags)
+            .unwrap_or_else(|_| Vec::new());
+
+        // Add the attachments tag with the JSON
+        tags.push(vec!["attachments".to_string(), attachments_json]);
+
+        let new_tags = serde_json::to_string(&tags)
+            .unwrap_or_else(|_| "[]".to_string());
+
+        conn.execute(
+            "UPDATE events SET tags = ?1 WHERE id = ?2",
+            rusqlite::params![new_tags, event_id]
+        ).ok();
+
+        updated_count += 1;
+    }
+
+    // Update storage version to 3
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
+        []
+    ).map_err(|e| format!("Failed to update storage version: {}", e))?;
+
+    println!("[Migration 7] Backfilled {} events with attachment metadata. Storage version set to 3.", updated_count);
+
+    Ok(())
+}
+
+/// Migrate existing messages from the old nested format to the flat events table
+/// This extracts reactions and attachments as separate event rows
+fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String> {
+    println!("[Migration 6] Migrating messages to events table...");
+
+    // Count existing messages
+    let message_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    if message_count == 0 {
+        println!("[Migration 6] No messages to migrate");
+        return Ok(());
+    }
+
+    println!("[Migration 6] Migrating {} messages...", message_count);
+
+    // Step 1: Migrate text messages (kind=14) and file attachments (kind=15)
+    // We need to determine kind based on whether the message has attachments
+    conn.execute(r#"
+        INSERT INTO events (
+            id, kind, chat_id, user_id, content, tags, reference_id,
+            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+        )
+        SELECT
+            m.id,
+            CASE
+                WHEN m.attachments != '[]' AND m.attachments IS NOT NULL THEN 15
+                ELSE 14
+            END as kind,
+            m.chat_id,
+            m.user_id,
+            m.content_encrypted,
+            CASE
+                WHEN m.replied_to != '' THEN json_array(json_array('e', m.replied_to, '', 'reply'))
+                ELSE '[]'
+            END as tags,
+            NULL as reference_id,
+            m.at / 1000 as created_at,
+            m.at as received_at,
+            m.mine,
+            0 as pending,
+            0 as failed,
+            m.wrapper_event_id,
+            NULL as npub
+        FROM messages m
+    "#, []).map_err(|e| format!("Failed to migrate messages: {}", e))?;
+
+    // Step 2: Extract and migrate reactions from the JSON arrays
+    // Get all messages with non-empty reactions
+    let mut reaction_stmt = conn.prepare(
+        "SELECT id, chat_id, reactions, at FROM messages WHERE reactions != '[]' AND reactions IS NOT NULL"
+    ).map_err(|e| format!("Failed to prepare reaction query: {}", e))?;
+
+    let reaction_rows: Vec<(String, i64, String, i64)> = reaction_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query reactions: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut reaction_count = 0;
+    for (message_id, chat_id, reactions_json, at) in reaction_rows {
+        // Parse the reactions JSON array
+        if let Ok(reactions) = serde_json::from_str::<Vec<serde_json::Value>>(&reactions_json) {
+            for reaction in reactions {
+                if let (Some(reaction_id), Some(emoji), Some(author_id)) = (
+                    reaction.get("id").and_then(|v| v.as_str()),
+                    reaction.get("emoji").and_then(|v| v.as_str()),
+                    reaction.get("author_id").and_then(|v| v.as_str()),
+                ) {
+                    // Insert reaction as separate event
+                    let tags = serde_json::json!([["e", message_id]]).to_string();
+
+                    conn.execute(
+                        r#"
+                        INSERT OR IGNORE INTO events (
+                            id, kind, chat_id, user_id, content, tags, reference_id,
+                            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+                        ) VALUES (?1, 7, ?2, NULL, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, NULL, ?8)
+                        "#,
+                        rusqlite::params![
+                            reaction_id,
+                            chat_id,
+                            emoji,
+                            tags,
+                            message_id,
+                            at / 1000,
+                            at,
+                            author_id
+                        ]
+                    ).ok(); // Ignore errors for individual reactions
+
+                    reaction_count += 1;
+                }
+            }
+        }
+    }
+
+    println!("[Migration 6] Migrated {} reactions", reaction_count);
+
+    // Step 3: Mark migration as complete by storing version in settings
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '2')",
+        []
+    ).map_err(|e| format!("Failed to update storage version: {}", e))?;
+
+    println!("[Migration 6] Migration complete. Storage version set to 2.");
 
     Ok(())
 }

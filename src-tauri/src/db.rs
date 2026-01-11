@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use once_cell::sync::Lazy;
 
-use crate::{Profile, Status, Message, Chat, ChatType, Attachment};
+use crate::{Profile, Status, Message, Chat, ChatType, Attachment, Reaction};
+use crate::message::EditEntry;
 use crate::crypto::{internal_encrypt, internal_decrypt};
+use crate::stored_event::{StoredEvent, event_kind};
 
 /// In-memory cache for chat_identifier → integer ID mappings
 /// This avoids database lookups on every message operation
@@ -34,6 +36,8 @@ pub struct SlimProfile {
     status: Status,
     muted: bool,
     bot: bool,
+    avatar_cached: String,
+    banner_cached: String,
     // Omitting: messages, last_updated, mine
 }
 
@@ -54,6 +58,8 @@ impl Default for SlimProfile {
             status: Status::new(),
             muted: false,
             bot: false,
+            avatar_cached: String::new(),
+            banner_cached: String::new(),
         }
     }
 }
@@ -75,6 +81,8 @@ impl From<&Profile> for SlimProfile {
             status: profile.status.clone(),
             muted: profile.muted,
             bot: profile.bot,
+            avatar_cached: profile.avatar_cached.clone(),
+            banner_cached: profile.banner_cached.clone(),
         }
     }
 }
@@ -99,6 +107,8 @@ impl SlimProfile {
             mine: false,          // Default value
             muted: self.muted,
             bot: self.bot,
+            avatar_cached: self.avatar_cached.clone(),
+            banner_cached: self.banner_cached.clone(),
         }
     }
 }
@@ -107,10 +117,26 @@ impl SlimProfile {
 pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
     let conn = crate::account_manager::get_db_connection(handle)?;
 
-    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot FROM profiles")
+    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
+        // Get cached paths and validate they exist on disk
+        let avatar_cached: String = row.get(15)?;
+        let banner_cached: String = row.get(16)?;
+
+        // Only use cached paths if the files actually exist
+        let validated_avatar_cached = if !avatar_cached.is_empty() && std::path::Path::new(&avatar_cached).exists() {
+            avatar_cached
+        } else {
+            String::new()
+        };
+        let validated_banner_cached = if !banner_cached.is_empty() && std::path::Path::new(&banner_cached).exists() {
+            banner_cached
+        } else {
+            String::new()
+        };
+
         Ok(SlimProfile {
             id: row.get(0)?,  // npub column
             name: row.get(1)?,
@@ -130,6 +156,8 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
             },
             muted: row.get::<_, i32>(13)? != 0,
             bot: row.get::<_, i32>(14)? != 0,
+            avatar_cached: validated_avatar_cached,
+            banner_cached: validated_banner_cached,
         })
     })
     .map_err(|e| format!("Failed to query profiles: {}", e))?
@@ -148,8 +176,8 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
     let conn = crate::account_manager::get_db_connection(&handle)?;
 
     conn.execute(
-        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(npub) DO UPDATE SET
             name = excluded.name,
             display_name = excluded.display_name,
@@ -164,7 +192,9 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
             status_content = excluded.status_content,
             status_url = excluded.status_url,
             muted = excluded.muted,
-            bot = excluded.bot",
+            bot = excluded.bot,
+            avatar_cached = excluded.avatar_cached,
+            banner_cached = excluded.banner_cached",
         rusqlite::params![
             profile.id,  // This is the npub
             profile.name,
@@ -181,6 +211,8 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
             profile.status.url,
             profile.muted as i32,
             profile.bot as i32,
+            profile.avatar_cached,
+            profile.banner_cached,
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 
@@ -389,6 +421,40 @@ fn get_or_create_chat_id<R: Runtime>(
     crate::account_manager::return_db_connection(conn);
 
     // Update cache with the ID (write to both DB and cache)
+    {
+        let mut cache = CHAT_ID_CACHE.write().unwrap();
+        cache.insert(chat_identifier.to_string(), id);
+    }
+
+    Ok(id)
+}
+
+/// Helper function to get integer chat ID from identifier (lookup only, no creation)
+/// Returns an error if the chat doesn't exist
+pub fn get_chat_id_by_identifier<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_identifier: &str,
+) -> Result<i64, String> {
+    // Check cache first (fast path - no DB access)
+    {
+        let cache = CHAT_ID_CACHE.read().unwrap();
+        if let Some(&id) = cache.get(chat_identifier) {
+            return Ok(id);
+        }
+    }
+
+    // Cache miss - check database
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let id: i64 = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![chat_identifier],
+        |row| row.get(0)
+    ).map_err(|_| format!("Chat not found: {}", chat_identifier))?;
+
+    crate::account_manager::return_db_connection(conn);
+
+    // Update cache
     {
         let mut cache = CHAT_ID_CACHE.write().unwrap();
         cache.insert(chat_identifier.to_string(), id);
@@ -626,27 +692,15 @@ pub async fn delete_chat<R: Runtime>(handle: AppHandle<R>, chat_id: &str) -> Res
 }
 
 /// Save a single message to the database (efficient for incremental updates)
+///
+/// This function saves to the `events` table using the flat event architecture.
+/// The old `messages` table is no longer written to - it only exists for
+/// backward compatibility with migrated data (read-only fallback).
 pub async fn save_message<R: Runtime>(
     handle: AppHandle<R>,
     chat_id: &str,
     message: &Message
 ) -> Result<(), String> {
-    let npub = crate::account_manager::get_current_account()?;
-    let _db_path = crate::account_manager::get_database_path(&handle, &npub)?;
-
-    // Encrypt the message content
-    let encrypted_content = internal_encrypt(message.content.clone(), None).await;
-
-    let attachments_json = serde_json::to_string(&message.attachments)
-        .unwrap_or_else(|_| "[]".to_string());
-    let reactions_json = serde_json::to_string(&message.reactions)
-        .unwrap_or_else(|_| "[]".to_string());
-    let preview_json = message.preview_metadata.as_ref()
-        .and_then(|p| serde_json::to_string(p).ok());
-
-    // Get database connection
-    let conn = crate::account_manager::get_db_connection(&handle)?;
-
     // Get or create integer chat ID
     let chat_int_id = get_or_create_chat_id(&handle, chat_id)?;
 
@@ -657,33 +711,87 @@ pub async fn save_message<R: Runtime>(
         None
     };
 
-    conn.execute(
-        "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id, wrapper_event_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        rusqlite::params![
-            message.id,
-            chat_int_id,
-            encrypted_content,
-            message.replied_to,
-            preview_json,
-            attachments_json,
-            reactions_json,
-            message.at as i64,
-            message.mine as i32,
-            user_int_id,
-            message.wrapper_event_id,
-        ],
-    ).map_err(|e| format!("Failed to insert message {}: {}", message.id, e))?;
+    // Save to events table (flat event architecture)
+    let event = message_to_stored_event(message, chat_int_id, user_int_id);
+    save_event(&handle, &event).await?;
 
-    crate::account_manager::return_db_connection(conn);
+    // Also save any reactions as separate kind=7 events
+    for reaction in &message.reactions {
+        // Check if reaction event already exists to avoid duplicates
+        if !event_exists(&handle, &reaction.id)? {
+            let user_id = get_or_create_user_id(&handle, &reaction.author_id)?;
+            let is_mine = if let Ok(current_npub) = crate::account_manager::get_current_account() {
+                reaction.author_id == current_npub
+            } else {
+                false
+            };
+            save_reaction_event(&handle, reaction, chat_int_id, user_id, is_mine).await?;
+        }
+    }
 
     Ok(())
 }
 
-/// Save multiple messages for a specific chat (batch operation with transaction)
+/// Convert a Message to a StoredEvent for the flat event architecture
+fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>) -> StoredEvent {
+    // Determine event kind based on whether message has attachments
+    let kind = if !message.attachments.is_empty() {
+        event_kind::FILE_ATTACHMENT
+    } else {
+        event_kind::PRIVATE_DIRECT_MESSAGE
+    };
+
+    // Build tags array
+    let mut tags: Vec<Vec<String>> = Vec::new();
+
+    // Add millisecond precision tag
+    let ms = message.at % 1000;
+    if ms > 0 {
+        tags.push(vec!["ms".to_string(), ms.to_string()]);
+    }
+
+    // Add reply reference tag if present
+    if !message.replied_to.is_empty() {
+        tags.push(vec![
+            "e".to_string(),
+            message.replied_to.clone(),
+            "".to_string(),
+            "reply".to_string(),
+        ]);
+    }
+
+    // Add attachments as JSON tag for file messages
+    if !message.attachments.is_empty() {
+        if let Ok(attachments_json) = serde_json::to_string(&message.attachments) {
+            tags.push(vec!["attachments".to_string(), attachments_json]);
+        }
+    }
+
+    StoredEvent {
+        id: message.id.clone(),
+        kind,
+        chat_id,
+        user_id,
+        content: message.content.clone(),
+        tags,
+        reference_id: None,
+        created_at: message.at / 1000, // Convert ms to seconds
+        received_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        mine: message.mine,
+        pending: message.pending,
+        failed: message.failed,
+        wrapper_event_id: message.wrapper_event_id.clone(),
+        npub: message.npub.clone(),
+    }
+}
+
+/// Save multiple messages for a specific chat (batch operation)
 ///
-/// Note: This performs UPSERT operations - it only inserts/updates the provided messages,
-/// it does NOT delete other messages in the chat. This is safe for incremental updates.
+/// This uses the flat event architecture - each message is stored as an event.
+/// Reactions are stored as separate kind=7 events.
 pub async fn save_chat_messages<R: Runtime>(
     handle: AppHandle<R>,
     chat_id: &str,
@@ -694,91 +802,14 @@ pub async fn save_chat_messages<R: Runtime>(
         return Ok(());
     }
 
-    // For single message, use the optimized single-message function
-    if messages.len() == 1 {
-        return save_message(handle, chat_id, &messages[0]).await;
-    }
-
-    let npub = crate::account_manager::get_current_account()?;
-    let _db_path = crate::account_manager::get_database_path(&handle, &npub)?;
-
-    // Get or create integer chat ID
-    let chat_int_id = get_or_create_chat_id(&handle, chat_id)?;
-
-
-    // Encrypt all messages first and get user IDs (async operations before database transaction)
-    let mut encrypted_messages = Vec::new();
+    // Save each message using the event-based save_message function
     for message in messages {
-        // Get or create user ID
-        let user_int_id = if let Some(ref npub_str) = message.npub {
-            get_or_create_user_id(&handle, npub_str)?
-        } else {
-            None
-        };
-
-        let encrypted_content = internal_encrypt(message.content.clone(), None).await;
-        let attachments_json = serde_json::to_string(&message.attachments)
-            .unwrap_or_else(|_| "[]".to_string());
-        let reactions_json = serde_json::to_string(&message.reactions)
-            .unwrap_or_else(|_| "[]".to_string());
-        let preview_json = message.preview_metadata.as_ref()
-            .and_then(|p| serde_json::to_string(p).ok());
-
-        encrypted_messages.push((
-            message.id.clone(),
-            encrypted_content,
-            message.replied_to.clone(),
-            preview_json,
-            attachments_json,
-            reactions_json,
-            message.at,
-            message.mine,
-            user_int_id,
-            message.wrapper_event_id.clone(),
-        ));
-    }
-
-    // Now do all database operations synchronously
-    let mut conn = crate::account_manager::get_db_connection(&handle)?;
-
-    let tx = conn.transaction()
-        .map_err(|e| format!("Failed to start transaction: {}", e))?;
-
-    // Use INSERT OR REPLACE to upsert individual messages (preserves other messages in the chat)
-    for (id, encrypted_content, replied_to, preview_json, attachments_json, reactions_json, at, mine, user_int_id, wrapper_event_id) in encrypted_messages {
-        if let Err(e) = tx.execute(
-            "INSERT OR REPLACE INTO messages (id, chat_id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id, wrapper_event_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                id,
-                chat_int_id,
-                encrypted_content,
-                replied_to,
-                preview_json,
-                attachments_json,
-                reactions_json,
-                at as i64,
-                mine as i32,
-                user_int_id,
-                wrapper_event_id,
-            ],
-        ) {
-            eprintln!("Failed to insert message {} for chat {}: {}",
-                &id[..8.min(id.len())], &chat_id[..8.min(chat_id.len())], e);
+        if let Err(e) = save_message(handle.clone(), chat_id, message).await {
+            eprintln!("Failed to save message {}: {}", &message.id[..8.min(message.id.len())], e);
         }
     }
 
-    let result = match tx.commit() {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            eprintln!("Failed to commit transaction for chat {}: {}",
-                &chat_id[..8.min(chat_id.len())], e);
-            Err(format!("Failed to commit transaction: {}", e))
-        }
-    };
-
-    crate::account_manager::return_db_connection(conn);
-    result
+    Ok(())
 }
 
 // ============================================================================
@@ -1044,26 +1075,27 @@ pub struct AttachmentRef {
 pub async fn build_file_hash_index<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<HashMap<String, AttachmentRef>, String> {
+    use crate::stored_event::event_kind;
+
     let mut index: HashMap<String, AttachmentRef> = HashMap::new();
 
     let conn = crate::account_manager::get_db_connection(handle)?;
 
-    // Query all messages with non-empty attachments
-    // The attachments field is stored as plaintext JSON, so no decryption needed!
-    // Collect all data first, then drop the statement before returning connection
+    // Query file attachment events (kind=15) from the events table
+    // Attachments are stored in the tags field as JSON
     let attachment_data: Vec<(String, String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT m.id, c.chat_identifier, m.attachments
-             FROM messages m
-             JOIN chats c ON m.chat_id = c.id
-             WHERE m.attachments != '[]'"
+            "SELECT e.id, c.chat_identifier, e.tags
+             FROM events e
+             JOIN chats c ON e.chat_id = c.id
+             WHERE e.kind = ?1"
         ).map_err(|e| format!("Failed to prepare attachment query: {}", e))?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(rusqlite::params![event_kind::FILE_ATTACHMENT], |row| {
             Ok((
-                row.get::<_, String>(0)?, // message_id
+                row.get::<_, String>(0)?, // event_id (message_id)
                 row.get::<_, String>(1)?, // chat_identifier
-                row.get::<_, String>(2)?, // attachments JSON
+                row.get::<_, String>(2)?, // tags JSON
             ))
         }).map_err(|e| format!("Failed to query attachments: {}", e))?;
 
@@ -1077,9 +1109,19 @@ pub async fn build_file_hash_index<R: Runtime>(
 
     // Process the collected data
     const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    for (message_id, chat_id, attachments_json) in attachment_data {
+    for (message_id, chat_id, tags_json) in attachment_data {
+        // Parse tags to find the "attachments" tag
+        let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+        // Find the attachments tag: ["attachments", "<json>"]
+        let attachments_json = tags.iter()
+            .find(|tag| tag.first().map(|s| s.as_str()) == Some("attachments"))
+            .and_then(|tag| tag.get(1))
+            .map(|s| s.as_str())
+            .unwrap_or("[]");
+
         // Parse the attachments JSON
-        let attachments: Vec<crate::Attachment> = serde_json::from_str(&attachments_json)
+        let attachments: Vec<crate::Attachment> = serde_json::from_str(attachments_json)
             .unwrap_or_default();
 
         // Add each attachment to the index (skip empty hashes and empty URLs)
@@ -1114,84 +1156,17 @@ pub async fn build_file_hash_index<R: Runtime>(
 /// - offset: Number of messages to skip from the newest
 ///
 /// Returns messages in chronological order (oldest first within the batch)
+/// NOTE: This now uses the events table via get_message_views
 pub async fn get_chat_messages_paginated<R: Runtime>(
     handle: &AppHandle<R>,
     chat_id: &str,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    // Get integer chat ID from identifier
-    let chat_int_id: i64 = conn.query_row(
-        "SELECT id FROM chats WHERE chat_identifier = ?1",
-        rusqlite::params![chat_id],
-        |row| row.get(0)
-    ).map_err(|e| format!("Chat not found: {}", e))?;
-
-    // Query messages with pagination (newest first, then reverse for chronological order)
-    // We use a subquery to get the right slice, then order chronologically
-    let messages = {
-        let mut stmt = conn.prepare(
-            "SELECT id, content_encrypted, replied_to, preview_metadata, attachments, reactions, at, mine, user_id
-             FROM (
-                 SELECT m.id, m.content_encrypted, m.replied_to, m.preview_metadata, m.attachments, m.reactions, m.at, m.mine, p.npub as user_id
-                 FROM messages m
-                 LEFT JOIN profiles p ON m.user_id = p.id
-                 WHERE m.chat_id = ?1
-                 ORDER BY m.at DESC
-                 LIMIT ?2 OFFSET ?3
-             )
-             ORDER BY at ASC"
-        ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
-
-        let rows = stmt.query_map(rusqlite::params![chat_int_id, limit as i64, offset as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?, // id
-                row.get::<_, String>(1)?, // content_encrypted
-                row.get::<_, String>(2)?, // replied_to
-                row.get::<_, Option<String>>(3)?, // preview_metadata
-                row.get::<_, String>(4)?, // attachments
-                row.get::<_, String>(5)?, // reactions
-                row.get::<_, i64>(6)? as u64, // at
-                row.get::<_, i32>(7)? != 0, // mine
-                row.get::<_, Option<String>>(8)?, // npub
-            ))
-        }).map_err(|e| format!("Failed to query messages: {}", e))?;
-
-        let result: Result<Vec<_>, _> = rows.collect();
-        result.map_err(|e| format!("Failed to collect messages: {}", e))?
-    };
-
-    crate::account_manager::return_db_connection(conn);
-
-    // Decrypt content for each message
-    let mut result = Vec::with_capacity(messages.len());
-    for (id, content_encrypted, replied_to, preview_json, attachments_json, reactions_json, at, mine, npub) in messages {
-        let content = internal_decrypt(content_encrypted, None).await
-            .unwrap_or_else(|_| "[Decryption failed]".to_string());
-
-        let attachments: Vec<crate::Attachment> = serde_json::from_str(&attachments_json).unwrap_or_default();
-        let reactions: Vec<crate::Reaction> = serde_json::from_str(&reactions_json).unwrap_or_default();
-        let preview_metadata = preview_json.and_then(|p| serde_json::from_str(&p).ok());
-
-        result.push(Message {
-            id,
-            content,
-            replied_to,
-            preview_metadata,
-            attachments,
-            reactions,
-            at,
-            pending: false,
-            failed: false,
-            mine,
-            npub,
-            wrapper_event_id: None, // Paginated queries don't need wrapper_event_id
-        });
-    }
-
-    Ok(result)
+    // Get integer chat ID
+    let chat_int_id = get_chat_id_by_identifier(handle, chat_id)?;
+    // Use the events-based message views
+    get_message_views(handle, chat_int_id, limit, offset).await
 }
 
 /// Get the total message count for a chat
@@ -1209,8 +1184,9 @@ pub async fn get_chat_message_count<R: Runtime>(
         |row| row.get(0)
     ).map_err(|e| format!("Chat not found: {}", e))?;
 
+    // Count message events (kind 14 = DM, kind 15 = file) from events table
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id = ?1",
+        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (14, 15)",
         rusqlite::params![chat_int_id],
         |row| row.get(0)
     ).map_err(|e| format!("Failed to count messages: {}", e))?;
@@ -1227,11 +1203,13 @@ pub async fn get_chat_last_messages<R: Runtime>(
     chat_id: &str,
     count: usize,
 ) -> Result<Vec<Message>, String> {
-    // Just use paginated with offset 0
-    get_chat_messages_paginated(handle, chat_id, count, 0).await
+    // Get integer chat ID
+    let chat_int_id = get_chat_id_by_identifier(handle, chat_id)?;
+    // Use the events-based message views
+    get_message_views(handle, chat_int_id, count, 0).await
 }
 
-/// Check if a message exists in the database by its ID
+/// Check if a message/event exists in the database by its ID
 /// This is used to prevent duplicate processing during sync
 pub async fn message_exists_in_db<R: Runtime>(
     handle: &AppHandle<R>,
@@ -1243,11 +1221,12 @@ pub async fn message_exists_in_db<R: Runtime>(
         Err(_) => return Ok(false), // No DB, let in-memory check handle it
     };
 
+    // Check in events table (unified storage)
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
         rusqlite::params![message_id],
         |row| row.get(0)
-    ).map_err(|e| format!("Failed to check message existence: {}", e))?;
+    ).map_err(|e| format!("Failed to check event existence: {}", e))?;
 
     crate::account_manager::return_db_connection(conn);
 
@@ -1266,8 +1245,9 @@ pub async fn wrapper_event_exists<R: Runtime>(
         Err(_) => return Ok(false), // No DB, can't check
     };
 
+    // Check in events table (unified storage)
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM messages WHERE wrapper_event_id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)",
         rusqlite::params![wrapper_event_id],
         |row| row.get(0)
     ).map_err(|e| format!("Failed to check wrapper event existence: {}", e))?;
@@ -1277,12 +1257,12 @@ pub async fn wrapper_event_exists<R: Runtime>(
     Ok(exists)
 }
 
-/// Update the wrapper event ID for an existing message
-/// This is called when we process a message that was previously stored without its wrapper ID
-/// Returns: Ok(true) if updated, Ok(false) if message already had a wrapper_id (duplicate giftwrap)
+/// Update the wrapper event ID for an existing event
+/// This is called when we process an event that was previously stored without its wrapper ID
+/// Returns: Ok(true) if updated, Ok(false) if event already had a wrapper_id (duplicate giftwrap)
 pub async fn update_wrapper_event_id<R: Runtime>(
     handle: &AppHandle<R>,
-    message_id: &str,
+    event_id: &str,
     wrapper_event_id: &str,
 ) -> Result<bool, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
@@ -1291,9 +1271,10 @@ pub async fn update_wrapper_event_id<R: Runtime>(
         Err(_) => return Ok(false), // No DB, nothing to update
     };
 
+    // Update in events table (unified storage)
     let rows_updated = match conn.execute(
-        "UPDATE messages SET wrapper_event_id = ?1 WHERE id = ?2 AND (wrapper_event_id IS NULL OR wrapper_event_id = '')",
-        rusqlite::params![wrapper_event_id, message_id],
+        "UPDATE events SET wrapper_event_id = ?1 WHERE id = ?2 AND (wrapper_event_id IS NULL OR wrapper_event_id = '')",
+        rusqlite::params![wrapper_event_id, event_id],
     ) {
         Ok(n) => n,
         Err(e) => {
@@ -1304,7 +1285,7 @@ pub async fn update_wrapper_event_id<R: Runtime>(
 
     crate::account_manager::return_db_connection(conn);
 
-    // Returns true if backfill succeeded, false if message already has a wrapper_id (duplicate giftwrap)
+    // Returns true if backfill succeeded, false if event already has a wrapper_id (duplicate giftwrap)
     Ok(rows_updated > 0)
 }
 
@@ -1322,23 +1303,23 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
         Err(_) => return Ok(wrapper_ids), // No DB, return empty set
     };
 
-    // Calculate timestamp for N days ago (in milliseconds, matching our `at` field)
-    let cutoff_ms = (std::time::SystemTime::now()
+    // Calculate timestamp for N days ago (in seconds, matching events.created_at)
+    let cutoff_secs = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64)
-        .saturating_sub(days * 24 * 60 * 60 * 1000);
+        .as_secs())
+        .saturating_sub(days * 24 * 60 * 60);
 
-    // Query all wrapper_event_ids from recent messages
+    // Query all wrapper_event_ids from recent events
     let result: Result<Vec<String>, _> = {
         let mut stmt = conn.prepare(
-            "SELECT wrapper_event_id FROM messages
+            "SELECT wrapper_event_id FROM events
              WHERE wrapper_event_id IS NOT NULL
              AND wrapper_event_id != ''
-             AND at >= ?1"
+             AND created_at >= ?1"
         ).map_err(|e| format!("Failed to prepare wrapper_id query: {}", e))?;
 
-        let rows = stmt.query_map(rusqlite::params![cutoff_ms as i64], |row| {
+        let rows = stmt.query_map(rusqlite::params![cutoff_secs as i64], |row| {
             row.get::<_, String>(0)
         }).map_err(|e| format!("Failed to query wrapper_ids: {}", e))?;
 
@@ -1364,7 +1345,7 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
 /// Update the downloaded status of an attachment in the database
 pub fn update_attachment_downloaded_status<R: Runtime>(
     handle: &AppHandle<R>,
-    chat_id: &str,
+    _chat_id: &str,  // No longer needed - we query by event ID directly
     msg_id: &str,
     attachment_id: &str,
     downloaded: bool,
@@ -1372,17 +1353,29 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
 ) -> Result<(), String> {
     let conn = crate::account_manager::get_db_connection(handle)?;
 
-    // Get the current attachments JSON
-    let attachments_json: String = conn.query_row(
-        "SELECT m.attachments FROM messages m
-         JOIN chats c ON m.chat_id = c.id
-         WHERE m.id = ?1 AND c.chat_identifier = ?2",
-        rusqlite::params![msg_id, chat_id],
+    // Get the current tags JSON from the events table
+    let tags_json: String = conn.query_row(
+        "SELECT tags FROM events WHERE id = ?1",
+        rusqlite::params![msg_id],
         |row| row.get(0)
-    ).map_err(|e| format!("Message not found: {}", e))?;
+    ).map_err(|e| format!("Event not found: {}", e))?;
+
+    // Parse the tags
+    let mut tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+    // Find the "attachments" tag
+    let attachments_tag_idx = tags.iter().position(|tag| {
+        tag.first().map(|s| s.as_str()) == Some("attachments")
+    });
+
+    let attachments_json = attachments_tag_idx
+        .and_then(|idx| tags.get(idx))
+        .and_then(|tag| tag.get(1))
+        .map(|s| s.as_str())
+        .unwrap_or("[]");
 
     // Parse and update the attachment
-    let mut attachments: Vec<Attachment> = serde_json::from_str(&attachments_json).unwrap_or_default();
+    let mut attachments: Vec<Attachment> = serde_json::from_str(attachments_json).unwrap_or_default();
 
     if let Some(att) = attachments.iter_mut().find(|a| a.id == attachment_id) {
         att.downloaded = downloaded;
@@ -1390,25 +1383,29 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
         att.path = path.to_string();
     } else {
         crate::account_manager::return_db_connection(conn);
-        return Err("Attachment not found in message".to_string());
+        return Err("Attachment not found in event".to_string());
     }
 
-    // Serialize back to JSON
-    let updated_json = serde_json::to_string(&attachments)
+    // Serialize the updated attachments back to JSON
+    let updated_attachments_json = serde_json::to_string(&attachments)
         .map_err(|e| format!("Failed to serialize attachments: {}", e))?;
 
-    // Get the chat's integer ID
-    let chat_int_id: i64 = conn.query_row(
-        "SELECT id FROM chats WHERE chat_identifier = ?1",
-        rusqlite::params![chat_id],
-        |row| row.get(0)
-    ).map_err(|e| format!("Chat not found: {}", e))?;
+    // Update the tags array - either update existing "attachments" tag or add new one
+    if let Some(idx) = attachments_tag_idx {
+        tags[idx] = vec!["attachments".to_string(), updated_attachments_json];
+    } else {
+        tags.push(vec!["attachments".to_string(), updated_attachments_json]);
+    }
 
-    // Update the message in the database
+    // Serialize the tags back to JSON
+    let updated_tags_json = serde_json::to_string(&tags)
+        .map_err(|e| format!("Failed to serialize tags: {}", e))?;
+
+    // Update the event in the database
     conn.execute(
-        "UPDATE messages SET attachments = ?1 WHERE id = ?2 AND chat_id = ?3",
-        rusqlite::params![updated_json, msg_id, chat_int_id],
-    ).map_err(|e| format!("Failed to update message: {}", e))?;
+        "UPDATE events SET tags = ?1 WHERE id = ?2",
+        rusqlite::params![updated_tags_json, msg_id],
+    ).map_err(|e| format!("Failed to update event: {}", e))?;
 
     crate::account_manager::return_db_connection(conn);
 
@@ -1466,4 +1463,1065 @@ pub async fn check_and_vacuum_if_needed<R: Runtime>(handle: &AppHandle<R>) -> Re
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Mini Apps History Functions
+// ============================================================================
+
+/// Mini App history entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiniAppHistoryEntry {
+    pub id: i64,
+    pub name: String,
+    pub src_url: String,
+    pub attachment_ref: String,
+    pub open_count: i64,
+    pub last_opened_at: i64,
+    pub is_favorite: bool,
+    /// Comma-separated list of categories (e.g., "game" or "app")
+    pub categories: String,
+    /// Optional marketplace app ID for linking to marketplace
+    pub marketplace_id: Option<String>,
+    /// Installed version of the app (for marketplace apps)
+    pub installed_version: Option<String>,
+}
+
+/// Record a Mini App being opened (upsert - insert or update)
+/// If the same name+src_url combo exists, update the attachment_ref, increment count, and update timestamp
+pub fn record_miniapp_opened<R: Runtime>(
+    handle: &AppHandle<R>,
+    name: String,
+    src_url: String,
+    attachment_ref: String,
+) -> Result<(), String> {
+    record_miniapp_opened_with_metadata(handle, name, src_url, attachment_ref, String::new(), None, None)
+}
+
+/// Record a Mini App being opened with additional metadata (categories, marketplace_id, and version)
+pub fn record_miniapp_opened_with_metadata<R: Runtime>(
+    handle: &AppHandle<R>,
+    name: String,
+    src_url: String,
+    attachment_ref: String,
+    categories: String,
+    marketplace_id: Option<String>,
+    installed_version: Option<String>,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Use INSERT OR REPLACE with a subquery to preserve/increment open_count
+    // Uses UNIQUE(name) constraint - same app name always updates the existing entry
+    conn.execute(
+        r#"
+        INSERT INTO miniapps_history (name, src_url, attachment_ref, open_count, last_opened_at, categories, marketplace_id, installed_version)
+        VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)
+        ON CONFLICT(name) DO UPDATE SET
+            src_url = excluded.src_url,
+            attachment_ref = excluded.attachment_ref,
+            open_count = open_count + 1,
+            last_opened_at = excluded.last_opened_at,
+            categories = CASE WHEN excluded.categories != '' THEN excluded.categories ELSE categories END,
+            marketplace_id = CASE WHEN excluded.marketplace_id IS NOT NULL THEN excluded.marketplace_id ELSE marketplace_id END,
+            installed_version = CASE WHEN excluded.installed_version IS NOT NULL THEN excluded.installed_version ELSE installed_version END
+        "#,
+        rusqlite::params![name, src_url, attachment_ref, now, categories, marketplace_id, installed_version],
+    ).map_err(|e| format!("Failed to record Mini App opened: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Get Mini Apps history sorted by last opened (most recent first)
+pub fn get_miniapps_history<R: Runtime>(
+    handle: &AppHandle<R>,
+    limit: Option<i64>,
+) -> Result<Vec<MiniAppHistoryEntry>, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let limit_val = limit.unwrap_or(50);
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, name, src_url, attachment_ref, open_count, last_opened_at, is_favorite, categories, marketplace_id, installed_version
+        FROM miniapps_history
+        ORDER BY is_favorite DESC, last_opened_at DESC
+        LIMIT ?1
+        "#
+    ).map_err(|e| format!("Failed to prepare Mini Apps history query: {}", e))?;
+
+    let result: Vec<MiniAppHistoryEntry> = {
+        let entries = stmt.query_map(rusqlite::params![limit_val], |row| {
+            Ok(MiniAppHistoryEntry {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                src_url: row.get(2)?,
+                attachment_ref: row.get(3)?,
+                open_count: row.get(4)?,
+                last_opened_at: row.get(5)?,
+                is_favorite: row.get::<_, i64>(6)? != 0,
+                categories: row.get(7)?,
+                marketplace_id: row.get(8)?,
+                installed_version: row.get(9)?,
+            })
+        }).map_err(|e| format!("Failed to query Mini Apps history: {}", e))?;
+
+        entries.filter_map(|e| e.ok()).collect()
+    };
+
+    drop(stmt);
+    crate::account_manager::return_db_connection(conn);
+    Ok(result)
+}
+
+/// Toggle the favorite status of a Mini App by its ID
+pub fn toggle_miniapp_favorite<R: Runtime>(
+    handle: &AppHandle<R>,
+    id: i64,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Toggle the is_favorite value and return the new state
+    conn.execute(
+        "UPDATE miniapps_history SET is_favorite = NOT is_favorite WHERE id = ?1",
+        rusqlite::params![id],
+    ).map_err(|e| format!("Failed to toggle Mini App favorite: {}", e))?;
+
+    // Get the new favorite state
+    let new_state: bool = conn.query_row(
+        "SELECT is_favorite FROM miniapps_history WHERE id = ?1",
+        rusqlite::params![id],
+        |row| row.get::<_, i64>(0).map(|v| v != 0)
+    ).map_err(|e| format!("Failed to get Mini App favorite state: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(new_state)
+}
+
+/// Set the favorite status of a Mini App by its ID
+pub fn set_miniapp_favorite<R: Runtime>(
+    handle: &AppHandle<R>,
+    id: i64,
+    is_favorite: bool,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "UPDATE miniapps_history SET is_favorite = ?1 WHERE id = ?2",
+        rusqlite::params![if is_favorite { 1 } else { 0 }, id],
+    ).map_err(|e| format!("Failed to set Mini App favorite: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Remove a Mini App from history by name
+pub fn remove_miniapp_from_history<R: Runtime>(
+    handle: &AppHandle<R>,
+    name: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "DELETE FROM miniapps_history WHERE name = ?1",
+        rusqlite::params![name],
+    ).map_err(|e| format!("Failed to remove Mini App from history: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Update the installed version for a marketplace app
+pub fn update_miniapp_version<R: Runtime>(
+    handle: &AppHandle<R>,
+    marketplace_id: &str,
+    version: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "UPDATE miniapps_history SET installed_version = ?1 WHERE marketplace_id = ?2",
+        rusqlite::params![version, marketplace_id],
+    ).map_err(|e| format!("Failed to update Mini App version: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Get the installed version for a marketplace app by its marketplace_id
+pub fn get_miniapp_installed_version<R: Runtime>(
+    handle: &AppHandle<R>,
+    marketplace_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let result = conn.query_row(
+        "SELECT installed_version FROM miniapps_history WHERE marketplace_id = ?1",
+        rusqlite::params![marketplace_id],
+        |row| row.get::<_, Option<String>>(0)
+    );
+
+    crate::account_manager::return_db_connection(conn);
+
+    match result {
+        Ok(version) => Ok(version),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Failed to get Mini App installed version: {}", e)),
+    }
+}
+
+// ============================================================================
+// Mini App Permissions Functions
+// ============================================================================
+
+/// Get all granted permissions for a Mini App by its file hash
+/// Returns a comma-separated string of granted permission names
+pub fn get_miniapp_granted_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+) -> Result<String, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT permission FROM miniapp_permissions WHERE file_hash = ?1 AND granted = 1"
+    ).map_err(|e| format!("Failed to prepare permission query: {}", e))?;
+
+    let permissions: Vec<String> = stmt.query_map(rusqlite::params![file_hash], |row| {
+        row.get::<_, String>(0)
+    })
+    .map_err(|e| format!("Failed to query permissions: {}", e))?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    drop(stmt);
+    crate::account_manager::return_db_connection(conn);
+
+    Ok(permissions.join(","))
+}
+
+/// Set the granted status of a permission for a Mini App by its file hash
+pub fn set_miniapp_permission<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+    permission: &str,
+    granted: bool,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    conn.execute(
+        r#"
+        INSERT INTO miniapp_permissions (file_hash, permission, granted, granted_at)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(file_hash, permission) DO UPDATE SET
+            granted = excluded.granted,
+            granted_at = CASE WHEN excluded.granted = 1 THEN excluded.granted_at ELSE granted_at END
+        "#,
+        rusqlite::params![file_hash, permission, granted as i32, if granted { Some(now) } else { None::<i64> }],
+    ).map_err(|e| format!("Failed to set Mini App permission: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Set multiple permissions at once for a Mini App by its file hash
+/// Uses a transaction to ensure all permissions are set atomically
+pub fn set_miniapp_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+    permissions: &[(&str, bool)],
+) -> Result<(), String> {
+    let mut conn = crate::account_manager::get_db_connection(handle)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let tx = conn.transaction()
+        .map_err(|e| format!("Failed to start transaction: {}", e))?;
+
+    for (permission, granted) in permissions {
+        tx.execute(
+            r#"
+            INSERT INTO miniapp_permissions (file_hash, permission, granted, granted_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(file_hash, permission) DO UPDATE SET
+                granted = excluded.granted,
+                granted_at = CASE WHEN excluded.granted = 1 THEN excluded.granted_at ELSE granted_at END
+            "#,
+            rusqlite::params![file_hash, permission, *granted as i32, if *granted { Some(now) } else { None::<i64> }],
+        ).map_err(|e| format!("Failed to set Mini App permission: {}", e))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit permission changes: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Check if an app has been prompted for permissions yet (by file hash)
+/// Returns true if any permission record exists for this hash
+pub fn has_miniapp_permission_prompt<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM miniapp_permissions WHERE file_hash = ?1)",
+        rusqlite::params![file_hash],
+        |row| row.get(0)
+    ).map_err(|e| format!("Failed to check permission prompt: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(exists)
+}
+
+/// Revoke all permissions for a Mini App by its file hash
+pub fn revoke_all_miniapp_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    file_hash: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "DELETE FROM miniapp_permissions WHERE file_hash = ?1",
+        rusqlite::params![file_hash],
+    ).map_err(|e| format!("Failed to revoke Mini App permissions: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Copy all permissions from one file hash to another (for app updates)
+pub fn copy_miniapp_permissions<R: Runtime>(
+    handle: &AppHandle<R>,
+    old_hash: &str,
+    new_hash: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Copy all permission records from old hash to new hash
+    conn.execute(
+        r#"
+        INSERT OR REPLACE INTO miniapp_permissions (file_hash, permission, granted, granted_at)
+        SELECT ?2, permission, granted, granted_at
+        FROM miniapp_permissions
+        WHERE file_hash = ?1
+        "#,
+        rusqlite::params![old_hash, new_hash],
+    ).map_err(|e| format!("Failed to copy Mini App permissions: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+// ============================================================================
+// Event Storage Functions (Flat Event-Based Architecture)
+// ============================================================================
+
+/// Save a StoredEvent to the events table
+///
+/// This is the primary storage function for the flat event architecture.
+/// All events (messages, reactions, attachments, etc.) are stored as flat rows.
+pub async fn save_event<R: Runtime>(
+    handle: &AppHandle<R>,
+    event: &StoredEvent,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Serialize tags to JSON
+    let tags_json = serde_json::to_string(&event.tags)
+        .unwrap_or_else(|_| "[]".to_string());
+
+    // For message and edit events, encrypt the content
+    let content = if event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+        || event.kind == event_kind::MESSAGE_EDIT
+    {
+        internal_encrypt(event.content.clone(), None).await
+    } else {
+        event.content.clone()
+    };
+
+    conn.execute(
+        r#"
+        INSERT OR REPLACE INTO events (
+            id, kind, chat_id, user_id, content, tags, reference_id,
+            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "#,
+        rusqlite::params![
+            event.id,
+            event.kind as i32,
+            event.chat_id,
+            event.user_id,
+            content,
+            tags_json,
+            event.reference_id,
+            event.created_at as i64,
+            event.received_at as i64,
+            event.mine as i32,
+            event.pending as i32,
+            event.failed as i32,
+            event.wrapper_event_id,
+            event.npub,
+        ],
+    ).map_err(|e| format!("Failed to save event: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Save a PIVX payment event to the events table
+///
+/// Resolves the chat_id from the conversation identifier and saves the event.
+pub async fn save_pivx_payment_event<R: Runtime>(
+    handle: &AppHandle<R>,
+    conversation_id: &str,
+    mut event: StoredEvent,
+) -> Result<(), String> {
+    // Resolve chat_id from conversation identifier
+    let chat_id = get_or_create_chat_id(handle, conversation_id)?;
+    event.chat_id = chat_id;
+
+    // Save the event
+    save_event(handle, &event).await
+}
+
+/// Get PIVX payment events for a chat
+///
+/// Returns all PIVX payment events (kind 30078 with d=pivx-payment tag) for a conversation.
+pub async fn get_pivx_payments_for_chat<R: Runtime>(
+    handle: &AppHandle<R>,
+    conversation_id: &str,
+) -> Result<Vec<StoredEvent>, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Get chat_id from conversation identifier
+    let chat_id: i64 = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![conversation_id],
+        |row| row.get(0)
+    ).map_err(|_| "Chat not found")?;
+
+    // Query events with kind=30078 and check for pivx-payment tag
+    let payments = {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, kind, chat_id, user_id, content, tags, reference_id,
+                   created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+            FROM events
+            WHERE chat_id = ?1 AND kind = ?2
+            ORDER BY created_at ASC
+            "#
+        ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
+
+        let rows = stmt.query_map(
+            rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32],
+            |row| {
+                let tags_json: String = row.get(5)?;
+                let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+                Ok(StoredEvent {
+                    id: row.get(0)?,
+                    kind: row.get::<_, i32>(1)? as u16,
+                    chat_id: row.get(2)?,
+                    user_id: row.get(3)?,
+                    content: row.get(4)?,
+                    tags,
+                    reference_id: row.get(6)?,
+                    created_at: row.get::<_, i64>(7)? as u64,
+                    received_at: row.get::<_, i64>(8)? as u64,
+                    mine: row.get::<_, i32>(9)? != 0,
+                    pending: row.get::<_, i32>(10)? != 0,
+                    failed: row.get::<_, i32>(11)? != 0,
+                    wrapper_event_id: row.get(12)?,
+                    npub: row.get(13)?,
+                })
+            }
+        ).map_err(|e| format!("Failed to query events: {}", e))?;
+
+        // Filter for PIVX payment events (d tag = "pivx-payment")
+        let mut payments = Vec::new();
+        for row in rows {
+            let event = row.map_err(|e| format!("Failed to read event: {}", e))?;
+            // Check if this is a PIVX payment (has d=pivx-payment tag)
+            let is_pivx = event.tags.iter().any(|tag| {
+                tag.len() >= 2 && tag[0] == "d" && tag[1] == "pivx-payment"
+            });
+            if is_pivx {
+                payments.push(event);
+            }
+        }
+        payments
+    }; // stmt dropped here, releasing borrow on conn
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(payments)
+}
+
+/// Save a reaction as a kind=7 event in the events table
+///
+/// Reactions are stored as separate events referencing the message they react to.
+/// This is the Nostr-standard way to store reactions (NIP-25).
+pub async fn save_reaction_event<R: Runtime>(
+    handle: &AppHandle<R>,
+    reaction: &Reaction,
+    chat_id: i64,
+    user_id: Option<i64>,
+    mine: bool,
+) -> Result<(), String> {
+    let event = StoredEvent {
+        id: reaction.id.clone(),
+        kind: event_kind::REACTION,
+        chat_id,
+        user_id,
+        content: reaction.emoji.clone(),
+        tags: vec![
+            vec!["e".to_string(), reaction.reference_id.clone()],
+        ],
+        reference_id: Some(reaction.reference_id.clone()),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        received_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        mine,
+        pending: false,
+        failed: false,
+        wrapper_event_id: None,
+        npub: Some(reaction.author_id.clone()),
+    };
+
+    save_event(handle, &event).await
+}
+
+/// Save a message edit as a kind=16 event in the events table
+///
+/// Edit events reference the original message and contain the new content.
+/// The content is encrypted just like DM content.
+pub async fn save_edit_event<R: Runtime>(
+    handle: &AppHandle<R>,
+    edit_id: &str,
+    message_id: &str,
+    new_content: &str,
+    chat_id: i64,
+    user_id: Option<i64>,
+    npub: &str,
+) -> Result<(), String> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let event = StoredEvent {
+        id: edit_id.to_string(),
+        kind: event_kind::MESSAGE_EDIT,
+        chat_id,
+        user_id,
+        content: new_content.to_string(),
+        tags: vec![
+            vec!["e".to_string(), message_id.to_string(), "".to_string(), "edit".to_string()],
+        ],
+        reference_id: Some(message_id.to_string()),
+        created_at: now_secs,
+        received_at: now_ms,
+        mine: true,
+        pending: false,
+        failed: false,
+        wrapper_event_id: None,
+        npub: Some(npub.to_string()),
+    };
+
+    save_event(handle, &event).await
+}
+
+/// Check if an event exists in the events table
+pub fn event_exists<R: Runtime>(
+    handle: &AppHandle<R>,
+    event_id: &str,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
+        rusqlite::params![event_id],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to check event existence: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(exists)
+}
+
+/// Check if an event exists by wrapper event ID (for deduplication during sync)
+pub fn event_exists_by_wrapper<R: Runtime>(
+    handle: &AppHandle<R>,
+    wrapper_event_id: &str,
+) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)",
+        rusqlite::params![wrapper_event_id],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to check event by wrapper: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(exists)
+}
+
+/// Get events for a chat with pagination
+///
+/// Returns events ordered by created_at descending (newest first).
+/// Optionally filter by event kinds.
+pub async fn get_events<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: i64,
+    kinds: Option<&[u16]>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<StoredEvent>, String> {
+    // Do all SQLite work synchronously in a block to avoid Send issues
+    let events: Vec<StoredEvent> = {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+
+        // Build query based on whether kinds filter is provided
+        let events = if let Some(k) = kinds {
+            // Build numbered placeholders for the IN clause
+            // chat_id=?1, kinds=?2,?3,..., limit=?N, offset=?N+1
+            let kind_placeholders: String = (0..k.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let limit_param = k.len() + 2;
+            let offset_param = k.len() + 3;
+
+            let sql = format!(
+                r#"
+                SELECT id, kind, chat_id, user_id, content, tags, reference_id,
+                       created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+                FROM events
+                WHERE chat_id = ?1 AND kind IN ({})
+                ORDER BY created_at DESC
+                LIMIT ?{} OFFSET ?{}
+                "#,
+                kind_placeholders, limit_param, offset_param
+            );
+
+            let mut stmt = conn.prepare(&sql)
+                .map_err(|e| format!("Failed to prepare events query: {}", e))?;
+
+            // Use rusqlite params! macro with dynamic kinds
+            let result: Vec<StoredEvent> = match k.len() {
+                1 => {
+                    let rows = stmt.query_map(
+                        rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64],
+                        parse_event_row
+                    ).map_err(|e| format!("Failed to query events: {}", e))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                },
+                2 => {
+                    let rows = stmt.query_map(
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, limit as i64, offset as i64],
+                        parse_event_row
+                    ).map_err(|e| format!("Failed to query events: {}", e))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                },
+                _ => return Err("Unsupported number of kinds".to_string()),
+            };
+
+            drop(stmt);
+            result
+        } else {
+            let sql = r#"
+                SELECT id, kind, chat_id, user_id, content, tags, reference_id,
+                       created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+                FROM events
+                WHERE chat_id = ?1
+                ORDER BY created_at DESC
+                LIMIT ?2 OFFSET ?3
+            "#;
+
+            let mut stmt = conn.prepare(sql)
+                .map_err(|e| format!("Failed to prepare events query: {}", e))?;
+
+            let rows = stmt.query_map(
+                rusqlite::params![chat_id, limit as i64, offset as i64],
+                parse_event_row
+            ).map_err(|e| format!("Failed to query events: {}", e))?;
+            let result: Vec<StoredEvent> = rows.filter_map(|r| r.ok()).collect();
+
+            drop(stmt);
+            result
+        };
+
+        crate::account_manager::return_db_connection(conn);
+        events
+    };
+
+    // Decrypt message content for text messages (this is the async part)
+    let mut decrypted_events = Vec::with_capacity(events.len());
+    for mut event in events {
+        if event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
+            event.content = internal_decrypt(event.content, None).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        }
+        decrypted_events.push(event);
+    }
+
+    Ok(decrypted_events)
+}
+
+/// Helper function to parse a row into a StoredEvent
+fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
+    let tags_json: String = row.get(5)?;
+    let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+    Ok(StoredEvent {
+        id: row.get(0)?,
+        kind: row.get::<_, i32>(1)? as u16,
+        chat_id: row.get(2)?,
+        user_id: row.get(3)?,
+        content: row.get(4)?,
+        tags,
+        reference_id: row.get(6)?,
+        created_at: row.get::<_, i64>(7)? as u64,
+        received_at: row.get::<_, i64>(8)? as u64,
+        mine: row.get::<_, i32>(9)? != 0,
+        pending: row.get::<_, i32>(10)? != 0,
+        failed: row.get::<_, i32>(11)? != 0,
+        wrapper_event_id: row.get(12)?,
+        npub: row.get(13)?,
+    })
+}
+
+/// Get events that reference specific message IDs
+///
+/// Used to fetch reactions and attachments for a set of messages.
+/// This is the core function for building materialized views.
+pub async fn get_related_events<R: Runtime>(
+    handle: &AppHandle<R>,
+    reference_ids: &[String],
+) -> Result<Vec<StoredEvent>, String> {
+    if reference_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let placeholders: String = reference_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        r#"
+        SELECT id, kind, chat_id, user_id, content, tags, reference_id,
+               created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+        FROM events
+        WHERE reference_id IN ({})
+        ORDER BY created_at ASC
+        "#,
+        placeholders
+    );
+
+    let mut stmt = conn.prepare(&sql)
+        .map_err(|e| format!("Failed to prepare related events query: {}", e))?;
+
+    let params: Vec<&dyn rusqlite::ToSql> = reference_ids.iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+
+    let events: Vec<StoredEvent> = stmt.query_map(params.as_slice(), |row| {
+        let tags_json: String = row.get(5)?;
+        let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+        Ok(StoredEvent {
+            id: row.get(0)?,
+            kind: row.get::<_, i32>(1)? as u16,
+            chat_id: row.get(2)?,
+            user_id: row.get(3)?,
+            content: row.get(4)?,
+            tags,
+            reference_id: row.get(6)?,
+            created_at: row.get::<_, i64>(7)? as u64,
+            received_at: row.get::<_, i64>(8)? as u64,
+            mine: row.get::<_, i32>(9)? != 0,
+            pending: row.get::<_, i32>(10)? != 0,
+            failed: row.get::<_, i32>(11)? != 0,
+            wrapper_event_id: row.get(12)?,
+            npub: row.get(13)?,
+        })
+    })
+    .map_err(|e| format!("Failed to query related events: {}", e))?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    // Drop statement to release borrow on conn
+    drop(stmt);
+    crate::account_manager::return_db_connection(conn);
+    Ok(events)
+}
+
+/// Get message events with their reactions composed (materialized view)
+///
+/// This function performs a single efficient query to get messages and their
+/// related events, then composes them into Message structs for the frontend.
+pub async fn get_message_views<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: i64,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Message>, String> {
+    // Step 1: Get message events (kind 14 and 15)
+    let message_kinds = [event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
+    let message_events = get_events(handle, chat_id, Some(&message_kinds), limit, offset).await?;
+
+    if message_events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2: Get related events (reactions, edits) for these messages
+    let message_ids: Vec<String> = message_events.iter().map(|e| e.id.clone()).collect();
+    let related_events = get_related_events(handle, &message_ids).await?;
+
+    // Group reactions and edits by message ID
+    let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<(u64, String)>> = HashMap::new(); // (timestamp, content)
+
+    for event in related_events {
+        if let Some(ref_id) = &event.reference_id {
+            match event.kind {
+                k if k == event_kind::REACTION => {
+                    let reaction = Reaction {
+                        id: event.id.clone(),
+                        reference_id: ref_id.clone(),
+                        author_id: event.npub.clone().unwrap_or_default(),
+                        emoji: event.content.clone(),
+                    };
+                    reactions_by_msg.entry(ref_id.clone()).or_default().push(reaction);
+                }
+                k if k == event_kind::MESSAGE_EDIT => {
+                    // Edit content is encrypted - already decrypted by get_related_events? No, we need to decrypt
+                    // Actually get_related_events doesn't decrypt. We need to decrypt here.
+                    let decrypted_content = internal_decrypt(event.content.clone(), None).await
+                        .unwrap_or_else(|_| event.content.clone());
+                    let timestamp_ms = event.created_at * 1000; // Convert to ms
+                    edits_by_msg.entry(ref_id.clone()).or_default().push((timestamp_ms, decrypted_content));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Sort edits by timestamp (chronologically)
+    for edits in edits_by_msg.values_mut() {
+        edits.sort_by_key(|(ts, _)| *ts);
+    }
+
+    // Step 3: Parse attachments from event tags OR fall back to messages table
+    // New events have attachments in tags, old migrated events need messages table lookup
+    let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
+    let mut events_needing_legacy_lookup: Vec<String> = Vec::new();
+
+    for event in &message_events {
+        if event.kind != event_kind::FILE_ATTACHMENT {
+            continue;
+        }
+
+        // Try to parse attachments from the "attachments" tag (new events)
+        if let Some(attachments_json) = event.get_tag("attachments") {
+            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(attachments_json) {
+                attachments_by_msg.insert(event.id.clone(), attachments);
+                continue;
+            }
+        }
+
+        // No attachments tag found - this is an old migrated event, need legacy lookup
+        events_needing_legacy_lookup.push(event.id.clone());
+    }
+
+    // Fall back to messages table for old migrated events without attachments tag
+    // NOTE: This is a legacy fallback - the messages table may have been dropped
+    if !events_needing_legacy_lookup.is_empty() {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+
+        // Check if messages table exists before querying it
+        let has_messages_table: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+            [],
+            |row| row.get::<_, i32>(0)
+        ).map(|count| count > 0).unwrap_or(false);
+
+        if has_messages_table {
+            for msg_id in &events_needing_legacy_lookup {
+                if let Ok(attachments_json) = conn.query_row::<String, _, _>(
+                    "SELECT attachments FROM messages WHERE id = ?1",
+                    rusqlite::params![msg_id],
+                    |row| row.get(0),
+                ) {
+                    if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&attachments_json) {
+                        attachments_by_msg.insert(msg_id.to_string(), attachments);
+                    }
+                }
+            }
+        }
+        crate::account_manager::return_db_connection(conn);
+    }
+
+    // Step 4: Compose Message structs (with decryption and edit application)
+    let mut messages = Vec::with_capacity(message_events.len());
+    for event in message_events {
+        // Calculate derived values before moving ownership
+        let replied_to = event.get_reply_reference().unwrap_or("").to_string();
+        let at = event.timestamp_ms();
+        let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
+
+        // Get attachments from the lookup map (for kind=15 file messages)
+        let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
+
+        // Get original content (already decrypted by get_events())
+        let original_content = if event.kind == event_kind::FILE_ATTACHMENT {
+            // File attachment content is just an encrypted hash - don't display
+            String::new()
+        } else {
+            // Content already decrypted by get_events()
+            event.content.clone()
+        };
+
+        // Check for edits and build edit history
+        let (content, edited, edit_history) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+            // Build edit history: original + all edits
+            let mut history = Vec::with_capacity(edits.len() + 1);
+
+            // Add original as first entry
+            history.push(EditEntry {
+                content: original_content.clone(),
+                edited_at: at,
+            });
+
+            // Add all edits
+            for (edit_ts, edit_content) in &edits {
+                history.push(EditEntry {
+                    content: edit_content.clone(),
+                    edited_at: *edit_ts,
+                });
+            }
+
+            // Use the latest edit's content
+            let latest_content = edits.last()
+                .map(|(_, c)| c.clone())
+                .unwrap_or(original_content);
+
+            (latest_content, true, Some(history))
+        } else {
+            (original_content, false, None)
+        };
+
+        let message = Message {
+            id: event.id,
+            content,
+            replied_to,
+            preview_metadata: None, // TODO: Parse from tags if needed
+            attachments,
+            reactions,
+            at,
+            pending: event.pending,
+            failed: event.failed,
+            mine: event.mine,
+            npub: event.npub,
+            wrapper_event_id: event.wrapper_event_id,
+            edited,
+            edit_history,
+        };
+        messages.push(message);
+    }
+
+    Ok(messages)
+}
+
+/// Update an event's pending/failed status
+pub fn update_event_status<R: Runtime>(
+    handle: &AppHandle<R>,
+    event_id: &str,
+    pending: bool,
+    failed: bool,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "UPDATE events SET pending = ?1, failed = ?2 WHERE id = ?3",
+        rusqlite::params![pending as i32, failed as i32, event_id],
+    ).map_err(|e| format!("Failed to update event status: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Delete an event by ID
+pub fn delete_event<R: Runtime>(
+    handle: &AppHandle<R>,
+    event_id: &str,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "DELETE FROM events WHERE id = ?1",
+        rusqlite::params![event_id],
+    ).map_err(|e| format!("Failed to delete event: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Get the total count of message events in a chat
+pub fn get_message_count<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: i64,
+) -> Result<i64, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3)",
+        rusqlite::params![
+            chat_id,
+            event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+            event_kind::FILE_ATTACHMENT as i32
+        ],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to count messages: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(count)
+}
+
+/// Get the storage version from settings
+pub fn get_storage_version<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<i32, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let version: i32 = conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'storage_version'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1); // Default to version 1 (old format)
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(version)
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-any-account-exists"
+description = "Enables the check_any_account_exists command without any pre-configured scope."
+commands.allow = ["check_any_account_exists"]
+
+[[permission]]
+identifier = "deny-check-any-account-exists"
+description = "Denies the check_any_account_exists command without any pre-configured scope."
+commands.deny = ["check_any_account_exists"]

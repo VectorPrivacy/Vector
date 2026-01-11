@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-marketplace-sync-install-status"
+description = "Enables the marketplace_sync_install_status command without any pre-configured scope."
+commands.allow = ["marketplace_sync_install_status"]
+
+[[permission]]
+identifier = "deny-marketplace-sync-install-status"
+description = "Denies the marketplace_sync_install_status command without any pre-configured scope."
+commands.deny = ["marketplace_sync_install_status"]

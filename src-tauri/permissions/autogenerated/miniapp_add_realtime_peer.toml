@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-add-realtime-peer"
+description = "Enables the miniapp_add_realtime_peer command without any pre-configured scope."
+commands.allow = ["miniapp_add_realtime_peer"]
+
+[[permission]]
+identifier = "deny-miniapp-add-realtime-peer"
+description = "Denies the miniapp_add_realtime_peer command without any pre-configured scope."
+commands.deny = ["miniapp_add_realtime_peer"]

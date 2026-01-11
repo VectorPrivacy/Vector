@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-invited-users"
+description = "Enables the get_invited_users command without any pre-configured scope."
+commands.allow = ["get_invited_users"]
+
+[[permission]]
+identifier = "deny-get-invited-users"
+description = "Denies the get_invited_users command without any pre-configured scope."
+commands.deny = ["get_invited_users"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-queue-chat-profiles-sync"
+description = "Enables the queue_chat_profiles_sync command without any pre-configured scope."
+commands.allow = ["queue_chat_profiles_sync"]
+
+[[permission]]
+identifier = "deny-queue-chat-profiles-sync"
+description = "Denies the queue_chat_profiles_sync command without any pre-configured scope."
+commands.deny = ["queue_chat_profiles_sync"]

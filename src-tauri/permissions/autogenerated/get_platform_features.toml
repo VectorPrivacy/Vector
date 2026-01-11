@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-platform-features"
+description = "Enables the get_platform_features command without any pre-configured scope."
+commands.allow = ["get_platform_features"]
+
+[[permission]]
+identifier = "deny-get-platform-features"
+description = "Denies the get_platform_features command without any pre-configured scope."
+commands.deny = ["get_platform_features"]

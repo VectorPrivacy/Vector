@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-pkey"
+description = "Enables the set_pkey command without any pre-configured scope."
+commands.allow = ["set_pkey"]
+
+[[permission]]
+identifier = "deny-set-pkey"
+description = "Denies the set_pkey command without any pre-configured scope."
+commands.deny = ["set_pkey"]

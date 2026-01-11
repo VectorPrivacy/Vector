@@ -28,7 +28,7 @@
 use std::borrow::Cow;
 use nostr_sdk::prelude::*;
 use tauri::Manager;
-use crate::{Message, Attachment, Reaction, TAURI_APP};
+use crate::{Message, Attachment, Reaction, TAURI_APP, StoredEvent, StoredEventBuilder};
 use crate::message::ImageMetadata;
 
 /// Protocol-agnostic rumor event representation
@@ -88,7 +88,30 @@ pub enum RumorProcessingResult {
         profile_id: String,
         until: u64,
     },
-    /// Event was ignored (unknown type or invalid)
+    /// A WebXDC peer advertisement for realtime channels
+    WebxdcPeerAdvertisement {
+        topic_id: String,
+        node_addr: String,
+    },
+    /// Unknown event type - stored for future compatibility
+    /// The frontend will render this as "Unknown Event" placeholder
+    UnknownEvent(StoredEvent),
+    /// A PIVX payment promo code sent in chat
+    PivxPayment {
+        /// The promo code (5-char Base58)
+        gift_code: String,
+        /// Amount in PIV
+        amount_piv: f64,
+        /// The PIVX address for balance checking (optional for older events)
+        address: Option<String>,
+        /// Optional message from sender
+        message: Option<String>,
+        /// The message ID for this payment event
+        message_id: String,
+        /// The stored event for persistence
+        event: StoredEvent,
+    },
+    /// Event was ignored (invalid, expired, or should not be stored)
     Ignored,
 }
 
@@ -128,9 +151,46 @@ pub async fn process_rumor(
         Kind::ApplicationSpecificData => {
             process_app_specific(rumor, context).await
         }
-        // Unknown or unsupported kind
-        _ => Ok(RumorProcessingResult::Ignored),
+        // Unknown or unsupported kind - store for future compatibility
+        _ => {
+            process_unknown_event(rumor, context).await
+        }
     }
+}
+
+/// Process an unknown event type
+///
+/// Creates a StoredEvent for unknown kinds so they can be stored
+/// and potentially displayed/processed in future versions.
+async fn process_unknown_event(
+    rumor: RumorEvent,
+    context: RumorContext,
+) -> Result<RumorProcessingResult, String> {
+    // Convert tags to Vec<Vec<String>> format
+    let tags: Vec<Vec<String>> = rumor.tags.iter()
+        .map(|tag| {
+            tag.as_slice().iter().map(|s| s.to_string()).collect()
+        })
+        .collect();
+
+    // Extract reference_id from e-tag if present
+    let reference_id = rumor.tags
+        .find(TagKind::e())
+        .and_then(|tag| tag.content())
+        .map(|s| s.to_string());
+
+    let event = StoredEventBuilder::new()
+        .id(rumor.id.to_hex())
+        .kind(rumor.kind.as_u16())
+        .content(rumor.content)
+        .tags(tags)
+        .reference_id(reference_id)
+        .created_at(rumor.created_at.as_u64())
+        .mine(context.is_mine)
+        .npub(rumor.pubkey.to_bech32().ok())
+        .build();
+
+    Ok(RumorProcessingResult::UnknownEvent(event))
 }
 
 /// Process a text message rumor
@@ -166,6 +226,8 @@ async fn process_text_message(
             None
         },
         wrapper_event_id: None, // Set by caller after processing
+        edited: false,
+        edit_history: None,
     };
     
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -298,6 +360,12 @@ async fn process_file_attachment(
     // Extract millisecond-precision timestamp
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
     
+    // Extract webxdc-topic for Mini Apps (realtime channel isolation)
+    let webxdc_topic = rumor.tags
+        .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
+        .and_then(|tag| tag.content())
+        .map(|s| s.to_string());
+    
     // Create the attachment
     let attachment = Attachment {
         id: file_hash,
@@ -310,6 +378,7 @@ async fn process_file_attachment(
         img_meta,
         downloading: false,
         downloaded,
+        webxdc_topic,
     };
     
     // Create the message with attachment
@@ -332,6 +401,8 @@ async fn process_file_attachment(
             None
         },
         wrapper_event_id: None, // Set by caller after processing
+        edited: false,
+        edit_history: None,
     };
     
     Ok(RumorProcessingResult::FileAttachment(msg))
@@ -369,7 +440,7 @@ async fn process_reaction(
 /// Currently handles typing indicators for real-time status updates.
 async fn process_app_specific(
     rumor: RumorEvent,
-    _context: RumorContext,
+    context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
     // Check if this is a typing indicator
     if is_typing_indicator(&rumor) {
@@ -404,8 +475,131 @@ async fn process_app_specific(
         });
     }
     
+    // Check if this is a PIVX payment
+    if is_pivx_payment(&rumor) {
+        // Extract gift code from tags
+        let gift_code = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("gift-code")))
+            .and_then(|tag| tag.content())
+            .ok_or("PIVX payment missing gift-code tag")?
+            .to_string();
+
+        // Extract amount from tags (in satoshis, convert to PIV)
+        let amount_str = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("amount")))
+            .and_then(|tag| tag.content())
+            .unwrap_or("0");
+        let amount_piv = amount_str.parse::<u64>().unwrap_or(0) as f64 / 100_000_000.0;
+
+        // Extract address from tags (for balance checking, optional for older events)
+        let address = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("address")))
+            .and_then(|tag| tag.content())
+            .map(|s| s.to_string());
+
+        // Parse optional message from content JSON
+        let message = serde_json::from_str::<serde_json::Value>(&rumor.content)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str().map(String::from)));
+
+        let message_id = rumor.id.to_hex();
+
+        // Convert rumor tags to StoredEvent format
+        let tags: Vec<Vec<String>> = rumor.tags.iter()
+            .map(|tag| tag.as_slice().iter().map(|s| s.to_string()).collect())
+            .collect();
+
+        // Create StoredEvent for persistence (chat_id will be set by caller)
+        let event = StoredEventBuilder::new()
+            .id(&message_id)
+            .kind(crate::stored_event::event_kind::APPLICATION_SPECIFIC)
+            .chat_id(0) // Will be set by caller
+            .content(&rumor.content)
+            .tags(tags)
+            .created_at(rumor.created_at.as_u64())
+            .mine(context.is_mine)
+            .npub(Some(rumor.pubkey.to_bech32().unwrap_or_default()))
+            .build();
+
+        return Ok(RumorProcessingResult::PivxPayment {
+            gift_code,
+            amount_piv,
+            address,
+            message,
+            message_id,
+            event,
+        });
+    }
+
+    // Check if this is a WebXDC peer advertisement
+    if is_webxdc_peer_advertisement(&rumor) {
+        println!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
+            context.is_mine,
+            rumor.pubkey.to_bech32().unwrap_or_else(|_| "unknown".to_string()));
+        
+        // Skip our own peer advertisements - we don't need to connect to ourselves
+        if context.is_mine {
+            println!("[WEBXDC] Ignoring our own peer advertisement");
+            return Ok(RumorProcessingResult::Ignored);
+        }
+        
+        println!("[WEBXDC] Detected peer advertisement in rumor from another device");
+        
+        // Extract topic ID and node address
+        let topic_id = rumor.tags
+            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic")))
+            .and_then(|tag| tag.content())
+            .ok_or("Peer advertisement missing webxdc-topic tag")?
+            .to_string();
+        
+        let node_addr = rumor.tags
+            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr")))
+            .and_then(|tag| tag.content())
+            .ok_or("Peer advertisement missing webxdc-node-addr tag")?
+            .to_string();
+        
+        // Validate expiration (peer advertisements should be short-lived)
+        if let Some(expiry_tag) = rumor.tags.find(TagKind::Expiration) {
+            if let Some(expiry_str) = expiry_tag.content() {
+                if let Ok(expiry_timestamp) = expiry_str.parse::<u64>() {
+                    let current_timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|e| format!("System time error: {}", e))?
+                        .as_secs();
+                    
+                    // Reject expired advertisements
+                    if expiry_timestamp <= current_timestamp {
+                        return Ok(RumorProcessingResult::Ignored);
+                    }
+                }
+            }
+        }
+        
+        return Ok(RumorProcessingResult::WebxdcPeerAdvertisement {
+            topic_id,
+            node_addr,
+        });
+    }
+    
     // Unknown application-specific data
     Ok(RumorProcessingResult::Ignored)
+}
+
+/// Check if a rumor is a WebXDC peer advertisement
+fn is_webxdc_peer_advertisement(rumor: &RumorEvent) -> bool {
+    rumor.content == "peer-advertisement"
+        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
+        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr"))).is_some()
+}
+
+/// Check if a rumor is a PIVX payment
+fn is_pivx_payment(rumor: &RumorEvent) -> bool {
+    rumor.tags
+        .find(TagKind::d())
+        .and_then(|tag| tag.content())
+        .map(|content| content == "pivx-payment")
+        .unwrap_or(false)
+        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("gift-code"))).is_some()
 }
 
 // ============================================================================

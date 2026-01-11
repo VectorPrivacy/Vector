@@ -1,7 +1,7 @@
 //! MLS (Message Layer Security) Module
 //!
 //! This module provides MLS group messaging capabilities using the nostr-mls crate.
-//! We use nostr-mls defaults and communicate exclusively through TRUSTED_RELAY.
+//! We use nostr-mls defaults and communicate exclusively through TRUSTED_RELAYS.
 //!
 //! ## Storage Schema
 //!
@@ -26,7 +26,7 @@ use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use std::sync::Arc;
 use tauri::{AppHandle, Runtime, Emitter};
-use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAY, STATE};
+use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
 use crate::db::{save_chat, save_chat_messages};
 
@@ -152,15 +152,15 @@ impl MlsService {
     }
 
     /// Publish the device's keypackage to enable others to add this device to groups
-    /// 
+    ///
     /// This will:
     /// 1. Generate a new keypackage for the device if needed
-    /// 2. Publish it to TRUSTED_RELAY via nostr-mls
+    /// 2. Publish it to TRUSTED_RELAYS via nostr-mls
     /// 3. Update "mls_keypackage_index" with the reference
     pub async fn publish_device_keypackage(&self, device_id: &str) -> Result<(), MlsError> {
         // TODO: Use nostr-mls to generate and publish keypackage
         // TODO: Store keypackage reference in "mls_keypackage_index"
-        // TODO: Use TRUSTED_RELAY for publishing
+        // TODO: Use TRUSTED_RELAYS for publishing
         
         // Stub implementation
         let _ = device_id;
@@ -182,7 +182,7 @@ impl MlsService {
       • initial_member_devices: Vec of (member_npub, device_id) pairs chosen by the caller
 
     - Steps:
-      1) Resolve creator pubkey and build NostrGroupConfigData scoped to TRUSTED_RELAY.
+      1) Resolve creator pubkey and build NostrGroupConfigData scoped to TRUSTED_RELAYS.
       2) Resolve each member device to its KeyPackage Event before touching the MLS engine:
          • Prefer local plaintext index "mls_keypackage_index" to get keypackage_ref by member npub + device_id.
          • If ref exists: fetch exact event by id; else: fetch latest Kind::MlsKeyPackage by author.
@@ -192,7 +192,7 @@ impl MlsService {
          • Capture:
            - engine_group_id (internal engine id, hex) for local operations and send path.
            - wire group id used on relays (h tag). We derive a canonical 64-hex when possible; fallback to engine id.
-      4) Publish welcome(s) to invited recipients 1:1 via gift_wrap_to on TRUSTED_RELAY.
+      4) Publish welcome(s) to invited recipients 1:1 via gift_wrap_to on TRUSTED_RELAYS.
       5) Persist encrypted UI metadata ("mls_groups") with:
          • group_id = wire id (relay filtering id, shown in UI)
          • engine_group_id = engine id (used by [rust.send_mls_group_message()](src-tauri/src/lib.rs:3144))
@@ -242,8 +242,10 @@ impl MlsService {
             .map_err(|e| MlsError::CryptoError(e.to_string()))?;
 
         // Build group config (relay-scoped)
-        let relay_url = RelayUrl::parse(TRUSTED_RELAY)
-            .map_err(|e| MlsError::NetworkError(format!("RelayUrl::parse: {}", e)))?;
+        let relay_urls: Vec<RelayUrl> = TRUSTED_RELAYS
+            .iter()
+            .filter_map(|r| RelayUrl::parse(r).ok())
+            .collect();
         let description = format!("Vector group: {}", name);
         let group_config = NostrGroupConfigData::new(
             name.to_string(),
@@ -251,7 +253,7 @@ impl MlsService {
             None, // image_hash
             None, // image_key
             None, // image_nonce
-            vec![relay_url],
+            relay_urls,
             vec![my_pubkey], // admins - moved from create_group call
         );
 
@@ -295,7 +297,7 @@ impl MlsService {
                 match NOSTR_CLIENT
                     .get()
                     .unwrap()
-                    .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     Ok(events) => events.into_iter().next(),
@@ -305,7 +307,7 @@ impl MlsService {
                     }
                 }
             } else {
-                // Fallback: fetch latest KeyPackage by author from TRUSTED_RELAY
+                // Fallback: fetch latest KeyPackage by author from TRUSTED_RELAYS
                 let filter = Filter::new()
                     .author(member_pk)
                     .kind(Kind::MlsKeyPackage)
@@ -313,7 +315,7 @@ impl MlsService {
                 match NOSTR_CLIENT
                     .get()
                     .unwrap()
-                    .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     Ok(events) => {
@@ -420,24 +422,24 @@ impl MlsService {
                 match NOSTR_CLIENT
                     .get()
                     .unwrap()
-                    .gift_wrap_to([TRUSTED_RELAY], &target, welcome, [])
+                    .gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &target, welcome, [])
                     .await
                 {
                     Ok(wrapper_id) => {
                         let recipient = target.to_bech32().unwrap_or_default();
                         println!(
-                            "[MLS][welcome][published] wrapper_id={}, recipient={}, relay={}",
+                            "[MLS][welcome][published] wrapper_id={}, recipient={}, relays={:?}",
                             wrapper_id.to_hex(),
                             recipient,
-                            TRUSTED_RELAY
+                            TRUSTED_RELAYS
                         );
                     }
                     Err(e) => {
                         let recipient = target.to_bech32().unwrap_or_default();
                         eprintln!(
-                            "[MLS][welcome][publish_error] recipient={}, relay={}, err={}",
+                            "[MLS][welcome][publish_error] recipient={}, relays={:?}, err={}",
                             recipient,
-                            TRUSTED_RELAY,
+                            TRUSTED_RELAYS,
                             e
                         );
                     }
@@ -547,7 +549,7 @@ impl MlsService {
                     .map_err(|e| MlsError::CryptoError(format!("Invalid keypackage ref: {}", e)))?;
                 let filter = Filter::new().id(id).limit(1);
                 if let Ok(events) = client
-                    .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     kp_event = events.into_iter().next();
@@ -563,7 +565,7 @@ impl MlsService {
                 .kind(Kind::MlsKeyPackage)
                 .limit(50);
             if let Ok(events) = client
-                .fetch_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+                .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
                 .await
             {
                 kp_event = events.into_iter().max_by_key(|e| e.created_at.as_u64());
@@ -604,7 +606,7 @@ impl MlsService {
         // Send welcome before merging commit (welcome is created for current epoch)
         if let Some(welcome_rumors) = welcome_rumors {
             for welcome in welcome_rumors {
-                if let Err(e) = client.gift_wrap_to([TRUSTED_RELAY], &member_pk, welcome, []).await {
+                if let Err(e) = client.gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &member_pk, welcome, []).await {
                     eprintln!("[MLS] Failed to send welcome: {}", e);
                 }
             }
@@ -806,13 +808,13 @@ impl MlsService {
     }
 
     /// Sync group messages since last cursor position
-    /// 
+    ///
     /// This will:
     /// 1. Read cursor from "mls_event_cursors" for the group
-    /// 2. Query TRUSTED_RELAY for events since cursor
+    /// 2. Query TRUSTED_RELAYS for events since cursor
     /// 3. Process each event via engine.process_message
     /// 4. Update cursor position
-    /// 
+    ///
     /// Returns (processed_events_count, new_messages_count)
     pub async fn sync_group_since_cursor(&self, group_id: &str) -> Result<(u32, u32), MlsError> {
         use nostr_sdk::prelude::*;
@@ -872,11 +874,11 @@ impl MlsService {
             .custom_tag(SingleLetterTag::lowercase(Alphabet::H), &gid_for_fetch)
             .limit(1000);
 
-        // 3) Fetch from TRUSTED_RELAY with reasonable timeout
+        // 3) Fetch from TRUSTED_RELAYS with reasonable timeout
         let mut used_fallback = false;
         let mut events = match client
             .fetch_events_from(
-                vec![TRUSTED_RELAY],
+                TRUSTED_RELAYS.to_vec(),
                 filter.clone(),
                 std::time::Duration::from_secs(15),
             )
@@ -903,7 +905,7 @@ impl MlsService {
 
             events = match client
                 .fetch_events_from(
-                    vec![TRUSTED_RELAY],
+                    TRUSTED_RELAYS.to_vec(),
                     filter,
                     std::time::Duration::from_secs(15),
                 )
@@ -1298,8 +1300,40 @@ impl MlsService {
                                     }));
                                 }
                             }
+                            RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
+                                // Handle WebXDC peer advertisement - add peer to realtime channel
+                                crate::handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
+                            }
+                            RumorProcessingResult::UnknownEvent(mut event) => {
+                                // Store unknown events for future compatibility
+                                if let Some(handle) = TAURI_APP.get() {
+                                    if let Ok(chat_int_id) = crate::db::get_chat_id_by_identifier(handle, &chat_id) {
+                                        event.chat_id = chat_int_id;
+                                        let _ = crate::db::save_event(handle, &event).await;
+                                    }
+                                }
+                            }
                             RumorProcessingResult::Ignored => {
-                                // Rumor was ignored (e.g., unknown kind)
+                                // Rumor was ignored (e.g., expired typing indicator)
+                            }
+                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                                // Save PIVX payment event to database and emit to frontend
+                                if let Some(handle) = TAURI_APP.get() {
+                                    let _ = crate::db::save_pivx_payment_event(handle, &gid_for_fetch, event).await;
+
+                                    handle.emit("pivx_payment_received", serde_json::json!({
+                                        "conversation_id": gid_for_fetch,
+                                        "gift_code": gift_code,
+                                        "amount_piv": amount_piv,
+                                        "address": address,
+                                        "message": message,
+                                        "message_id": message_id,
+                                        "sender": rumor_event.pubkey.to_hex(),
+                                        "is_mine": *is_mine,
+                                    })).unwrap_or_else(|e| {
+                                        eprintln!("[MLS] Failed to emit pivx_payment_received event: {}", e);
+                                    });
+                                }
                             }
                         }
                     }
@@ -1794,12 +1828,12 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                 
                 // Send the wrapper with expiration
                 client
-                    .send_event_to([TRUSTED_RELAY], &wrapper_with_expiry)
+                    .send_event_to(TRUSTED_RELAYS.iter().copied(), &wrapper_with_expiry)
                     .await
             } else {
                 // Send normal wrapper without expiration
                 client
-                    .send_event_to([TRUSTED_RELAY], &mls_wrapper)
+                    .send_event_to(TRUSTED_RELAYS.iter().copied(), &mls_wrapper)
                     .await
             };
             

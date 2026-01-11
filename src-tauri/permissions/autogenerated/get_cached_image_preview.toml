@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-cached-image-preview"
+description = "Enables the get_cached_image_preview command without any pre-configured scope."
+commands.allow = ["get_cached_image_preview"]
+
+[[permission]]
+identifier = "deny-get-cached-image-preview"
+description = "Denies the get_cached_image_preview command without any pre-configured scope."
+commands.deny = ["get_cached_image_preview"]

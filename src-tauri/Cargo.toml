@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.2.3"
+version = "0.3.0"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -59,6 +59,27 @@ hound = "3.5.1"
 rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Mini Apps (WebXDC) support
+zip = "2.1"
+toml = "0.8"
+thiserror = "1.0"
+anyhow = "1.0"
+log = "0.4"
+http = "1.1"
+url = "2.5"
+mime_guess = "2.0"
+# Realtime peer channels (Iroh P2P)
+iroh = "0.34"
+iroh-gossip = "0.34"
+parking_lot = "0.12"
+data-encoding = "2.6"
+rand = "0.8"
+# PIVX Promos (addressless crypto payments)
+secp256k1 = { version = "0.29", features = ["rand", "hashes"] }
+ripemd = "0.1"
+bs58 = "0.5"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]
@@ -85,3 +106,6 @@ whisper-rs = { version = "0.13.2", optional = true }
 tauri-plugin-updater = "2.9.0"
 tauri-plugin-single-instance = { version = "2.3.6", features = ["deep-link"] }
 tauri-plugin-window-state = "2.4.1"
+
+# MCP bridge for AI-assisted debugging (only included in debug builds via cfg)
+tauri-plugin-mcp-bridge = "0.7"

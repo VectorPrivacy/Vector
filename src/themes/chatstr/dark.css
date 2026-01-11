@@ -83,6 +83,11 @@
   border-color: #1e0d2aff;
 }
 
+.attachment-panel {
+  background: #0a0a0a;
+  border-color: #1e0d2aff;
+}
+
 .input-box {
   background-color: #251134ff;
 }
@@ -337,4 +342,311 @@ select:disabled {
 
 .file-preview-btn-send:hover {
   opacity: 0.9;
+}
+
+/* Marketplace Theme Overrides */
+.marketplace-panel {
+  background-color: #0e0e10;
+}
+
+.marketplace-header {
+  background-color: rgba(22, 22, 22, 0.85);
+}
+
+/* Marketplace button in attachment panel */
+.attachment-panel-marketplace-btn {
+  background: linear-gradient(135deg, #b188e2 0%, #7d3c98 100%) !important;
+}
+
+.attachment-panel-marketplace-btn .icon {
+  background-color: #fff !important;
+}
+
+.marketplace-search-container input:focus {
+  border-color: rgba(177, 136, 226, 0.5);
+}
+
+.marketplace-filter-tag {
+  background-color: rgba(177, 136, 226, 0.15);
+  color: #b188e2;
+}
+
+.marketplace-filter-tag:hover {
+  background-color: rgba(177, 136, 226, 0.25);
+}
+
+.marketplace-filter-tag .icon {
+  background-color: #b188e2;
+}
+
+.marketplace-app-card {
+  background-color: #1a1a1d;
+  border-color: rgba(177, 136, 226, 0.15);
+}
+
+.marketplace-app-card:hover {
+  border-color: rgba(177, 136, 226, 0.35);
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.15);
+}
+
+.marketplace-app-icon-container {
+  background-color: rgba(177, 136, 226, 0.1);
+  border: 1px solid rgba(177, 136, 226, 0.2);
+}
+
+.marketplace-app-icon-placeholder {
+  background-color: #b188e2;
+}
+
+.marketplace-app-category {
+  background-color: rgba(177, 136, 226, 0.15);
+  color: #b188e2;
+}
+
+.marketplace-app-category:hover {
+  background-color: rgba(177, 136, 226, 0.3);
+}
+
+.marketplace-install-btn {
+  background-color: #b188e2;
+  color: #000;
+}
+
+.marketplace-install-btn:hover {
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+}
+
+.marketplace-install-btn.installed {
+  background-color: #b188e2;
+}
+
+.marketplace-install-btn.installing {
+  background-color: #b188e2;
+  opacity: 0.7;
+}
+
+.marketplace-install-btn.update-available {
+  background-color: #b188e2;
+  color: #000;
+}
+
+.marketplace-install-btn.updating {
+  background-color: #b188e2;
+  opacity: 0.7;
+}
+
+.marketplace-app-version.update-available {
+  color: #b188e2;
+}
+
+.marketplace-loading-icon {
+  background-color: #b188e2;
+}
+
+.marketplace-empty-icon {
+  background-color: rgba(177, 136, 226, 0.4);
+}
+
+.marketplace-retry-btn {
+  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
+  color: #fff;
+}
+
+.marketplace-retry-btn:hover {
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+}
+
+/* Publish Dialog Theme */
+.publish-app-container {
+  background-color: #0e0e10;
+  border-color: rgba(177, 136, 226, 0.25);
+}
+
+.publish-app-header {
+  border-bottom-color: rgba(177, 136, 226, 0.2);
+}
+
+.publish-app-icon-placeholder {
+  background: linear-gradient(135deg, #b188e2 0%, #7d3c98 100%);
+}
+
+.publish-app-icon-placeholder .icon {
+  background-color: #fff;
+}
+
+.publish-app-field input:focus,
+.publish-app-field textarea:focus {
+  border-color: rgba(177, 136, 226, 0.5);
+  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.15);
+}
+
+.publish-app-btn-publish {
+  background: linear-gradient(90deg, #9b6dd3, #b188e2);
+  color: #fff;
+}
+
+.publish-app-btn-publish:hover {
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+}
+
+/* File Preview Publish Button */
+.file-preview-btn-publish {
+  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
+  color: #fff;
+}
+
+.file-preview-btn-publish .icon {
+  background-color: #fff;
+}
+
+.file-preview-btn-publish:hover {
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+}
+
+/* App Details Panel Theme Overrides */
+.app-details-panel {
+  background-color: #0e0e10;
+}
+
+.app-details-header {
+  background-color: rgba(22, 22, 22, 0.85);
+}
+
+.app-details-icon-container {
+  background-color: rgba(177, 136, 226, 0.1);
+}
+
+.app-details-icon-placeholder {
+  background-color: #b188e2;
+}
+
+.app-details-category {
+  background-color: rgba(177, 136, 226, 0.15);
+  color: #b188e2;
+}
+
+.app-details-category:hover {
+  background-color: rgba(177, 136, 226, 0.3);
+}
+
+.app-details-action-btn {
+  background-color: #b188e2;
+  color: #000;
+}
+
+.app-details-action-btn:hover {
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+}
+
+.app-details-action-btn.installed {
+  background-color: #b188e2;
+}
+
+.app-details-action-btn.installing {
+  background-color: #b188e2;
+  opacity: 0.7;
+}
+
+/* App Details Uninstall Button */
+.app-details-uninstall-btn {
+  background-color: rgba(255, 100, 100, 0.2);
+  color: #ff6464;
+  border: 1px solid rgba(255, 100, 100, 0.4);
+}
+
+.app-details-uninstall-btn:hover {
+  background-color: rgba(255, 100, 100, 0.3);
+  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.2);
+}
+
+/* App Details Update Button */
+.app-details-update-btn {
+  background-color: #b188e2;
+  color: #000;
+}
+
+.app-details-update-btn:hover {
+  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+}
+
+.app-details-update-btn.updating {
+  background-color: #b188e2;
+  opacity: 0.7;
+}
+
+/* App Details Version Update Display */
+.app-details-version-arrow {
+  color: #b188e2;
+}
+
+.app-details-version-new {
+  color: #b188e2;
+}
+
+.app-details-publisher {
+  background-color: rgba(177, 136, 226, 0.05);
+}
+
+.app-details-publisher:hover {
+  background-color: rgba(177, 136, 226, 0.1);
+}
+
+/* Marketplace category overflow indicator */
+.marketplace-app-category-overflow {
+  background-color: rgba(177, 136, 226, 0.2);
+  color: rgba(177, 136, 226, 0.9);
+}
+
+/* Featured category card */
+.marketplace-featured-category.highlighted {
+  background: linear-gradient(135deg, rgba(177, 136, 226, 0.15) 0%, rgba(112, 0, 128, 0.08) 100%);
+  border-color: rgba(177, 136, 226, 0.3);
+}
+
+.marketplace-featured-category.highlighted:hover {
+  box-shadow: 0 8px 24px rgba(177, 136, 226, 0.2);
+}
+
+.marketplace-popular-category:hover {
+  background-color: rgba(177, 136, 226, 0.2);
+  color: #b188e2;
+}
+
+/* Relay Add Button */
+.relay-add-btn {
+  background: rgba(177, 136, 226, 0.2);
+  border: 1px solid rgba(177, 136, 226, 0.4);
+  color: #b188e2;
+}
+
+.relay-add-btn:hover {
+  background: rgba(177, 136, 226, 0.3);
+  border-color: rgba(177, 136, 226, 0.6);
+}
+
+/* Relay Dialog */
+.relay-dialog {
+  border-color: rgba(177, 136, 226, 0.25);
+}
+
+.relay-dialog-header {
+  background: linear-gradient(90deg, rgba(177, 136, 226, 0.15) 0%, rgba(125, 60, 152, 0.1) 100%);
+}
+
+.relay-form-input:focus,
+.relay-form-select:focus {
+  border-color: rgba(177, 136, 226, 0.5);
+}
+
+.relay-dialog-buttons .primary-btn {
+  background-color: #b188e2;
+  color: #000;
+}
+
+.relay-dialog-buttons .primary-btn:hover {
+  box-shadow: 0 4px 12px rgba(177, 136, 226, 0.3);
+}
+
+.relay-metric-value {
+  color: #b188e2;
 }

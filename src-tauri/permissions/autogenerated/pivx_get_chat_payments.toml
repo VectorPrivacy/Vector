@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-get-chat-payments"
+description = "Enables the pivx_get_chat_payments command without any pre-configured scope."
+commands.allow = ["pivx_get_chat_payments"]
+
+[[permission]]
+identifier = "deny-pivx-get-chat-payments"
+description = "Denies the pivx_get_chat_payments command without any pre-configured scope."
+commands.deny = ["pivx_get_chat_payments"]

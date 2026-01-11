@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-chat-messages-paginated"
+description = "Enables the get_chat_messages_paginated command without any pre-configured scope."
+commands.allow = ["get_chat_messages_paginated"]
+
+[[permission]]
+identifier = "deny-get-chat-messages-paginated"
+description = "Denies the get_chat_messages_paginated command without any pre-configured scope."
+commands.deny = ["get_chat_messages_paginated"]
