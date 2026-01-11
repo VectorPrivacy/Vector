@@ -26,9 +26,6 @@ const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmno
 /// PIVX mainnet P2PKH address prefix (0x1E = 30)
 const PIVX_PUBKEY_ADDRESS_PREFIX: u8 = 30;
 
-/// PIVX mainnet WIF prefix (0xD4 = 212)
-const PIVX_WIF_PREFIX: u8 = 212;
-
 /// Blockbook API endpoints (with failover)
 const BLOCKBOOK_APIS: &[&str] = &[
     "https://explorer.pivxla.bz",
@@ -118,11 +115,14 @@ where
 // Core Cryptographic Functions
 // ============================================================================
 
-/// Generate a random 5-character Base58 promo code
+/// Generate a random 10-character Base58 promo code
+/// 10 chars = 58^10 ≈ 430 quadrillion combinations (vs 656M for 5 chars)
+/// Combined with 12.5M iterations, this makes brute-forcing impractical
+/// Note: Claiming/sweeping supports any code length for backwards compatibility
 fn generate_promo_code() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..5)
+    (0..10)
         .map(|_| {
             let idx = rng.gen_range(0..BASE58_ALPHABET.len());
             BASE58_ALPHABET[idx] as char
@@ -272,19 +272,6 @@ fn decode_pivx_address(address: &str) -> Result<[u8; 20], String> {
     let mut hash = [0u8; 20];
     hash.copy_from_slice(&decoded[1..21]);
     Ok(hash)
-}
-
-/// Convert private key to WIF format
-#[allow(dead_code)]
-fn privkey_to_wif(privkey: &[u8; 32]) -> String {
-    let mut payload = vec![PIVX_WIF_PREFIX];
-    payload.extend_from_slice(privkey);
-    payload.push(0x01); // Compressed flag
-
-    let checksum = double_sha256(&payload);
-    payload.extend_from_slice(&checksum[0..4]);
-
-    base58_encode(&payload)
 }
 
 // ============================================================================
@@ -714,6 +701,7 @@ async fn get_promo_privkey<R: Runtime>(
 }
 
 /// Update promo status in database
+/// For 'claimed' or 'sent' status, the promo is deleted (funds are gone)
 fn update_promo_status<R: Runtime>(
     handle: &AppHandle<R>,
     gift_code: &str,
@@ -721,19 +709,18 @@ fn update_promo_status<R: Runtime>(
 ) -> Result<(), String> {
     let conn = crate::account_manager::get_db_connection(handle)?;
 
-    let claimed_at = if status == "claimed" {
-        Some(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs())
+    // For claimed/sent promos, delete them entirely (no need to track spent promos)
+    if status == "claimed" || status == "sent" {
+        conn.execute(
+            "DELETE FROM pivx_promos WHERE gift_code = ?1",
+            rusqlite::params![gift_code],
+        ).map_err(|e| format!("Failed to delete promo: {}", e))?;
     } else {
-        None
-    };
-
-    conn.execute(
-        "UPDATE pivx_promos SET status = ?1, claimed_at = ?2 WHERE gift_code = ?3",
-        rusqlite::params![status, claimed_at, gift_code],
-    ).map_err(|e| format!("Failed to update promo status: {}", e))?;
+        conn.execute(
+            "UPDATE pivx_promos SET status = ?1 WHERE gift_code = ?2",
+            rusqlite::params![status, gift_code],
+        ).map_err(|e| format!("Failed to update promo status: {}", e))?;
+    }
 
     crate::account_manager::return_db_connection(conn);
     Ok(())
@@ -1250,11 +1237,11 @@ pub async fn pivx_send_payment<R: Runtime>(
         event_id
     };
 
-    // Mark promo as sent (critical for security - prevents reuse)
+    // Delete sent promo from DB (funds are gone, no need to track it)
     let conn = crate::account_manager::get_db_connection(&handle)?;
     let _ = conn.execute(
-        "UPDATE pivx_promos SET amount_piv = ?1, status = 'sent' WHERE gift_code = ?2",
-        rusqlite::params![amount_piv, promo.gift_code],
+        "DELETE FROM pivx_promos WHERE gift_code = ?1",
+        rusqlite::params![promo.gift_code],
     );
     crate::account_manager::return_db_connection(conn);
 
@@ -1383,11 +1370,11 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         event_id
     };
 
-    // Mark promo as sent (change status)
+    // Delete sent promo from DB (funds are gone, no need to track it)
     {
         let conn = crate::account_manager::get_db_connection(&handle)?;
         let _ = conn.execute(
-            "UPDATE pivx_promos SET status = 'sent' WHERE gift_code = ?1",
+            "DELETE FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![gift_code],
         );
         crate::account_manager::return_db_connection(conn);

@@ -5828,6 +5828,24 @@ hr {
   transform: scale(0.95);
 }
 
+.pivx-dock-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pivx-dock-btn.disabled:hover {
+  transform: none;
+}
+
+.pivx-dock-btn.disabled:hover .pivx-dock-icon {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+}
+
+.pivx-dock-btn.disabled:hover .pivx-dock-icon .icon {
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
 .pivx-dock-icon {
   display: flex;
   align-items: center;
@@ -6011,6 +6029,8 @@ hr {
   margin-top: 10px;
   padding-top: 15px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
+  text-align: center;
+  position: relative;
 }
 
 .pivx-awaiting-deposit {
@@ -6035,8 +6055,11 @@ hr {
 }
 
 .pivx-deposit-received .icon {
+  position: relative;
   width: 20px;
   height: 20px;
+  min-width: 20px;
+  flex-shrink: 0;
   background-color: #59fcb3;
 }
 

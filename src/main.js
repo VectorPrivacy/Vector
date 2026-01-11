@@ -514,11 +514,25 @@ async function refreshPivxWallet() {
             fetchPivxPrice()
         ]);
 
+        // Store current balance for deposit limit check
+        pivxCurrentWalletBalance = balance;
+
         if (domPivxBalanceAmount) {
             domPivxBalanceAmount.innerHTML = `${balance.toFixed(2)} <span style="color: #564b8d;">PIV</span>`;
             // Trigger fade-in animation
             void domPivxBalanceAmount.offsetWidth; // Force reflow
             domPivxBalanceAmount.classList.add('pivx-fade-in');
+        }
+
+        // Update deposit button state based on balance
+        if (domPivxDepositBtn) {
+            if (balance >= PIVX_MAX_BALANCE_WARNING) {
+                domPivxDepositBtn.classList.add('disabled');
+                domPivxDepositBtn.title = 'Balance too high - please withdraw first';
+            } else {
+                domPivxDepositBtn.classList.remove('disabled');
+                domPivxDepositBtn.title = '';
+            }
         }
 
         // Show fiat value if we have price data
@@ -548,11 +562,25 @@ async function refreshPivxWallet() {
 // Track deposit polling state
 let pivxDepositPollingInterval = null;
 let pivxCurrentDepositAddress = null;
+let pivxCurrentWalletBalance = 0;
+const PIVX_MAX_BALANCE_WARNING = 1000;
 
 /**
  * Shows the deposit dialog with a new promo code and address
  */
 async function showPivxDepositDialog() {
+    // Security check: prevent deposits if balance is too high
+    if (pivxCurrentWalletBalance >= PIVX_MAX_BALANCE_WARNING) {
+        await popupConfirm(
+            'Balance Too High',
+            `Your wallet balance is <b>${pivxCurrentWalletBalance.toFixed(2)} PIV</b>, which exceeds the recommended limit of ${PIVX_MAX_BALANCE_WARNING} PIV.<br><br>Vector is not intended to replace a proper cryptocurrency wallet. Please <b>withdraw your funds</b> to a secure wallet before depositing more.`,
+            true,
+            '',
+            'vector_warning.svg'
+        );
+        return;
+    }
+
     // Show loading state on deposit button
     if (domPivxDepositBtn) {
         domPivxDepositBtn.classList.add('loading');
@@ -628,7 +656,7 @@ async function checkForDeposit(address) {
             if (statusEl) {
                 statusEl.innerHTML = `
                     <div class="pivx-deposit-received">
-                        <span class="icon icon-checkmark"></span>
+                        <span class="icon icon-check"></span>
                         <span>Received ${thisPromo.balance_piv.toFixed(8)} PIV!</span>
                     </div>
                 `;
