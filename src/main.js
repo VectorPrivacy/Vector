@@ -1209,13 +1209,25 @@ async function sendPivxPayment() {
                 return;
             }
 
-            // TODO: Implement UTXO splitting for custom amounts
-            showToast('Custom amounts coming soon. Use quick send for now.');
-            if (confirmBtn) {
-                confirmBtn.disabled = false;
-                confirmBtn.textContent = 'Send to Chat';
+            if (amount > pivxSendAvailableBalance) {
+                showToast(`Insufficient funds (max: ${pivxSendAvailableBalance.toFixed(2)} PIV)`);
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
             }
-            return;
+
+            // Send custom amount via coin selection
+            await invoke('pivx_send_payment', {
+                receiver: strOpenChat,
+                amountPiv: amount,
+                paymentMessage: message || null
+            });
+
+            closePivxSendDialog();
+            showToast(`Sent ${amount.toFixed(2)} PIV`);
+            refreshPivxWallet();
         }
     } catch (err) {
         console.error('Failed to send PIVX payment:', err);
@@ -1397,13 +1409,26 @@ function renderPivxPaymentBubble(giftCode, amountPiv, message, isMine, address) 
  * @param {string} address - PIVX address to check
  * @param {HTMLElement} hintEl - The hint element to update
  * @param {boolean} isMine - Whether this is my payment
+ * @param {number} retryCount - Number of retries attempted (for unconfirmed tx propagation)
  */
-async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine) {
+async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount = 0) {
     try {
-        const balance = await __TAURI__.core.invoke('pivx_check_address_balance', { address });
+        // Use force=true on retries to bypass cache
+        const force = retryCount > 0;
+        const balance = await __TAURI__.core.invoke('pivx_check_address_balance', { address, force });
         bubble.classList.remove('syncing');
         if (balance <= 0) {
-            // Mark as claimed - lower opacity and update hint
+            // Balance is 0 - could be claimed OR unconfirmed tx not yet visible
+            // Retry a few times with delay to handle tx propagation delay
+            if (retryCount < 3) {
+                bubble.classList.add('syncing');
+                hintEl.textContent = 'Confirming...';
+                setTimeout(() => {
+                    checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount + 1);
+                }, 3000); // Retry after 3 seconds
+                return;
+            }
+            // After retries, mark as claimed
             bubble.classList.add('claimed');
             hintEl.textContent = 'Claimed';
         } else {

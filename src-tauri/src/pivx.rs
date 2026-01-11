@@ -1157,7 +1157,8 @@ use num_bigint;
 // Send PIVX Payment via Chat
 // ============================================================================
 
-/// Send a PIVX payment to a chat (creates promo if needed)
+/// Send a PIVX payment to a chat using coin selection
+/// Merges existing promos as needed and creates a promo with the exact amount
 #[tauri::command]
 pub async fn pivx_send_payment<R: Runtime>(
     handle: AppHandle<R>,
@@ -1173,47 +1174,187 @@ pub async fn pivx_send_payment<R: Runtime>(
         return Err("Amount must be greater than 0".to_string());
     }
 
-    // Create a new promo code for this payment
-    let promo = pivx_create_promo(handle.clone()).await?;
+    let amount_sats = (amount_piv * 100_000_000.0) as u64;
 
-    // Get Nostr client
+    // Get all active promos with balances (collect encrypted keys first)
+    let encrypted_promos: Vec<(String, String, String, f64)> = {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let result = {
+            let mut stmt = conn.prepare(
+                "SELECT gift_code, address, privkey_encrypted, COALESCE(amount_piv, 0)
+                 FROM pivx_promos WHERE status = 'active' AND COALESCE(amount_piv, 0) > 0
+                 ORDER BY amount_piv DESC"
+            ).map_err(|e| format!("DB error: {}", e))?;
+
+            let rows = stmt.query_map([], |row| {
+                let gift_code: String = row.get(0)?;
+                let address: String = row.get(1)?;
+                let privkey_encrypted: String = row.get(2)?;
+                let amount: f64 = row.get(3)?;
+                Ok((gift_code, address, privkey_encrypted, amount))
+            }).map_err(|e| format!("Query error: {}", e))?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| format!("Row error: {}", e))?);
+            }
+            result
+        };
+        crate::account_manager::return_db_connection(conn);
+        result
+    };
+
+    // Decrypt private keys
+    let mut promos: Vec<(String, String, [u8; 32], f64)> = Vec::new();
+    for (gift_code, address, privkey_encrypted, amount) in encrypted_promos {
+        let privkey_hex = crate::crypto::internal_decrypt(privkey_encrypted, None)
+            .await
+            .map_err(|_| "Failed to decrypt key")?;
+        let privkey_bytes: [u8; 32] = hex::decode(&privkey_hex)
+            .map_err(|_| "Invalid privkey hex")?
+            .try_into()
+            .map_err(|_| "Invalid privkey length")?;
+        promos.push((gift_code, address, privkey_bytes, amount));
+    }
+
+    if promos.is_empty() {
+        return Err("No funds available to send".to_string());
+    }
+
+    // Calculate total available
+    let total_available: f64 = promos.iter().map(|(_, _, _, amt)| amt).sum();
+    let total_available_sats = (total_available * 100_000_000.0) as u64;
+
+    if total_available_sats < amount_sats {
+        return Err(format!(
+            "Insufficient funds: have {:.8} PIV, need {:.8} PIV",
+            total_available, amount_piv
+        ));
+    }
+
+    // Coin selection: select promos until we have enough (largest first)
+    let mut selected_promos: Vec<(String, String, [u8; 32])> = Vec::new();
+    let mut selected_total_sats: u64 = 0;
+
+    for (gift_code, address, privkey, amount) in &promos {
+        if selected_total_sats >= amount_sats {
+            break;
+        }
+        selected_promos.push((gift_code.clone(), address.clone(), *privkey));
+        selected_total_sats += (*amount * 100_000_000.0) as u64;
+    }
+
+    // Fetch UTXOs for all selected promos
+    let mut inputs: Vec<WithdrawInput> = Vec::new();
+    for (gift_code, address, privkey) in &selected_promos {
+        let utxos = fetch_utxos(address).await?;
+        if !utxos.is_empty() {
+            inputs.push(WithdrawInput {
+                utxos,
+                privkey: *privkey,
+                address: address.clone(),
+                gift_code: gift_code.clone(),
+            });
+        }
+    }
+
+    if inputs.is_empty() {
+        return Err("No UTXOs found in selected promos".to_string());
+    }
+
+    // Generate the send promo (will hold exact amount for recipient)
+    let send_promo = {
+        let code = loop {
+            let c = generate_promo_code();
+            if !promo_code_exists(&handle, &c)? {
+                break c;
+            }
+        };
+        let privkey = derive_privkey_from_code(&code);
+        let address = privkey_to_address(&privkey)?;
+        (code, address, privkey)
+    };
+
+    // Generate change promo
+    let change_promo = {
+        let code = loop {
+            let c = generate_promo_code();
+            if !promo_code_exists(&handle, &c)? && c != send_promo.0 {
+                break c;
+            }
+        };
+        let privkey = derive_privkey_from_code(&code);
+        let address = privkey_to_address(&privkey)?;
+        (code, address, privkey)
+    };
+
+    // Build transaction: send exact amount to send_promo, remainder to change_promo
+    let (tx_hex, change_sats) = build_withdrawal_transaction(
+        &inputs,
+        &send_promo.1,  // destination = send promo address
+        amount_sats,
+        Some(&change_promo.1),  // change = change promo address
+    ).await?;
+
+    // Broadcast transaction
+    let _txid = broadcast_tx(&tx_hex).await?;
+
+    // Delete spent promos
+    for input in &inputs {
+        let _ = update_promo_status(&handle, &input.gift_code, "claimed");
+    }
+
+    // Save the send promo (it now has the exact amount)
+    save_promo(&handle, &send_promo.0, &send_promo.1, &send_promo.2).await?;
+    {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let _ = conn.execute(
+            "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
+            rusqlite::params![amount_piv, send_promo.0],
+        );
+        crate::account_manager::return_db_connection(conn);
+    }
+
+    // Save change promo if there's change
+    let change_piv = change_sats as f64 / 100_000_000.0;
+    if change_sats > 0 {
+        save_promo(&handle, &change_promo.0, &change_promo.1, &change_promo.2).await?;
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let _ = conn.execute(
+            "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
+            rusqlite::params![change_piv, change_promo.0],
+        );
+        crate::account_manager::return_db_connection(conn);
+    }
+
+    // Now send the funded promo via Nostr
     let client = crate::NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
     let signer = client.signer().await.map_err(|e| e.to_string())?;
     let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
 
-    // Build content JSON
     let content = serde_json::json!({
         "amount_piv": amount_piv,
         "message": payment_message,
     }).to_string();
 
-    // Convert amount to satoshis for the tag
-    let amount_sats = (amount_piv * 100_000_000.0) as u64;
-
-    // Build and send the PIVX payment rumor
     let event_id = if receiver.starts_with("npub1") {
-        // Direct message - send via gift wrap
         let receiver_pubkey = PublicKey::from_bech32(&receiver).map_err(|e| e.to_string())?;
 
-        // Build the PIVX payment rumor with p tag for recipient (needed for DM routing)
-        // Include the address tag so recipients can check balance without deriving keys
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
             .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&promo.gift_code]))
+            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&send_promo.0]))
             .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&promo.address]))
+            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&send_promo.1]))
             .tag(Tag::public_key(receiver_pubkey))
             .build(my_public_key);
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
-        // Send to receiver
         client
             .gift_wrap(&receiver_pubkey, rumor.clone(), [])
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Send to ourselves for recovery
         client
             .gift_wrap(&my_public_key, rumor, [])
             .await
@@ -1221,40 +1362,40 @@ pub async fn pivx_send_payment<R: Runtime>(
 
         event_id
     } else {
-        // MLS group - build rumor without p tag but include address for balance checks
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
             .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&promo.gift_code]))
+            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&send_promo.0]))
             .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&promo.address]))
+            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&send_promo.1]))
             .build(my_public_key);
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
-        // Send via MLS
         crate::mls::send_mls_message(&receiver, rumor, None).await?;
 
         event_id
     };
 
-    // Delete sent promo from DB (funds are gone, no need to track it)
-    let conn = crate::account_manager::get_db_connection(&handle)?;
-    let _ = conn.execute(
-        "DELETE FROM pivx_promos WHERE gift_code = ?1",
-        rusqlite::params![promo.gift_code],
-    );
-    crate::account_manager::return_db_connection(conn);
+    // Delete sent promo from our DB (funds are transferred to recipient)
+    {
+        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let _ = conn.execute(
+            "DELETE FROM pivx_promos WHERE gift_code = ?1",
+            rusqlite::params![send_promo.0],
+        );
+        crate::account_manager::return_db_connection(conn);
+    }
 
-    // Save PIVX payment event to database for persistence
+    // Save payment event for persistence
     let stored_event = crate::stored_event::StoredEventBuilder::new()
         .id(&event_id)
         .kind(crate::stored_event::event_kind::APPLICATION_SPECIFIC)
         .content(&content)
         .tags(vec![
             vec!["d".to_string(), "pivx-payment".to_string()],
-            vec!["gift-code".to_string(), promo.gift_code.clone()],
+            vec!["gift-code".to_string(), send_promo.0.clone()],
             vec!["amount".to_string(), amount_sats.to_string()],
-            vec!["address".to_string(), promo.address.clone()],
+            vec!["address".to_string(), send_promo.1.clone()],
         ])
         .created_at(std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1265,12 +1406,12 @@ pub async fn pivx_send_payment<R: Runtime>(
         .build();
     let _ = crate::db::save_pivx_payment_event(&handle, &receiver, stored_event).await;
 
-    // Emit event to frontend so our own send shows up in chat immediately
+    // Emit event to frontend
     handle.emit("pivx_payment_received", serde_json::json!({
         "conversation_id": receiver,
-        "gift_code": promo.gift_code,
+        "gift_code": send_promo.0,
         "amount_piv": amount_piv,
-        "address": promo.address,
+        "address": send_promo.1,
         "message": payment_message,
         "message_id": event_id,
         "sender": my_public_key.to_bech32().unwrap_or_default(),
@@ -1467,10 +1608,18 @@ pub async fn pivx_get_chat_payments<R: Runtime>(
 }
 
 /// Check balance of a PIVX address (for frontend balance checking)
+/// Set force=true to bypass cache (useful after sending a tx)
 #[tauri::command]
 pub async fn pivx_check_address_balance(
     address: String,
+    force: Option<bool>,
 ) -> Result<f64, String> {
+    // If force=true, clear cache entry for this address first
+    if force.unwrap_or(false) {
+        if let Ok(mut cache) = BALANCE_CACHE.write() {
+            cache.remove(&address);
+        }
+    }
     fetch_balance(&address).await
 }
 
