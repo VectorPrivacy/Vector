@@ -1,4 +1,4 @@
-<img width="1293" height="646" alt="GitHub-Repo-Graphics-Header" src="https://github.com/user-attachments/assets/70ac808f-b2ea-499d-b2ab-ed76f7403e64"/>
+<img width="1293" height="646" alt="GitHub-Repo-Graphics-Header" src="./assets/github_header_readme.png"/>
  
 ---
 <h3 align="center">
@@ -19,7 +19,7 @@
 </p>
 
 ---
-<img align="left" src="https://github.com/user-attachments/assets/8787ed84-612b-4480-955b-49c5fe6c2a0c" width="150">
+<img align="left" src="./assets/vector_check.png" width="150">
 
 ### Free-to-Use, Open-Source
 
@@ -27,7 +27,7 @@ Vector Privacy is a free messenger application that was designed for anyone arou
 
 ---
 
-<img align="left" src="https://github.com/user-attachments/assets/4f2e73d2-991c-47ec-bcf6-00cc03562583" width="150">
+<img align="left" src="./assets/vector_warning.png" width="150">
 
 ### No Compromise Encryption
 
@@ -35,7 +35,7 @@ Vector utilizes a decentralized relay network (Nostr) as the base infrastructure
 
 ---
 
-<img align="left" src="https://github.com/user-attachments/assets/4f2e73d2-991c-47ec-bcf6-00cc03562583" width="150">
+<img align="left" src="./assets/vector_warning.png" width="150">
 
 ### No Personal Data Tracing, Breaches, & Leaks
 
