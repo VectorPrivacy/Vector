@@ -28,7 +28,7 @@
 use std::borrow::Cow;
 use nostr_sdk::prelude::*;
 use tauri::Manager;
-use crate::{Message, Attachment, Reaction, TAURI_APP};
+use crate::{Message, Attachment, Reaction, TAURI_APP, StoredEvent, StoredEventBuilder};
 use crate::message::ImageMetadata;
 
 /// Protocol-agnostic rumor event representation
@@ -93,7 +93,25 @@ pub enum RumorProcessingResult {
         topic_id: String,
         node_addr: String,
     },
-    /// Event was ignored (unknown type or invalid)
+    /// Unknown event type - stored for future compatibility
+    /// The frontend will render this as "Unknown Event" placeholder
+    UnknownEvent(StoredEvent),
+    /// A PIVX payment promo code sent in chat
+    PivxPayment {
+        /// The promo code (5-char Base58)
+        gift_code: String,
+        /// Amount in PIV
+        amount_piv: f64,
+        /// The PIVX address for balance checking (optional for older events)
+        address: Option<String>,
+        /// Optional message from sender
+        message: Option<String>,
+        /// The message ID for this payment event
+        message_id: String,
+        /// The stored event for persistence
+        event: StoredEvent,
+    },
+    /// Event was ignored (invalid, expired, or should not be stored)
     Ignored,
 }
 
@@ -133,9 +151,46 @@ pub async fn process_rumor(
         Kind::ApplicationSpecificData => {
             process_app_specific(rumor, context).await
         }
-        // Unknown or unsupported kind
-        _ => Ok(RumorProcessingResult::Ignored),
+        // Unknown or unsupported kind - store for future compatibility
+        _ => {
+            process_unknown_event(rumor, context).await
+        }
     }
+}
+
+/// Process an unknown event type
+///
+/// Creates a StoredEvent for unknown kinds so they can be stored
+/// and potentially displayed/processed in future versions.
+async fn process_unknown_event(
+    rumor: RumorEvent,
+    context: RumorContext,
+) -> Result<RumorProcessingResult, String> {
+    // Convert tags to Vec<Vec<String>> format
+    let tags: Vec<Vec<String>> = rumor.tags.iter()
+        .map(|tag| {
+            tag.as_slice().iter().map(|s| s.to_string()).collect()
+        })
+        .collect();
+
+    // Extract reference_id from e-tag if present
+    let reference_id = rumor.tags
+        .find(TagKind::e())
+        .and_then(|tag| tag.content())
+        .map(|s| s.to_string());
+
+    let event = StoredEventBuilder::new()
+        .id(rumor.id.to_hex())
+        .kind(rumor.kind.as_u16())
+        .content(rumor.content)
+        .tags(tags)
+        .reference_id(reference_id)
+        .created_at(rumor.created_at.as_u64())
+        .mine(context.is_mine)
+        .npub(rumor.pubkey.to_bech32().ok())
+        .build();
+
+    Ok(RumorProcessingResult::UnknownEvent(event))
 }
 
 /// Process a text message rumor
@@ -171,6 +226,8 @@ async fn process_text_message(
             None
         },
         wrapper_event_id: None, // Set by caller after processing
+        edited: false,
+        edit_history: None,
     };
     
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -344,6 +401,8 @@ async fn process_file_attachment(
             None
         },
         wrapper_event_id: None, // Set by caller after processing
+        edited: false,
+        edit_history: None,
     };
     
     Ok(RumorProcessingResult::FileAttachment(msg))
@@ -416,6 +475,62 @@ async fn process_app_specific(
         });
     }
     
+    // Check if this is a PIVX payment
+    if is_pivx_payment(&rumor) {
+        // Extract gift code from tags
+        let gift_code = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("gift-code")))
+            .and_then(|tag| tag.content())
+            .ok_or("PIVX payment missing gift-code tag")?
+            .to_string();
+
+        // Extract amount from tags (in satoshis, convert to PIV)
+        let amount_str = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("amount")))
+            .and_then(|tag| tag.content())
+            .unwrap_or("0");
+        let amount_piv = amount_str.parse::<u64>().unwrap_or(0) as f64 / 100_000_000.0;
+
+        // Extract address from tags (for balance checking, optional for older events)
+        let address = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("address")))
+            .and_then(|tag| tag.content())
+            .map(|s| s.to_string());
+
+        // Parse optional message from content JSON
+        let message = serde_json::from_str::<serde_json::Value>(&rumor.content)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str().map(String::from)));
+
+        let message_id = rumor.id.to_hex();
+
+        // Convert rumor tags to StoredEvent format
+        let tags: Vec<Vec<String>> = rumor.tags.iter()
+            .map(|tag| tag.as_slice().iter().map(|s| s.to_string()).collect())
+            .collect();
+
+        // Create StoredEvent for persistence (chat_id will be set by caller)
+        let event = StoredEventBuilder::new()
+            .id(&message_id)
+            .kind(crate::stored_event::event_kind::APPLICATION_SPECIFIC)
+            .chat_id(0) // Will be set by caller
+            .content(&rumor.content)
+            .tags(tags)
+            .created_at(rumor.created_at.as_u64())
+            .mine(context.is_mine)
+            .npub(Some(rumor.pubkey.to_bech32().unwrap_or_default()))
+            .build();
+
+        return Ok(RumorProcessingResult::PivxPayment {
+            gift_code,
+            amount_piv,
+            address,
+            message,
+            message_id,
+            event,
+        });
+    }
+
     // Check if this is a WebXDC peer advertisement
     if is_webxdc_peer_advertisement(&rumor) {
         println!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
@@ -475,6 +590,16 @@ fn is_webxdc_peer_advertisement(rumor: &RumorEvent) -> bool {
     rumor.content == "peer-advertisement"
         && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
         && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr"))).is_some()
+}
+
+/// Check if a rumor is a PIVX payment
+fn is_pivx_payment(rumor: &RumorEvent) -> bool {
+    rumor.tags
+        .find(TagKind::d())
+        .and_then(|tag| tag.content())
+        .map(|content| content == "pivx-payment")
+        .unwrap_or(false)
+        && rumor.tags.find(TagKind::Custom(Cow::Borrowed("gift-code"))).is_some()
 }
 
 // ============================================================================

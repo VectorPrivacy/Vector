@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-relay-logs"
+description = "Enables the get_relay_logs command without any pre-configured scope."
+commands.allow = ["get_relay_logs"]
+
+[[permission]]
+identifier = "deny-get-relay-logs"
+description = "Denies the get_relay_logs command without any pre-configured scope."
+commands.deny = ["get_relay_logs"]

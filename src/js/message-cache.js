@@ -201,49 +201,49 @@ class MessageCache {
     
     /**
      * Load initial messages for a chat from the database
+     * Uses the new event-based materialized views that compute reactions from flat events.
      * @param {string} chatId - The chat identifier
      * @param {number} count - Number of messages to load
      * @returns {Promise<Array>} - The loaded messages
      */
     async loadInitialMessages(chatId, count = MESSAGE_CACHE_CONFIG.messagesPerBatch) {
         const entry = this.getOrCreateEntry(chatId);
-        
+
         try {
             // Always refresh total count from DB (it may have changed since cache was created)
             entry.totalInDb = await invoke('get_chat_message_count', { chatId });
-            
+
             if (entry.totalInDb === 0) {
                 entry.isFullyLoaded = true;
                 return [];
             }
-            
+
             // If we already have enough messages cached, return them
             if (entry.messages.length >= count) {
                 return entry.messages;
             }
-            
+
             // We need to load messages from DB
             // If we have some cached (e.g., from real-time updates), we need to merge carefully
             const cachedMessages = entry.messages;
-            const cachedCount = cachedMessages.length;
-            
-            // Load the most recent messages from DB
-            const messages = await invoke('get_chat_messages_paginated', {
+
+            // Load materialized message views (messages with computed reactions from events table)
+            const messages = await invoke('get_message_views', {
                 chatId,
                 limit: count,
                 offset: 0
             });
-            
+
             // Merge: DB messages are authoritative, but add any cached messages not in DB result
             // (This handles the case where real-time messages arrived but aren't in DB yet)
             const dbMessageIds = new Set(messages.map(m => m.id));
             const newCachedMessages = cachedMessages.filter(m => !dbMessageIds.has(m.id));
-            
+
             // Combine: DB messages + any truly new cached messages, sorted by timestamp
             entry.messages = [...messages, ...newCachedMessages].sort((a, b) => a.at - b.at);
             entry.loadedOffset = messages.length; // Track how many we loaded from DB
             entry.isFullyLoaded = messages.length >= entry.totalInDb;
-            
+
             return entry.messages;
         } catch (error) {
             // Return whatever we have cached on error
@@ -253,6 +253,7 @@ class MessageCache {
     
     /**
      * Load more (older) messages for a chat
+     * Uses the new event-based materialized views.
      * @param {string} chatId - The chat identifier
      * @param {number} count - Number of additional messages to load
      * @returns {Promise<Array>} - The newly loaded messages (older ones)
@@ -262,28 +263,29 @@ class MessageCache {
         if (!entry) {
             return [];
         }
-        
+
         if (entry.isFullyLoaded || !entry.hasMoreMessages) {
             return [];
         }
-        
+
         try {
-            const messages = await invoke('get_chat_messages_paginated', {
+            // Load materialized message views with offset (from events table)
+            const messages = await invoke('get_message_views', {
                 chatId,
                 limit: count,
                 offset: entry.loadedOffset
             });
-            
+
             if (messages.length === 0) {
                 entry.isFullyLoaded = true;
                 return [];
             }
-            
+
             // Prepend older messages
             entry.addMessages(messages, true);
             entry.loadedOffset += messages.length;
             entry.isFullyLoaded = entry.loadedOffset >= entry.totalInDb;
-            
+
             return messages;
         } catch (error) {
             return [];
@@ -300,7 +302,48 @@ class MessageCache {
         const entry = this.getOrCreateEntry(chatId);
         return entry.addNewMessage(message);
     }
-    
+
+    /**
+     * Add a reaction to a cached message
+     * Used for real-time reaction updates from the event-based system.
+     * @param {string} chatId - The chat identifier
+     * @param {string} messageId - The ID of the message to add the reaction to
+     * @param {Object} reaction - The reaction object { id, reference_id, author_id, emoji }
+     * @returns {boolean} - Whether the reaction was added
+     */
+    addReactionToMessage(chatId, messageId, reaction) {
+        const entry = this.cache.get(chatId);
+        if (!entry) return false;
+
+        const message = entry.messages.find(m => m.id === messageId);
+        if (!message) return false;
+
+        // Initialize reactions array if not present
+        if (!message.reactions) {
+            message.reactions = [];
+        }
+
+        // Check for duplicate reaction
+        if (message.reactions.some(r => r.id === reaction.id)) {
+            return false;
+        }
+
+        message.reactions.push(reaction);
+        return true;
+    }
+
+    /**
+     * Get a specific message from the cache
+     * @param {string} chatId - The chat identifier
+     * @param {string} messageId - The message ID
+     * @returns {Object|null} - The message or null if not found
+     */
+    getMessage(chatId, messageId) {
+        const entry = this.cache.get(chatId);
+        if (!entry) return null;
+        return entry.messages.find(m => m.id === messageId) || null;
+    }
+
     /**
      * Update the total message count for a chat (e.g., after sync)
      * @param {string} chatId - The chat identifier

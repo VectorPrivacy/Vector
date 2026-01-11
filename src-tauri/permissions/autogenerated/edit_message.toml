@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-edit-message"
+description = "Enables the edit_message command without any pre-configured scope."
+commands.allow = ["edit_message"]
+
+[[permission]]
+identifier = "deny-edit-message"
+description = "Denies the edit_message command without any pre-configured scope."
+commands.deny = ["edit_message"]

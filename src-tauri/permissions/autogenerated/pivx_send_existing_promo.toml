@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-send-existing-promo"
+description = "Enables the pivx_send_existing_promo command without any pre-configured scope."
+commands.allow = ["pivx_send_existing_promo"]
+
+[[permission]]
+identifier = "deny-pivx-send-existing-promo"
+description = "Denies the pivx_send_existing_promo command without any pre-configured scope."
+commands.deny = ["pivx_send_existing_promo"]

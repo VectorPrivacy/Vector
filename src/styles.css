@@ -188,6 +188,20 @@
   mask-image: url("./icons/send.svg");
 }
 
+.icon-withdraw {
+  mask-image: url("./icons/withdraw.svg");
+}
+
+.icon-pivx {
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  background-color: transparent !important;
+  background-image: url("./icons/pivx.svg");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
 .icon-message {
   mask-image: url("./icons/message.svg");
 }
@@ -1538,6 +1552,98 @@ html, body {
 
 .reply-btn {
   font-size: 25px;
+}
+
+.edit-btn {
+  font-size: 18px;
+  margin-left: 2px;
+}
+
+/* Edited message indicator */
+.msg-edited-indicator {
+  display: inline;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.35);
+  font-style: italic;
+  margin-left: 6px;
+}
+
+.msg-edited-indicator.btn:hover {
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+
+/* Edit History Popup */
+.edit-history-popup {
+  position: fixed;
+  z-index: 1000;
+  background: #1a1a1a;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  min-width: 280px;
+  max-width: 400px;
+  max-height: 300px;
+  overflow: hidden;
+  animation: popupFadeIn 0.3s ease-out;
+}
+
+@keyframes popupFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.edit-history-content {
+  padding: 8px;
+  overflow-y: auto;
+  max-height: 280px;
+}
+
+.edit-history-entry {
+  padding: 8px 10px;
+  background: #0f0f0f;
+  border-radius: 6px;
+  border-left: 3px solid #555;
+  opacity: 0;
+  animation: entryFadeIn 0.2s ease-out forwards;
+}
+
+@keyframes entryFadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.edit-history-entry + .edit-history-entry {
+  margin-top: 6px;
+}
+
+.edit-history-entry.original {
+  border-left-color: #666;
+}
+
+.edit-history-entry.current {
+  border-left-color: var(--icon-color-primary);
+}
+
+.edit-history-time {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  line-height: 1.2;
+}
+
+.edit-history-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.3);
+  margin-left: 6px;
+}
+
+.edit-history-text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  word-wrap: break-word;
+  line-height: 1.3;
+  margin-top: 2px;
 }
 
 .msg-them:hover .msg-extras .hideable {
@@ -3862,8 +3968,11 @@ select:disabled:hover {
   flex: 1;
   font-size: 14px;
   color: rgba(255, 255, 255, 0.8);
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   margin-right: 15px;
+  min-width: 0;
 }
 
 .relay-status {
@@ -3906,6 +4015,369 @@ select:disabled:hover {
   background: rgba(128, 128, 128, 0.2);
   color: #808080;
   border: 1px solid rgba(128, 128, 128, 0.3);
+}
+
+.relay-status.disabled {
+  background: rgba(128, 128, 128, 0.15);
+  color: #666;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.relay-status.sleeping {
+  background: rgba(100, 149, 237, 0.2);
+  color: #6495ed;
+  border: 1px solid rgba(100, 149, 237, 0.3);
+}
+
+/* Relay Item Interactive Controls */
+.relay-item {
+  cursor: pointer;
+}
+
+.relay-item.disabled {
+  opacity: 0.5;
+}
+
+.relay-item-content {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.relay-mode-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.2);
+  color: #8b5cf6;
+  text-transform: uppercase;
+}
+
+.relay-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.relay-toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  appearance: none;
+  background: rgba(128, 128, 128, 0.3);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.3s ease;
+}
+
+.relay-toggle:checked {
+  background: rgba(90, 252, 180, 0.4);
+}
+
+.relay-toggle::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.3s ease;
+}
+
+.relay-toggle:checked::before {
+  transform: translateX(16px);
+}
+
+.relay-default-badge {
+  font-size: 9px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+}
+
+/* Relay Dialog Styles */
+.relay-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.relay-dialog-overlay.active {
+  display: flex;
+  opacity: 1;
+}
+
+.relay-dialog {
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
+  width: min(420px, calc(100vw - 40px));
+  max-height: calc(100vh - 80px);
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.relay-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.relay-dialog-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #fff;
+  word-break: break-all;
+  padding-right: 10px;
+}
+
+.relay-dialog-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.relay-dialog-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.relay-dialog-content {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+}
+
+.relay-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.relay-form-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.relay-form-input,
+.relay-form-select {
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  transition: border-color 0.2s ease;
+}
+
+.relay-form-input:focus,
+.relay-form-select:focus {
+  outline: none;
+}
+
+.relay-form-select {
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M2.5 4.5L6 8L9.5 4.5' stroke='rgba(255,255,255,0.6)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+
+.relay-form-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.relay-form-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0;
+}
+
+.relay-dialog-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.relay-dialog-buttons .btn {
+  flex: 1;
+  padding: 10px 15px;
+}
+
+/* Relay Info Dialog Specific */
+.relay-metrics-section h4,
+.relay-logs-section h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+}
+
+.relay-metrics-header,
+.relay-logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.relay-status-small {
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
+.relay-logs-copy-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+
+.relay-logs-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.relay-logs-copy-btn .icon {
+  width: 14px;
+  height: 14px;
+  background-color: rgba(255, 255, 255, 0.5);
+}
+
+.relay-logs-copy-btn:hover .icon {
+  background-color: rgba(255, 255, 255, 0.8);
+}
+
+.relay-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.relay-metric {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+}
+
+.relay-metric-value {
+  display: block;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.relay-metric-label {
+  display: block;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+
+.relay-logs-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.relay-logs-list li {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.relay-logs-list li:last-child {
+  border-bottom: none;
+}
+
+.relay-log-empty {
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+  text-align: center;
+}
+
+.relay-log-time {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  margin-right: 8px;
+}
+
+.relay-log-message.info { color: rgba(255, 255, 255, 0.7); }
+.relay-log-message.warn { color: #ffc107; }
+.relay-log-message.error { color: #ff5252; }
+
+/* Add Relay Button */
+.relay-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.relay-add-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 200px;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: bold;
+  transition: all 0.2s ease;
 }
 
 /* Responsive adjustments */
@@ -5151,6 +5623,914 @@ hr {
 /* Marketplace button in attachment panel */
 .attachment-panel-marketplace-btn {
   background-color: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* PIVX button in attachment panel */
+.attachment-panel-pivx-btn {
+  background: linear-gradient(to right, #3e306d, #534792) !important;
+}
+
+/* ============================================================================
+   PIVX WALLET STYLES
+   ============================================================================ */
+
+/* Attachment panel border when PIVX is active */
+.attachment-panel.pivx-active {
+  border-color: #282828;
+}
+
+/* PIVX Wallet Panel Content */
+.pivx-wallet-panel {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 0 !important;
+  position: relative;
+}
+
+.pivx-close-btn {
+  position: absolute;
+  top: -5px;
+  right: 0;
+  width: 22px;
+  height: 22px;
+  border: 2px solid #323232;
+  background: #000;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  z-index: 10;
+  transition: background 0.2s ease;
+}
+
+.pivx-close-btn:hover {
+  background: #1a1a1a;
+}
+
+.pivx-close-btn .icon {
+  width: 14px;
+  height: 14px;
+  background-color: #52478c;
+  position: relative;
+  margin: 0;
+}
+
+.pivx-wallet-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 15px;
+  padding-top: 28px;
+}
+
+.pivx-balance-section {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: linear-gradient(to right, #52478c 0%, #111013 100%);
+  border-radius: 12px;
+  border: 1px solid #52478c;
+  opacity: 0; /* Hidden by default, animated in when panel opens */
+}
+
+.pivx-balance-logo {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pivx-balance-logo img {
+  width: 64px;
+  height: 64px;
+}
+
+.pivx-balance-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  padding-right: 12px;
+}
+
+.pivx-balance-amount {
+  font-size: 30px;
+  font-weight: 600;
+  color: #fff;
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+
+.pivx-balance-fiat {
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.4);
+  font-family: var(--font-mono);
+  margin-top: 4px;
+  line-height: 1;
+}
+
+/* Balance fade-in animation */
+@keyframes pivx-fade-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.pivx-balance-amount.pivx-fade-in,
+.pivx-balance-fiat.pivx-fade-in {
+  animation: pivx-fade-in-left 0.3s ease-out forwards;
+}
+
+/* PIVX Panel open animations */
+@keyframes pivx-panel-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pivx-panel-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.pivx-balance-section.pivx-panel-animate {
+  animation: pivx-panel-fade-in 0.25s ease-out forwards;
+}
+
+.pivx-dock-btn.pivx-panel-animate {
+  animation: pivx-panel-slide-in 0.25s ease-out forwards;
+}
+
+.pivx-balance-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 34px;
+}
+
+.pivx-balance-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-top: 5px;
+}
+
+/* PIVX Action Dock (compact icon + label style) */
+.pivx-actions-dock {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.pivx-dock-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: white;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+  opacity: 0; /* Hidden by default, animated in when panel opens */
+}
+
+.pivx-dock-btn:hover {
+  transform: scale(1.08);
+}
+
+.pivx-dock-btn:active {
+  transform: scale(0.95);
+}
+
+.pivx-dock-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.pivx-dock-btn:hover .pivx-dock-icon {
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
+}
+
+.pivx-dock-icon .icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
+.pivx-dock-btn:hover .pivx-dock-icon .icon {
+  background-color: white;
+}
+
+/* Primary button (Send) - purple highlight */
+.pivx-dock-btn-primary .pivx-dock-icon {
+  background: linear-gradient(to right, #3e306d, #534792);
+}
+
+.pivx-dock-btn-primary .pivx-dock-icon .icon {
+  background-color: white;
+}
+
+.pivx-dock-btn-primary:hover .pivx-dock-icon {
+  background: linear-gradient(to right, #4a3c7a, #6358a3);
+  box-shadow: 0 4px 12px rgba(92, 77, 154, 0.4);
+}
+
+.pivx-dock-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+  transition: color 0.15s ease;
+}
+
+.pivx-dock-btn:hover .pivx-dock-label {
+  color: white;
+}
+
+/* PIVX Dialog Overlay */
+.pivx-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.pivx-dialog-overlay.active {
+  display: flex;
+  opacity: 1;
+}
+
+.pivx-dialog {
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid rgba(92, 77, 154, 0.3);
+  border-radius: 16px;
+  width: min(400px, calc(100vw - 40px));
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.pivx-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(to right, #3e306d, #534792);
+}
+
+.pivx-dialog-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #fff;
+}
+
+.pivx-dialog-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.pivx-dialog-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.pivx-dialog-content {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.pivx-deposit-instructions {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+}
+
+.pivx-address-display,
+.pivx-promo-code-display {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  word-break: break-all;
+  text-align: center;
+  color: #fff;
+}
+
+.pivx-promo-code-display {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: #8b5cf6;
+}
+
+.pivx-copy-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pivx-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.pivx-copy-btn .icon {
+  width: 16px;
+  height: 16px;
+  position: relative;
+  margin: 0;
+}
+
+/* PIVX Deposit Status */
+.pivx-deposit-status {
+  margin-top: 10px;
+  padding-top: 15px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pivx-awaiting-deposit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 15px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+}
+
+.pivx-deposit-received {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 15px;
+  color: #59fcb3;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.pivx-deposit-received .icon {
+  width: 20px;
+  height: 20px;
+  background-color: #59fcb3;
+}
+
+.pivx-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #7b68ee;
+  border-radius: 50%;
+  animation: pivx-spin 1s linear infinite;
+}
+
+@keyframes pivx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* PIVX Send Dialog */
+.pivx-send-promo-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pivx-send-promo-label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.pivx-send-promo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.pivx-send-promo-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.pivx-send-promo-list::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+}
+
+.pivx-send-promo-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.pivx-send-promo-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.pivx-send-promo-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+}
+
+.pivx-send-promo-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 15px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  opacity: 0;
+}
+
+.pivx-send-promo-item.animate-in {
+  animation: pivx-promo-fade-in 0.2s ease-out forwards;
+}
+
+@keyframes pivx-promo-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.pivx-send-promo-item:hover {
+  background: rgba(92, 77, 154, 0.3);
+  border-color: rgba(92, 77, 154, 0.5);
+}
+
+.pivx-send-promo-item.selected {
+  background: rgba(92, 77, 154, 0.4);
+  border-color: #7b68ee;
+}
+
+.pivx-send-promo-item-amount {
+  font-size: 16px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: #fff;
+}
+
+.pivx-send-promo-item-code {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  font-family: var(--font-mono);
+}
+
+.pivx-send-promo-empty {
+  padding: 20px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 13px;
+}
+
+.pivx-send-custom-toggle,
+.pivx-send-back-toggle {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  text-align: center;
+  padding: 8px;
+  padding-top: 0;
+  transition: color 0.2s ease;
+}
+
+.pivx-send-custom-toggle:hover,
+.pivx-send-back-toggle:hover {
+  color: #7b68ee;
+}
+
+.pivx-send-custom-warning {
+  font-size: 11px;
+  color: #FCE459;
+  border: 1px solid rgba(252, 228, 89, 0.3);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.pivx-amount-input-container {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 15px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+#pivx-send-amount,
+#pivx-withdraw-amount {
+  background: none;
+  border: none;
+  font-size: 24px;
+  font-family: var(--font-mono);
+  color: #fff;
+  outline: none;
+  text-align: right;
+  width: 150px;
+  padding-right: 0;
+}
+
+#pivx-send-amount::placeholder,
+#pivx-withdraw-amount::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.pivx-amount-label {
+  font-size: 18px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.pivx-send-available {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 4px 0;
+}
+
+.pivx-send-available #pivx-send-available-amount {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+#pivx-send-message {
+  width: 100%;
+  min-height: 80px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  resize: none;
+  outline: none;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+#pivx-send-message::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.pivx-send-info {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  text-align: center;
+}
+
+#pivx-send-recipient {
+  color: #8b5cf6;
+  font-weight: 500;
+}
+
+.pivx-send-confirm-btn {
+  width: 100%;
+  padding: 14px;
+  background: linear-gradient(to right, #3e306d, #534792);
+  border: none;
+  border-radius: 8px;
+  color: white;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pivx-send-confirm-btn:hover {
+  opacity: 0.9;
+  transform: scale(1.02);
+}
+
+.pivx-send-confirm-btn:active {
+  transform: scale(0.98);
+}
+
+.pivx-send-confirm-btn:disabled {
+  background: rgba(255, 255, 255, 0.2);
+  cursor: not-allowed;
+  transform: none;
+}
+
+.pivx-send-confirm-btn.loading {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* PIVX Dock Button Loading State */
+.pivx-dock-btn.loading {
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.pivx-dock-btn.loading .pivx-dock-icon .icon {
+  visibility: hidden;
+}
+
+.pivx-dock-btn.loading .pivx-dock-icon::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: pivx-spin 1s linear infinite;
+}
+
+.pivx-dock-btn.loading .pivx-dock-icon {
+  position: relative;
+}
+
+/* PIVX Withdraw Dialog */
+.pivx-withdraw-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.pivx-withdraw-available {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 4px 0;
+}
+
+.pivx-withdraw-available #pivx-withdraw-available-amount {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.pivx-withdraw-max-btn {
+  background: rgba(92, 77, 154, 0.3);
+  color: #8b5cf6;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pivx-withdraw-max-btn:hover {
+  background: rgba(92, 77, 154, 0.5);
+}
+
+.pivx-withdraw-fee-info {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+  margin-bottom: 12px;
+}
+
+/* PIVX Settings Dialog */
+.pivx-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pivx-settings-label {
+  font-size: 14px;
+  color: #fff;
+  font-weight: 500;
+}
+
+.pivx-settings-input {
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.pivx-settings-input:focus {
+  border-color: rgba(92, 77, 154, 0.5);
+}
+
+.pivx-settings-input::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.pivx-settings-select {
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.5)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 36px;
+  margin-bottom: 0;
+}
+
+.pivx-settings-select:focus {
+  border-color: rgba(92, 77, 154, 0.5);
+}
+
+.pivx-settings-select option {
+  background: #1a1a2e;
+  color: #fff;
+}
+
+.pivx-settings-hint {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  line-height: 1.3;
+}
+
+.pivx-settings-save-btn {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(to right, #3e306d, #534792);
+  border: none;
+  border-radius: 8px;
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-top: 10px;
+}
+
+.pivx-settings-save-btn:hover {
+  opacity: 0.9;
+}
+
+/* PIVX Payment Message Bubble - matches .msg-payment style */
+.msg-pivx-payment {
+  display: flex;
+  align-items: center;
+  padding: 10px;
+  border-radius: 16px;
+  margin-top: 10px;
+  border: 1px solid #9530f4;
+  background-color: #9530f440;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.msg-pivx-payment:hover {
+  background-color: #9530f460;
+}
+
+.msg-pivx-payment.syncing {
+  opacity: 0.6;
+  cursor: wait;
+  pointer-events: none;
+}
+
+.msg-pivx-payment.claiming {
+  opacity: 0.7;
+  cursor: wait;
+  pointer-events: none;
+}
+
+.msg-pivx-payment.claimed {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.msg-pivx-payment.claimed:hover {
+  background-color: #9530f440;
+}
+
+.msg-pivx-payment img {
+  height: 50px;
+  margin-right: 10px;
+  flex-shrink: 0;
+}
+
+.msg-pivx-payment-info {
+  margin-left: auto;
+  text-align: right;
+}
+
+.msg-pivx-payment-amount {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1;
+}
+
+.msg-pivx-payment-fiat {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.msg-pivx-payment-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.msg-pivx-payment-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  flex: 1;
+  margin-right: 30px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Marketplace Panel */

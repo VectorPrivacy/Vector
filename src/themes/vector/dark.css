@@ -591,3 +591,42 @@ select:disabled {
   background-color: rgba(89, 252, 179, 0.2);
   color: #59fcb3;
 }
+
+/* Relay Add Button */
+.relay-add-btn {
+  background: rgba(89, 252, 179, 0.2);
+  border: 1px solid rgba(89, 252, 179, 0.4);
+  color: #59fcb3;
+}
+
+.relay-add-btn:hover {
+  background: rgba(89, 252, 179, 0.3);
+  border-color: rgba(89, 252, 179, 0.6);
+}
+
+/* Relay Dialog */
+.relay-dialog {
+  border-color: rgba(89, 252, 179, 0.25);
+}
+
+.relay-dialog-header {
+  background: linear-gradient(90deg, rgba(89, 252, 179, 0.15) 0%, rgba(43, 151, 108, 0.1) 100%);
+}
+
+.relay-form-input:focus,
+.relay-form-select:focus {
+  border-color: rgba(89, 252, 179, 0.5);
+}
+
+.relay-dialog-buttons .primary-btn {
+  background-color: #59fcb3;
+  color: #000;
+}
+
+.relay-dialog-buttons .primary-btn:hover {
+  box-shadow: 0 4px 12px rgba(89, 252, 179, 0.3);
+}
+
+.relay-metric-value {
+  color: #59fcb3;
+}

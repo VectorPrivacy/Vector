@@ -55,6 +55,12 @@ pub struct Message {
     pub npub: Option<String>, // Sender's npub (for group chats)
     #[serde(skip_serializing, default)]
     pub wrapper_event_id: Option<String>, // Public giftwrap event ID (for duplicate detection)
+    /// Whether this message has been edited
+    #[serde(default)]
+    pub edited: bool,
+    /// Full edit history (original + all edits), ordered chronologically
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_history: Option<Vec<EditEntry>>,
 }
 
 impl Default for Message {
@@ -72,6 +78,8 @@ impl Default for Message {
             mine: false,
             npub: None,
             wrapper_event_id: None,
+            edited: false,
+            edit_history: None,
         }
     }
 }
@@ -189,6 +197,15 @@ pub struct Reaction {
     pub emoji: String,
 }
 
+/// A single entry in a message's edit history
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct EditEntry {
+    /// The content at this point in history
+    pub content: String,
+    /// When this version was created (Unix ms)
+    pub edited_at: u64,
+}
+
 /// Helper function to mark message as failed and update frontend
 async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
     // Find the message in chats and mark it as failed
@@ -241,6 +258,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         mine: true,
         npub: None, // Pending messages don't need npub (they're always mine)
         wrapper_event_id: None, // Will be set when message is sent
+        edited: false,
+        edit_history: None,
     };
     // Grab our pubkey first
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -2751,4 +2770,118 @@ pub async fn forward_attachment(
     
     // Return success - the new message ID will be emitted via the normal message flow
     Ok("forwarded".to_string())
+}
+
+/// Edit a message by sending an edit event
+/// Returns the edit event ID if successful
+#[tauri::command]
+pub async fn edit_message(
+    message_id: String,
+    chat_id: String,
+    new_content: String,
+) -> Result<String, String> {
+    use crate::chat::ChatType;
+    use crate::stored_event::event_kind;
+
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let my_npub = my_public_key.to_bech32().map_err(|e| e.to_string())?;
+
+    // Determine chat type and get db chat_id
+    let (chat_type, db_chat_id) = {
+        let state = STATE.lock().await;
+        let chat = state.chats.iter().find(|c| c.id == chat_id)
+            .ok_or_else(|| "Chat not found".to_string())?;
+        let chat_type = chat.chat_type.clone();
+
+        // Get db chat ID
+        let handle = TAURI_APP.get().ok_or("App handle not available")?;
+        let db_chat_id = crate::db::get_chat_id_by_identifier(handle, &chat_id)?;
+
+        (chat_type, db_chat_id)
+    };
+
+    // Build the edit rumor
+    let reference_event = EventId::from_hex(&message_id).map_err(|e| e.to_string())?;
+    let rumor = EventBuilder::new(Kind::from_u16(event_kind::MESSAGE_EDIT), &new_content)
+        .tag(Tag::event(reference_event))
+        .build(my_public_key);
+    let edit_id = rumor.id.ok_or("Failed to get edit rumor ID")?.to_hex();
+    let created_at = rumor.created_at.as_u64();
+
+    match chat_type {
+        ChatType::DirectMessage => {
+            // For DMs, send gift-wrapped edit
+            let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
+
+            // Send edit to the receiver
+            client
+                .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+                .await
+                .map_err(|e| e.to_string())?;
+
+            // Send edit to ourselves for recovery
+            client
+                .gift_wrap(&my_public_key, rumor, [])
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        ChatType::MlsGroup => {
+            // For group chats, send edit through MLS
+            crate::mls::send_mls_message(&chat_id, rumor, None).await?;
+        }
+    }
+
+    // Save edit event to database
+    if let Some(handle) = TAURI_APP.get() {
+        crate::db::save_edit_event(
+            handle,
+            &edit_id,
+            &message_id,
+            &new_content,
+            db_chat_id,
+            None, // user_id derived from npub stored in event
+            &my_npub,
+        ).await?;
+    }
+
+    // Update local state
+    let mut state = STATE.lock().await;
+    if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
+            // Build edit history if not present
+            if msg.edit_history.is_none() {
+                // First edit: save original content
+                msg.edit_history = Some(vec![EditEntry {
+                    content: msg.content.clone(),
+                    edited_at: msg.at,
+                }]);
+            }
+
+            // Add new edit to history
+            let edit_timestamp_ms = created_at * 1000;
+            if let Some(ref mut history) = msg.edit_history {
+                history.push(EditEntry {
+                    content: new_content.clone(),
+                    edited_at: edit_timestamp_ms,
+                });
+            }
+
+            // Update the message content and flag
+            msg.content = new_content;
+            msg.edited = true;
+
+            // Emit update to frontend
+            if let Some(handle) = TAURI_APP.get() {
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &message_id,
+                    "message": &msg,
+                    "chat_id": &chat_id
+                })).ok();
+            }
+        }
+    }
+
+    Ok(edit_id)
 }

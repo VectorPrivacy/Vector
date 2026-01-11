@@ -74,6 +74,12 @@ iroh-gossip = "0.34"
 parking_lot = "0.12"
 data-encoding = "2.6"
 rand = "0.8"
+# PIVX Promos (addressless crypto payments)
+secp256k1 = { version = "0.29", features = ["rand", "hashes"] }
+ripemd = "0.1"
+bs58 = "0.5"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

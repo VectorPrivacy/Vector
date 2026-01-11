@@ -52,6 +52,10 @@ pub use chat::{Chat, ChatType, ChatMetadata};
 mod rumor;
 pub use rumor::{RumorEvent, RumorContext, RumorProcessingResult, ConversationType, process_rumor};
 
+// Flat event storage layer (protocol-aligned)
+mod stored_event;
+pub use stored_event::{StoredEvent, StoredEventBuilder, event_kind};
+
 mod deep_link;
 
 // Mini Apps (WebXDC-compatible) support
@@ -60,12 +64,20 @@ mod miniapps;
 // Image caching for avatars, banners, and Mini App icons
 mod image_cache;
 
-/// # Trusted Relay
+// PIVX Promos (addressless cryptocurrency payments)
+mod pivx;
+
+/// # Trusted Relays
 ///
-/// The 'Trusted Relay' handles events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
+/// The 'Trusted Relays' handle events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
 ///
-/// This relay may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
-pub(crate) static TRUSTED_RELAY: &str = "wss://jskitty.cat/nostr";
+/// These relays may be used for events like Typing Indicators, Key Exchanges (forward-secrecy setup) and more.
+/// Multiple relays provide redundancy for critical operations.
+pub(crate) static TRUSTED_RELAYS: &[&str] = &[
+    "wss://jskitty.cat/nostr",
+    "wss://asia.vectorapp.io/nostr",
+    "wss://nostr.computingcache.com",
+];
 
 /// # Blossom Media Servers
 ///
@@ -1014,7 +1026,7 @@ async fn start_typing(receiver: String) -> bool {
             );
             match client
                 .gift_wrap_to(
-                    [TRUSTED_RELAY],
+                    TRUSTED_RELAYS.iter().copied(),
                     &pubkey,
                     rumor,
                     [Tag::expiration(expiry_time)],
@@ -1028,7 +1040,7 @@ async fn start_typing(receiver: String) -> bool {
         Err(_) => {
             // This is a group chat - use MLS
             let group_id = receiver.clone();
-            
+
             // Build the typing indicator rumor
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
                 .tag(Tag::custom(TagKind::d(), vec!["vector"]))
@@ -1062,7 +1074,7 @@ async fn send_webxdc_peer_advertisement(
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
     let my_npub = my_public_key.to_bech32().unwrap_or_else(|_| "unknown".to_string());
-    
+
     println!("[WEBXDC] Sending peer advertisement: my_npub={}, receiver={}, topic={}", my_npub, receiver, topic_id);
     log::info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
     log::debug!("Node address: {}", node_addr);
@@ -1071,7 +1083,7 @@ async fn send_webxdc_peer_advertisement(
     match PublicKey::from_bech32(receiver.as_str()) {
         Ok(pubkey) => {
             // This is a DM - use NIP-17 gift wrapping
-            
+
             // Build the peer advertisement rumor
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
                 .tag(Tag::public_key(pubkey))
@@ -1087,7 +1099,7 @@ async fn send_webxdc_peer_advertisement(
                 )))
                 .build(my_public_key);
 
-            // Gift Wrap and send to receiver via our Trusted Relay
+            // Gift Wrap and send to receiver via our Trusted Relays
             let expiry_time = Timestamp::from_secs(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1097,7 +1109,7 @@ async fn send_webxdc_peer_advertisement(
             );
             match client
                 .gift_wrap_to(
-                    [TRUSTED_RELAY],
+                    TRUSTED_RELAYS.iter().copied(),
                     &pubkey,
                     rumor,
                     [Tag::expiration(expiry_time)],
@@ -1173,6 +1185,37 @@ async fn get_chat_message_count<R: Runtime>(
     chat_id: String,
 ) -> Result<usize, String> {
     db::get_chat_message_count(&handle, &chat_id).await
+}
+
+/// Get message views (composed from events table) for a chat
+/// This is the new event-based approach that computes reactions from flat events
+#[tauri::command]
+async fn get_message_views<R: Runtime>(
+    handle: AppHandle<R>,
+    chat_id: String,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Message>, String> {
+    // Convert chat identifier to database ID
+    let chat_int_id = db::get_chat_id_by_identifier(&handle, &chat_id)?;
+
+    // Get materialized message views from events
+    let messages = db::get_message_views(&handle, chat_int_id, limit, offset).await?;
+
+    // Also sync to backend state for cache compatibility
+    if !messages.is_empty() {
+        let mut state = STATE.lock().await;
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+            for msg in &messages {
+                if !chat.messages.iter().any(|m| m.id == msg.id) {
+                    chat.messages.push(msg.clone());
+                }
+            }
+            chat.messages.sort_by_key(|m| m.at);
+        }
+    }
+
+    Ok(messages)
 }
 
 /// Evict messages from the backend cache for a specific chat
@@ -1391,7 +1434,31 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             // Handle WebXDC peer advertisement - add peer to realtime channel
                             handle_webxdc_peer_advertisement(&topic_id, &node_addr).await
                         }
+                        RumorProcessingResult::UnknownEvent(mut event) => {
+                            // Store unknown events for future compatibility
+                            event.wrapper_event_id = Some(wrapper_event_id.clone());
+                            handle_unknown_event(event, &contact).await
+                        }
                         RumorProcessingResult::Ignored => false,
+                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                            // Save PIVX payment event to database
+                            if let Some(handle) = TAURI_APP.get() {
+                                let _ = db::save_pivx_payment_event(handle, &contact, event).await;
+
+                                // Emit PIVX payment event to frontend for DMs
+                                let _ = handle.emit("pivx_payment_received", serde_json::json!({
+                                    "conversation_id": contact,
+                                    "gift_code": gift_code,
+                                    "amount_piv": amount_piv,
+                                    "address": address,
+                                    "message": message,
+                                    "message_id": message_id,
+                                    "sender": sender,
+                                    "is_mine": is_mine,
+                                }));
+                            }
+                            true
+                        }
                     }
                 }
                 Err(e) => {
@@ -1633,6 +1700,36 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
     }
 
     reaction_added
+}
+
+/// Handle an unknown event type - store for future compatibility
+async fn handle_unknown_event(mut event: StoredEvent, contact: &str) -> bool {
+    // Get the chat_id for this contact
+    if let Some(handle) = TAURI_APP.get() {
+        match db::get_chat_id_by_identifier(&handle, contact) {
+            Ok(chat_id) => {
+                event.chat_id = chat_id;
+                // Save the event to the database
+                if let Err(e) = db::save_event(&handle, &event).await {
+                    eprintln!("Failed to save unknown event: {}", e);
+                    return false;
+                }
+                // Emit event to frontend (it can render as "Unknown Event" placeholder)
+                let _ = handle.emit("event_new", serde_json::json!({
+                    "event": event,
+                    "chat_id": contact
+                }));
+                true
+            }
+            Err(_) => {
+                // Chat doesn't exist yet, skip this event
+                eprintln!("Cannot save unknown event: chat not found for {}", contact);
+                false
+            }
+        }
+    } else {
+        false
+    }
 }
 
 /// Handle a WebXDC peer advertisement - add the peer to our realtime channel
@@ -2132,7 +2229,37 @@ async fn notifs() -> Result<bool, String> {
                                                                 handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
                                                                 None // Don't emit as message
                                                             }
+                                                            RumorProcessingResult::UnknownEvent(mut event) => {
+                                                                // Store unknown events for future compatibility
+                                                                // Get chat_id and save the event
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    if let Ok(chat_id) = db::get_chat_id_by_identifier(handle, &group_id_for_persist) {
+                                                                        event.chat_id = chat_id;
+                                                                        let _ = db::save_event(handle, &event).await;
+                                                                    }
+                                                                }
+                                                                None // Don't emit as message
+                                                            }
                                                             RumorProcessingResult::Ignored => None,
+                                                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                                                                // Save PIVX payment event and emit to frontend
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let _ = db::save_pivx_payment_event(handle, &group_id_for_persist, event).await;
+
+                                                                    let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
+                                                                    let _ = handle.emit("pivx_payment_received", serde_json::json!({
+                                                                        "conversation_id": group_id_for_persist,
+                                                                        "gift_code": gift_code,
+                                                                        "amount_piv": amount_piv,
+                                                                        "address": address,
+                                                                        "message": message,
+                                                                        "message_id": message_id,
+                                                                        "sender": sender_npub,
+                                                                        "is_mine": is_mine,
+                                                                    }));
+                                                                }
+                                                                None // Don't emit as message
+                                                            }
                                                         }
                                                     }
                                                     Err(e) => {
@@ -2252,41 +2379,211 @@ async fn notifs() -> Result<bool, String> {
     }
 }
 
+/// Default relays that come pre-configured
+pub(crate) const DEFAULT_RELAYS: &[&str] = &[
+    "wss://jskitty.cat/nostr",        // TRUSTED_RELAY
+    "wss://asia.vectorapp.io/nostr",  // TRUSTED_RELAY
+    "wss://nostr.computingcache.com", // TRUSTED_RELAY
+    "wss://relay.damus.io",
+];
+
+/// Check if a URL is a default relay
+fn is_default_relay(url: &str) -> bool {
+    let normalized = url.trim().trim_end_matches('/').to_lowercase();
+    DEFAULT_RELAYS.iter().any(|r| r.to_lowercase() == normalized)
+}
+
+// ============================================================================
+// Relay Metrics & Logging
+// ============================================================================
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::RwLock;
+use once_cell::sync::Lazy;
+
+/// Metrics tracked per relay
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct RelayMetrics {
+    pub ping_ms: Option<u64>,
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+    pub last_check: Option<u64>,  // Unix timestamp
+    pub events_received: u64,
+    pub events_sent: u64,
+}
+
+impl Default for RelayMetrics {
+    fn default() -> Self {
+        Self {
+            ping_ms: None,
+            bytes_up: 0,
+            bytes_down: 0,
+            last_check: None,
+            events_received: 0,
+            events_sent: 0,
+        }
+    }
+}
+
+/// A single log entry for a relay
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct RelayLog {
+    pub timestamp: u64,  // Unix timestamp
+    pub level: String,   // "info", "warn", "error"
+    pub message: String,
+}
+
+/// Global storage for relay metrics
+static RELAY_METRICS: Lazy<RwLock<HashMap<String, RelayMetrics>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Global storage for relay logs (max 10 per relay)
+static RELAY_LOGS: Lazy<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Add a log entry for a relay
+fn add_relay_log(url: &str, level: &str, message: &str) {
+    let normalized = url.trim().trim_end_matches('/').to_lowercase();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let log = RelayLog {
+        timestamp,
+        level: level.to_string(),
+        message: message.to_string(),
+    };
+
+    if let Ok(mut logs) = RELAY_LOGS.write() {
+        let relay_logs = logs.entry(normalized).or_insert_with(VecDeque::new);
+        relay_logs.push_front(log);
+        // Keep only last 10 logs
+        while relay_logs.len() > 10 {
+            relay_logs.pop_back();
+        }
+    }
+}
+
+/// Update metrics for a relay
+fn update_relay_metrics(url: &str, update_fn: impl FnOnce(&mut RelayMetrics)) {
+    let normalized = url.trim().trim_end_matches('/').to_lowercase();
+    if let Ok(mut metrics) = RELAY_METRICS.write() {
+        let relay_metrics = metrics.entry(normalized).or_insert_with(RelayMetrics::default);
+        update_fn(relay_metrics);
+    }
+}
+
+/// Get metrics for a relay
+#[tauri::command]
+async fn get_relay_metrics(url: String) -> Result<RelayMetrics, String> {
+    let normalized = url.trim().trim_end_matches('/').to_lowercase();
+    let metrics = RELAY_METRICS.read()
+        .map_err(|_| "Failed to read metrics")?
+        .get(&normalized)
+        .cloned()
+        .unwrap_or_default();
+    Ok(metrics)
+}
+
+/// Get logs for a relay
+#[tauri::command]
+async fn get_relay_logs(url: String) -> Result<Vec<RelayLog>, String> {
+    let normalized = url.trim().trim_end_matches('/').to_lowercase();
+    let logs = RELAY_LOGS.read()
+        .map_err(|_| "Failed to read logs")?
+        .get(&normalized)
+        .map(|l| l.iter().cloned().collect())
+        .unwrap_or_default();
+    Ok(logs)
+}
+
+// ============================================================================
+
 #[derive(serde::Serialize)]
 struct RelayInfo {
     url: String,
     status: String,
+    is_default: bool,
+    is_custom: bool,
+    enabled: bool,
+    mode: String,
 }
 
 /// Get all relays with their current status
 #[tauri::command]
-async fn get_relays() -> Result<Vec<RelayInfo>, String> {
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    
-    // Get all relays
-    let relays = client.relays().await;
-    
-    // Convert to our RelayInfo format
-    let relay_infos: Vec<RelayInfo> = relays
-        .into_iter()
-        .map(|(url, relay)| {
-            let status = relay.status();
-            RelayInfo {
-                url: url.to_string(),
-                status: match status {
-                    RelayStatus::Initialized => "initialized",
-                    RelayStatus::Pending => "pending",
-                    RelayStatus::Connecting => "connecting",
-                    RelayStatus::Connected => "connected",
-                    RelayStatus::Disconnected => "disconnected",
-                    RelayStatus::Terminated => "terminated",
-                    RelayStatus::Banned => "banned",
-                    RelayStatus::Sleeping => "sleeping",
-                }.to_string(),
-            }
-        })
-        .collect();
-    
+async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInfo>, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+
+    // Get custom relays from DB
+    let custom_relays = get_custom_relays(handle.clone()).await.unwrap_or_default();
+    let disabled_defaults = get_disabled_default_relays(&handle).await.unwrap_or_default();
+
+    // Get all connected relays from client pool
+    let pool_relays = client.relays().await;
+
+    let mut relay_infos: Vec<RelayInfo> = Vec::new();
+
+    // First, add all default relays (even if disabled)
+    for default_url in DEFAULT_RELAYS {
+        let url_str = default_url.to_string();
+        let is_disabled = disabled_defaults.iter().any(|d| d.to_lowercase() == url_str.to_lowercase());
+
+        // Check if this relay is in the pool
+        let (status, mode) = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.to_string().to_lowercase() == url_str.to_lowercase()) {
+            let status = match relay.status() {
+                RelayStatus::Initialized => "initialized",
+                RelayStatus::Pending => "pending",
+                RelayStatus::Connecting => "connecting",
+                RelayStatus::Connected => "connected",
+                RelayStatus::Disconnected => "disconnected",
+                RelayStatus::Terminated => "terminated",
+                RelayStatus::Banned => "banned",
+                RelayStatus::Sleeping => "sleeping",
+            };
+            (status.to_string(), "both".to_string())
+        } else {
+            ("disabled".to_string(), "both".to_string())
+        };
+
+        relay_infos.push(RelayInfo {
+            url: url_str,
+            status,
+            is_default: true,
+            is_custom: false,
+            enabled: !is_disabled,
+            mode,
+        });
+    }
+
+    // Then add custom relays
+    for custom in &custom_relays {
+        // Check if this relay is in the pool
+        let status = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.to_string().to_lowercase() == custom.url.to_lowercase()) {
+            match relay.status() {
+                RelayStatus::Initialized => "initialized",
+                RelayStatus::Pending => "pending",
+                RelayStatus::Connecting => "connecting",
+                RelayStatus::Connected => "connected",
+                RelayStatus::Disconnected => "disconnected",
+                RelayStatus::Terminated => "terminated",
+                RelayStatus::Banned => "banned",
+                RelayStatus::Sleeping => "sleeping",
+            }.to_string()
+        } else {
+            "disabled".to_string()
+        };
+
+        relay_infos.push(RelayInfo {
+            url: custom.url.clone(),
+            status,
+            is_default: false,
+            is_custom: true,
+            enabled: custom.enabled,
+            mode: custom.mode.clone(),
+        });
+    }
+
     Ok(relay_infos)
 }
 
@@ -2295,6 +2592,384 @@ async fn get_relays() -> Result<Vec<RelayInfo>, String> {
 async fn get_media_servers() -> Vec<String> {
     get_blossom_servers()
 }
+
+// ============================================================================
+// Custom Relay Management
+// ============================================================================
+
+/// Saved custom relay entry with optional metadata
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct CustomRelay {
+    url: String,
+    enabled: bool,
+    #[serde(default = "default_relay_mode")]
+    mode: String,  // "read" | "write" | "both"
+}
+
+fn default_relay_mode() -> String {
+    "both".to_string()
+}
+
+/// Validate a relay URL format (must be wss://)
+fn validate_relay_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+
+    // Must start with wss:// (secure WebSocket only)
+    if !trimmed.starts_with("wss://") {
+        return Err("Relay URL must start with wss://".to_string());
+    }
+
+    // Basic URL validation - must have host after protocol
+    let after_protocol = &trimmed[6..];
+    if after_protocol.is_empty() {
+        return Err("Relay URL must include a host".to_string());
+    }
+
+    // Don't allow trailing slashes for consistency
+    let normalized = trimmed.trim_end_matches('/');
+
+    Ok(normalized.to_string())
+}
+
+/// Get the list of custom relays from settings
+#[tauri::command]
+async fn get_custom_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<CustomRelay>, String> {
+    // Check if an account is selected
+    if crate::account_manager::get_current_account().is_err() {
+        return Ok(vec![]);
+    }
+
+    let conn = crate::account_manager::get_db_connection(&handle)?;
+
+    let result: Option<String> = conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        rusqlite::params!["custom_relays"],
+        |row| row.get(0)
+    ).ok();
+
+    crate::account_manager::return_db_connection(conn);
+
+    match result {
+        Some(json_str) => {
+            serde_json::from_str(&json_str)
+                .map_err(|e| format!("Failed to parse custom relays: {}", e))
+        }
+        None => Ok(vec![])
+    }
+}
+
+/// Save the list of custom relays to settings
+async fn save_custom_relays<R: Runtime>(handle: &AppHandle<R>, relays: &[CustomRelay]) -> Result<(), String> {
+    if crate::account_manager::get_current_account().is_err() {
+        return Err("No account selected".to_string());
+    }
+
+    let json_str = serde_json::to_string(relays)
+        .map_err(|e| format!("Failed to serialize relays: {}", e))?;
+
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["custom_relays", json_str],
+    ).map_err(|e| format!("Failed to save custom relays: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Get the list of disabled default relays from settings
+async fn get_disabled_default_relays<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<String>, String> {
+    if crate::account_manager::get_current_account().is_err() {
+        return Ok(vec![]);
+    }
+
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    let result: Option<String> = conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        rusqlite::params!["disabled_default_relays"],
+        |row| row.get(0)
+    ).ok();
+
+    crate::account_manager::return_db_connection(conn);
+
+    match result {
+        Some(json_str) => {
+            serde_json::from_str(&json_str)
+                .map_err(|e| format!("Failed to parse disabled default relays: {}", e))
+        }
+        None => Ok(vec![])
+    }
+}
+
+/// Save the list of disabled default relays to settings
+async fn save_disabled_default_relays<R: Runtime>(handle: &AppHandle<R>, relays: &[String]) -> Result<(), String> {
+    if crate::account_manager::get_current_account().is_err() {
+        return Err("No account selected".to_string());
+    }
+
+    let json_str = serde_json::to_string(relays)
+        .map_err(|e| format!("Failed to serialize disabled relays: {}", e))?;
+
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params!["disabled_default_relays", json_str],
+    ).map_err(|e| format!("Failed to save disabled default relays: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(())
+}
+
+/// Toggle a default relay's enabled state
+#[tauri::command]
+async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String, enabled: bool) -> Result<bool, String> {
+    // Verify it's actually a default relay
+    if !is_default_relay(&url) {
+        return Err("Not a default relay".to_string());
+    }
+
+    let normalized_url = url.trim().trim_end_matches('/').to_string();
+    let mut disabled = get_disabled_default_relays(&handle).await?;
+
+    if enabled {
+        // Remove from disabled list
+        disabled.retain(|d| d.to_lowercase() != normalized_url.to_lowercase());
+    } else {
+        // Add to disabled list if not already there
+        if !disabled.iter().any(|d| d.to_lowercase() == normalized_url.to_lowercase()) {
+            disabled.push(normalized_url.clone());
+        }
+    }
+
+    save_disabled_default_relays(&handle, &disabled).await?;
+
+    // Update the relay pool
+    if let Some(client) = NOSTR_CLIENT.get() {
+        if enabled {
+            // Re-add the relay
+            match client.pool().add_relay(&normalized_url, RelayOptions::new().reconnect(false)).await {
+                Ok(_) => {
+                    let _ = client.pool().connect_relay(&normalized_url).await;
+                    println!("[Relay] Enabled default relay: {}", normalized_url);
+                }
+                Err(e) => eprintln!("[Relay] Failed to enable default relay: {}", e),
+            }
+        } else {
+            // Remove the relay from pool
+            if let Err(e) = client.pool().remove_relay(&normalized_url).await {
+                eprintln!("[Relay] Note: Could not disable default relay in pool: {}", e);
+            } else {
+                println!("[Relay] Disabled default relay: {}", normalized_url);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+/// Helper to build RelayOptions based on mode
+fn relay_options_for_mode(mode: &str) -> RelayOptions {
+    let opts = RelayOptions::new().reconnect(false);
+    match mode {
+        "read" => opts.write(false),
+        "write" => opts.read(false),
+        _ => opts, // "both" - default read and write enabled
+    }
+}
+
+/// Add a custom relay URL
+#[tauri::command]
+async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mode: Option<String>) -> Result<CustomRelay, String> {
+    // Validate and normalize the URL
+    let normalized_url = validate_relay_url(&url)?;
+
+    // Validate mode
+    let relay_mode = mode.unwrap_or_else(|| "both".to_string());
+    if !["read", "write", "both"].contains(&relay_mode.as_str()) {
+        return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
+    }
+
+    // Get existing relays
+    let mut relays = get_custom_relays(handle.clone()).await?;
+
+    // Check for duplicates (case-insensitive)
+    let url_lower = normalized_url.to_lowercase();
+    if relays.iter().any(|r| r.url.to_lowercase() == url_lower) {
+        return Err("Relay already exists".to_string());
+    }
+
+    // Don't allow adding default relays as custom
+    if is_default_relay(&normalized_url) {
+        return Err("Cannot add default relay as custom relay".to_string());
+    }
+
+    // Create new relay entry
+    let new_relay = CustomRelay {
+        url: normalized_url,
+        enabled: true,
+        mode: relay_mode.clone(),
+    };
+
+    relays.push(new_relay.clone());
+
+    // Save to settings
+    save_custom_relays(&handle, &relays).await?;
+
+    // If we're already connected, add this relay to the pool immediately
+    if let Some(client) = NOSTR_CLIENT.get() {
+        if client.relays().await.len() > 0 {
+            match client.pool().add_relay(&new_relay.url, relay_options_for_mode(&relay_mode)).await {
+                Ok(_) => {
+                    println!("[Relay] Added custom relay to pool: {} (mode: {})", new_relay.url, relay_mode);
+                    // Connect to the new relay
+                    if let Err(e) = client.pool().connect_relay(&new_relay.url).await {
+                        eprintln!("[Relay] Failed to connect to new relay: {}", e);
+                    }
+                }
+                Err(e) => eprintln!("[Relay] Failed to add relay to pool: {}", e),
+            }
+        }
+    }
+
+    Ok(new_relay)
+}
+
+/// Remove a custom relay URL
+#[tauri::command]
+async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) -> Result<bool, String> {
+    let mut relays = get_custom_relays(handle.clone()).await?;
+
+    let url_lower = url.to_lowercase();
+    let original_len = relays.len();
+    relays.retain(|r| r.url.to_lowercase() != url_lower);
+
+    if relays.len() == original_len {
+        return Ok(false); // Relay not found
+    }
+
+    // Save updated list
+    save_custom_relays(&handle, &relays).await?;
+
+    // Remove from active pool if connected
+    if let Some(client) = NOSTR_CLIENT.get() {
+        if let Err(e) = client.pool().remove_relay(&url).await {
+            // Log but don't fail - relay might not be in pool
+            eprintln!("[Relay] Note: Could not remove relay from pool: {}", e);
+        } else {
+            println!("[Relay] Removed custom relay from pool: {}", url);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Toggle a custom relay's enabled state
+#[tauri::command]
+async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, enabled: bool) -> Result<bool, String> {
+    let mut relays = get_custom_relays(handle.clone()).await?;
+
+    let url_lower = url.to_lowercase();
+    let mut found = false;
+    let mut relay_mode = "both".to_string();
+
+    for relay in relays.iter_mut() {
+        if relay.url.to_lowercase() == url_lower {
+            relay.enabled = enabled;
+            relay_mode = relay.mode.clone();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err("Relay not found".to_string());
+    }
+
+    // Save updated list
+    save_custom_relays(&handle, &relays).await?;
+
+    // Update the relay pool
+    if let Some(client) = NOSTR_CLIENT.get() {
+        if enabled {
+            // Add and connect with proper mode
+            match client.pool().add_relay(&url, relay_options_for_mode(&relay_mode)).await {
+                Ok(_) => {
+                    let _ = client.pool().connect_relay(&url).await;
+                    println!("[Relay] Enabled custom relay: {} (mode: {})", url, relay_mode);
+                }
+                Err(e) => eprintln!("[Relay] Failed to enable relay: {}", e),
+            }
+        } else {
+            // Disconnect and remove
+            if let Err(e) = client.pool().remove_relay(&url).await {
+                eprintln!("[Relay] Note: Could not disable relay in pool: {}", e);
+            } else {
+                println!("[Relay] Disabled custom relay: {}", url);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+/// Update a custom relay's mode (read/write/both)
+#[tauri::command]
+async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mode: String) -> Result<bool, String> {
+    // Validate mode
+    if !["read", "write", "both"].contains(&mode.as_str()) {
+        return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
+    }
+
+    let mut relays = get_custom_relays(handle.clone()).await?;
+
+    let url_lower = url.to_lowercase();
+    let mut found = false;
+    let mut is_enabled = false;
+
+    for relay in relays.iter_mut() {
+        if relay.url.to_lowercase() == url_lower {
+            relay.mode = mode.clone();
+            is_enabled = relay.enabled;
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err("Relay not found".to_string());
+    }
+
+    // Save updated list
+    save_custom_relays(&handle, &relays).await?;
+
+    // If relay is currently enabled, reconnect with new mode
+    if is_enabled {
+        if let Some(client) = NOSTR_CLIENT.get() {
+            // Remove and re-add with new options
+            let _ = client.pool().remove_relay(&url).await;
+            match client.pool().add_relay(&url, relay_options_for_mode(&mode)).await {
+                Ok(_) => {
+                    let _ = client.pool().connect_relay(&url).await;
+                    println!("[Relay] Updated relay mode: {} -> {}", url, mode);
+                }
+                Err(e) => eprintln!("[Relay] Failed to update relay mode: {}", e),
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+/// Validate a relay URL without saving it
+#[tauri::command]
+async fn validate_relay_url_cmd(url: String) -> Result<String, String> {
+    validate_relay_url(&url)
+}
+
+// ============================================================================
 
 /// Monitor relay pool connection status changes
 #[tauri::command]
@@ -2319,21 +2994,33 @@ async fn monitor_relay_connections() -> Result<bool, String> {
         while let Ok(notification) = receiver.recv().await {
             match notification {
                 MonitorNotification::StatusChanged { relay_url, status } => {
+                    let url_str = relay_url.to_string();
+                    let status_str = match status {
+                        RelayStatus::Initialized => "initialized",
+                        RelayStatus::Pending => "pending",
+                        RelayStatus::Connecting => "connecting",
+                        RelayStatus::Connected => "connected",
+                        RelayStatus::Disconnected => "disconnected",
+                        RelayStatus::Terminated => "terminated",
+                        RelayStatus::Banned => "banned",
+                        RelayStatus::Sleeping => "sleeping",
+                    };
+
+                    // Log the status change
+                    let log_level = match status {
+                        RelayStatus::Connected => "info",
+                        RelayStatus::Disconnected | RelayStatus::Terminated => "warn",
+                        RelayStatus::Banned => "error",
+                        _ => "info",
+                    };
+                    add_relay_log(&url_str, log_level, &format!("Status changed to {}", status_str));
+
                     // Emit relay status update to frontend
                     handle_clone.emit("relay_status_change", serde_json::json!({
-                        "url": relay_url.to_string(),
-                        "status": match status {
-                            RelayStatus::Initialized => "initialized",
-                            RelayStatus::Pending => "pending",
-                            RelayStatus::Connecting => "connecting",
-                            RelayStatus::Connected => "connected",
-                            RelayStatus::Disconnected => "disconnected",
-                            RelayStatus::Terminated => "terminated",
-                            RelayStatus::Banned => "banned",
-                            RelayStatus::Sleeping => "sleeping",
-                        }
+                        "url": url_str,
+                        "status": status_str
                     })).unwrap();
-                    
+
                     // Handle reconnection logic
                     match status {
                         RelayStatus::Disconnected => {
@@ -2346,7 +3033,7 @@ async fn monitor_relay_connections() -> Result<bool, String> {
                         RelayStatus::Connected => {
                             // When a relay reconnects, fetch last 2 days of messages from just that relay
                             let handle_inner = handle_clone.clone();
-                            let url_string = relay_url.to_string();
+                            let url_string = url_str.clone();
                             tokio::spawn(async move {
                                 // fetch_messages handles both DM and MLS group syncing for single-relay reconnections
                                 fetch_messages(handle_inner, false, Some(url_string)).await;
@@ -2394,22 +3081,37 @@ async fn monitor_relay_connections() -> Result<bool, String> {
                     
                     let elapsed = start.elapsed();
                     
+                    let url_str = url.to_string();
+                    let ping_ms = elapsed.as_millis() as u64;
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
                     match result {
                         Ok(Ok(events)) => {
                             // Check if we actually got events or just an empty response
                             if events.is_empty() && elapsed.as_secs() >= 2 {
                                 // Empty response after 2+ seconds means relay is not responding properly
                                 unhealthy_relays.push((url.clone(), relay.clone()));
+                                add_relay_log(&url_str, "warn", "Health check failed: slow/empty response");
+                            } else {
+                                // Healthy - record ping time
+                                update_relay_metrics(&url_str, |m| {
+                                    m.ping_ms = Some(ping_ms);
+                                    m.last_check = Some(now_secs);
+                                });
                             }
-                            // else: Healthy - got response quickly
                         }
-                        Ok(Err(_)) => {
+                        Ok(Err(e)) => {
                             // Query failed
                             unhealthy_relays.push((url.clone(), relay.clone()));
+                            add_relay_log(&url_str, "warn", &format!("Health check failed: {}", e));
                         }
                         Err(_) => {
                             // Timeout
                             unhealthy_relays.push((url.clone(), relay.clone()));
+                            add_relay_log(&url_str, "warn", "Health check failed: timeout");
                         }
                     }
                 } else if status == RelayStatus::Terminated || status == RelayStatus::Disconnected {
@@ -2417,21 +3119,23 @@ async fn monitor_relay_connections() -> Result<bool, String> {
                     unhealthy_relays.push((url.clone(), relay.clone()));
                 }
             }
-            
+
             // Force reconnect unhealthy relays
             for (url, relay) in unhealthy_relays {
+                let url_str = url.to_string();
                 // First disconnect if needed
                 if relay.status() == RelayStatus::Connected {
                     let _ = relay.disconnect();
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                
+
                 // Try to reconnect
+                add_relay_log(&url_str, "info", "Attempting reconnection...");
                 let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
-                
+
                 // Emit status update
                 handle_health.emit("relay_health_check", serde_json::json!({
-                    "url": url.to_string(),
+                    "url": url_str,
                     "healthy": false,
                     "action": "force_reconnect"
                 })).unwrap();
@@ -3113,7 +3817,7 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
 
 /// Returns `true` if the client has connected, `false` if it was already connected
 #[tauri::command]
-async fn connect() -> bool {
+async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // If we're already connected to some relays - skip and tell the frontend our client is already online
@@ -3121,12 +3825,49 @@ async fn connect() -> bool {
         return false;
     }
 
-    // Add our 'Trusted Relay' (see Rustdoc for TRUSTED_RELAY for more info)
-    client.pool().add_relay(TRUSTED_RELAY, RelayOptions::new().reconnect(false)).await.unwrap();
+    // Get disabled default relays
+    let disabled_defaults = get_disabled_default_relays(&handle).await.unwrap_or_default();
 
-    // Add a couple common Nostr relays
-    client.pool().add_relay("wss://auth.nostr1.com", RelayOptions::new().reconnect(false)).await.unwrap();
-    client.pool().add_relay("wss://relay.damus.io", RelayOptions::new().reconnect(false)).await.unwrap();
+    // Add default relays (unless disabled)
+    for default_url in DEFAULT_RELAYS {
+        let is_disabled = disabled_defaults.iter().any(|d| d.to_lowercase() == default_url.to_lowercase());
+        if !is_disabled {
+            match client.pool().add_relay(*default_url, RelayOptions::new().reconnect(false)).await {
+                Ok(_) => {
+                    println!("[Relay] Added default relay: {}", default_url);
+                    add_relay_log(default_url, "info", "Added to relay pool");
+                }
+                Err(e) => {
+                    eprintln!("[Relay] Failed to add default relay {}: {}", default_url, e);
+                    add_relay_log(default_url, "error", &format!("Failed to add: {}", e));
+                }
+            }
+        } else {
+            println!("[Relay] Skipping disabled default relay: {}", default_url);
+            add_relay_log(default_url, "info", "Skipped (disabled by user)");
+        }
+    }
+
+    // Add user's custom relays (if any)
+    match get_custom_relays(handle.clone()).await {
+        Ok(custom_relays) => {
+            for relay in custom_relays {
+                if relay.enabled {
+                    match client.pool().add_relay(&relay.url, relay_options_for_mode(&relay.mode)).await {
+                        Ok(_) => {
+                            println!("[Relay] Added custom relay: {} (mode: {})", relay.url, relay.mode);
+                            add_relay_log(&relay.url, "info", &format!("Added to relay pool (mode: {})", relay.mode));
+                        }
+                        Err(e) => {
+                            eprintln!("[Relay] Failed to add custom relay {}: {}", relay.url, e);
+                            add_relay_log(&relay.url, "error", &format!("Failed to add: {}", e));
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => eprintln!("[Relay] Failed to load custom relays: {}", e),
+    }
 
     // Connect!
     client.connect().await;
@@ -3169,9 +3910,9 @@ async fn encrypt(input: String, password: Option<String>) -> String {
                 // Build the event
                 match client.sign_event_builder(event_builder).await {
                     Ok(event) => {
-                        // Send only to trusted relay
-                        match client.send_event_to([TRUSTED_RELAY], &event).await {
-                            Ok(_) => println!("Successfully broadcast invite acceptance to trusted relay"),
+                        // Send only to trusted relays
+                        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await {
+                            Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
                     }
@@ -3617,9 +4358,9 @@ async fn get_or_create_invite_code() -> Result<String, String> {
     
     // Build the event
     let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
-    
-    // Send only to trusted relay
-    client.send_event_to([TRUSTED_RELAY], &event).await.map_err(|e| e.to_string())?;
+
+    // Send only to trusted relays
+    client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await.map_err(|e| e.to_string())?;
     
     // Store locally
     db::set_sql_setting(handle.clone(), "invite_code".to_string(), new_code.clone())
@@ -3648,7 +4389,7 @@ async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     
     // Find the invite event
     let mut events = client
-        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
@@ -3890,18 +4631,18 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
     // Convert npub to PublicKey
     let inviter_pubkey = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
     
-    // First, get the inviter's invite code from the trusted relay
+    // First, get the inviter's invite code from the trusted relays
     let filter = Filter::new()
         .author(inviter_pubkey)
         .kind(Kind::ApplicationSpecificData)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "vector")
         .limit(100);
-    
+
     let mut events = client
-        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    
+
     // Find the invite event and extract the invite code
     let mut invite_code_opt = None;
     while let Some(event) = events.next().await {
@@ -3915,15 +4656,15 @@ async fn get_invited_users(npub: String) -> Result<u32, String> {
         }
     }
     let invite_code = invite_code_opt.ok_or("No invite code found for this user")?;
-    
-    // Now fetch all acceptance events for this invite code from the trusted relay
+
+    // Now fetch all acceptance events for this invite code from the trusted relays
     let acceptance_filter = Filter::new()
         .kind(Kind::ApplicationSpecificData)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), invite_code)
         .limit(1000); // Allow fetching many acceptances
-    
+
     let mut acceptance_events = client
-        .stream_events_from(vec![TRUSTED_RELAY], acceptance_filter, std::time::Duration::from_secs(10))
+        .stream_events_from(TRUSTED_RELAYS.to_vec(), acceptance_filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
@@ -3971,9 +4712,9 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
         .kind(Kind::ApplicationSpecificData)
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "fawkes_2025")
         .limit(10);
-    
+
     let mut events = client
-        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
     
@@ -4063,9 +4804,9 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
                     .id(event_id)
                     .kind(Kind::MlsKeyPackage)
                     .limit(1);
-                
+
                 match client.stream_events_from(
-                    vec![TRUSTED_RELAY],
+                    TRUSTED_RELAYS.to_vec(),
                     filter,
                     std::time::Duration::from_secs(5)
                 ).await {
@@ -4090,9 +4831,12 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
     let (kp_encoded, kp_tags) = {
         let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
         let engine = mls_service.engine().map_err(|e| e.to_string())?;
-        let relay_url = nostr_sdk::RelayUrl::parse(TRUSTED_RELAY).map_err(|e| e.to_string())?;
+        let relay_urls: Vec<nostr_sdk::RelayUrl> = TRUSTED_RELAYS
+            .iter()
+            .filter_map(|r| nostr_sdk::RelayUrl::parse(r).ok())
+            .collect();
         engine
-            .create_key_package_for_event(&my_pubkey, [relay_url])
+            .create_key_package_for_event(&my_pubkey, relay_urls)
             .map_err(|e| e.to_string())?
     }; // engine and mls_service dropped here before any await
 
@@ -4102,9 +4846,9 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
         .await
         .map_err(|e| e.to_string())?;
 
-    // Publish to TRUSTED_RELAY
+    // Publish to TRUSTED_RELAYS
     client
-        .send_event_to([TRUSTED_RELAY], &kp_event)
+        .send_event_to(TRUSTED_RELAYS.iter().copied(), &kp_event)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -4844,9 +5588,9 @@ async fn refresh_keypackages_for_contact(
         // Only need the newest KeyPackage
         .limit(1);
 
-    // Fetch from TRUSTED_RELAY with short timeout
+    // Fetch from TRUSTED_RELAYS with short timeout
     let mut events = client
-        .stream_events_from(vec![TRUSTED_RELAY], filter, std::time::Duration::from_secs(10))
+        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -5116,11 +5860,13 @@ pub fn run() {
             message::clear_compression_cache,
             message::send_cached_compressed_file,
             message::react_to_message,
+            message::edit_message,
             message::fetch_msg_metadata,
             fetch_messages,
             deep_rescan,
             is_scanning,
             get_chat_messages_paginated,
+            get_message_views,
             get_chat_message_count,
             get_file_hash_index,
             evict_chat_messages,
@@ -5132,6 +5878,16 @@ pub fn run() {
             notifs,
             get_relays,
             get_media_servers,
+            // Custom relay management
+            get_custom_relays,
+            add_custom_relay,
+            remove_custom_relay,
+            toggle_custom_relay,
+            toggle_default_relay,
+            update_relay_mode,
+            validate_relay_url_cmd,
+            get_relay_metrics,
+            get_relay_logs,
             monitor_relay_connections,
             start_typing,
             send_webxdc_peer_advertisement,
@@ -5232,6 +5988,26 @@ pub fn run() {
             image_cache::get_or_cache_image,
             image_cache::clear_image_cache,
             image_cache::get_image_cache_stats,
+            // PIVX Promos commands
+            pivx::pivx_create_promo,
+            pivx::pivx_get_promo_balance,
+            pivx::pivx_get_wallet_balance,
+            pivx::pivx_list_promos,
+            pivx::pivx_sweep_promo,
+            pivx::pivx_set_wallet_address,
+            pivx::pivx_get_wallet_address,
+            pivx::pivx_claim_from_message,
+            pivx::pivx_import_promo,
+            pivx::pivx_refresh_balances,
+            pivx::pivx_send_payment,
+            pivx::pivx_send_existing_promo,
+            pivx::pivx_get_chat_payments,
+            pivx::pivx_check_address_balance,
+            pivx::pivx_withdraw,
+            pivx::pivx_get_currencies,
+            pivx::pivx_get_price,
+            pivx::pivx_set_preferred_currency,
+            pivx::pivx_get_preferred_currency,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
