@@ -627,11 +627,12 @@ fn get_bundled_sound_path<R: Runtime>(
 
     // Production: use bundled resource path
     #[cfg(not(debug_assertions))]
-    let find_sound = |filename: &str| -> Option<std::path::PathBuf> {
+    let find_sound = |filename: &str| -> Option<PathBuf> {
         let resource_path = handle
             .path()
             .resource_dir()
             .ok()?
+            .join("resources")
             .join("sounds")
             .join(filename);
         if resource_path.exists() {
