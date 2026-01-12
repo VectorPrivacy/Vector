@@ -1446,6 +1446,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                         RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
                             // Save PIVX payment event to database
                             if let Some(handle) = TAURI_APP.get() {
+                                let event_timestamp = event.created_at;
                                 let _ = db::save_pivx_payment_event(handle, &contact, event).await;
 
                                 // Emit PIVX payment event to frontend for DMs
@@ -1458,6 +1459,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                     "message_id": message_id,
                                     "sender": sender,
                                     "is_mine": is_mine,
+                                    "at": event_timestamp * 1000,
                                 }));
                             }
                             true
@@ -2236,6 +2238,7 @@ async fn notifs() -> Result<bool, String> {
                                                             RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
                                                                 // Save PIVX payment event and emit to frontend
                                                                 if let Some(handle) = TAURI_APP.get() {
+                                                                    let event_timestamp = event.created_at;
                                                                     let _ = db::save_pivx_payment_event(handle, &group_id_for_persist, event).await;
 
                                                                     let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
@@ -2248,6 +2251,7 @@ async fn notifs() -> Result<bool, String> {
                                                                         "message_id": message_id,
                                                                         "sender": sender_npub,
                                                                         "is_mine": is_mine,
+                                                                        "at": event_timestamp * 1000,
                                                                     }));
                                                                 }
                                                                 None // Don't emit as message

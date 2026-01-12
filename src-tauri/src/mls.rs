@@ -1319,6 +1319,7 @@ impl MlsService {
                             RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
                                 // Save PIVX payment event to database and emit to frontend
                                 if let Some(handle) = TAURI_APP.get() {
+                                    let event_timestamp = event.created_at;
                                     let _ = crate::db::save_pivx_payment_event(handle, &gid_for_fetch, event).await;
 
                                     handle.emit("pivx_payment_received", serde_json::json!({
@@ -1330,6 +1331,7 @@ impl MlsService {
                                         "message_id": message_id,
                                         "sender": rumor_event.pubkey.to_hex(),
                                         "is_mine": *is_mine,
+                                        "at": event_timestamp * 1000,
                                     })).unwrap_or_else(|e| {
                                         eprintln!("[MLS] Failed to emit pivx_payment_received event: {}", e);
                                     });

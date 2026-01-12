@@ -3346,6 +3346,17 @@ function renderChat(chat) {
                     senderPrefix = `${senderName}: `;
                 }
                 pChatPreview.textContent = senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+            } else if (cLastMsg.pivx_payment) {
+                // PIVX payment message
+                let senderPrefix = '';
+                if (cLastMsg.mine) {
+                    senderPrefix = 'You: ';
+                } else if (cLastMsg.npub) {
+                    const senderProfile = getProfile(cLastMsg.npub);
+                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+                    senderPrefix = `${senderName}: `;
+                }
+                pChatPreview.textContent = senderPrefix + 'Sent a PIVX Payment';
             } else {
                 let senderPrefix = '';
                 if (cLastMsg.mine) {
@@ -3365,7 +3376,7 @@ function renderChat(chat) {
         const activeTypers = chat.active_typers || [];
         const fIsTyping = activeTypers.length > 0;
         pChatPreview.classList.toggle('text-gradient', fIsTyping);
-        
+
         if (fIsTyping) {
             // Typing; display the glowy indicator!
             pChatPreview.textContent = `Typing...`;
@@ -3374,6 +3385,9 @@ function renderChat(chat) {
         } else if (!cLastMsg.content && cLastMsg.attachments?.length && !cLastMsg.pending) {
             // Not typing, and no text; display as an attachment
             pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
+        } else if (cLastMsg.pivx_payment && !cLastMsg.pending) {
+            // PIVX payment message
+            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a PIVX Payment';
         } else if (cLastMsg.pending) {
             // A message is pending: thus, we're still sending one
             pChatPreview.textContent = `Sending...`;
@@ -4033,7 +4047,6 @@ async function setupRustListeners() {
     // Listen for PIVX payment events
     await listen('pivx_payment_received', (evt) => {
         const { conversation_id, gift_code, amount_piv, address, message, message_id, sender, is_mine } = evt.payload;
-        console.log('PIVX payment received:', { conversation_id, gift_code, amount_piv, address, message, message_id, sender, is_mine });
 
         // Find the chat
         const chat = arrChats.find(c => c.id === conversation_id);
@@ -4045,14 +4058,13 @@ async function setupRustListeners() {
         // Check if this payment message already exists in chat
         const existingMsg = chat.messages?.find(m => m.id === message_id);
         if (existingMsg) {
-            console.log('PIVX payment already exists in chat:', message_id);
             return;
         }
 
         // Create a synthetic message object for the PIVX payment
         const pivxMsg = {
             id: message_id,
-            at: Date.now(),
+            at: evt.payload.at || Date.now(),
             content: '',
             mine: is_mine,
             attachments: [],
@@ -4065,16 +4077,34 @@ async function setupRustListeners() {
             }
         };
 
-        // Add to chat messages
+        // Add to chat messages in sorted order by timestamp
         if (!chat.messages) chat.messages = [];
-        chat.messages.push(pivxMsg);
 
-        // If this chat is currently open, render the payment
-        if (strOpenChat === conversation_id) {
-            const profile = chat.chat_type === 'MlsGroup' ? null : getProfile(conversation_id);
-            const msgEl = renderMessage(pivxMsg, profile);
-            domChatMessages.appendChild(msgEl);
-            softChatScroll();
+        // Check if this is the newest message (should be appended at end)
+        const isNewest = chat.messages.length === 0 || pivxMsg.at >= chat.messages[chat.messages.length - 1].at;
+
+        if (isNewest) {
+            // Newest message - append to end
+            chat.messages.push(pivxMsg);
+
+            // If this chat is currently open, append to DOM and scroll
+            if (strOpenChat === conversation_id) {
+                const profile = chat.chat_type === 'MlsGroup' ? null : getProfile(conversation_id);
+                const msgEl = renderMessage(pivxMsg, profile);
+                domChatMessages.appendChild(msgEl);
+                softChatScroll();
+            }
+        } else {
+            // Historical message during resync - insert at correct position in array
+            // but don't manipulate DOM (user will see it on scroll/reopen)
+            let insertIdx = 0;
+            for (let i = chat.messages.length - 1; i >= 0; i--) {
+                if (chat.messages[i].at <= pivxMsg.at) {
+                    insertIdx = i + 1;
+                    break;
+                }
+            }
+            chat.messages.splice(insertIdx, 0, pivxMsg);
         }
 
         // Update chatlist

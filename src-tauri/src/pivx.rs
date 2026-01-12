@@ -84,7 +84,7 @@ pub struct Utxo {
 
 /// Address balance from Blockbook API
 #[derive(Debug, Clone, Deserialize)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, dead_code)]
 pub struct AddressBalance {
     pub address: String,
     #[serde(deserialize_with = "deserialize_string_to_u64")]
@@ -670,34 +670,61 @@ async fn save_promo<R: Runtime>(
     Ok(())
 }
 
-/// Get encrypted private key for a promo code
-async fn get_promo_privkey<R: Runtime>(
-    handle: &AppHandle<R>,
-    gift_code: &str,
-) -> Result<[u8; 32], String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-    let privkey_encrypted: String = conn.query_row(
-        "SELECT privkey_encrypted FROM pivx_promos WHERE gift_code = ?1",
-        rusqlite::params![gift_code],
-        |row| row.get(0),
-    ).map_err(|_| "Promo code not found in database")?;
-    crate::account_manager::return_db_connection(conn);
-
-    // Decrypt private key
+/// Decrypt an encrypted private key string and convert to bytes
+/// Used for retrieving stored promo privkeys without re-deriving (avoids PoW cost)
+async fn decrypt_privkey_bytes(privkey_encrypted: String) -> Result<[u8; 32], String> {
     let privkey_hex = crate::crypto::internal_decrypt(privkey_encrypted, None)
         .await
-        .map_err(|_| "Failed to decrypt private key")?;
+        .map_err(|_| "Failed to decrypt private key".to_string())?;
 
-    let privkey_bytes = hex::decode(&privkey_hex)
-        .map_err(|_| "Invalid private key format")?;
+    hex::decode(&privkey_hex)
+        .map_err(|_| "Invalid private key format".to_string())?
+        .try_into()
+        .map_err(|_| "Invalid private key length".to_string())
+}
 
-    if privkey_bytes.len() != 32 {
-        return Err("Invalid private key length".to_string());
+/// Promo with decrypted private key ready for signing
+pub struct DecryptedPromo {
+    pub gift_code: String,
+    pub address: String,
+    pub privkey: [u8; 32],
+    pub amount_piv: f64,
+}
+
+/// Get all active promos with positive balances, with decrypted private keys
+/// This queries the DB once and decrypts all keys, avoiding repeated PoW derivation
+async fn get_active_promos_with_keys<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<Vec<DecryptedPromo>, String> {
+    // Query all active promos with balances
+    let encrypted_promos: Vec<(String, String, String, f64)> = {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        let result = {
+            let mut stmt = conn.prepare(
+                "SELECT gift_code, address, privkey_encrypted, COALESCE(amount_piv, 0)
+                 FROM pivx_promos WHERE status = 'active' AND COALESCE(amount_piv, 0) > 0
+                 ORDER BY amount_piv DESC"
+            ).map_err(|e| format!("DB error: {}", e))?;
+
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            }).map_err(|e| format!("Query error: {}", e))?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Row error: {}", e))?
+        };
+        crate::account_manager::return_db_connection(conn);
+        result
+    };
+
+    // Decrypt all private keys
+    let mut promos = Vec::with_capacity(encrypted_promos.len());
+    for (gift_code, address, privkey_encrypted, amount_piv) in encrypted_promos {
+        let privkey = decrypt_privkey_bytes(privkey_encrypted).await?;
+        promos.push(DecryptedPromo { gift_code, address, privkey, amount_piv });
     }
 
-    let mut privkey = [0u8; 32];
-    privkey.copy_from_slice(&privkey_bytes);
-    Ok(privkey)
+    Ok(promos)
 }
 
 /// Update promo status in database
@@ -1176,53 +1203,14 @@ pub async fn pivx_send_payment<R: Runtime>(
 
     let amount_sats = (amount_piv * 100_000_000.0) as u64;
 
-    // Get all active promos with balances (collect encrypted keys first)
-    let encrypted_promos: Vec<(String, String, String, f64)> = {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
-        let result = {
-            let mut stmt = conn.prepare(
-                "SELECT gift_code, address, privkey_encrypted, COALESCE(amount_piv, 0)
-                 FROM pivx_promos WHERE status = 'active' AND COALESCE(amount_piv, 0) > 0
-                 ORDER BY amount_piv DESC"
-            ).map_err(|e| format!("DB error: {}", e))?;
-
-            let rows = stmt.query_map([], |row| {
-                let gift_code: String = row.get(0)?;
-                let address: String = row.get(1)?;
-                let privkey_encrypted: String = row.get(2)?;
-                let amount: f64 = row.get(3)?;
-                Ok((gift_code, address, privkey_encrypted, amount))
-            }).map_err(|e| format!("Query error: {}", e))?;
-
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row.map_err(|e| format!("Row error: {}", e))?);
-            }
-            result
-        };
-        crate::account_manager::return_db_connection(conn);
-        result
-    };
-
-    // Decrypt private keys
-    let mut promos: Vec<(String, String, [u8; 32], f64)> = Vec::new();
-    for (gift_code, address, privkey_encrypted, amount) in encrypted_promos {
-        let privkey_hex = crate::crypto::internal_decrypt(privkey_encrypted, None)
-            .await
-            .map_err(|_| "Failed to decrypt key")?;
-        let privkey_bytes: [u8; 32] = hex::decode(&privkey_hex)
-            .map_err(|_| "Invalid privkey hex")?
-            .try_into()
-            .map_err(|_| "Invalid privkey length")?;
-        promos.push((gift_code, address, privkey_bytes, amount));
-    }
-
+    // Get all active promos with decrypted keys
+    let promos = get_active_promos_with_keys(&handle).await?;
     if promos.is_empty() {
         return Err("No funds available to send".to_string());
     }
 
     // Calculate total available
-    let total_available: f64 = promos.iter().map(|(_, _, _, amt)| amt).sum();
+    let total_available: f64 = promos.iter().map(|p| p.amount_piv).sum();
     let total_available_sats = (total_available * 100_000_000.0) as u64;
 
     if total_available_sats < amount_sats {
@@ -1236,12 +1224,12 @@ pub async fn pivx_send_payment<R: Runtime>(
     let mut selected_promos: Vec<(String, String, [u8; 32])> = Vec::new();
     let mut selected_total_sats: u64 = 0;
 
-    for (gift_code, address, privkey, amount) in &promos {
+    for promo in &promos {
         if selected_total_sats >= amount_sats {
             break;
         }
-        selected_promos.push((gift_code.clone(), address.clone(), *privkey));
-        selected_total_sats += (*amount * 100_000_000.0) as u64;
+        selected_promos.push((promo.gift_code.clone(), promo.address.clone(), promo.privkey));
+        selected_total_sats += (promo.amount_piv * 100_000_000.0) as u64;
     }
 
     // Fetch UTXOs for all selected promos
@@ -1404,6 +1392,7 @@ pub async fn pivx_send_payment<R: Runtime>(
         .mine(true)
         .npub(Some(my_public_key.to_bech32().unwrap_or_default()))
         .build();
+    let event_timestamp = stored_event.created_at;
     let _ = crate::db::save_pivx_payment_event(&handle, &receiver, stored_event).await;
 
     // Emit event to frontend
@@ -1416,6 +1405,7 @@ pub async fn pivx_send_payment<R: Runtime>(
         "message_id": event_id,
         "sender": my_public_key.to_bech32().unwrap_or_default(),
         "is_mine": true,
+        "at": event_timestamp * 1000,
     })).map_err(|e| format!("Failed to emit event: {}", e))?;
 
     Ok(event_id)
@@ -1539,6 +1529,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         .mine(true)
         .npub(Some(my_public_key.to_bech32().unwrap_or_default()))
         .build();
+    let event_timestamp = stored_event.created_at;
     let _ = crate::db::save_pivx_payment_event(&handle, &receiver, stored_event).await;
 
     // Emit event to frontend so our own send shows up in chat immediately
@@ -1551,6 +1542,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         "message_id": event_id,
         "sender": my_public_key.to_bech32().unwrap_or_default(),
         "is_mine": true,
+        "at": event_timestamp * 1000,
     })).map_err(|e| format!("Failed to emit event: {}", e))?;
 
     Ok(event_id)
@@ -1836,53 +1828,14 @@ pub async fn pivx_withdraw<R: Runtime>(
         "message": "Loading wallet promos...",
     }));
 
-    // Get all active promos with balances (collect encrypted keys first)
-    let encrypted_promos: Vec<(String, String, String, f64)> = {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
-        let result = {
-            let mut stmt = conn.prepare(
-                "SELECT gift_code, address, privkey_encrypted, COALESCE(amount_piv, 0)
-                 FROM pivx_promos WHERE status = 'active' AND COALESCE(amount_piv, 0) > 0
-                 ORDER BY amount_piv DESC"
-            ).map_err(|e| format!("DB error: {}", e))?;
-
-            let rows = stmt.query_map([], |row| {
-                let gift_code: String = row.get(0)?;
-                let address: String = row.get(1)?;
-                let privkey_encrypted: String = row.get(2)?;
-                let amount: f64 = row.get(3)?;
-                Ok((gift_code, address, privkey_encrypted, amount))
-            }).map_err(|e| format!("Query error: {}", e))?;
-
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row.map_err(|e| format!("Row error: {}", e))?);
-            }
-            result
-        };
-        crate::account_manager::return_db_connection(conn);
-        result
-    };
-
-    // Decrypt private keys (async operation, done outside DB block)
-    let mut promos: Vec<(String, String, [u8; 32], f64)> = Vec::new();
-    for (gift_code, address, privkey_encrypted, amount) in encrypted_promos {
-        let privkey_hex = crate::crypto::internal_decrypt(privkey_encrypted, None)
-            .await
-            .map_err(|_| "Failed to decrypt key")?;
-        let privkey_bytes: [u8; 32] = hex::decode(&privkey_hex)
-            .map_err(|_| "Invalid privkey hex")?
-            .try_into()
-            .map_err(|_| "Invalid privkey length")?;
-        promos.push((gift_code, address, privkey_bytes, amount));
-    }
-
+    // Get all active promos with decrypted keys
+    let promos = get_active_promos_with_keys(&handle).await?;
     if promos.is_empty() {
         return Err("No funds available to withdraw".to_string());
     }
 
     // Calculate total available
-    let total_available: f64 = promos.iter().map(|(_, _, _, amt)| amt).sum();
+    let total_available: f64 = promos.iter().map(|p| p.amount_piv).sum();
     let total_available_sats = (total_available * 100_000_000.0) as u64;
 
     if total_available_sats < amount_sats {
@@ -1902,12 +1855,12 @@ pub async fn pivx_withdraw<R: Runtime>(
     let mut selected_promos: Vec<(String, String, [u8; 32])> = Vec::new();
     let mut selected_total_sats: u64 = 0;
 
-    for (gift_code, address, privkey, amount) in &promos {
+    for promo in &promos {
         if selected_total_sats >= amount_sats {
             break;
         }
-        selected_promos.push((gift_code.clone(), address.clone(), *privkey));
-        selected_total_sats += (*amount * 100_000_000.0) as u64;
+        selected_promos.push((promo.gift_code.clone(), promo.address.clone(), promo.privkey));
+        selected_total_sats += (promo.amount_piv * 100_000_000.0) as u64;
     }
 
     // Emit progress
