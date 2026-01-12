@@ -133,6 +133,50 @@ async function saveSendTypingIndicators(bool) {
     return await invoke('set_sql_setting', { key: 'send_typing_indicators', value: bool ? 'true' : 'false' });
 }
 
+// ============================================================================
+// Notification Sound Settings
+// ============================================================================
+
+/**
+ * @typedef {Object} NotificationSettings
+ * @property {boolean} global_mute - Whether all notification sounds are muted
+ * @property {Object} sound - The notification sound setting
+ */
+
+/**
+ * Load notification settings from the backend
+ * @returns {Promise<NotificationSettings>}
+ */
+async function loadNotificationSettings() {
+    return await invoke('get_notification_settings');
+}
+
+/**
+ * Save notification settings to the backend
+ * @param {NotificationSettings} settings - The notification settings to save
+ * @returns {Promise<void>}
+ */
+async function saveNotificationSettings(settings) {
+    return await invoke('set_notification_settings', { settings });
+}
+
+/**
+ * Preview a notification sound
+ * @param {Object} sound - The sound to preview (e.g., { type: 'Default' } or { type: 'Custom', path: '/path/to/file' })
+ * @returns {Promise<void>}
+ */
+async function previewNotificationSound(sound) {
+    return await invoke('preview_notification_sound', { sound });
+}
+
+/**
+ * Open file picker to select a custom notification sound
+ * @returns {Promise<string>} - The path to the selected sound file
+ */
+async function selectCustomNotificationSound() {
+    return await invoke('select_custom_notification_sound');
+}
+
 /**
  * Check if any account exists.
  * @returns {Promise<boolean>}

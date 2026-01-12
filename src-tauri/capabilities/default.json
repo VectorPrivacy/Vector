@@ -183,6 +183,11 @@
     "allow-pivx-get-currencies",
     "allow-pivx-get-price",
     "allow-pivx-set-preferred-currency",
-    "allow-pivx-get-preferred-currency"
+    "allow-pivx-get-preferred-currency",
+    "allow-get-notification-settings",
+    "allow-set-notification-settings",
+    "allow-preview-notification-sound",
+    "allow-select-custom-notification-sound",
+    "allow-run-maintenance"
   ]
 }

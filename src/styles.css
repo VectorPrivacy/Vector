@@ -8161,4 +8161,67 @@ hr {
   min-width: 100px;
 }
 
+/* Notification Sound Chip */
+.notif-custom-container {
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+}
 
+.notif-sound-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 12px 12px 15px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 25px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.notif-sound-chip:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.notif-sound-chip-icon {
+  font-size: 20px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.notif-sound-chip-name {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.notif-sound-chip-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.7);
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+}
+
+.notif-sound-chip-clear:hover {
+  background: rgba(255, 100, 100, 0.3);
+  color: #ff6b6b;
+}

@@ -66,6 +66,34 @@ Twemoji provides a consistent, high-quality emoji experience across all platform
 
 ---
 
+## Sounds
+
+### Sonar Ping (notif-sonar.mp3)
+
+- **Source**: [Freesound](https://freesound.org/people/shinephoenixstormcrow/sounds/337050/)
+- **License**: [CC Attribution 3.0](https://creativecommons.org/licenses/by/3.0/)
+- **Author**: [shinephoenixstormcrow](https://freesound.org/people/shinephoenixstormcrow/) (modified from [unfa](https://freesound.org/people/unfa/)'s original)
+- **Usage**: Used as the "Sonar" notification sound option
+- **File**: `src-tauri/resources/sounds/notif-sonar.mp3`
+
+### Techno Ping (notif-techno.mp3)
+
+- **Source**: [Freesound](https://freesound.org/people/Alexhanj/sounds/528730/)
+- **License**: [CC0 1.0 (Public Domain)](https://creativecommons.org/publicdomain/zero/1.0/)
+- **Author**: [Alexhanj](https://freesound.org/people/Alexhanj/)
+- **Usage**: Used as the "Techno" notification sound option
+- **File**: `src-tauri/resources/sounds/notif-techno.mp3`
+
+### Synth Ping (notif-synth.mp3)
+
+- **Source**: [Freesound](https://freesound.org/people/SUBQUiRE/sounds/833599/)
+- **License**: [CC Attribution 4.0](https://creativecommons.org/licenses/by/4.0/)
+- **Author**: [SUBQUiRE](https://freesound.org/people/SUBQUiRE/)
+- **Usage**: Used as the "Synth" notification sound option
+- **File**: `src-tauri/resources/sounds/notif-synth.mp3`
+
+---
+
 ## Additional Notes
 
 Vector strives to properly attribute all third-party assets and respect the licenses under which they are provided. If you believe any attribution is missing or incorrect, please [open an issue](https://github.com/VectorPrivacy/Vector/issues) or contact the development team.

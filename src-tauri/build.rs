@@ -154,6 +154,13 @@ fn main() {
             // Whisper commands (conditional)
             "delete_whisper_model",
             "list_models",
+            // Notification sound commands
+            "get_notification_settings",
+            "set_notification_settings",
+            "preview_notification_sound",
+            "select_custom_notification_sound",
+            // Maintenance
+            "run_maintenance",
             // Debug commands (conditional)
             "debug_hot_reload_sync",
         ]),

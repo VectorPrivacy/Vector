@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-run-maintenance"
+description = "Enables the run_maintenance command without any pre-configured scope."
+commands.allow = ["run_maintenance"]
+
+[[permission]]
+identifier = "deny-run-maintenance"
+description = "Denies the run_maintenance command without any pre-configured scope."
+commands.deny = ["run_maintenance"]

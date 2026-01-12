@@ -1170,6 +1170,156 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
     }
 }
 
+// ============================================================================
+// Notification Sound Settings
+// ============================================================================
+
+/** @type {Object|null} Current notification settings */
+let currentNotificationSettings = null;
+
+/** @type {string|null} Path to custom sound file */
+let customSoundPath = null;
+
+/**
+ * Initialize notification sound settings UI
+ */
+async function initNotificationSettings() {
+    // Load current settings
+    try {
+        currentNotificationSettings = await loadNotificationSettings();
+    } catch (e) {
+        console.error('Failed to load notification settings:', e);
+        currentNotificationSettings = { global_mute: false, sound: { type: 'Default' } };
+    }
+
+    const muteToggle = document.getElementById('notif-mute-toggle');
+    const soundSelect = document.getElementById('notif-sound-select');
+    const customGroup = document.getElementById('notif-custom-group');
+    const customFilename = document.getElementById('notif-custom-filename');
+    const customSelectBtn = document.getElementById('notif-custom-select-btn');
+    const previewBtn = document.getElementById('notif-preview-btn');
+
+    // Set initial mute toggle state
+    muteToggle.checked = currentNotificationSettings.global_mute;
+
+    // Determine current sound selection
+    const sound = currentNotificationSettings.sound;
+    if (sound && sound.type === 'Custom' && sound.path) {
+        customSoundPath = sound.path;
+        soundSelect.value = 'custom';
+        customGroup.style.display = 'block';
+        updateCustomFilename(sound.path);
+    } else if (sound && sound.type === 'None') {
+        soundSelect.value = 'none';
+    } else if (sound && sound.type === 'Sonar') {
+        soundSelect.value = 'sonar';
+    } else if (sound && sound.type === 'Techno') {
+        soundSelect.value = 'techno';
+    } else if (sound && sound.type === 'Synth') {
+        soundSelect.value = 'synth';
+    } else {
+        soundSelect.value = 'default';
+    }
+
+    // Mute toggle handler
+    muteToggle.addEventListener('change', async (e) => {
+        currentNotificationSettings.global_mute = e.target.checked;
+        await saveCurrentNotificationSettings();
+    });
+
+    // Sound selection handler
+    soundSelect.addEventListener('change', async (e) => {
+        const value = e.target.value;
+
+        if (value === 'custom') {
+            customGroup.style.display = 'block';
+            if (customSoundPath) {
+                updateCustomFilename(customSoundPath);
+                currentNotificationSettings.sound = { type: 'Custom', path: customSoundPath };
+                await saveCurrentNotificationSettings();
+            } else {
+                // No custom path yet - show placeholder
+                customFilename.textContent = 'No file selected';
+            }
+        } else {
+            customGroup.style.display = 'none';
+            if (value === 'none') {
+                currentNotificationSettings.sound = { type: 'None' };
+            } else if (value === 'sonar') {
+                currentNotificationSettings.sound = { type: 'Sonar' };
+            } else if (value === 'techno') {
+                currentNotificationSettings.sound = { type: 'Techno' };
+            } else if (value === 'synth') {
+                currentNotificationSettings.sound = { type: 'Synth' };
+            } else {
+                currentNotificationSettings.sound = { type: 'Default' };
+            }
+            await saveCurrentNotificationSettings();
+        }
+    });
+
+    // Custom sound file selection handler
+    customSelectBtn.addEventListener('click', async () => {
+        try {
+            const path = await selectCustomNotificationSound();
+            customSoundPath = path;
+            currentNotificationSettings.sound = { type: 'Custom', path: path };
+            updateCustomFilename(path);
+            await saveCurrentNotificationSettings();
+        } catch (e) {
+            if (e === 'FILE_TOO_LARGE') {
+                popupConfirm('File Too Large', 'Notification sounds must be under 1MB. Please choose a shorter audio clip.', true);
+            } else if (e === 'AUDIO_TOO_LONG') {
+                popupConfirm('Audio Too Long', 'Notification sounds must be 10 seconds or less.', true);
+            } else if (e !== 'No file selected') {
+                console.error('Failed to select custom sound:', e);
+            }
+        }
+    });
+
+    // Clear custom sound handler
+    const clearBtn = document.getElementById('notif-custom-clear');
+    clearBtn.addEventListener('click', async (e) => {
+        e.stopPropagation(); // Prevent triggering the chip click (file picker)
+        customSoundPath = null;
+        currentNotificationSettings.sound = { type: 'Default' };
+        soundSelect.value = 'default';
+        customGroup.style.display = 'none';
+        await saveCurrentNotificationSettings();
+    });
+
+    // Preview button handler
+    previewBtn.addEventListener('click', async () => {
+        try {
+            await previewNotificationSound(currentNotificationSettings.sound);
+        } catch (e) {
+            console.error('Failed to preview sound:', e);
+        }
+    });
+}
+
+/**
+ * Update the custom filename display
+ * @param {string} path - Full path to the sound file (may be cache format: name_RATE.raw)
+ */
+function updateCustomFilename(path) {
+    const filename = path.split(/[/\\]/).pop() || 'Unknown file';
+    // Extract friendly name from cache format (e.g., "discord_ping_48000.raw" -> "discord_ping")
+    const friendlyName = filename.replace(/_\d+\.raw$/, '');
+    document.getElementById('notif-custom-filename').textContent = friendlyName;
+}
+
+/**
+ * Save current notification settings to backend
+ */
+async function saveCurrentNotificationSettings() {
+    try {
+        await saveNotificationSettings(currentNotificationSettings);
+    } catch (e) {
+        console.error('Failed to save notification settings:', e);
+    }
+}
+
 /**
  * Initialize settings on app start
  */
@@ -1201,6 +1351,15 @@ async function initSettings() {
         fSendTypingIndicators = e.target.checked;
         await saveSendTypingIndicators(e.target.checked);
     });
+
+    // Initialize notification sound settings (desktop only)
+    if (platformFeatures.notification_sounds) {
+        await initNotificationSettings();
+    } else {
+        // Hide notification sounds section on mobile
+        const notifSection = document.getElementById('settings-notifications');
+        if (notifSection) notifSection.style.display = 'none';
+    }
 
     // Set up clear storage button
     const clearStorageBtn = document.getElementById('clear-storage-btn');

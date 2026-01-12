@@ -67,6 +67,9 @@ mod image_cache;
 // PIVX Promos (addressless cryptocurrency payments)
 mod pivx;
 
+// Audio processing: resampling (all platforms) + notification playback (desktop only)
+mod audio;
+
 /// # Trusted Relays
 ///
 /// The 'Trusted Relays' handle events that MAY have a small amount of public-facing metadata attached (i.e: Expiration tags).
@@ -1473,39 +1476,6 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
 /// Handle a processed text message
 async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
-    // Send an OS notification for incoming messages (do this before locking state)
-    if !is_mine && is_new {
-        // Clone necessary data for notification (avoid holding lock during notification)
-        let display_info = {
-            let state = STATE.lock().await;
-            match state.get_profile(contact) {
-                Some(profile) => {
-                    if profile.muted {
-                        None // Profile is muted, don't send notification
-                    } else {
-                        // Profile is not muted, send notification
-                        let display_name = if !profile.nickname.is_empty() {
-                            profile.nickname.clone()
-                        } else if !profile.name.is_empty() {
-                            profile.name.clone()
-                        } else {
-                            String::from("New Message")
-                        };
-                        Some((display_name, msg.content.clone()))
-                    }
-                }
-                // No profile, send notification with default name
-                None => Some((String::from("New Message"), msg.content.clone())),
-            }
-        };
-            
-        // Send notification outside of state lock using new generic system
-        if let Some((display_name, content)) = display_info {
-            let notification = NotificationData::direct_message(display_name, content);
-            show_notification_generic(notification);
-        }
-    }
-
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -1540,6 +1510,34 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
                 "message": &msg,
                 "chat_id": contact
             })).unwrap();
+        }
+
+        // Send OS notification for incoming messages (only after confirming message is new)
+        if !is_mine && is_new {
+            let display_info = {
+                let state = STATE.lock().await;
+                match state.get_profile(contact) {
+                    Some(profile) => {
+                        if profile.muted {
+                            None // Profile is muted, don't send notification
+                        } else {
+                            let display_name = if !profile.nickname.is_empty() {
+                                profile.nickname.clone()
+                            } else if !profile.name.is_empty() {
+                                profile.name.clone()
+                            } else {
+                                String::from("New Message")
+                            };
+                            Some((display_name, msg.content.clone()))
+                        }
+                    }
+                    None => Some((String::from("New Message"), msg.content.clone())),
+                }
+            };
+            if let Some((display_name, content)) = display_info {
+                let notification = NotificationData::direct_message(display_name, content);
+                show_notification_generic(notification);
+            }
         }
 
         // Save the new message to DB (chat_id = contact npub for DMs)
@@ -1583,41 +1581,6 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
         .map(|att| att.extension.clone())
         .unwrap_or_else(|| String::from("file"));
 
-    // Send an OS notification for incoming files (do this before locking state)
-    if !is_mine && is_new {
-        // Clone necessary data for notification (avoid holding lock during notification)
-        let display_info = {
-            let state = STATE.lock().await;
-            match state.get_profile(contact) {
-                Some(profile) => {
-                    if profile.muted {
-                        None // Profile is muted, don't send notification
-                    } else {
-                        // Profile is not muted, send notification
-                        let display_name = if !profile.nickname.is_empty() {
-                            profile.nickname.clone()
-                        } else if !profile.name.is_empty() {
-                            profile.name.clone()
-                        } else {
-                            String::from("New Message")
-                        };
-                        // Create a "description" of the attachment file
-                        Some((display_name, extension.clone()))
-                    }
-                }
-                // No profile, send notification with default name
-                None => Some((String::from("New Message"), extension.clone())),
-            }
-        };
-        
-        // Send notification outside of state lock using new generic system
-        if let Some((display_name, file_extension)) = display_info {
-            let file_description = "Sent a ".to_string() + &get_file_type_description(&file_extension);
-            let notification = NotificationData::direct_message(display_name, file_description);
-            show_notification_generic(notification);
-        }
-    }
-
     // Add the message to the state and clear typing indicator for sender
     let (was_msg_added_to_state, _active_typers) = {
         let mut state = STATE.lock().await;
@@ -1642,6 +1605,35 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
                 "message": &msg,
                 "chat_id": contact
             })).unwrap();
+        }
+
+        // Send OS notification for incoming files (only after confirming message is new)
+        if !is_mine && is_new {
+            let display_info = {
+                let state = STATE.lock().await;
+                match state.get_profile(contact) {
+                    Some(profile) => {
+                        if profile.muted {
+                            None // Profile is muted, don't send notification
+                        } else {
+                            let display_name = if !profile.nickname.is_empty() {
+                                profile.nickname.clone()
+                            } else if !profile.name.is_empty() {
+                                profile.name.clone()
+                            } else {
+                                String::from("New Message")
+                            };
+                            Some((display_name, extension.clone()))
+                        }
+                    }
+                    None => Some((String::from("New Message"), extension.clone())),
+                }
+            };
+            if let Some((display_name, file_extension)) = display_info {
+                let file_description = "Sent a ".to_string() + &get_file_type_description(&file_extension);
+                let notification = NotificationData::direct_message(display_name, file_description);
+                show_notification_generic(notification);
+            }
         }
 
         // Save the new message to DB (chat_id = contact npub for DMs)
@@ -3231,7 +3223,7 @@ impl NotificationData {
 /// Show an OS notification with generic notification data
 fn show_notification_generic(data: NotificationData) {
     let handle = TAURI_APP.get().unwrap();
-    
+
     // Only send notifications if the app is not focused
     if !handle
         .webview_windows()
@@ -3242,6 +3234,17 @@ fn show_notification_generic(data: NotificationData) {
         .is_focused()
         .unwrap()
     {
+        // Play notification sound (non-blocking, desktop only)
+        #[cfg(desktop)]
+        {
+            let handle_clone = handle.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = audio::play_notification_if_enabled(&handle_clone) {
+                    eprintln!("Failed to play notification sound: {}", e);
+                }
+            });
+        }
+
         #[cfg(target_os = "android")]
         {
             // Determine summary based on notification type
@@ -4172,10 +4175,10 @@ async fn export_keys() -> Result<serde_json::Value, String> {
 #[derive(serde::Serialize, Clone)]
 struct PlatformFeatures {
     transcription: bool,
+    notification_sounds: bool,
     os: String,
     is_mobile: bool,
     debug_mode: bool,
-    // Add more features here as needed
 }
 
 /// Returns a list of platform-specific features available
@@ -4199,10 +4202,28 @@ async fn get_platform_features() -> PlatformFeatures {
 
     PlatformFeatures {
         transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
+        notification_sounds: cfg!(desktop),
         os: os.to_string(),
         is_mobile,
         debug_mode: cfg!(debug_assertions),
     }
+}
+
+/// Run periodic maintenance tasks to keep memory usage low
+/// Called every ~45s from the JS profile sync loop
+///
+/// Current tasks:
+/// - Purge expired notification sound cache (10 min TTL, desktop only)
+///
+/// Future tasks could include:
+/// - Image cache cleanup
+/// - Temporary file cleanup
+/// - Memory pressure responses
+#[tauri::command]
+fn run_maintenance() {
+    // Audio: purge expired notification sound cache (desktop only)
+    #[cfg(desktop)]
+    audio::check_cache_ttl();
 }
 
 #[tauri::command]
@@ -4259,8 +4280,8 @@ async fn transcribe<R: Runtime>(handle: AppHandle<R>, file_path: String, model_n
         return Err(format!("File does not exist: {}", file_path));
     }
     
-    // Read the wav file and resample
-    match whisper::resample_audio(path, 16000) {
+    // Decode and resample to 16kHz for Whisper
+    match audio::decode_and_resample(path, 16000) {
         Ok(audio_data) => {
             // Pass the resampled audio to the whisper transcribe function
             match whisper::transcribe(&handle, &model_name, translate, audio_data).await {
@@ -4583,18 +4604,17 @@ async fn clear_storage() -> Result<serde_json::Value, String> {
         }
     }
     
-    // Clear image cache (avatars, banners, miniapp icons)
-    // Cache is global (not per-account) for deduplication across accounts
-    let mut cache_cleared = 0u64;
-    if let Ok(count) = image_cache::clear_cache(handle, image_cache::ImageType::Avatar) {
-        cache_cleared += count;
+    // Clear all disk caches (images, sounds, etc.) by nuking the cache directory
+    let cache_dir = handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("cache");
+    if cache_dir.exists() {
+        let _ = std::fs::remove_dir_all(&cache_dir);
     }
-    if let Ok(count) = image_cache::clear_cache(handle, image_cache::ImageType::Banner) {
-        cache_cleared += count;
-    }
-    if let Ok(count) = image_cache::clear_cache(handle, image_cache::ImageType::MiniAppIcon) {
-        cache_cleared += count;
-    }
+
+    // Clear in-memory notification sound cache (desktop only)
+    #[cfg(desktop)]
+    audio::purge_sound_cache();
 
     // Clear cached paths from all profiles in state and database
     for profile in &mut state.profiles {
@@ -4618,8 +4638,7 @@ async fn clear_storage() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "freed_bytes": freed_bytes,
         "freed_formatted": format_bytes(freed_bytes),
-        "updated_chats": updated_chats.len(),
-        "cache_files_cleared": cache_cleared
+        "updated_chats": updated_chats.len()
     }))
 }
 
@@ -6008,6 +6027,17 @@ pub fn run() {
             pivx::pivx_get_price,
             pivx::pivx_set_preferred_currency,
             pivx::pivx_get_preferred_currency,
+            // Notification sound commands (desktop only)
+            #[cfg(desktop)]
+            audio::get_notification_settings,
+            #[cfg(desktop)]
+            audio::set_notification_settings,
+            #[cfg(desktop)]
+            audio::preview_notification_sound,
+            #[cfg(desktop)]
+            audio::select_custom_notification_sound,
+            // Maintenance (periodic cleanup tasks)
+            run_maintenance,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

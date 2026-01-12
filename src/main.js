@@ -140,6 +140,7 @@ const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-au
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
+const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
@@ -2892,10 +2893,14 @@ function declineMLSInvite(welcomeEventId) {
 
 /**
  * A "thread" function dedicated to refreshing Profile data in the background
+ * Also runs periodic maintenance tasks (cache cleanup, etc.)
  */
 async function fetchProfiles() {
     // Use the new profile sync system
     await invoke("sync_all_profiles");
+
+    // Run periodic maintenance (cache cleanup, memory optimization)
+    invoke("run_maintenance").catch(() => {});
 }
 
 // Track pending status hide timeout
@@ -9293,6 +9298,11 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
+    };
+    domSettingsNotifMuteInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.', true);
     };
 
     domSettingsDeepRescanInfo.onclick = (e) => {

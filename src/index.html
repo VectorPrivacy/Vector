@@ -778,6 +778,48 @@
           </div>
         </div>
 
+        <!-- Notification Settings Section -->
+        <div id="settings-notifications" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Notifications</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="notif-mute-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Mute All Notification Sounds</span>
+              <input type="checkbox" id="notif-mute-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label for="notif-sound-select">Notification Sound</label>
+            <div class="select-container" style="margin-top: 10px;">
+              <select id="notif-sound-select">
+                <option value="default">Default</option>
+                <option value="sonar">Sonar</option>
+                <option value="techno">Techno</option>
+                <option value="synth">Synth</option>
+                <option value="none">None</option>
+                <option value="custom">Custom...</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group" id="notif-custom-group" style="display: none;">
+            <div class="notif-custom-container">
+              <div class="notif-sound-chip" id="notif-custom-select-btn" title="Click to change sound">
+                <span class="notif-sound-chip-icon">♪</span>
+                <span class="notif-sound-chip-name" id="notif-custom-filename">No file selected</span>
+                <button class="notif-sound-chip-clear" id="notif-custom-clear" title="Remove custom sound">×</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <button id="notif-preview-btn" class="btn cancel-btn">Preview Sound</button>
+          </div>
+        </div>
+
         <!-- Network Settings Section -->
         <div id="settings-network" class="settings-section">
           <hr class="divider settings-divider">
