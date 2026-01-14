@@ -571,24 +571,42 @@ pub async fn miniapp_open(
     
     // Check if already open
     if let Some((existing_label, _existing_instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
-        // Focus existing window
-        if let Some(window) = app.get_webview_window(&existing_label) {
-            // If href is provided, navigate to it
-            if let Some(ref href_value) = href {
-                let mut nav_url = get_miniapp_base_url()?;
-                // Append href to the base URL (href should start with / or be a relative path)
-                let href_path = href_value.trim_start_matches('/');
-                nav_url.set_path(&format!("/{}", href_path));
-                trace!("Navigating existing Mini App to: {}", nav_url);
-                window.navigate(nav_url)?;
+        #[cfg(target_os = "android")]
+        {
+            // On Android, navigate the existing overlay if open
+            if crate::android::miniapp::is_miniapp_open().unwrap_or(false) {
+                if let Some(ref href_value) = href {
+                    let _ = crate::android::miniapp::send_to_miniapp("navigate", href_value);
+                }
+                return Ok(());
+            } else {
+                // Overlay was closed, clean up state
+                warn!("Instance exists but overlay closed, cleaning up: {}", existing_label);
+                state.remove_instance(&existing_label).await;
             }
-            window.show()?;
-            window.set_focus()?;
-            return Ok(());
-        } else {
-            // Window was closed but instance still exists, clean up
-            warn!("Instance exists but window missing, cleaning up: {}", existing_label);
-            state.remove_instance(&existing_label).await;
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            // Desktop: Focus existing window
+            if let Some(window) = app.get_webview_window(&existing_label) {
+                // If href is provided, navigate to it
+                if let Some(ref href_value) = href {
+                    let mut nav_url = get_miniapp_base_url()?;
+                    // Append href to the base URL (href should start with / or be a relative path)
+                    let href_path = href_value.trim_start_matches('/');
+                    nav_url.set_path(&format!("/{}", href_path));
+                    trace!("Navigating existing Mini App to: {}", nav_url);
+                    window.navigate(nav_url)?;
+                }
+                window.show()?;
+                window.set_focus()?;
+                return Ok(());
+            } else {
+                // Window was closed but instance still exists, clean up
+                warn!("Instance exists but window missing, cleaning up: {}", existing_label);
+                state.remove_instance(&existing_label).await;
+            }
         }
     }
     
@@ -619,7 +637,42 @@ pub async fn miniapp_open(
     
     // Register the instance before creating the window
     state.add_instance(instance.clone()).await;
-    
+
+    // ========================================
+    // Android: Use native WebView overlay
+    // ========================================
+    #[cfg(target_os = "android")]
+    {
+        info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
+
+        // Open the native overlay WebView
+        crate::android::miniapp::open_miniapp_overlay(
+            &window_label,
+            &file_path,
+            &chat_id,
+            &message_id,
+            href.as_deref(),
+        ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
+
+        // Record to Mini Apps history
+        let attachment_ref = file_path.clone();
+        if let Err(e) = crate::db::record_miniapp_opened(
+            &app,
+            package.manifest.name.clone(),
+            file_path.clone(),
+            attachment_ref,
+        ) {
+            warn!("Failed to record Mini App to history: {}", e);
+        }
+
+        return Ok(());
+    }
+
+    // ========================================
+    // Desktop: Use WebviewWindowBuilder
+    // ========================================
+    #[cfg(not(target_os = "android"))]
+    {
     // Build the initial URL - append href if provided
     let mut initial_url = get_miniapp_base_url()?;
     if let Some(ref href_value) = href {
@@ -788,8 +841,9 @@ pub async fn miniapp_open(
     ) {
         warn!("Failed to record Mini App to history: {}", e);
     }
-    
+
     Ok(())
+    } // End of #[cfg(not(target_os = "android"))] block
 }
 
 /// Close a Mini App window
@@ -800,14 +854,26 @@ pub async fn miniapp_close(
     message_id: String,
 ) -> Result<(), Error> {
     let state = app.state::<MiniAppsState>();
-    
+
     if let Some((label, _)) = state.get_instance_by_message(&chat_id, &message_id).await {
-        if let Some(window) = app.get_webview_window(&label) {
-            window.close()?;
+        #[cfg(target_os = "android")]
+        {
+            // Close Android overlay
+            crate::android::miniapp::close_miniapp_overlay()
+                .map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to close Mini App overlay: {}", e)))?;
         }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            // Desktop: Close window
+            if let Some(window) = app.get_webview_window(&label) {
+                window.close()?;
+            }
+        }
+
         state.remove_instance(&label).await;
     }
-    
+
     Ok(())
 }
 

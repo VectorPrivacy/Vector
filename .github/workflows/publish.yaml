@@ -54,24 +54,24 @@ jobs:
         if: matrix.platform == 'windows-latest'
         run: |
           Write-Host "Installing Vulkan components..."
-          
+
           # Install Vulkan components via vcpkg
           vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
-          
+
           # Download glslc from your server
           Write-Host "Downloading glslc.exe..."
           Invoke-WebRequest -Uri "https://jskitty.cat/glslc.exe" -OutFile "glslc.exe"
-          
+
           # Place it in the vcpkg bin directory
           $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
           New-Item -ItemType Directory -Force -Path $vcpkgBin
           Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
-          
+
           # Set up environment
           echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
           echo "$vcpkgBin" >> $env:GITHUB_PATH
-          
+
           # Verify glslc works
           Write-Host "Verifying glslc..."
           & "$vcpkgBin\glslc.exe" --version
@@ -91,3 +91,77 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # Android APK Build
+  publish-android:
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;29.0.14206865"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> $GITHUB_ENV
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Setup Android signing
+        run: |
+          # Decode the keystore from base64 secret
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > $HOME/upload-keystore.jks
+
+          # Create keystore.properties file for Gradle
+          cat > src-tauri/gen/android/keystore.properties << EOF
+          storeFile=$HOME/upload-keystore.jks
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          EOF
+
+      - name: Build Android APK
+        run: npx tauri android build --apk --target aarch64
+        env:
+          NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload APK to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get_version.outputs.VERSION }}
+          files: |
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

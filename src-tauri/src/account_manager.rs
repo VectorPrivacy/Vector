@@ -733,6 +733,30 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         println!("[Migration 8] pivx_promos table created successfully");
     }
 
+    // Migration 9: Fix DM chats with empty participants
+    // DM chats (chat_type = 0) should have the other party's npub in participants
+    // A bug in get_or_create_chat_id was creating DM chats with participants = '[]'
+    let empty_dm_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chats WHERE chat_type = 0 AND participants = '[]'",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    if empty_dm_count > 0 {
+        println!("[Migration 9] Fixing {} DM chats with empty participants...", empty_dm_count);
+
+        // For DM chats, the chat_identifier IS the other party's npub
+        // So we set participants = '["<chat_identifier>"]'
+        conn.execute(
+            r#"UPDATE chats
+               SET participants = '["' || chat_identifier || '"]'
+               WHERE chat_type = 0 AND participants = '[]'"#,
+            [],
+        ).map_err(|e| format!("Failed to fix DM chat participants: {}", e))?;
+
+        println!("[Migration 9] Fixed {} DM chats with empty participants", empty_dm_count);
+    }
+
     Ok(())
 }
 

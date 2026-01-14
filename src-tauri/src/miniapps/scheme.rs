@@ -676,17 +676,17 @@ fn generate_inline_webxdc_script(user_npub: &str, user_display_name: &str) -> St
 // Mini App Bridge for Vector (injected)
 (function() {{
     'use strict';
-    
+
     const selfAddr = {self_addr};
     const selfName = {self_name};
-    
+
     // State tracking
     let updateListener = null;
     let lastKnownSerial = 0;
     let realtimeChannel = null;
     let realtimeListener = null;
     let tauriChannel = null;
-    
+
     // Helper to wait for Tauri
     function waitForTauri(callback) {{
         if (window.__TAURI__ && window.__TAURI__.core) {{
@@ -858,6 +858,9 @@ fn make_error_response(status: http::StatusCode, message: &str, granted_permissi
         .header(http::header::CONTENT_SECURITY_POLICY, CSP.as_str())
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header("Permissions-Policy", permissions_policy)
+        // Cross-origin isolation headers for SharedArrayBuffer (WASM threads)
+        .header("Cross-Origin-Opener-Policy", "same-origin")
+        .header("Cross-Origin-Embedder-Policy", "require-corp")
         .body(Cow::Owned(message.as_bytes().to_vec()))
         .unwrap()
 }

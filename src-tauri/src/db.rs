@@ -407,10 +407,20 @@ fn get_or_create_chat_id<R: Runtime>(
             .unwrap()
             .as_secs();
 
+        // Determine chat type and participants based on chat_identifier format
+        // DM chats have npub as identifier, MLS groups have hex group ID
+        let (chat_type, participants_json) = if chat_identifier.starts_with("npub1") {
+            // DM chat: participant is the other party (the chat_identifier itself)
+            (0, format!("[\"{}\"]", chat_identifier))
+        } else {
+            // MLS group: participants managed separately, start with empty
+            (1, "[]".to_string())
+        };
+
         conn.execute(
             "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted)
-             VALUES (?1, 0, '[]', '', ?2, '{}', 0)",
-            rusqlite::params![chat_identifier, now as i64],
+             VALUES (?1, ?2, ?3, '', ?4, '{}', 0)",
+            rusqlite::params![chat_identifier, chat_type, participants_json, now as i64],
         ).map_err(|e| format!("Failed to create chat: {}", e))?;
 
         // Get the auto-generated ID

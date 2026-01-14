@@ -81,10 +81,10 @@ All signing code and configuration edits have already been applied to the Vector
 
 ```bash
 # Build an APK for a specific architecture (aarch64 is the standard at >95% adoption, thus, the recommended APK arch)
-npm run tauri android build -- --apk --target aarch64
+npm run tauri android build -- --apk true --target aarch64
 
 # Build an APK for all architectures (bulky binary, not recommended)
-npm run tauri android build -- --apk
+npm run tauri android build -- --apk true
 ```
 
 ## Troubleshooting

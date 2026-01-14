@@ -247,8 +247,15 @@ impl ChatState {
             },
             None => {
                 // Chat doesn't exist, create it and add the message
-                // For now, we'll create a basic chat - in the future this should be more sophisticated
-                let mut chat = Chat::new(chat_id.to_string(), ChatType::DirectMessage, vec![]);
+                // Determine chat type based on chat_id format
+                let chat = if chat_id.starts_with("npub1") {
+                    // DM chat: use the chat_id as the participant
+                    Chat::new_dm(chat_id.to_string())
+                } else {
+                    // MLS group: participants will be set later
+                    Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
+                };
+                let mut chat = chat;
                 let was_added = chat.internal_add_message(message);
                 self.chats.push(chat);
                 was_added
@@ -3368,7 +3375,7 @@ async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<Strin
 #[tauri::command]
 async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
-    
+
     // Grab the attachment's metadata by searching through chats
     let attachment = {
         let mut state = STATE.lock().await;
@@ -3381,7 +3388,7 @@ async fn download_attachment(npub: String, msg_id: String, attachment_id: String
                 ChatType::MlsGroup => chat.id == npub,
                 ChatType::DirectMessage => chat.has_participant(&npub),
             };
-            
+
             if is_target_chat {
                 if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
                     if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
@@ -5719,8 +5726,8 @@ pub fn run() {
         // Register Mini Apps state
         .manage(miniapps::state::MiniAppsState::new());
 
-    // MCP Bridge plugin for AI-assisted debugging (debug builds only)
-    #[cfg(debug_assertions)]
+    // MCP Bridge plugin for AI-assisted debugging (desktop debug builds only)
+    #[cfg(all(debug_assertions, desktop))]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init());
     }

@@ -1,5 +1,7 @@
 pub mod clipboard;
 pub mod filesystem;
+pub mod miniapp;
+pub mod miniapp_jni;
 pub mod permissions;
 pub mod utils;
 
