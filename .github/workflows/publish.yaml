@@ -146,7 +146,7 @@ jobs:
           EOF
 
       - name: Build Android APK
-        run: npx tauri android build --apk --target aarch64
+        run: npx tauri android build --apk true --target aarch64
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
 
