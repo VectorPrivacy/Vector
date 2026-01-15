@@ -6130,6 +6130,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // Render the reply in a quote-like fashion
             const divRef = document.createElement('div');
             divRef.classList.add('msg-reply', 'btn');
+            // Add green styling when replying to the other person's message
+            if (!cMsg.mine) {
+                divRef.classList.add('msg-reply-them');
+            }
             divRef.id = `r-${cMsg.id}`;
 
             // Name + Message

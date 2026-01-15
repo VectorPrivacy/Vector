@@ -56,7 +56,12 @@
 }
 
 .msg-reply {
-  border-left: solid rgba(255, 255, 255, 0.45) 2px;
+  border-left: solid rgba(255, 255, 255, 0.45) 2px !important;
+}
+
+/* Green border when quoting the other person's message */
+.msg-reply-them {
+  border-left-color: #58fcb3;
 }
 
 @keyframes highlightMessage {
