@@ -549,8 +549,14 @@ fn play_samples_cached(samples: Arc<Vec<f32>>, device_sample_rate: u32) -> Resul
         .default_output_device()
         .ok_or("No output device found")?;
 
+    // Get the device's preferred channel count - Windows WASAPI often requires stereo
+    let default_config = device
+        .default_output_config()
+        .map_err(|e| format!("Failed to get output config: {}", e))?;
+    let device_channels = default_config.channels();
+
     let config = cpal::StreamConfig {
-        channels: 1, // mono
+        channels: device_channels,
         sample_rate: cpal::SampleRate(device_sample_rate),
         buffer_size: cpal::BufferSize::Default,
     };
@@ -569,13 +575,20 @@ fn play_samples_cached(samples: Arc<Vec<f32>>, device_sample_rate: u32) -> Resul
             move |data: &mut [f32], _: &_| {
                 let samples = &*samples_clone;
                 let mut pos = position_clone.load(Ordering::Relaxed);
+                let channels = device_channels as usize;
 
-                for sample in data.iter_mut() {
+                // Fill buffer, duplicating mono sample to all channels (e.g., stereo)
+                for frame in data.chunks_mut(channels) {
                     if pos < samples.len() {
-                        *sample = samples[pos];
+                        let sample = samples[pos];
+                        for channel_sample in frame.iter_mut() {
+                            *channel_sample = sample;
+                        }
                         pos += 1;
                     } else {
-                        *sample = 0.0;
+                        for channel_sample in frame.iter_mut() {
+                            *channel_sample = 0.0;
+                        }
                         finished_clone.store(true, Ordering::Relaxed);
                     }
                 }
