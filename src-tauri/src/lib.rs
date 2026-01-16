@@ -1450,7 +1450,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             handle_unknown_event(event, &contact).await
                         }
                         RumorProcessingResult::Ignored => false,
-                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                             // Save PIVX payment event to database
                             if let Some(handle) = TAURI_APP.get() {
                                 let event_timestamp = event.created_at;
@@ -1462,7 +1462,6 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                     "gift_code": gift_code,
                                     "amount_piv": amount_piv,
                                     "address": address,
-                                    "message": message,
                                     "message_id": message_id,
                                     "sender": sender,
                                     "is_mine": is_mine,
@@ -2242,7 +2241,7 @@ async fn notifs() -> Result<bool, String> {
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::Ignored => None,
-                                                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                                                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                                                                 // Save PIVX payment event and emit to frontend
                                                                 if let Some(handle) = TAURI_APP.get() {
                                                                     let event_timestamp = event.created_at;
@@ -2254,7 +2253,6 @@ async fn notifs() -> Result<bool, String> {
                                                                         "gift_code": gift_code,
                                                                         "amount_piv": amount_piv,
                                                                         "address": address,
-                                                                        "message": message,
                                                                         "message_id": message_id,
                                                                         "sender": sender_npub,
                                                                         "is_mine": is_mine,

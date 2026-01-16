@@ -104,8 +104,6 @@ pub enum RumorProcessingResult {
         amount_piv: f64,
         /// The PIVX address for balance checking (optional for older events)
         address: Option<String>,
-        /// Optional message from sender
-        message: Option<String>,
         /// The message ID for this payment event
         message_id: String,
         /// The stored event for persistence
@@ -497,11 +495,6 @@ async fn process_app_specific(
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
 
-        // Parse optional message from content JSON
-        let message = serde_json::from_str::<serde_json::Value>(&rumor.content)
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str().map(String::from)));
-
         let message_id = rumor.id.to_hex();
 
         // Convert rumor tags to StoredEvent format
@@ -525,7 +518,6 @@ async fn process_app_specific(
             gift_code,
             amount_piv,
             address,
-            message,
             message_id,
             event,
         });

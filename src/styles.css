@@ -6555,16 +6555,6 @@ hr {
   line-height: 1.4;
 }
 
-.msg-pivx-payment-message {
-  font-size: 13px;
-  color: var(--text-secondary);
-  flex: 1;
-  margin-right: 30px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Marketplace Panel */
 .marketplace-panel {
   position: fixed;

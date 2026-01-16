@@ -833,7 +833,6 @@ async function showPivxSendDialog() {
 
     const recipientEl = document.getElementById('pivx-send-recipient');
     const amountEl = document.getElementById('pivx-send-amount');
-    const messageEl = document.getElementById('pivx-send-message');
     const availableEl = document.getElementById('pivx-send-available-amount');
     const promoListEl = document.getElementById('pivx-send-promo-list');
     const promoSectionEl = document.getElementById('pivx-send-promo-section');
@@ -848,7 +847,6 @@ async function showPivxSendDialog() {
     pivxSendSelectedPromo = null;
     pivxSendMode = 'quick';
     if (amountEl) amountEl.value = '';
-    if (messageEl) messageEl.value = '';
 
     // Show promo section, hide custom section
     if (promoSectionEl) promoSectionEl.style.display = '';
@@ -1162,9 +1160,7 @@ async function executePivxWithdraw() {
  * Sends a PIVX payment to the current chat
  */
 async function sendPivxPayment() {
-    const messageEl = document.getElementById('pivx-send-message');
     const confirmBtn = document.getElementById('pivx-send-confirm');
-    const message = messageEl?.value || '';
 
     if (!strOpenChat) {
         showToast('No chat selected');
@@ -1191,8 +1187,7 @@ async function sendPivxPayment() {
 
             await invoke('pivx_send_existing_promo', {
                 receiver: strOpenChat,
-                giftCode: pivxSendSelectedPromo.gift_code,
-                paymentMessage: message || null
+                giftCode: pivxSendSelectedPromo.gift_code
             });
 
             closePivxSendDialog();
@@ -1224,8 +1219,7 @@ async function sendPivxPayment() {
             // Send custom amount via coin selection
             await invoke('pivx_send_payment', {
                 receiver: strOpenChat,
-                amountPiv: amount,
-                paymentMessage: message || null
+                amountPiv: amount
             });
 
             closePivxSendDialog();
@@ -1335,12 +1329,11 @@ async function claimPivxPayment(giftCode, bubbleEl) {
  * Renders a PIVX payment bubble for a message
  * @param {string} giftCode - The promo code
  * @param {number} amountPiv - Amount in PIV
- * @param {string} message - Optional message
  * @param {boolean} isMine - Whether this is my payment (sent by me)
  * @param {string} address - Optional PIVX address for balance checking
  * @returns {HTMLElement} The payment bubble element
  */
-function renderPivxPaymentBubble(giftCode, amountPiv, message, isMine, address) {
+function renderPivxPaymentBubble(giftCode, amountPiv, isMine, address) {
     const bubble = document.createElement('div');
     bubble.className = 'msg-pivx-payment';
     bubble.dataset.giftCode = giftCode;
@@ -1350,14 +1343,6 @@ function renderPivxPaymentBubble(giftCode, amountPiv, message, isMine, address) 
     const img = document.createElement('img');
     img.src = './icons/pivx.svg';
     bubble.appendChild(img);
-
-    // Optional message in the middle
-    if (message) {
-        const msgText = document.createElement('div');
-        msgText.className = 'msg-pivx-payment-message';
-        msgText.textContent = message;
-        bubble.appendChild(msgText);
-    }
 
     // Amount and hint on the right
     const info = document.createElement('div');
@@ -4048,7 +4033,7 @@ async function setupRustListeners() {
 
     // Listen for PIVX payment events
     await listen('pivx_payment_received', (evt) => {
-        const { conversation_id, gift_code, amount_piv, address, message, message_id, sender, is_mine } = evt.payload;
+        const { conversation_id, gift_code, amount_piv, address, message_id, sender, is_mine } = evt.payload;
 
         // Find the chat
         const chat = arrChats.find(c => c.id === conversation_id);
@@ -4074,8 +4059,7 @@ async function setupRustListeners() {
             pivx_payment: {
                 gift_code,
                 amount_piv,
-                address,
-                message
+                address
             }
         };
 
@@ -5945,7 +5929,6 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         const pivxBubble = renderPivxPaymentBubble(
             msg.pivx_payment.gift_code,
             msg.pivx_payment.amount_piv,
-            msg.pivx_payment.message,
             msg.mine,
             msg.pivx_payment.address
         );
