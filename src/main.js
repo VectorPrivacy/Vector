@@ -8355,6 +8355,9 @@ async function openChatlist() {
     adjustSize();
     await loadMLSInvites();
     adjustSize();
+
+    // Refresh timestamps immediately so they're not stale after viewing a chat
+    updateChatlistTimestamps();
 }
 
 function openSettings() {
