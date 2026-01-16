@@ -1690,6 +1690,16 @@ html, body {
   padding: 10px;
 }
 
+#chat-input-file .icon {
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1),
+              background-color 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+#chat-input-file.open .icon {
+  transform: rotate(45deg);
+  background-color: #B2B2B2;
+}
+
 #chat-input {
   width: -webkit-fill-available;
   line-height: inherit;

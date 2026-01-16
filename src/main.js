@@ -256,6 +256,7 @@ function toggleAttachmentPanel() {
 
         // Display the attachment panel
         domAttachmentPanel.classList.add('visible');
+        domChatMessageInputFile.classList.add('open');
 
         // Position attachment panel dynamically above the chat-box
         const chatBox = document.getElementById('chat-box');
@@ -278,6 +279,7 @@ function toggleAttachmentPanel() {
 function closeAttachmentPanel() {
     domAttachmentPanel.classList.remove('visible');
     domAttachmentPanel.style.bottom = '';
+    domChatMessageInputFile.classList.remove('open');
     // Reset to main view when closing
     showAttachmentPanelMain();
 }
