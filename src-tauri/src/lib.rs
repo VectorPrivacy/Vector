@@ -1212,16 +1212,13 @@ async fn get_message_views<R: Runtime>(
     // Get materialized message views from events
     let messages = db::get_message_views(&handle, chat_int_id, limit, offset).await?;
 
-    // Also sync to backend state for cache compatibility
+    // Sync to backend state for cache compatibility (uses binary search for efficient insertion)
     if !messages.is_empty() {
         let mut state = STATE.lock().await;
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-            for msg in &messages {
-                if !chat.messages.iter().any(|m| m.id == msg.id) {
-                    chat.messages.push(msg.clone());
-                }
+            for msg in messages.iter().cloned() {
+                chat.internal_add_message(msg);
             }
-            chat.messages.sort_by_key(|m| m.at);
         }
     }
 
@@ -1237,7 +1234,19 @@ async fn get_messages_around_id<R: Runtime>(
     target_message_id: String,
     context_before: usize,
 ) -> Result<Vec<Message>, String> {
-    db::get_messages_around_id(&handle, &chat_id, &target_message_id, context_before).await
+    let messages = db::get_messages_around_id(&handle, &chat_id, &target_message_id, context_before).await?;
+
+    // Sync to backend state so fetch_msg_metadata and other functions can find these messages
+    if !messages.is_empty() {
+        let mut state = STATE.lock().await;
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+            for msg in messages.iter().cloned() {
+                chat.internal_add_message(msg);
+            }
+        }
+    }
+
+    Ok(messages)
 }
 
 /// Evict messages from the backend cache for a specific chat

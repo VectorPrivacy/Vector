@@ -2691,9 +2691,13 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         let mut state = STATE.lock().await;
         let message = state.chats.iter_mut()
             .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
-            .unwrap();
-        message.content.clone()
+            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id));
+
+        // Message might not be in backend state (e.g., loaded via get_messages_around_id)
+        match message {
+            Some(msg) => msg.content.clone(),
+            None => return false,
+        }
     };
 
     // Extract URLs from the message
