@@ -1990,6 +1990,17 @@ function escapeHtml(text) {
 }
 
 /**
+ * Truncates a string to a maximum number of grapheme clusters (visual characters).
+ * Unlike substring(), this properly handles emojis and other multi-byte characters.
+ */
+function truncateGraphemes(text, maxLength) {
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+    const segments = [...segmenter.segment(text)];
+    if (segments.length <= maxLength) return text;
+    return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
+}
+
+/**
  * Renders the Recently Used emojis immediately, then renders
  * the All Emojis grid after the last recent emoji image loads.
  */
@@ -6151,7 +6162,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             if (cMsg.content) {
                 spanRef = document.createElement('span');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanRef.textContent = cMsg.content.length < 50 ? cMsg.content : cMsg.content.substring(0, 50) + '…';
+                spanRef.textContent = truncateGraphemes(cMsg.content, 50);
                 twemojify(spanRef);
             } else if (cMsg.attachments.length) {
                 // For Attachments, we display an additional icon for quickly inferring the replied-to content
