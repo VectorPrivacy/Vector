@@ -256,6 +256,7 @@ function toggleAttachmentPanel() {
 
         // Display the attachment panel
         domAttachmentPanel.classList.add('visible');
+        domChatMessageInputFile.classList.add('open');
 
         // Position attachment panel dynamically above the chat-box
         const chatBox = document.getElementById('chat-box');
@@ -278,6 +279,7 @@ function toggleAttachmentPanel() {
 function closeAttachmentPanel() {
     domAttachmentPanel.classList.remove('visible');
     domAttachmentPanel.style.bottom = '';
+    domChatMessageInputFile.classList.remove('open');
     // Reset to main view when closing
     showAttachmentPanelMain();
 }
@@ -831,7 +833,6 @@ async function showPivxSendDialog() {
 
     const recipientEl = document.getElementById('pivx-send-recipient');
     const amountEl = document.getElementById('pivx-send-amount');
-    const messageEl = document.getElementById('pivx-send-message');
     const availableEl = document.getElementById('pivx-send-available-amount');
     const promoListEl = document.getElementById('pivx-send-promo-list');
     const promoSectionEl = document.getElementById('pivx-send-promo-section');
@@ -846,7 +847,6 @@ async function showPivxSendDialog() {
     pivxSendSelectedPromo = null;
     pivxSendMode = 'quick';
     if (amountEl) amountEl.value = '';
-    if (messageEl) messageEl.value = '';
 
     // Show promo section, hide custom section
     if (promoSectionEl) promoSectionEl.style.display = '';
@@ -1160,9 +1160,7 @@ async function executePivxWithdraw() {
  * Sends a PIVX payment to the current chat
  */
 async function sendPivxPayment() {
-    const messageEl = document.getElementById('pivx-send-message');
     const confirmBtn = document.getElementById('pivx-send-confirm');
-    const message = messageEl?.value || '';
 
     if (!strOpenChat) {
         showToast('No chat selected');
@@ -1189,8 +1187,7 @@ async function sendPivxPayment() {
 
             await invoke('pivx_send_existing_promo', {
                 receiver: strOpenChat,
-                giftCode: pivxSendSelectedPromo.gift_code,
-                paymentMessage: message || null
+                giftCode: pivxSendSelectedPromo.gift_code
             });
 
             closePivxSendDialog();
@@ -1222,8 +1219,7 @@ async function sendPivxPayment() {
             // Send custom amount via coin selection
             await invoke('pivx_send_payment', {
                 receiver: strOpenChat,
-                amountPiv: amount,
-                paymentMessage: message || null
+                amountPiv: amount
             });
 
             closePivxSendDialog();
@@ -1333,12 +1329,11 @@ async function claimPivxPayment(giftCode, bubbleEl) {
  * Renders a PIVX payment bubble for a message
  * @param {string} giftCode - The promo code
  * @param {number} amountPiv - Amount in PIV
- * @param {string} message - Optional message
  * @param {boolean} isMine - Whether this is my payment (sent by me)
  * @param {string} address - Optional PIVX address for balance checking
  * @returns {HTMLElement} The payment bubble element
  */
-function renderPivxPaymentBubble(giftCode, amountPiv, message, isMine, address) {
+function renderPivxPaymentBubble(giftCode, amountPiv, isMine, address) {
     const bubble = document.createElement('div');
     bubble.className = 'msg-pivx-payment';
     bubble.dataset.giftCode = giftCode;
@@ -1348,14 +1343,6 @@ function renderPivxPaymentBubble(giftCode, amountPiv, message, isMine, address) 
     const img = document.createElement('img');
     img.src = './icons/pivx.svg';
     bubble.appendChild(img);
-
-    // Optional message in the middle
-    if (message) {
-        const msgText = document.createElement('div');
-        msgText.className = 'msg-pivx-payment-message';
-        msgText.textContent = message;
-        bubble.appendChild(msgText);
-    }
 
     // Amount and hint on the right
     const info = document.createElement('div');
@@ -2003,6 +1990,17 @@ function escapeHtml(text) {
 }
 
 /**
+ * Truncates a string to a maximum number of grapheme clusters (visual characters).
+ * Unlike substring(), this properly handles emojis and other multi-byte characters.
+ */
+function truncateGraphemes(text, maxLength) {
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+    const segments = [...segmenter.segment(text)];
+    if (segments.length <= maxLength) return text;
+    return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
+}
+
+/**
  * Renders the Recently Used emojis immediately, then renders
  * the All Emojis grid after the last recent emoji image loads.
  */
@@ -2523,6 +2521,11 @@ let strOpenChat = "";
  * The chat ID we came from when opening a profile (to return to on back)
  */
 let previousChatBeforeProfile = "";
+
+/**
+ * Interval ID for periodic profile refresh while viewing profile tab
+ */
+let profileRefreshInterval = null;
 
 /**
  * Get a DM chat for a user
@@ -3999,8 +4002,7 @@ async function setupRustListeners() {
         });
         
         // If this user is being viewed in the Expanded Profile View, update it
-        // Note: no need to update our own, it makes editing very weird
-        if (!evt.payload.mine && domProfileId.textContent === evt.payload.id) {
+        if (domProfileId.textContent === evt.payload.id) {
             renderProfileTab(evt.payload);
         }
         
@@ -4046,7 +4048,7 @@ async function setupRustListeners() {
 
     // Listen for PIVX payment events
     await listen('pivx_payment_received', (evt) => {
-        const { conversation_id, gift_code, amount_piv, address, message, message_id, sender, is_mine } = evt.payload;
+        const { conversation_id, gift_code, amount_piv, address, message_id, sender, is_mine } = evt.payload;
 
         // Find the chat
         const chat = arrChats.find(c => c.id === conversation_id);
@@ -4072,8 +4074,7 @@ async function setupRustListeners() {
             pivx_payment: {
                 gift_code,
                 amount_piv,
-                address,
-                message
+                address
             }
         };
 
@@ -4948,6 +4949,15 @@ async function login() {
                 domAccount.style.display = ``;
                 domAccount.classList.add('fadein-anim');
                 domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+
+                // Refresh our own profile from the network to catch any changes made on other clients
+                if (cProfile?.id) {
+                    invoke("queue_profile_sync", {
+                        npub: cProfile.id,
+                        priority: "critical",
+                        forceRefresh: true
+                    });
+                }
 
                 // Finished boot!
                 fInit = false;
@@ -5943,7 +5953,6 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         const pivxBubble = renderPivxPaymentBubble(
             msg.pivx_payment.gift_code,
             msg.pivx_payment.amount_piv,
-            msg.pivx_payment.message,
             msg.mine,
             msg.pivx_payment.address
         );
@@ -6120,50 +6129,80 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.style.borderColor = `#ffffff`;
     }
 
-    // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
+    // If it's a reply: inject a preview of the replied-to message
+    // Uses backend-provided reply context (works for old messages not in cache)
+    // Falls back to in-memory search for pending messages or backwards compatibility
     if (msg.replied_to) {
-        // Try to find the referenced message in the current chat
-        // For DMs, use sender profile; for groups, use the currently open chat
+        // Check if we have reply context from the backend (preferred - always available)
+        const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
+
+        // Try to find the referenced message in the current chat (fallback for pending messages)
         const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
         const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
-        if (cMsg) {
+
+        // Use backend context if available, otherwise fall back to in-memory message
+        if (hasBackendContext || cMsg) {
             // Render the reply in a quote-like fashion
             const divRef = document.createElement('div');
             divRef.classList.add('msg-reply', 'btn');
+
             // Add theme-based styling when replying to the other person's message
             if (!cMsg.mine) {
                 divRef.classList.add('msg-reply-them');
             }
-            divRef.id = `r-${cMsg.id}`;
+            divRef.id = `r-${msg.replied_to}`;
 
             // Name + Message
             const spanName = document.createElement('span');
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
 
-            // Name - for group chats, use cMsg.npub; for DMs, use sender
-            const cSenderProfile = !cMsg.mine
-                ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
-                : getProfile(strPubkey);
+            // Determine the sender of the replied-to message
+            let cSenderProfile;
+            if (hasBackendContext) {
+                // Use backend-provided npub
+                if (msg.replied_to_npub) {
+                    cSenderProfile = getProfile(msg.replied_to_npub);
+                    // Check if it's our own message
+                    if (msg.replied_to_npub === strPubkey) {
+                        cSenderProfile = getProfile(strPubkey);
+                    }
+                } else {
+                    // DM without npub - it's from the other participant
+                    cSenderProfile = sender;
+                }
+            } else if (cMsg) {
+                // Fallback to in-memory message data
+                cSenderProfile = !cMsg.mine
+                    ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
+                    : getProfile(strPubkey);
+            }
+
             if (cSenderProfile?.nickname || cSenderProfile?.name) {
                 spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
                 twemojify(spanName);
             } else {
-                const fallbackId = cMsg.npub || cSenderProfile?.id || '';
+                const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || cSenderProfile?.id || '';
                 spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
             }
 
             // Replied-to content (Text or Attachment)
             let spanRef;
-            if (cMsg.content) {
+            const replyContent = hasBackendContext ? msg.replied_to_content : cMsg?.content;
+            const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
+
+            if (replyContent) {
                 spanRef = document.createElement('span');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanRef.textContent = cMsg.content.length < 50 ? cMsg.content : cMsg.content.substring(0, 50) + '…';
+                spanRef.textContent = truncateGraphemes(replyContent, 50);
                 twemojify(spanRef);
-            } else if (cMsg.attachments.length) {
+            } else if (hasAttachment) {
                 // For Attachments, we display an additional icon for quickly inferring the replied-to content
                 spanRef = document.createElement('div');
                 spanRef.style.display = `flex`;
-                const cFileType = getFileTypeInfo(cMsg.attachments[0].extension);
+
+                // Use in-memory message for detailed attachment info if available, otherwise show generic
+                const attachmentExt = cMsg?.attachments?.[0]?.extension;
+                const cFileType = attachmentExt ? getFileTypeInfo(attachmentExt) : { icon: 'attachment', description: 'Attachment' };
 
                 // Icon
                 const spanIcon = document.createElement('span');
@@ -6186,7 +6225,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             divRef.appendChild(spanName);
             divRef.appendChild(document.createElement('br'));
-            divRef.appendChild(spanRef);
+            if (spanRef) {
+                divRef.appendChild(spanRef);
+            }
             pMessage.appendChild(divRef);
         }
     }
@@ -7655,11 +7696,6 @@ async function closeChat() {
  * @param {Profile} cProfile - An optional profile to render
  */
 async function openProfile(cProfile) {
-    // Force immediate refresh when user views profile
-    if (cProfile && cProfile.id) {
-        await invoke("refresh_profile_now", { npub: cProfile.id });
-    }
-    
     navbarSelect('profile-btn');
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
@@ -7674,6 +7710,25 @@ async function openProfile(cProfile) {
         // Clear previous chat when opening our own profile from navbar
         previousChatBeforeProfile = '';
     }
+
+    // Force immediate refresh when user views profile
+    if (cProfile && cProfile.id) {
+        invoke("refresh_profile_now", { npub: cProfile.id });
+
+        // Start periodic refresh while viewing this profile (every 30 seconds)
+        clearInterval(profileRefreshInterval);
+        profileRefreshInterval = setInterval(() => {
+            // Only refresh if profile tab is still open
+            if (domProfile.style.display === '') {
+                invoke("refresh_profile_now", { npub: cProfile.id });
+            } else {
+                // Profile tab closed, stop refreshing
+                clearInterval(profileRefreshInterval);
+                profileRefreshInterval = null;
+            }
+        }, 30000);
+    }
+
     renderProfileTab(cProfile);
 
     if (domProfile.style.display !== '') {
@@ -8357,6 +8412,9 @@ async function openChatlist() {
     adjustSize();
     await loadMLSInvites();
     adjustSize();
+
+    // Refresh timestamps immediately so they're not stale after viewing a chat
+    updateChatlistTimestamps();
 }
 
 function openSettings() {
@@ -9540,6 +9598,16 @@ document.addEventListener('click', (e) => {
     const editHistoryPopup = document.getElementById('edit-history-popup');
     if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
         if (!editHistoryPopup.contains(e.target) && !e.target.classList.contains('msg-edited-indicator')) {
+            hideEditHistory();
+        }
+    }
+});
+
+// Close edit history popup on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const editHistoryPopup = document.getElementById('edit-history-popup');
+        if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
             hideEditHistory();
         }
     }

@@ -1455,6 +1455,40 @@ html, body {
   vertical-align: -3px;
 }
 
+/* In-message headers */
+.msg-me h1,
+.msg-me h2,
+.msg-me h3,
+.msg-me h4,
+.msg-me h5,
+.msg-me h6,
+.msg-them h1,
+.msg-them h2,
+.msg-them h3,
+.msg-them h4,
+.msg-them h5,
+.msg-them h6 {
+  margin: 5px 0;
+}
+
+/* Header emojis - scale with header text size using em units */
+.msg-me h1 .emoji,
+.msg-me h2 .emoji,
+.msg-me h3 .emoji,
+.msg-me h4 .emoji,
+.msg-me h5 .emoji,
+.msg-me h6 .emoji,
+.msg-them h1 .emoji,
+.msg-them h2 .emoji,
+.msg-them h3 .emoji,
+.msg-them h4 .emoji,
+.msg-them h5 .emoji,
+.msg-them h6 .emoji {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.15em;
+}
+
 .no-background {
   background: none !important;
   border-color: transparent !important;
@@ -1688,6 +1722,16 @@ html, body {
   position: relative;
   background-color: transparent;
   padding: 10px;
+}
+
+#chat-input-file .icon {
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1),
+              background-color 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+#chat-input-file.open .icon {
+  transform: rotate(45deg);
+  background-color: #B2B2B2;
 }
 
 #chat-input {
@@ -6543,16 +6587,6 @@ hr {
   color: var(--text-secondary);
   margin-top: 2px;
   line-height: 1.4;
-}
-
-.msg-pivx-payment-message {
-  font-size: 13px;
-  color: var(--text-secondary);
-  flex: 1;
-  margin-right: 30px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Marketplace Panel */

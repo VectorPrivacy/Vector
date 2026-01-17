@@ -157,12 +157,17 @@ jobs:
           VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Rename APK
+        run: |
+          mv src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+             src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk
+
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get_version.outputs.VERSION }}
           files: |
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

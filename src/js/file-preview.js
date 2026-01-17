@@ -188,10 +188,15 @@ function createFilePreviewOverlay() {
         }
     });
     
-    // Close on Escape key
+    // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && filePreviewOverlay && filePreviewOverlay.classList.contains('active')) {
+        if (!filePreviewOverlay || !filePreviewOverlay.classList.contains('active')) return;
+
+        if (e.key === 'Escape') {
             closeFilePreview();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            sendPreviewedFile();
         }
     });
 }

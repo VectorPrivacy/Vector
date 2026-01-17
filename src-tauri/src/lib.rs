@@ -1212,16 +1212,37 @@ async fn get_message_views<R: Runtime>(
     // Get materialized message views from events
     let messages = db::get_message_views(&handle, chat_int_id, limit, offset).await?;
 
-    // Also sync to backend state for cache compatibility
+    // Sync to backend state for cache compatibility (uses binary search for efficient insertion)
     if !messages.is_empty() {
         let mut state = STATE.lock().await;
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-            for msg in &messages {
-                if !chat.messages.iter().any(|m| m.id == msg.id) {
-                    chat.messages.push(msg.clone());
-                }
+            for msg in messages.iter().cloned() {
+                chat.internal_add_message(msg);
             }
-            chat.messages.sort_by_key(|m| m.at);
+        }
+    }
+
+    Ok(messages)
+}
+
+/// Get messages around a specific message ID (for scrolling to replied-to messages)
+/// Loads messages from (target - context_before) to the most recent
+#[tauri::command]
+async fn get_messages_around_id<R: Runtime>(
+    handle: AppHandle<R>,
+    chat_id: String,
+    target_message_id: String,
+    context_before: usize,
+) -> Result<Vec<Message>, String> {
+    let messages = db::get_messages_around_id(&handle, &chat_id, &target_message_id, context_before).await?;
+
+    // Sync to backend state so fetch_msg_metadata and other functions can find these messages
+    if !messages.is_empty() {
+        let mut state = STATE.lock().await;
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+            for msg in messages.iter().cloned() {
+                chat.internal_add_message(msg);
+            }
         }
     }
 
@@ -1450,7 +1471,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             handle_unknown_event(event, &contact).await
                         }
                         RumorProcessingResult::Ignored => false,
-                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                             // Save PIVX payment event to database
                             if let Some(handle) = TAURI_APP.get() {
                                 let event_timestamp = event.created_at;
@@ -1462,7 +1483,6 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                     "gift_code": gift_code,
                                     "amount_piv": amount_piv,
                                     "address": address,
-                                    "message": message,
                                     "message_id": message_id,
                                     "sender": sender,
                                     "is_mine": is_mine,
@@ -1484,7 +1504,7 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 }
 
 /// Handle a processed text message
-async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -1502,6 +1522,13 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
                 }
                 return false;
             }
+        }
+    }
+
+    // Populate reply context before emitting (for replies to old messages not in frontend cache)
+    if !msg.replied_to.is_empty() {
+        if let Some(handle) = TAURI_APP.get() {
+            let _ = db::populate_reply_context(&handle, &mut msg).await;
         }
     }
 
@@ -1564,7 +1591,7 @@ async fn handle_text_message(msg: Message, contact: &str, is_mine: bool, is_new:
 }
 
 /// Handle a processed file attachment
-async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -1582,6 +1609,13 @@ async fn handle_file_attachment(msg: Message, contact: &str, is_mine: bool, is_n
                 }
                 return false;
             }
+        }
+    }
+
+    // Populate reply context before emitting (for replies to old messages not in frontend cache)
+    if !msg.replied_to.is_empty() {
+        if let Some(handle) = TAURI_APP.get() {
+            let _ = db::populate_reply_context(&handle, &mut msg).await;
         }
     }
 
@@ -1993,13 +2027,20 @@ async fn notifs() -> Result<bool, String> {
                                                 match process_rumor(rumor_event, rumor_context).await {
                                                     Ok(result) => {
                                                         match result {
-                                                            RumorProcessingResult::TextMessage(message) => {
+                                                            RumorProcessingResult::TextMessage(mut message) => {
+                                                                // Populate reply context for old messages not in frontend cache
+                                                                if !message.replied_to.is_empty() {
+                                                                    if let Some(handle) = TAURI_APP.get() {
+                                                                        let _ = db::populate_reply_context(&handle, &mut message).await;
+                                                                    }
+                                                                }
+
                                                                 // Clear typing indicator for this sender (they just sent a message)
                                                                 let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
-                                                                
+
                                                                 let (was_added, _active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    
+
                                                                     // Add message to chat
                                                                     let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
                                                                     
@@ -2073,14 +2114,21 @@ async fn notifs() -> Result<bool, String> {
                                                                     None
                                                                 }
                                                             }
-                                                            RumorProcessingResult::FileAttachment(message) => {
+                                                            RumorProcessingResult::FileAttachment(mut message) => {
+                                                                // Populate reply context for old messages not in frontend cache
+                                                                if !message.replied_to.is_empty() {
+                                                                    if let Some(handle) = TAURI_APP.get() {
+                                                                        let _ = db::populate_reply_context(&handle, &mut message).await;
+                                                                    }
+                                                                }
+
                                                                 // Clear typing indicator for this sender (they just sent a message)
                                                                 let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
                                                                 let is_file = true;
-                                                                
+
                                                                 let (was_added, _active_typers, should_notify) = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    
+
                                                                     // Add message to chat
                                                                     let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
                                                                     
@@ -2242,7 +2290,7 @@ async fn notifs() -> Result<bool, String> {
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::Ignored => None,
-                                                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                                                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                                                                 // Save PIVX payment event and emit to frontend
                                                                 if let Some(handle) = TAURI_APP.get() {
                                                                     let event_timestamp = event.created_at;
@@ -2254,7 +2302,6 @@ async fn notifs() -> Result<bool, String> {
                                                                         "gift_code": gift_code,
                                                                         "amount_piv": amount_piv,
                                                                         "address": address,
-                                                                        "message": message,
                                                                         "message_id": message_id,
                                                                         "sender": sender_npub,
                                                                         "is_mine": is_mine,
@@ -5897,6 +5944,7 @@ pub fn run() {
             is_scanning,
             get_chat_messages_paginated,
             get_message_views,
+            get_messages_around_id,
             get_chat_message_count,
             get_file_hash_index,
             evict_chat_messages,

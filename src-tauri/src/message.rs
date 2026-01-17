@@ -44,6 +44,15 @@ pub struct Message {
     pub id: String,
     pub content: String,
     pub replied_to: String,
+    /// Content preview of the replied-to message (fetched from DB, not dependent on cache)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replied_to_content: Option<String>,
+    /// Sender's npub of the replied-to message
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replied_to_npub: Option<String>,
+    /// Whether the replied-to message has attachments (for showing attachment icon)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replied_to_has_attachment: Option<bool>,
     pub preview_metadata: Option<net::SiteMetadata>,
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
@@ -69,6 +78,9 @@ impl Default for Message {
             id: String::new(),
             content: String::new(),
             replied_to: String::new(),
+            replied_to_content: None,
+            replied_to_npub: None,
+            replied_to_has_attachment: None,
             preview_metadata: None,
             attachments: Vec::new(),
             reactions: Vec::new(),
@@ -249,6 +261,9 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         id: pending_id.as_ref().clone(),
         content,
         replied_to,
+        replied_to_content: None, // Will be populated when loaded from DB
+        replied_to_npub: None,
+        replied_to_has_attachment: None,
         preview_metadata: None,
         at: current_time.as_millis() as u64,
         attachments: Vec::new(),
@@ -2676,9 +2691,13 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         let mut state = STATE.lock().await;
         let message = state.chats.iter_mut()
             .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
-            .unwrap();
-        message.content.clone()
+            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id));
+
+        // Message might not be in backend state (e.g., loaded via get_messages_around_id)
+        match message {
+            Some(msg) => msg.content.clone(),
+            None => return false,
+        }
     };
 
     // Extract URLs from the message

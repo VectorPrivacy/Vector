@@ -1316,7 +1316,7 @@ impl MlsService {
                             RumorProcessingResult::Ignored => {
                                 // Rumor was ignored (e.g., expired typing indicator)
                             }
-                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message, message_id, event } => {
+                            RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                                 // Save PIVX payment event to database and emit to frontend
                                 if let Some(handle) = TAURI_APP.get() {
                                     let event_timestamp = event.created_at;
@@ -1327,7 +1327,6 @@ impl MlsService {
                                         "gift_code": gift_code,
                                         "amount_piv": amount_piv,
                                         "address": address,
-                                        "message": message,
                                         "message_id": message_id,
                                         "sender": rumor_event.pubkey.to_hex(),
                                         "is_mine": *is_mine,

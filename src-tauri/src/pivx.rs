@@ -1191,7 +1191,6 @@ pub async fn pivx_send_payment<R: Runtime>(
     handle: AppHandle<R>,
     receiver: String,
     amount_piv: f64,
-    payment_message: Option<String>,
 ) -> Result<String, String> {
     use nostr_sdk::prelude::*;
     use std::borrow::Cow;
@@ -1322,7 +1321,6 @@ pub async fn pivx_send_payment<R: Runtime>(
 
     let content = serde_json::json!({
         "amount_piv": amount_piv,
-        "message": payment_message,
     }).to_string();
 
     let event_id = if receiver.starts_with("npub1") {
@@ -1401,7 +1399,6 @@ pub async fn pivx_send_payment<R: Runtime>(
         "gift_code": send_promo.0,
         "amount_piv": amount_piv,
         "address": send_promo.1,
-        "message": payment_message,
         "message_id": event_id,
         "sender": my_public_key.to_bech32().unwrap_or_default(),
         "is_mine": true,
@@ -1417,7 +1414,6 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
     handle: AppHandle<R>,
     receiver: String,
     gift_code: String,
-    payment_message: Option<String>,
 ) -> Result<String, String> {
     use nostr_sdk::prelude::*;
     use std::borrow::Cow;
@@ -1448,7 +1444,6 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
     // Build content JSON
     let content = serde_json::json!({
         "amount_piv": amount_piv,
-        "message": payment_message,
     }).to_string();
 
     // Convert amount to satoshis for the tag
@@ -1538,7 +1533,6 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         "gift_code": gift_code,
         "amount_piv": amount_piv,
         "address": address,
-        "message": payment_message,
         "message_id": event_id,
         "sender": my_public_key.to_bech32().unwrap_or_default(),
         "is_mine": true,

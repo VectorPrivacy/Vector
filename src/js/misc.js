@@ -230,11 +230,37 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
 
     // Create a promise that resolves when either the confirm or cancel button was clicked
     return new Promise((resolve) => {
+        // Keyboard event handler
+        const onKeyDown = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                document.removeEventListener('keydown', onKeyDown);
+                onConfirmClick(resolve);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                document.removeEventListener('keydown', onKeyDown);
+                if (fNotice) {
+                    onConfirmClick(resolve);
+                } else {
+                    onCancelClick(resolve);
+                }
+            }
+        };
+
+        // Apply keyboard event listener
+        document.addEventListener('keydown', onKeyDown);
+
         // Apply event listener for the confirm button
-        domPopupConfirmBtn.addEventListener('click', () => onConfirmClick(resolve));
+        domPopupConfirmBtn.addEventListener('click', () => {
+            document.removeEventListener('keydown', onKeyDown);
+            onConfirmClick(resolve);
+        });
 
         // Apply event listener for the cancel button
-        if (!fNotice) domPopupCancelBtn.addEventListener('click', () => onCancelClick(resolve));
+        if (!fNotice) domPopupCancelBtn.addEventListener('click', () => {
+            document.removeEventListener('keydown', onKeyDown);
+            onCancelClick(resolve);
+        });
     });
 }
 

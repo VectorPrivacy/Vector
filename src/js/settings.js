@@ -433,15 +433,25 @@ async function askForUsername() {
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldName = cProfile.name;
     cProfile.name = strUsername;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: strUsername, avatar: "", banner: "", about: "" });
+        const success = await invoke("update_profile", { name: strUsername, avatar: "", banner: "", about: "" });
+        if (!success) {
+            cProfile.name = oldName;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            await popupConfirm('Username Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
-        await popupConfirm('Username Update Failed!', 'An error occurred while updating your Username, the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
+        cProfile.name = oldName;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        await popupConfirm('Username Update Failed!', e, true, '', 'vector_warning.svg');
     }
 }
 
@@ -485,14 +495,30 @@ async function askForAvatar() {
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldAvatar = cProfile.avatar;
+    const oldAvatarCached = cProfile.avatar_cached;
     cProfile.avatar = strUploadURL;
+    cProfile.avatar_cached = ''; // Clear stale cached image so new URL is used
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
+        const success = await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
+        if (!success) {
+            // Revert local change since network update failed
+            cProfile.avatar = oldAvatar;
+            cProfile.avatar_cached = oldAvatarCached;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            return await popupConfirm('Avatar Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
+        // Revert local change on error
+        cProfile.avatar = oldAvatar;
+        cProfile.avatar_cached = oldAvatarCached;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
         return await popupConfirm('Avatar Update Failed!', e, true, '', 'vector_warning.svg');
     }
 }
@@ -524,14 +550,30 @@ async function askForBanner() {
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldBanner = cProfile.banner;
+    const oldBannerCached = cProfile.banner_cached;
     cProfile.banner = strUploadURL;
+    cProfile.banner_cached = ''; // Clear stale cached image so new URL is used
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL, about: "" });
+        const success = await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL, about: "" });
+        if (!success) {
+            // Revert local change since network update failed
+            cProfile.banner = oldBanner;
+            cProfile.banner_cached = oldBannerCached;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            return await popupConfirm('Banner Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
+        // Revert local change on error
+        cProfile.banner = oldBanner;
+        cProfile.banner_cached = oldBannerCached;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
         return await popupConfirm('Banner Update Failed!', e, true, '', 'vector_warning.svg');
     }
 }
@@ -546,15 +588,25 @@ async function askForStatus() {
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldStatus = cProfile.status.title;
     cProfile.status.title = strStatus;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
-    // Send out the metadata update
+    // Send out the status update
     try {
-        await invoke("update_status", { status: strStatus });
+        const success = await invoke("update_status", { status: strStatus });
+        if (!success) {
+            cProfile.status.title = oldStatus;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            await popupConfirm('Status Update Failed!', 'Failed to broadcast status update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
-        await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
+        cProfile.status.title = oldStatus;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        await popupConfirm('Status Update Failed!', e, true, '', 'vector_warning.svg');
     }
 }
 
