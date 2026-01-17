@@ -1468,7 +1468,8 @@ html, body {
 .msg-them h4,
 .msg-them h5,
 .msg-them h6 {
-  margin: 5px 0;
+  margin: 0;
+  line-height: 1;
 }
 
 /* Header emojis - scale with header text size using em units */
