@@ -9567,6 +9567,16 @@ document.addEventListener('click', (e) => {
     }
 });
 
+// Close edit history popup on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const editHistoryPopup = document.getElementById('edit-history-popup');
+        if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
+            hideEditHistory();
+        }
+    }
+});
+
 /**
  * Resize certain tricky components (i.e: the Chat Box) on window resizes.
  * 
