@@ -1455,6 +1455,40 @@ html, body {
   vertical-align: -3px;
 }
 
+/* In-message headers */
+.msg-me h1,
+.msg-me h2,
+.msg-me h3,
+.msg-me h4,
+.msg-me h5,
+.msg-me h6,
+.msg-them h1,
+.msg-them h2,
+.msg-them h3,
+.msg-them h4,
+.msg-them h5,
+.msg-them h6 {
+  margin: 5px 0;
+}
+
+/* Header emojis - scale with header text size using em units */
+.msg-me h1 .emoji,
+.msg-me h2 .emoji,
+.msg-me h3 .emoji,
+.msg-me h4 .emoji,
+.msg-me h5 .emoji,
+.msg-me h6 .emoji,
+.msg-them h1 .emoji,
+.msg-them h2 .emoji,
+.msg-them h3 .emoji,
+.msg-them h4 .emoji,
+.msg-them h5 .emoji,
+.msg-them h6 .emoji {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.15em;
+}
+
 .no-background {
   background: none !important;
   border-color: transparent !important;
