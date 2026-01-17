@@ -107,14 +107,16 @@ impl Profile {
         if let Some(banner) = meta.banner {
             if self.banner != banner {
                 self.banner = banner;
+                self.banner_cached = String::new(); // Clear stale cache when URL changes
                 changed = true;
             }
         }
-        
+
         // Picture (Vector Avatar)
         if let Some(picture) = meta.picture {
             if self.avatar != picture {
                 self.avatar = picture;
+                self.avatar_cached = String::new(); // Clear stale cache when URL changes
                 changed = true;
             }
         }
@@ -346,22 +348,11 @@ pub async fn load_profile(npub: String) -> bool {
     };
 
     // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
-    // Mutex Scope: we want to hold this lock as short as possible, given this function is "spammed" for very fast profile cache hit checks
     let old_status: Status;
     {
         let mut state = STATE.lock().await;
         old_status = match state.get_profile(&npub) {
-            Some(p) => {
-                // If the profile has been refreshed in the last 30s, return it's cached version
-                if p.last_updated + 30 > std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    {
-                        return true;
-                    }
-                p.status.clone()
-            },
+            Some(p) => p.status.clone(),
             None => {
                 // Create a new profile
                 let mut new_profile = Profile::new();
@@ -497,27 +488,27 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     });
 
     // Optional avatar
-    if !avatar.is_empty() || !profile.avatar.is_empty() {
-        meta = meta.picture(
-            Url::parse(if avatar.is_empty() {
-                profile.avatar.as_str()
-            } else {
-                avatar.as_str()
-            })
-            .unwrap(),
-        );
+    let avatar_url_str = if avatar.is_empty() {
+        profile.avatar.as_str()
+    } else {
+        avatar.as_str()
+    };
+    if !avatar_url_str.is_empty() {
+        if let Ok(url) = Url::parse(avatar_url_str) {
+            meta = meta.picture(url);
+        }
     }
 
     // Optional banner
-    if !banner.is_empty() || !profile.banner.is_empty() {
-        meta = meta.banner(
-            Url::parse(if banner.is_empty() {
-                profile.banner.as_str()
-            } else {
-                banner.as_str()
-            })
-            .unwrap(),
-        );
+    let banner_url_str = if banner.is_empty() {
+        profile.banner.as_str()
+    } else {
+        banner.as_str()
+    };
+    if !banner_url_str.is_empty() {
+        if let Ok(url) = Url::parse(banner_url_str) {
+            meta = meta.banner(url);
+        }
     }
 
     // Add display_name
@@ -534,7 +525,9 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
 
     // Add website
     if !profile.website.is_empty() {
-        meta = meta.website(Url::parse(&profile.website).unwrap());
+        if let Ok(url) = Url::parse(&profile.website) {
+            meta = meta.website(url);
+        }
     }
 
     // Add nip05
@@ -563,14 +556,30 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     match client.send_event_builder(metadata_event).await {
         Ok(_) => {
             // Apply our Metadata to our Profile
+            let npub = my_public_key.to_bech32().unwrap();
             let profile_mutable = state
-                .get_profile_mut(&my_public_key.to_bech32().unwrap())
+                .get_profile_mut(&npub)
                 .unwrap();
             profile_mutable.from_metadata(meta);
 
             // Update the frontend
             let handle = TAURI_APP.get().unwrap();
             handle.emit("profile_update", &profile_mutable).unwrap();
+
+            // Save to database
+            let profile_clone = profile_mutable.clone();
+            let avatar_url = profile_mutable.avatar.clone();
+            let banner_url = profile_mutable.banner.clone();
+            drop(state); // Release lock before async operations
+
+            db::set_profile(handle.clone(), profile_clone).await.ok();
+
+            // Cache avatar/banner images in the background for offline access
+            let npub_clone = npub.clone();
+            tokio::spawn(async move {
+                cache_profile_images(&npub_clone, &avatar_url, &banner_url).await;
+            });
+
             true
         }
         Err(_) => false

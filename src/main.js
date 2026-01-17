@@ -2512,6 +2512,11 @@ let strOpenChat = "";
 let previousChatBeforeProfile = "";
 
 /**
+ * Interval ID for periodic profile refresh while viewing profile tab
+ */
+let profileRefreshInterval = null;
+
+/**
  * Get a DM chat for a user
  * @param {string} npub - The user's npub
  * @returns {Chat|undefined} - The chat if it exists
@@ -3986,8 +3991,7 @@ async function setupRustListeners() {
         });
         
         // If this user is being viewed in the Expanded Profile View, update it
-        // Note: no need to update our own, it makes editing very weird
-        if (!evt.payload.mine && domProfileId.textContent === evt.payload.id) {
+        if (domProfileId.textContent === evt.payload.id) {
             renderProfileTab(evt.payload);
         }
         
@@ -4934,6 +4938,15 @@ async function login() {
                 domAccount.style.display = ``;
                 domAccount.classList.add('fadein-anim');
                 domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+
+                // Refresh our own profile from the network to catch any changes made on other clients
+                if (cProfile?.id) {
+                    invoke("queue_profile_sync", {
+                        npub: cProfile.id,
+                        priority: "critical",
+                        forceRefresh: true
+                    });
+                }
 
                 // Finished boot!
                 fInit = false;
@@ -7636,11 +7649,6 @@ async function closeChat() {
  * @param {Profile} cProfile - An optional profile to render
  */
 async function openProfile(cProfile) {
-    // Force immediate refresh when user views profile
-    if (cProfile && cProfile.id) {
-        await invoke("refresh_profile_now", { npub: cProfile.id });
-    }
-    
     navbarSelect('profile-btn');
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
@@ -7655,6 +7663,25 @@ async function openProfile(cProfile) {
         // Clear previous chat when opening our own profile from navbar
         previousChatBeforeProfile = '';
     }
+
+    // Force immediate refresh when user views profile
+    if (cProfile && cProfile.id) {
+        invoke("refresh_profile_now", { npub: cProfile.id });
+
+        // Start periodic refresh while viewing this profile (every 30 seconds)
+        clearInterval(profileRefreshInterval);
+        profileRefreshInterval = setInterval(() => {
+            // Only refresh if profile tab is still open
+            if (domProfile.style.display === '') {
+                invoke("refresh_profile_now", { npub: cProfile.id });
+            } else {
+                // Profile tab closed, stop refreshing
+                clearInterval(profileRefreshInterval);
+                profileRefreshInterval = null;
+            }
+        }, 30000);
+    }
+
     renderProfileTab(cProfile);
 
     if (domProfile.style.display !== '') {
