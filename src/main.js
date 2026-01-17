@@ -6129,46 +6129,75 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         pMessage.style.borderColor = `#ffffff`;
     }
 
-    // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
+    // If it's a reply: inject a preview of the replied-to message
+    // Uses backend-provided reply context (works for old messages not in cache)
+    // Falls back to in-memory search for pending messages or backwards compatibility
     if (msg.replied_to) {
-        // Try to find the referenced message in the current chat
-        // For DMs, use sender profile; for groups, use the currently open chat
+        // Check if we have reply context from the backend (preferred - always available)
+        const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
+
+        // Try to find the referenced message in the current chat (fallback for pending messages)
         const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
         const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
-        if (cMsg) {
+
+        // Use backend context if available, otherwise fall back to in-memory message
+        if (hasBackendContext || cMsg) {
             // Render the reply in a quote-like fashion
             const divRef = document.createElement('div');
             divRef.classList.add('msg-reply', 'btn');
-            divRef.id = `r-${cMsg.id}`;
+            divRef.id = `r-${msg.replied_to}`;
 
             // Name + Message
             const spanName = document.createElement('span');
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
 
-            // Name - for group chats, use cMsg.npub; for DMs, use sender
-            const cSenderProfile = !cMsg.mine
-                ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
-                : getProfile(strPubkey);
+            // Determine the sender of the replied-to message
+            let cSenderProfile;
+            if (hasBackendContext) {
+                // Use backend-provided npub
+                if (msg.replied_to_npub) {
+                    cSenderProfile = getProfile(msg.replied_to_npub);
+                    // Check if it's our own message
+                    if (msg.replied_to_npub === strPubkey) {
+                        cSenderProfile = getProfile(strPubkey);
+                    }
+                } else {
+                    // DM without npub - it's from the other participant
+                    cSenderProfile = sender;
+                }
+            } else if (cMsg) {
+                // Fallback to in-memory message data
+                cSenderProfile = !cMsg.mine
+                    ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
+                    : getProfile(strPubkey);
+            }
+
             if (cSenderProfile?.nickname || cSenderProfile?.name) {
                 spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
                 twemojify(spanName);
             } else {
-                const fallbackId = cMsg.npub || cSenderProfile?.id || '';
+                const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || cSenderProfile?.id || '';
                 spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
             }
 
             // Replied-to content (Text or Attachment)
             let spanRef;
-            if (cMsg.content) {
+            const replyContent = hasBackendContext ? msg.replied_to_content : cMsg?.content;
+            const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
+
+            if (replyContent) {
                 spanRef = document.createElement('span');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanRef.textContent = truncateGraphemes(cMsg.content, 50);
+                spanRef.textContent = truncateGraphemes(replyContent, 50);
                 twemojify(spanRef);
-            } else if (cMsg.attachments.length) {
+            } else if (hasAttachment) {
                 // For Attachments, we display an additional icon for quickly inferring the replied-to content
                 spanRef = document.createElement('div');
                 spanRef.style.display = `flex`;
-                const cFileType = getFileTypeInfo(cMsg.attachments[0].extension);
+
+                // Use in-memory message for detailed attachment info if available, otherwise show generic
+                const attachmentExt = cMsg?.attachments?.[0]?.extension;
+                const cFileType = attachmentExt ? getFileTypeInfo(attachmentExt) : { icon: 'attachment', description: 'Attachment' };
 
                 // Icon
                 const spanIcon = document.createElement('span');
@@ -6191,7 +6220,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             divRef.appendChild(spanName);
             divRef.appendChild(document.createElement('br'));
-            divRef.appendChild(spanRef);
+            if (spanRef) {
+                divRef.appendChild(spanRef);
+            }
             pMessage.appendChild(divRef);
         }
     }

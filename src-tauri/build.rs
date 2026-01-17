@@ -60,6 +60,8 @@ fn main() {
             "deep_rescan",
             "is_scanning",
             "get_chat_messages_paginated",
+            "get_message_views",
+            "get_messages_around_id",
             "get_chat_message_count",
             "get_file_hash_index",
             "evict_chat_messages",

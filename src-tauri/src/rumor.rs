@@ -209,6 +209,9 @@ async fn process_text_message(
         id: rumor.id.to_hex(),
         content: rumor.content,
         replied_to,
+        replied_to_content: None, // Populated by get_message_views
+        replied_to_npub: None,
+        replied_to_has_attachment: None,
         preview_metadata: None,
         at: ms_timestamp,
         attachments: Vec::new(),
@@ -384,6 +387,9 @@ async fn process_file_attachment(
         id: rumor.id.to_hex(),
         content: String::new(),
         replied_to,
+        replied_to_content: None, // Populated by get_message_views
+        replied_to_npub: None,
+        replied_to_has_attachment: None,
         preview_metadata: None,
         at: ms_timestamp,
         attachments: vec![attachment],

@@ -1219,6 +1219,70 @@ pub async fn get_chat_last_messages<R: Runtime>(
     get_message_views(handle, chat_int_id, count, 0).await
 }
 
+/// Get messages around a specific message ID
+/// Returns messages from (target - context_before) to the most recent
+/// This is used for scrolling to old replied-to messages
+pub async fn get_messages_around_id<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: &str,
+    target_message_id: &str,
+    context_before: usize,
+) -> Result<Vec<Message>, String> {
+    let chat_int_id = get_chat_id_by_identifier(handle, chat_id)?;
+
+    // First, find the timestamp of the target message (don't require chat_id match in case of edge cases)
+    let target_timestamp: i64 = {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        // Try to find in the specified chat first
+        let ts_result = conn.query_row(
+            "SELECT created_at FROM events WHERE id = ?1 AND chat_id = ?2",
+            rusqlite::params![target_message_id, chat_int_id],
+            |row| row.get(0)
+        );
+
+        let ts = match ts_result {
+            Ok(t) => t,
+            Err(_) => {
+                // Message not found in specified chat, try finding it anywhere
+                conn.query_row(
+                    "SELECT created_at FROM events WHERE id = ?1",
+                    rusqlite::params![target_message_id],
+                    |row| row.get(0)
+                ).map_err(|e| format!("Target message not found in any chat: {}", e))?
+            }
+        };
+        crate::account_manager::return_db_connection(conn);
+        ts
+    };
+
+    // Count how many messages are older than the target in this chat
+    let older_count: i64 = {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (14, 15) AND created_at < ?2",
+            rusqlite::params![chat_int_id, target_timestamp],
+            |row| row.get(0)
+        ).map_err(|e| format!("Failed to count older messages: {}", e))?;
+        crate::account_manager::return_db_connection(conn);
+        count
+    };
+
+    // Get total message count for this chat
+    let total_count = get_chat_message_count(handle, chat_id).await?;
+
+    // Calculate the starting position (from oldest = 0)
+    // We want messages from (target - context_before) to the newest
+    let start_position = (older_count as usize).saturating_sub(context_before);
+
+    // get_message_views uses ORDER BY created_at DESC, so:
+    // - offset 0 = newest message
+    // - To get messages from position P to newest with DESC ordering, use offset=0, limit=(total - P)
+    let limit = total_count.saturating_sub(start_position);
+
+    // offset = 0 to start from the newest and get all messages back to start_position
+    get_message_views(handle, chat_int_id, limit, 0).await
+}
+
 /// Check if a message/event exists in the database by its ID
 /// This is used to prevent duplicate processing during sync
 pub async fn message_exists_in_db<R: Runtime>(
@@ -2288,6 +2352,110 @@ pub async fn get_related_events<R: Runtime>(
     Ok(events)
 }
 
+/// Context data for a replied-to message
+struct ReplyContext {
+    content: String,
+    npub: Option<String>,
+    has_attachment: bool,
+}
+
+/// Fetch reply context for a list of message IDs
+/// Returns a HashMap of message_id -> ReplyContext
+async fn get_reply_contexts<R: Runtime>(
+    handle: &AppHandle<R>,
+    message_ids: &[String],
+) -> Result<HashMap<String, ReplyContext>, String> {
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Do all SQLite work synchronously in a block to avoid Send issues
+    let events: Vec<(String, i32, String, Option<String>)> = {
+        let conn = crate::account_manager::get_db_connection(handle)?;
+
+        // Build placeholders for IN clause
+        let placeholders: String = (0..message_ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let sql = format!(
+            r#"
+            SELECT id, kind, content, npub
+            FROM events
+            WHERE id IN ({})
+            "#,
+            placeholders
+        );
+
+        let mut stmt = conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare reply context query: {}", e))?;
+
+        // Build params as String refs for the query
+        let params: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
+        let params_dyn: Vec<&dyn rusqlite::ToSql> = params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+        let rows = stmt.query_map(params_dyn.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?, // id
+                row.get::<_, i32>(1)?,    // kind
+                row.get::<_, String>(2)?, // content
+                row.get::<_, Option<String>>(3)?, // npub
+            ))
+        }).map_err(|e| format!("Failed to query reply contexts: {}", e))?;
+
+        let result: Vec<(String, i32, String, Option<String>)> = rows.filter_map(|r| r.ok()).collect();
+
+        drop(stmt);
+        crate::account_manager::return_db_connection(conn);
+        result
+    };
+
+    // Process events and decrypt content (async part)
+    let mut contexts = HashMap::new();
+    for (id, kind, content, npub) in events {
+        let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
+
+        // Decrypt content for text messages
+        let decrypted_content = if kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32 {
+            internal_decrypt(content, None).await
+                .unwrap_or_else(|_| "[Decryption failed]".to_string())
+        } else {
+            // File attachments don't have displayable content
+            String::new()
+        };
+
+        contexts.insert(id, ReplyContext {
+            content: decrypted_content,
+            npub,
+            has_attachment,
+        });
+    }
+
+    Ok(contexts)
+}
+
+/// Populate reply context for a single message before emitting to frontend
+/// This is used for real-time messages that don't go through get_message_views
+pub async fn populate_reply_context<R: Runtime>(
+    handle: &AppHandle<R>,
+    message: &mut Message,
+) -> Result<(), String> {
+    if message.replied_to.is_empty() {
+        return Ok(());
+    }
+
+    let contexts = get_reply_contexts(handle, &[message.replied_to.clone()]).await?;
+
+    if let Some(ctx) = contexts.get(&message.replied_to) {
+        message.replied_to_content = Some(ctx.content.clone());
+        message.replied_to_npub = ctx.npub.clone();
+        message.replied_to_has_attachment = Some(ctx.has_attachment);
+    }
+
+    Ok(())
+}
+
 /// Get message events with their reactions composed (materialized view)
 ///
 /// This function performs a single efficient query to get messages and their
@@ -2447,6 +2615,9 @@ pub async fn get_message_views<R: Runtime>(
             id: event.id,
             content,
             replied_to,
+            replied_to_content: None, // Populated below
+            replied_to_npub: None,    // Populated below
+            replied_to_has_attachment: None, // Populated below
             preview_metadata: None, // TODO: Parse from tags if needed
             attachments,
             reactions,
@@ -2460,6 +2631,30 @@ pub async fn get_message_views<R: Runtime>(
             edit_history,
         };
         messages.push(message);
+    }
+
+    // Step 5: Fetch reply context for messages that have replies
+    // Collect all replied_to IDs that are non-empty
+    let reply_ids: Vec<String> = messages
+        .iter()
+        .filter(|m| !m.replied_to.is_empty())
+        .map(|m| m.replied_to.clone())
+        .collect();
+
+    if !reply_ids.is_empty() {
+        // Fetch the replied-to events from the database
+        let reply_contexts = get_reply_contexts(handle, &reply_ids).await?;
+
+        // Populate reply context for each message
+        for message in &mut messages {
+            if !message.replied_to.is_empty() {
+                if let Some(ctx) = reply_contexts.get(&message.replied_to) {
+                    message.replied_to_content = Some(ctx.content.clone());
+                    message.replied_to_npub = ctx.npub.clone();
+                    message.replied_to_has_attachment = Some(ctx.has_attachment);
+                }
+            }
+        }
     }
 
     Ok(messages)
