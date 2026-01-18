@@ -5817,6 +5817,17 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     // Pass oldestMsgElement as context so renderMessage knows what comes after
                     const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
                     domChatMessages.insertBefore(domMsg, oldestMsgElement);
+
+                    // Update the next message's top corner if same sender (since new message is now before it)
+                    if (oldestMsgElement.getAttribute('sender') === domMsg.getAttribute('sender')) {
+                        const nextP = oldestMsgElement.querySelector('p');
+                        if (nextP) {
+                            const cornerProp = msg.mine ? 'borderTopRightRadius' : 'borderTopLeftRadius';
+                            nextP.style[cornerProp] = '0px';
+                            const audioPlayer = nextP.querySelector('.custom-audio-player');
+                            if (audioPlayer) audioPlayer.style[cornerProp] = '0px';
+                        }
+                    }
                     continue;
                 }
             }
@@ -5857,6 +5868,17 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     // Pass nextNode.element as context so renderMessage knows what comes after
                     const domMsg = renderMessage(msg, profile, '', nextNode.element);
                     domChatMessages.insertBefore(domMsg, nextNode.element);
+
+                    // Update the next message's top corner if same sender (since new message is now before it)
+                    if (nextNode.element.getAttribute('sender') === domMsg.getAttribute('sender')) {
+                        const nextP = nextNode.element.querySelector('p');
+                        if (nextP) {
+                            const cornerProp = msg.mine ? 'borderTopRightRadius' : 'borderTopLeftRadius';
+                            nextP.style[cornerProp] = '0px';
+                            const audioPlayer = nextP.querySelector('.custom-audio-player');
+                            if (audioPlayer) audioPlayer.style[cornerProp] = '0px';
+                        }
+                    }
                     inserted = true;
                     break;
                 }
@@ -6117,21 +6139,39 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // Curve the previous message's bottom border since a new sender is starting
             // For "mine" messages: bottom-RIGHT corner; for "them" messages: bottom-LEFT corner
             if (!wasPrevMsgFromContact) {
-                // Previous was from "me" - round its bottom-right corner
-                const pMsg = lastActualMessage.querySelector('p');
-                if (pMsg) {
-                    applyBorderRadius(pMsg, 'borderBottomRightRadius', '15px');
-                }
-            } else {
-                // The previous message was from the contact - check if it needs rounding as last in streak
-                // Look back to see if it had previous messages from same sender
-                let prevPrevMsg = lastActualMessage.previousElementSibling;
-                // Skip non-messages
+                // Previous was from "me" - check if it needs rounding as last in streak
+                // Look back to see if it had previous messages from same sender (with no timestamp between)
+                const prevPrevElement = lastActualMessage.previousElementSibling;
+                const hasTimestampBefore = prevPrevElement && !prevPrevElement.getAttribute('sender');
+
+                let prevPrevMsg = prevPrevElement;
                 while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
                     prevPrevMsg = prevPrevMsg.previousElementSibling;
                 }
-                const hadPreviousFromSameSender = prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
-                
+                // Only round if it's part of a multi-message streak (no timestamp before)
+                const hadPreviousFromSameSender = !hasTimestampBefore && prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
+
+                if (hadPreviousFromSameSender) {
+                    const pMsg = lastActualMessage.querySelector('p');
+                    if (pMsg) {
+                        applyBorderRadius(pMsg, 'borderBottomRightRadius', '15px');
+                    }
+                }
+            } else {
+                // The previous message was from the contact - check if it needs rounding as last in streak
+                // Look back to see if it had previous messages from same sender (with no timestamp between)
+                const prevPrevElement = lastActualMessage.previousElementSibling;
+                // Check if there's a timestamp immediately before (which would break the streak visually)
+                const hasTimestampBefore = prevPrevElement && !prevPrevElement.getAttribute('sender');
+
+                let prevPrevMsg = prevPrevElement;
+                // Skip non-messages to find actual previous message
+                while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
+                    prevPrevMsg = prevPrevMsg.previousElementSibling;
+                }
+                // Only consider it part of same streak if NO timestamp between them
+                const hadPreviousFromSameSender = !hasTimestampBefore && prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
+
                 // Look forward to see if there are more messages from same sender after this one
                 // (which would make this a middle message, not the last)
                 let prevNextMsg = lastActualMessage.nextElementSibling;
@@ -6140,7 +6180,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     prevNextMsg = prevNextMsg.nextElementSibling;
                 }
                 const hasNextFromSameSender = prevNextMsg && prevNextMsg.getAttribute('sender') === prevSenderID;
-                
+
                 // Only round if it had previous messages AND no next messages from same sender (making it the last)
                 if (hadPreviousFromSameSender && !hasNextFromSameSender) {
                     const pMsg = lastActualMessage.querySelector('p');
@@ -6158,7 +6198,14 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         if (isGroupChat) {
             pMessage.style.marginTop = !msg.mine ? `25px` : `10px`;
         } else if (msg.mine) pMessage.style.marginTop = `10px`;
-        
+
+        // Flatten bottom corner like a "new first message" (anticipating more messages may follow)
+        if (msg.mine) {
+            pMessage.style.borderBottomRightRadius = `0`;
+        } else {
+            pMessage.style.borderBottomLeftRadius = `0`;
+        }
+
         // Check if this is a singular message (no next message from same sender)
         // This check happens after the message is rendered (at the end of the function)
     } else {
@@ -6929,6 +6976,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         }
         if (pMessage.style.borderTopRightRadius) {
             audioPlayer.style.borderTopRightRadius = pMessage.style.borderTopRightRadius;
+        }
+        if (pMessage.style.borderBottomLeftRadius) {
+            audioPlayer.style.borderBottomLeftRadius = pMessage.style.borderBottomLeftRadius;
+        }
+        if (pMessage.style.borderBottomRightRadius) {
+            audioPlayer.style.borderBottomRightRadius = pMessage.style.borderBottomRightRadius;
         }
     }
 
