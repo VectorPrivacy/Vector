@@ -700,6 +700,7 @@ pub async fn miniapp_open(
     .inner_size(480.0, 640.0)
     .min_inner_size(320.0, 480.0)
     .resizable(true)
+    .focused(true)
     // Use initialization_script_for_all_frames like DeltaChat does
     .initialization_script_for_all_frames(INIT_SCRIPT)
     // Enable devtools in debug mode only

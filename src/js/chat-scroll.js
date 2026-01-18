@@ -47,12 +47,12 @@ function handleProceduralScroll() {
 
     // Check if we're using cache mode
     if (proceduralScrollState.useCache) {
-        // Use cache stats to determine if there are more messages
-        const cacheStats = messageCache.getStats(strOpenChat);
-        if (!cacheStats?.hasMoreMessages) {
-            return; // No more messages to load
+        // Use cache stats to determine if there are more events
+        const cacheStats = eventCache.getStats(strOpenChat);
+        if (!cacheStats?.hasMoreEvents) {
+            return; // No more events to load
         }
-        // Load more messages
+        // Load more events
         loadMoreMessages();
         return;
     }
@@ -79,13 +79,13 @@ async function loadMoreMessages() {
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat) return;
 
-    // Check if we should use the message cache
+    // Check if we should use the event cache
     if (proceduralScrollState.useCache) {
         // Use cache-based loading
-        const cacheStats = messageCache.getStats(strOpenChat);
-        
-        // Check if there are more messages to load
-        if (!cacheStats?.hasMoreMessages) {
+        const cacheStats = eventCache.getStats(strOpenChat);
+
+        // Check if there are more events to load
+        if (!cacheStats?.hasMoreEvents) {
             return;
         }
 
@@ -96,8 +96,8 @@ async function loadMoreMessages() {
         const scrollHeightBefore = domChatMessages.scrollHeight;
         const scrollTopBefore = domChatMessages.scrollTop;
 
-        // Load more messages from cache (fetches from DB if needed)
-        const olderMessages = await messageCache.loadMoreMessages(
+        // Load more events from cache (fetches from DB if needed)
+        const olderMessages = await eventCache.loadMoreEvents(
             strOpenChat,
             proceduralScrollState.messagesPerBatch
         );
@@ -109,20 +109,20 @@ async function loadMoreMessages() {
         }
 
         // Update the chat object's messages array for compatibility
-        chat.messages = messageCache.getMessages(strOpenChat) || [];
+        chat.messages = eventCache.getEvents(strOpenChat) || [];
 
         // Get profile for rendering
         const isGroup = chat?.chat_type === 'MlsGroup';
         const profile = !isGroup ? getProfile(chat.id) : null;
 
-        // Render the older messages (prepend)
+        // Render the older events (prepend)
         await updateChat(chat, olderMessages, profile, false);
 
         // Update rendered count
         proceduralScrollState.renderedMessageCount += olderMessages.length;
-        
+
         // Update total from cache stats
-        const newStats = messageCache.getStats(strOpenChat);
+        const newStats = eventCache.getStats(strOpenChat);
         proceduralScrollState.totalMessageCount = newStats?.totalInDb || proceduralScrollState.totalMessageCount;
 
         // Correct scroll position to prevent "snapping"

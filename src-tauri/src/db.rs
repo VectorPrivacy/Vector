@@ -1928,9 +1928,10 @@ pub async fn save_event<R: Runtime>(
         event.content.clone()
     };
 
+    // Use INSERT OR IGNORE to skip if event already exists (deduplication)
     conn.execute(
         r#"
-        INSERT OR REPLACE INTO events (
+        INSERT OR IGNORE INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
             created_at, received_at, mine, pending, failed, wrapper_event_id, npub
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
@@ -2495,8 +2496,7 @@ pub async fn get_message_views<R: Runtime>(
                     reactions_by_msg.entry(ref_id.clone()).or_default().push(reaction);
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
-                    // Edit content is encrypted - already decrypted by get_related_events? No, we need to decrypt
-                    // Actually get_related_events doesn't decrypt. We need to decrypt here.
+                    // Edit content is encrypted, decrypt it here
                     let decrypted_content = internal_decrypt(event.content.clone(), None).await
                         .unwrap_or_else(|_| event.content.clone());
                     let timestamp_ms = event.created_at * 1000; // Convert to ms

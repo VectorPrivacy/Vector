@@ -1336,6 +1336,38 @@ impl MlsService {
                                     });
                                 }
                             }
+                            RumorProcessingResult::Edit { message_id, new_content, edited_at, event } => {
+                                // Skip if this edit event was already processed (deduplication)
+                                if let Some(handle) = TAURI_APP.get() {
+                                    if crate::db::event_exists(handle, &event.id).unwrap_or(false) {
+                                        continue; // Already processed, skip
+                                    }
+
+                                    // Save edit event to database
+                                    if let Ok(chat_int_id) = crate::db::get_chat_id_by_identifier(handle, &chat_id) {
+                                        let mut event_with_chat = event;
+                                        event_with_chat.chat_id = chat_int_id;
+                                        let _ = crate::db::save_event(handle, &event_with_chat).await;
+                                    }
+                                }
+
+                                // Update message in state and emit to frontend
+                                let mut state = STATE.lock().await;
+                                if let Some(chat) = state.get_chat_mut(&chat_id) {
+                                    if let Some(msg) = chat.get_message_mut(&message_id) {
+                                        msg.apply_edit(new_content, edited_at);
+
+                                        // Emit update to frontend
+                                        if let Some(handle) = TAURI_APP.get() {
+                                            let _ = handle.emit("message_update", serde_json::json!({
+                                                "old_id": &message_id,
+                                                "message": &msg,
+                                                "chat_id": &chat_id
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => {

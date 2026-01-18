@@ -111,6 +111,17 @@ pub enum RumorProcessingResult {
     },
     /// Event was ignored (invalid, expired, or should not be stored)
     Ignored,
+    /// A message edit event
+    Edit {
+        /// The ID of the message being edited
+        message_id: String,
+        /// The new content
+        new_content: String,
+        /// Timestamp of the edit (milliseconds)
+        edited_at: u64,
+        /// The stored event for persistence
+        event: StoredEvent,
+    },
 }
 
 /// Main rumor processor - protocol agnostic
@@ -140,6 +151,10 @@ pub async fn process_rumor(
         // File attachments
         k if k.as_u16() == 15 => {
             process_file_attachment(rumor, context).await
+        }
+        // Message edits
+        k if k.as_u16() == crate::stored_event::event_kind::MESSAGE_EDIT => {
+            process_edit_event(rumor, context).await
         }
         // Emoji reactions
         Kind::Reaction => {
@@ -437,6 +452,52 @@ async fn process_reaction(
     };
     
     Ok(RumorProcessingResult::Reaction(reaction))
+}
+
+/// Process a message edit rumor
+///
+/// Extracts the edited content and references the original message.
+async fn process_edit_event(
+    rumor: RumorEvent,
+    context: RumorContext,
+) -> Result<RumorProcessingResult, String> {
+    // Find the reference event (the message being edited)
+    let reference_tag = rumor.tags
+        .find(TagKind::e())
+        .ok_or("Edit event missing reference event tag")?;
+
+    let message_id = reference_tag.content()
+        .ok_or("Edit reference tag has no content")?
+        .to_string();
+
+    // Extract millisecond-precision timestamp
+    let edited_at = extract_millisecond_timestamp(&rumor);
+
+    // Convert tags to Vec<Vec<String>> format for storage
+    let tags: Vec<Vec<String>> = rumor.tags.iter()
+        .map(|tag| {
+            tag.as_slice().iter().map(|s| s.to_string()).collect()
+        })
+        .collect();
+
+    // Create StoredEvent for persistence
+    let event = StoredEventBuilder::new()
+        .id(rumor.id.to_hex())
+        .kind(crate::stored_event::event_kind::MESSAGE_EDIT)
+        .content(rumor.content.clone())
+        .tags(tags)
+        .reference_id(Some(message_id.clone()))
+        .created_at(rumor.created_at.as_u64())
+        .mine(context.is_mine)
+        .npub(rumor.pubkey.to_bech32().ok())
+        .build();
+
+    Ok(RumorProcessingResult::Edit {
+        message_id,
+        new_content: rumor.content,
+        edited_at,
+        event,
+    })
 }
 
 /// Process application-specific data (typing indicators, etc.)

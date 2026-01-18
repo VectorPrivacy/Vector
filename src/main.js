@@ -3630,12 +3630,12 @@ async function setupRustListeners() {
             return;
         }
         
-        // Add to message cache
+        // Add to event cache
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
         const shouldAddToCache = fSyncComplete || group_id === strOpenChat;
         if (shouldAddToCache) {
-            const added = messageCache.addNewMessage(group_id, message);
+            const added = eventCache.addEvent(group_id, message);
             if (!added) return;
         }
         
@@ -4081,6 +4081,9 @@ async function setupRustListeners() {
         // Add to chat messages in sorted order by timestamp
         if (!chat.messages) chat.messages = [];
 
+        // Add to event cache so procedural scroll includes it
+        eventCache.addEvent(conversation_id, pivxMsg);
+
         // Check if this is the newest message (should be appended at end)
         const isNewest = chat.messages.length === 0 || pivxMsg.at >= chat.messages[chat.messages.length - 1].at;
 
@@ -4141,12 +4144,12 @@ async function setupRustListeners() {
         // Get the new message
         const newMessage = evt.payload.message;
         
-        // Add to message cache
+        // Add to event cache
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
         const shouldAddToCache = fSyncComplete || chat.id === strOpenChat;
         if (shouldAddToCache) {
-            const added = messageCache.addNewMessage(chat.id, newMessage);
+            const added = eventCache.addEvent(chat.id, newMessage);
             if (!added) return;
         }
 
@@ -4215,14 +4218,14 @@ async function setupRustListeners() {
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
         
-        // Also update the message cache
+        // Also update the event cache
         // This is important for pending->sent transitions where the ID changes
-        if (messageCache.has(evt.payload.chat_id)) {
-            const cachedMessages = messageCache.getMessages(evt.payload.chat_id);
-            if (cachedMessages) {
-                const cacheIdx = cachedMessages.findIndex(m => m.id === evt.payload.old_id);
+        if (eventCache.has(evt.payload.chat_id)) {
+            const cachedEvents = eventCache.getEvents(evt.payload.chat_id);
+            if (cachedEvents) {
+                const cacheIdx = cachedEvents.findIndex(m => m.id === evt.payload.old_id);
                 if (cacheIdx !== -1) {
-                    cachedMessages[cacheIdx] = evt.payload.message;
+                    cachedEvents[cacheIdx] = evt.payload.message;
                 }
             }
         }
@@ -4921,7 +4924,7 @@ async function login() {
 
             // Load the file hash index for attachment deduplication
             // This is done asynchronously and doesn't block the UI
-            messageCache.loadFileHashIndex().catch(() => {});
+            eventCache.loadFileHashIndex().catch(() => {});
 
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
@@ -5697,12 +5700,18 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
         if (!arrMessages.length) return;
 
+        // Sort messages by timestamp (oldest first) to ensure correct insertion order
+        // This is critical for timestamp insertion logic - without this, newer messages
+        // get inserted first and older messages compare gaps against distant ancestors
+        // instead of their actual chronological neighbors
+        const sortedMessages = [...arrMessages].sort((a, b) => a.at - b.at);
+
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
         /* Dedup guard: skip any message already present in the DOM by ID */
          // Process each message for insertion
-        for (const msg of arrMessages) {
+        for (const msg of sortedMessages) {
             // Guard against duplicate insertions if the DOM already contains this message ID
             if (document.getElementById(msg.id)) {
                 continue;
@@ -6147,7 +6156,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             divRef.classList.add('msg-reply', 'btn');
 
             // Add theme-based styling when replying to the other person's message
-            if (!cMsg.mine) {
+            // Use cMsg.mine if available, otherwise check backend-provided npub
+            const repliedToMine = cMsg?.mine ?? (msg.replied_to_npub === strPubkey);
+            if (!repliedToMine) {
                 divRef.classList.add('msg-reply-them');
             }
             divRef.id = `r-${msg.replied_to}`;
@@ -7514,10 +7525,10 @@ async function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
-    // Load messages from cache (on-demand loading)
-    // This uses the LRU message cache for efficient memory management
-    // Load messages from cache (will fetch from DB if not cached)
-    const initialMessages = await messageCache.loadInitialMessages(
+    // Load events from cache (on-demand loading)
+    // This uses the LRU event cache for efficient memory management
+    // Load events from cache (will fetch from DB if not cached)
+    const initialMessages = await eventCache.loadInitialEvents(
         contact,
         proceduralScrollState.messagesPerBatch
     );
@@ -7531,7 +7542,7 @@ async function openChat(contact) {
                 // Check if this payment already exists in messages
                 const existing = initialMessages.find(m => m.id === payment.message_id);
                 if (!existing) {
-                    initialMessages.push({
+                    const paymentMsg = {
                         id: payment.message_id,
                         at: payment.at,
                         content: '',
@@ -7544,7 +7555,10 @@ async function openChat(contact) {
                             address: payment.address,
                             message: payment.message
                         }
-                    });
+                    };
+                    initialMessages.push(paymentMsg);
+                    // Also add to cache so procedural scroll includes it
+                    eventCache.addEvent(contact, paymentMsg);
                 }
             }
             // Re-sort by timestamp after adding PIVX payments
@@ -7555,7 +7569,7 @@ async function openChat(contact) {
     }
 
     // Get cache stats for procedural scroll
-    const cacheStats = messageCache.getStats(contact);
+    const cacheStats = eventCache.getStats(contact);
     const totalMessages = cacheStats?.totalInDb || initialMessages.length;
 
     // Update the chat object's messages array for compatibility
@@ -7644,10 +7658,10 @@ async function closeChat() {
         }
     }
 
-    // Trim the message cache for this chat to free memory
-    // (keeps max 100 messages, removes older ones loaded during scroll)
+    // Trim the event cache for this chat to free memory
+    // (keeps max 100 events, removes older ones loaded during scroll)
     if (strOpenChat) {
-        messageCache.trimChat(strOpenChat);
+        eventCache.trimConversation(strOpenChat);
     }
 
     // Reset the chat UI
@@ -9243,7 +9257,8 @@ domChatMessageInput.oninput = async () => {
     }
 
     // Send a Typing Indicator only when content actually changes and setting is enabled
-    if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
+    // Don't send typing indicators while editing a message (it's not a new message)
+    if (fSendTypingIndicators && !strCurrentEditMessageId && nLastTypingIndicator + 30000 < Date.now()) {
         nLastTypingIndicator = Date.now();
         await invoke("start_typing", { receiver: strOpenChat });
     }

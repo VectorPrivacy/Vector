@@ -109,6 +109,41 @@ impl Message {
         self.attachments.iter_mut().find(|p| p.id == id)
     }
 
+    /// Apply an edit to this message, updating content and tracking history
+    /// Handles deduplication, sorting, and ensures content reflects the latest edit
+    pub fn apply_edit(&mut self, new_content: String, edited_at: u64) {
+        // Initialize edit history with original content if not present
+        if self.edit_history.is_none() {
+            self.edit_history = Some(vec![EditEntry {
+                content: self.content.clone(),
+                edited_at: self.at,
+            }]);
+        }
+
+        if let Some(ref mut history) = self.edit_history {
+            // Deduplicate: skip if we already have this edit (by timestamp)
+            if history.iter().any(|e| e.edited_at == edited_at) {
+                return;
+            }
+
+            // Add new edit to history
+            history.push(EditEntry {
+                content: new_content,
+                edited_at,
+            });
+
+            // Sort by timestamp to ensure correct order
+            history.sort_by_key(|e| e.edited_at);
+
+            // Content is always the latest edit (last in sorted history)
+            if let Some(latest) = history.last() {
+                self.content = latest.content.clone();
+            }
+        }
+
+        self.edited = true;
+    }
+
     /// Add a Reaction - if it was not already added
     pub fn add_reaction(&mut self, reaction: Reaction, chat_id: Option<&str>) -> bool {
         // Make sure we don't add the same reaction twice

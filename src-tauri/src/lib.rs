@@ -1491,6 +1491,39 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                             }
                             true
                         }
+                        RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
+                            // Skip if this edit event was already processed (deduplication)
+                            if let Some(handle) = TAURI_APP.get() {
+                                if db::event_exists(handle, &event.id).unwrap_or(false) {
+                                    return true; // Already processed, skip
+                                }
+
+                                // Save edit event to database with proper chat_id
+                                if let Ok(chat_id) = db::get_chat_id_by_identifier(handle, &contact) {
+                                    event.chat_id = chat_id;
+                                }
+                                event.wrapper_event_id = Some(wrapper_event_id.clone());
+                                let _ = db::save_event(handle, &event).await;
+                            }
+
+                            // Update message in state and emit to frontend
+                            let mut state = STATE.lock().await;
+                            if let Some(chat) = state.get_chat_mut(&contact) {
+                                if let Some(msg) = chat.get_message_mut(&message_id) {
+                                    msg.apply_edit(new_content, edited_at);
+
+                                    // Emit update to frontend
+                                    if let Some(handle) = TAURI_APP.get() {
+                                        let _ = handle.emit("message_update", serde_json::json!({
+                                            "old_id": &message_id,
+                                            "message": &msg,
+                                            "chat_id": &contact
+                                        }));
+                                    }
+                                }
+                            }
+                            true
+                        }
                     }
                 }
                 Err(e) => {
@@ -2307,6 +2340,39 @@ async fn notifs() -> Result<bool, String> {
                                                                         "is_mine": is_mine,
                                                                         "at": event_timestamp * 1000,
                                                                     }));
+                                                                }
+                                                                None // Don't emit as message
+                                                            }
+                                                            RumorProcessingResult::Edit { message_id, new_content, edited_at, event } => {
+                                                                // Skip if this edit event was already processed (deduplication)
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    if db::event_exists(handle, &event.id).unwrap_or(false) {
+                                                                        return None; // Already processed, skip
+                                                                    }
+
+                                                                    // Save edit event to database
+                                                                    if let Ok(chat_id) = db::get_chat_id_by_identifier(handle, &group_id_for_persist) {
+                                                                        let mut event_with_chat = event;
+                                                                        event_with_chat.chat_id = chat_id;
+                                                                        let _ = db::save_event(handle, &event_with_chat).await;
+                                                                    }
+                                                                }
+
+                                                                // Update message in state and emit to frontend
+                                                                let mut state = crate::STATE.lock().await;
+                                                                if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
+                                                                    if let Some(msg) = chat.get_message_mut(&message_id) {
+                                                                        msg.apply_edit(new_content, edited_at);
+
+                                                                        // Emit update to frontend
+                                                                        if let Some(handle) = TAURI_APP.get() {
+                                                                            let _ = handle.emit("message_update", serde_json::json!({
+                                                                                "old_id": &message_id,
+                                                                                "message": &msg,
+                                                                                "chat_id": &group_id_for_persist
+                                                                            }));
+                                                                        }
+                                                                    }
                                                                 }
                                                                 None // Don't emit as message
                                                             }
