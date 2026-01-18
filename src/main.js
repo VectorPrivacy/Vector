@@ -6032,7 +6032,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
     
     // Check if this is truly a new streak (different sender from last actual message)
-    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID;
+    // Also treat as new streak if there's a timestamp between (fIsMsg is false when immediate previous element isn't a message)
+    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID || !fIsMsg;
     
     if (isNewStreak) {
         // Add an avatar if this is not OUR message
