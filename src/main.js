@@ -4234,7 +4234,7 @@ async function setupRustListeners() {
         if (strOpenChat === evt.payload.chat_id) {
             // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
             const domMsg = document.getElementById(evt.payload.old_id);
-            
+
             // For DMs, get the profile; for groups, profile will be null
             const profile = getProfile(evt.payload.chat_id);
             domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
@@ -4243,6 +4243,28 @@ async function setupRustListeners() {
             if (evt.payload.old_id.startsWith('pending')) {
                 strLastMsgID = evt.payload.message.id;
                 softChatScroll();
+            }
+
+            // Update any reply contexts that quote this edited message
+            const editedMsgId = evt.payload.message.id;
+            const newContent = evt.payload.message.content;
+
+            // Find all messages that reply to this edited message and update their reply preview
+            const replyElements = document.querySelectorAll(`[id="r-${editedMsgId}"]`);
+            for (const replyEl of replyElements) {
+                const replyTextSpan = replyEl.querySelector('.msg-reply-text');
+                if (replyTextSpan && newContent) {
+                    // Truncate using same method as renderMessage
+                    replyTextSpan.textContent = truncateGraphemes(newContent, 50);
+                    twemojify(replyTextSpan);
+                }
+            }
+
+            // Also update the replied_to_content in cached message data
+            for (const msg of cChat.messages) {
+                if (msg.replied_to === editedMsgId) {
+                    msg.replied_to_content = newContent;
+                }
             }
         }
 
@@ -6203,6 +6225,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             if (replyContent) {
                 spanRef = document.createElement('span');
+                spanRef.classList.add('msg-reply-text');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
                 spanRef.textContent = truncateGraphemes(replyContent, 50);
                 twemojify(spanRef);

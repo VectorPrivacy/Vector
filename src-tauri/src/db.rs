@@ -2371,7 +2371,7 @@ async fn get_reply_contexts<R: Runtime>(
     }
 
     // Do all SQLite work synchronously in a block to avoid Send issues
-    let events: Vec<(String, i32, String, Option<String>)> = {
+    let (events, edits): (Vec<(String, i32, String, Option<String>)>, Vec<(String, String)>) = {
         let conn = crate::account_manager::get_db_connection(handle)?;
 
         // Build placeholders for IN clause
@@ -2380,6 +2380,7 @@ async fn get_reply_contexts<R: Runtime>(
             .collect::<Vec<_>>()
             .join(",");
 
+        // Query original messages
         let sql = format!(
             r#"
             SELECT id, kind, content, npub
@@ -2405,21 +2406,56 @@ async fn get_reply_contexts<R: Runtime>(
             ))
         }).map_err(|e| format!("Failed to query reply contexts: {}", e))?;
 
-        let result: Vec<(String, i32, String, Option<String>)> = rows.filter_map(|r| r.ok()).collect();
-
+        let events_result: Vec<(String, i32, String, Option<String>)> = rows.filter_map(|r| r.ok()).collect();
         drop(stmt);
+
+        // Query latest edits for these messages (most recent edit per message)
+        let edit_sql = format!(
+            r#"
+            SELECT reference_id, content
+            FROM events
+            WHERE kind = {} AND reference_id IN ({})
+            ORDER BY created_at DESC
+            "#,
+            event_kind::MESSAGE_EDIT,
+            placeholders
+        );
+
+        let mut edit_stmt = conn.prepare(&edit_sql)
+            .map_err(|e| format!("Failed to prepare edit query: {}", e))?;
+
+        let edit_rows = edit_stmt.query_map(params_dyn.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?, // reference_id (original message id)
+                row.get::<_, String>(1)?, // content (edited content)
+            ))
+        }).map_err(|e| format!("Failed to query edits: {}", e))?;
+
+        let edits_result: Vec<(String, String)> = edit_rows.filter_map(|r| r.ok()).collect();
+        drop(edit_stmt);
+
         crate::account_manager::return_db_connection(conn);
-        result
+        (events_result, edits_result)
     };
+
+    // Build a map of message_id -> latest edit content (first one since ordered DESC)
+    let mut latest_edits: HashMap<String, String> = HashMap::new();
+    for (ref_id, content) in edits {
+        // Only keep the first (most recent) edit for each message
+        latest_edits.entry(ref_id).or_insert(content);
+    }
 
     // Process events and decrypt content (async part)
     let mut contexts = HashMap::new();
-    for (id, kind, content, npub) in events {
+    for (id, kind, original_content, npub) in events {
         let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
+
+        // Use latest edit content if available, otherwise use original
+        let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
 
         // Decrypt content for text messages
         let decrypted_content = if kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32 {
-            internal_decrypt(content, None).await
+            internal_decrypt(content_to_decrypt, None).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string())
         } else {
             // File attachments don't have displayable content
