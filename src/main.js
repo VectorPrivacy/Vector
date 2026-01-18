@@ -2915,78 +2915,44 @@ let statusHideTimeout = null;
  */
 function updateChatHeaderSubtext(chat) {
     if (!chat) return;
-    
+
     // Clear any pending hide timeout
     if (statusHideTimeout) {
         clearTimeout(statusHideTimeout);
         statusHideTimeout = null;
     }
-    
+
     let newStatusText = '';
     let shouldAddGradient = false;
-    
+
     const isGroup = chat.chat_type === 'MlsGroup';
     const fNotes = chat.id === strPubkey;
+
+    // Check for typing indicators first (shared logic)
+    const typingText = generateTypingText(chat);
+
     if (fNotes) {
         newStatusText = 'Encrypted Notes to Self';
         shouldAddGradient = false;
+    } else if (typingText) {
+        // Someone is typing - use shared helper
+        newStatusText = typingText;
+        shouldAddGradient = true;
     } else if (isGroup) {
-        // Check for typing indicators in groups
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        
-        if (fIsTyping) {
-            // Display typing indicator with Discord-style multi-user support
-            if (activeTypers.length === 1) {
-                const typer = getProfile(activeTypers[0]);
-                const name = typer?.nickname || typer?.name || 'Someone';
-                newStatusText = `${name} is typing...`;
-            } else if (activeTypers.length === 2) {
-                const typer1 = getProfile(activeTypers[0]);
-                const typer2 = getProfile(activeTypers[1]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                newStatusText = `${name1} and ${name2} are typing...`;
-            } else if (activeTypers.length === 3) {
-                const typer1 = getProfile(activeTypers[0]);
-                const typer2 = getProfile(activeTypers[1]);
-                const typer3 = getProfile(activeTypers[2]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                const name3 = typer3?.nickname || typer3?.name || 'Someone';
-                newStatusText = `${name1}, ${name2}, and ${name3} are typing...`;
-            } else {
-                // 4+ people typing
-                newStatusText = `Several people are typing...`;
-            }
-            shouldAddGradient = true;
+        // Not typing - show member count
+        const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+        if (typeof memberCount === 'number') {
+            const label = memberCount === 1 ? 'member' : 'members';
+            newStatusText = `${memberCount} ${label}`;
         } else {
-            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-            if (typeof memberCount === 'number') {
-                const label = memberCount === 1 ? 'member' : 'members';
-                newStatusText = `${memberCount} ${label}`;
-            } else {
-                // Avoid misleading "0 members" before first count refresh
-                newStatusText = 'Members syncing...';
-            }
-            shouldAddGradient = false;
+            newStatusText = 'Members syncing...';
         }
+        shouldAddGradient = false;
     } else {
-        // Check for typing indicators in DMs (using chat.active_typers)
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        
-        if (fIsTyping) {
-            // For DMs, there should only be one typer (the other person)
-            const typer = getProfile(activeTypers[0]);
-            const name = typer?.nickname || typer?.name || 'User';
-            newStatusText = `${name} is typing...`;
-            shouldAddGradient = true;
-        } else {
-            const profile = getProfile(chat.id);
-            newStatusText = profile?.status?.title || '';
-            shouldAddGradient = false;
-        }
+        // DM - not typing, show profile status
+        const profile = getProfile(chat.id);
+        newStatusText = profile?.status?.title || '';
+        shouldAddGradient = false;
     }
     
     const currentHasStatus = !!domChatContactStatus.textContent && !domChatContactStatus.classList.contains('status-hidden');
@@ -3203,6 +3169,106 @@ function renderInviteItem(invite) {
 }
 
 /**
+ * Generate typing indicator text for a chat
+ * @param {Chat} chat - The chat object
+ * @returns {string|null} - The typing text, or null if no one is typing
+ */
+function generateTypingText(chat) {
+    const activeTypers = chat.active_typers || [];
+    if (activeTypers.length === 0) return null;
+
+    const isGroup = chat.chat_type === 'MlsGroup';
+
+    // DMs just show "Typing..." since we already know who it is
+    if (!isGroup) return 'Typing...';
+
+    // Groups show names
+    if (activeTypers.length === 1) {
+        const typer = getProfile(activeTypers[0]);
+        const name = typer?.nickname || typer?.name || 'Someone';
+        return `${name} is typing...`;
+    } else if (activeTypers.length === 2) {
+        const typer1 = getProfile(activeTypers[0]);
+        const typer2 = getProfile(activeTypers[1]);
+        const name1 = typer1?.nickname || typer1?.name || 'Someone';
+        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        return `${name1} and ${name2} are typing...`;
+    } else if (activeTypers.length === 3) {
+        const typer1 = getProfile(activeTypers[0]);
+        const typer2 = getProfile(activeTypers[1]);
+        const typer3 = getProfile(activeTypers[2]);
+        const name1 = typer1?.nickname || typer1?.name || 'Someone';
+        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        const name3 = typer3?.nickname || typer3?.name || 'Someone';
+        return `${name1}, ${name2}, and ${name3} are typing...`;
+    } else {
+        return 'Several people are typing...';
+    }
+}
+
+/**
+ * Generate chat preview text for the chatlist
+ * @param {Chat} chat - The chat object
+ * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
+ */
+function generateChatPreviewText(chat) {
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const cLastMsg = chat.messages[chat.messages.length - 1];
+
+    // Handle typing indicators
+    const typingText = generateTypingText(chat);
+    if (typingText) {
+        return { text: typingText, isTyping: true, needsTwemoji: false };
+    }
+
+    // No messages
+    if (!cLastMsg) {
+        if (isGroup) {
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            return {
+                text: (memberCount != null) ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}` : 'No messages yet',
+                isTyping: false,
+                needsTwemoji: false
+            };
+        } else {
+            return { text: 'Start a conversation', isTyping: false, needsTwemoji: false };
+        }
+    }
+
+    // Pending message
+    if (cLastMsg.pending) {
+        return { text: 'Sending...', isTyping: false, needsTwemoji: false };
+    }
+
+    // Build sender prefix for groups
+    let senderPrefix = '';
+    if (cLastMsg.mine) {
+        senderPrefix = 'You: ';
+    } else if (isGroup && cLastMsg.npub) {
+        const senderProfile = getProfile(cLastMsg.npub);
+        const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+        senderPrefix = `${senderName}: `;
+    }
+
+    // Attachment message
+    if (!cLastMsg.content && cLastMsg.attachments?.length) {
+        return {
+            text: senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description,
+            isTyping: false,
+            needsTwemoji: false
+        };
+    }
+
+    // PIVX payment message
+    if (cLastMsg.pivx_payment) {
+        return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false };
+    }
+
+    // Regular text message
+    return { text: senderPrefix + cLastMsg.content, isTyping: false, needsTwemoji: true };
+}
+
+/**
  * Render a Chat Preview for the Chat List
  * @param {Chat} chat - The profile we're rendering
  */
@@ -3304,102 +3370,12 @@ function renderChat(chat) {
     const cLastMsg = chat.messages[chat.messages.length - 1];
     const pChatPreview = document.createElement('p');
     pChatPreview.classList.add('cutoff');
-    
-    if (isGroup) {
-        // Check for typing indicators in groups
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        pChatPreview.classList.toggle('text-gradient', fIsTyping);
-        
-        if (fIsTyping) {
-            // Display typing indicator with Discord-style multi-user support
-            if (activeTypers.length === 1) {
-                const typer = getProfile(activeTypers[0]);
-                const name = typer?.nickname || typer?.name || 'Someone';
-                pChatPreview.textContent = `${name} is typing...`;
-            } else if (activeTypers.length === 2) {
-                const typer1 = getProfile(activeTypers[0]);
-                const typer2 = getProfile(activeTypers[1]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                pChatPreview.textContent = `${name1} and ${name2} are typing...`;
-            } else {
-                // 3+ people typing
-                const typer1 = getProfile(activeTypers[0]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                pChatPreview.textContent = `${name1} and ${activeTypers.length - 1} others are typing...`;
-            }
-        } else {
-            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-            if (!cLastMsg) {
-                pChatPreview.textContent = (memberCount != null)
-                    ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`
-                    : 'No messages yet';
-            } else if (cLastMsg.pending) {
-                pChatPreview.textContent = `Sending...`;
-            } else if (!cLastMsg.content && cLastMsg.attachments?.length) {
-                // No text content but has attachments; display as an attachment
-                let senderPrefix = '';
-                if (cLastMsg.mine) {
-                    senderPrefix = 'You: ';
-                } else if (cLastMsg.npub) {
-                    // Get sender's display name (nickname > name > npub prefix)
-                    const senderProfile = getProfile(cLastMsg.npub);
-                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
-                    senderPrefix = `${senderName}: `;
-                }
-                pChatPreview.textContent = senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
-            } else if (cLastMsg.pivx_payment) {
-                // PIVX payment message
-                let senderPrefix = '';
-                if (cLastMsg.mine) {
-                    senderPrefix = 'You: ';
-                } else if (cLastMsg.npub) {
-                    const senderProfile = getProfile(cLastMsg.npub);
-                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
-                    senderPrefix = `${senderName}: `;
-                }
-                pChatPreview.textContent = senderPrefix + 'Sent a PIVX Payment';
-            } else {
-                let senderPrefix = '';
-                if (cLastMsg.mine) {
-                    senderPrefix = 'You: ';
-                } else if (cLastMsg.npub) {
-                    // Get sender's display name (nickname > name > npub prefix)
-                    const senderProfile = getProfile(cLastMsg.npub);
-                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
-                    senderPrefix = `${senderName}: `;
-                }
-                pChatPreview.textContent = senderPrefix + cLastMsg.content;
-                twemojify(pChatPreview);
-            }
-        }
-    } else {
-        // Check for typing indicators in DMs (using chat.active_typers)
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        pChatPreview.classList.toggle('text-gradient', fIsTyping);
 
-        if (fIsTyping) {
-            // Typing; display the glowy indicator!
-            pChatPreview.textContent = `Typing...`;
-        } else if (!cLastMsg) {
-            pChatPreview.textContent = 'Start a conversation';
-        } else if (!cLastMsg.content && cLastMsg.attachments?.length && !cLastMsg.pending) {
-            // Not typing, and no text; display as an attachment
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
-        } else if (cLastMsg.pivx_payment && !cLastMsg.pending) {
-            // PIVX payment message
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a PIVX Payment';
-        } else if (cLastMsg.pending) {
-            // A message is pending: thus, we're still sending one
-            pChatPreview.textContent = `Sending...`;
-        } else {
-            // Not typing; display their last message
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
-            twemojify(pChatPreview);
-        }
-    }
+    const preview = generateChatPreviewText(chat);
+    pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+    pChatPreview.textContent = preview.text;
+    if (preview.needsTwemoji) twemojify(pChatPreview);
+
     divPreviewContainer.appendChild(pChatPreview);
 
     // Add the Chat Preview to the contact UI
@@ -3421,6 +3397,43 @@ function renderChat(chat) {
     divContact.appendChild(pTimeAgo);
 
     return divContact;
+}
+
+/**
+ * Update only the preview text and timestamp for a specific chat in the chatlist
+ * This is more efficient than re-rendering the entire chatlist for a single message edit
+ * @param {string} chatId - The chat ID to update
+ */
+function updateChatlistPreview(chatId) {
+    const chatElement = document.getElementById(`chatlist-${chatId}`);
+    if (!chatElement) {
+        // Chat not in DOM - fallback to full render
+        renderChatlist();
+        return;
+    }
+
+    const cChat = getChat(chatId);
+    if (!cChat) return;
+
+    // Find the preview text element (p.cutoff inside the preview container)
+    const previewContainer = chatElement.querySelector('.chatlist-contact-preview');
+    if (!previewContainer) return;
+
+    const pChatPreview = previewContainer.querySelector('p.cutoff');
+    const pTimeAgo = chatElement.querySelector('.chatlist-contact-timestamp');
+
+    if (pChatPreview) {
+        const preview = generateChatPreviewText(cChat);
+        pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+        pChatPreview.textContent = preview.text;
+        if (preview.needsTwemoji) twemojify(pChatPreview);
+    }
+
+    // Update timestamp
+    const cLastMsg = cChat.messages[cChat.messages.length - 1];
+    if (pTimeAgo && cLastMsg) {
+        pTimeAgo.textContent = timeAgo(cLastMsg.at);
+    }
 }
 
 /**
@@ -4207,11 +4220,12 @@ async function setupRustListeners() {
         if (!strOpenChat) renderChatlist();
     });
 
-    // Listen for existing message updates
+    // Listen for existing message updates (works for both DMs and MLS groups)
     await listen('message_update', (evt) => {
-        // Find the message we're updating - works for both DMs and groups
+        // Find the message we're updating
         const cChat = getChat(evt.payload.chat_id);
         if (!cChat) return;
+
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
 
@@ -4268,8 +4282,12 @@ async function setupRustListeners() {
             }
         }
 
-        // Render the Chat List
-        if (!strOpenChat) renderChatlist();
+        // Update chatlist preview if the edited message is the last message in the chat
+        // This efficiently updates just the preview text instead of re-rendering the entire chatlist
+        const isLastMessage = nMsgIdx === cChat.messages.length - 1;
+        if (isLastMessage) {
+            updateChatlistPreview(evt.payload.chat_id);
+        }
     });
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
