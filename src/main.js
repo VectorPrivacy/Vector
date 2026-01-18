@@ -5986,6 +5986,14 @@ function insertTimestamp(timestamp, parent = null) {
  * @param {HTMLElement?} contextElement - the DOM element to use for context (for prepending)
  */
 function renderMessage(msg, sender, editID = '', contextElement = null) {
+    // Helper to apply border radius to both p element and any custom-audio-player inside
+    const applyBorderRadius = (pEl, property, value) => {
+        if (!pEl) return;
+        pEl.style[property] = value;
+        const audioPlayer = pEl.querySelector('.custom-audio-player');
+        if (audioPlayer) audioPlayer.style[property] = value;
+    };
+
     // Construct the message container (the DOM ID is the HEX Nostr Event ID)
     const divMessage = document.createElement('div');
     divMessage.id = msg.id;
@@ -6105,13 +6113,14 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // Check if the previous message was from the contact (!mine)
             const prevSenderID = lastActualMessage.getAttribute('sender');
             const wasPrevMsgFromContact = prevSenderID !== strPubkey.substring(0, 8);
-            
-            // Only curve the previous message's bottom-left border if it was from the user (mine)
-            // If it was from the contact, we need to check if it should have a rounded corner (last in streak)
+
+            // Curve the previous message's bottom border since a new sender is starting
+            // For "mine" messages: bottom-RIGHT corner; for "them" messages: bottom-LEFT corner
             if (!wasPrevMsgFromContact) {
+                // Previous was from "me" - round its bottom-right corner
                 const pMsg = lastActualMessage.querySelector('p');
                 if (pMsg) {
-                    pMsg.style.borderBottomLeftRadius = `15px`;
+                    applyBorderRadius(pMsg, 'borderBottomRightRadius', '15px');
                 }
             } else {
                 // The previous message was from the contact - check if it needs rounding as last in streak
@@ -6136,7 +6145,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 if (hadPreviousFromSameSender && !hasNextFromSameSender) {
                     const pMsg = lastActualMessage.querySelector('p');
                     if (pMsg && !pMsg.classList.contains('no-background')) {
-                        pMsg.style.borderBottomLeftRadius = `15px`;
+                        applyBorderRadius(pMsg, 'borderBottomLeftRadius', '15px');
                     }
                 }
             }
@@ -6156,7 +6165,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         // Add additional margin to simulate avatar space
         // We always reserve space for non-mine messages since we render an avatar or placeholder for the first in a streak
         if (!msg.mine) {
-            pMessage.style.marginLeft = `45px`;
+            pMessage.style.marginLeft = `44px`;
         }
 
         // Flatten the top border to act as a visual continuation
@@ -6912,6 +6921,17 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             }
     }
 
+    // Sync border radius from pMessage to any custom-audio-player inside (for streak continuation)
+    const audioPlayer = pMessage.querySelector('.custom-audio-player');
+    if (audioPlayer) {
+        if (pMessage.style.borderTopLeftRadius) {
+            audioPlayer.style.borderTopLeftRadius = pMessage.style.borderTopLeftRadius;
+        }
+        if (pMessage.style.borderTopRightRadius) {
+            audioPlayer.style.borderTopRightRadius = pMessage.style.borderTopRightRadius;
+        }
+    }
+
     // Append Payment Shortcuts (i.e: Bitcoin Payment URIs, etc)
     const cAddress = detectCryptoAddress(msg.content);
     if (cAddress) {
@@ -7180,48 +7200,40 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     if (msg.mine) divMessage.append(divExtras, pMessage);
     else divMessage.append(pMessage, divExtras);
 
-    // After rendering, check message corner styling for received messages
+    // After rendering, check message corner styling
     // This needs to be done post-render when the message is in the DOM
     setTimeout(() => {
-        if (!msg.mine && domChatMessages.contains(divMessage)) {
+        if (domChatMessages.contains(divMessage)) {
             const nextMsg = divMessage.nextElementSibling;
             const prevMsg = divMessage.previousElementSibling;
-            
+
             // Check if previous message exists and is from a different sender
             const isFirstFromSender = !prevMsg || prevMsg.getAttribute('sender') !== strShortSenderID;
-            
+
             // Check if next message exists and is from the same sender
             const hasNextFromSameSender = nextMsg && nextMsg.getAttribute('sender') === strShortSenderID;
-            
+
+            // Determine which corner to use based on sender (mine = right, them = left)
+            const cornerProperty = msg.mine ? 'borderBottomRightRadius' : 'borderBottomLeftRadius';
+
             // If we're continuing a message streak (not first from sender), we need to update the previous message
             if (!isFirstFromSender && prevMsg) {
-                // The previous message is no longer the last in the streak, so remove its rounded corner
+                // The previous message is no longer the last in the streak, so flatten its bottom corner
                 const prevPMsg = prevMsg.querySelector('p');
-                if (prevPMsg && !prevPMsg.classList.contains('no-background')) {
-                    // Check if the previous message was styled as last (had rounded corner)
-                    if (prevPMsg.style.borderBottomLeftRadius === '15px') {
-                        // Remove the rounded corner since it's no longer the last
-                        prevPMsg.style.borderBottomLeftRadius = '';
-                    }
+                if (prevPMsg) {
+                    // Flatten the corner (0px) - this handles both CSS defaults and explicitly rounded corners
+                    applyBorderRadius(prevPMsg, cornerProperty, '0px');
                 }
             }
-            
+
             // Now style the current message appropriately
-            if (isFirstFromSender && !hasNextFromSameSender) {
-                // This is a singular message - apply sharp bottom-left corner
+            // Singular messages (first AND last) keep CSS default corners - no modification needed
+            // Only modify corners for multi-message streaks
+            if (!isFirstFromSender && !hasNextFromSameSender) {
+                // This is the last message in a multi-message streak - apply rounded corner to close the bubble group
                 const pMsg = divMessage.querySelector('p');
-                if (pMsg && !pMsg.classList.contains('no-background')) {
-                    // Make the bottom-left corner sharp (0px radius)
-                    pMsg.style.borderBottomLeftRadius = '0px';
-                }
-            }
-            // If this is the last message in a multi-message streak (has previous from same sender, but no next from same sender)
-            else if (!isFirstFromSender && !hasNextFromSameSender) {
-                // This is the last message in a streak - apply rounded bottom-left corner
-                const pMsg = divMessage.querySelector('p');
-                if (pMsg && !pMsg.classList.contains('no-background')) {
-                    // Make the bottom-left corner rounded (15px radius) to close the bubble group
-                    pMsg.style.borderBottomLeftRadius = '15px';
+                if (pMsg) {
+                    applyBorderRadius(pMsg, cornerProperty, '15px');
                 }
             }
         }

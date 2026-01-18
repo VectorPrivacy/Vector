@@ -215,6 +215,7 @@ select:disabled {
 }
 
 /* Custom Audio Player Theme Overrides */
+/* Default style */
 .custom-audio-player {
   background: rgba(37, 17, 52, 0.4);
   border-color: rgba(177, 136, 226, 0.25);
@@ -223,28 +224,41 @@ select:disabled {
 .custom-audio-player:hover {
   background: rgba(37, 17, 52, 0.6);
   border-color: rgba(177, 136, 226, 0.5);
-  box-shadow: 0 0 15px rgba(177, 136, 226, 0.2);
+}
+
+/* msg-me style (purple gradient to match text bubbles) */
+.msg-me .custom-audio-player {
+  background: linear-gradient(157deg, rgba(29,29,117,0.5) 45%, rgba(118,33,129,0.5) 100%);
+  border-color: rgba(29,29,117,0.5);
+}
+
+.msg-me .custom-audio-player:hover {
+  background: linear-gradient(157deg, rgba(29,29,117,0.6) 45%, rgba(118,33,129,0.6) 100%);
+  border-color: rgba(177, 136, 226, 0.5);
+}
+
+/* msg-them style (dark gray to match text bubbles) */
+.msg-them .custom-audio-player {
+  background: #24252a;
+  border-color: #24252a;
+}
+
+.msg-them .custom-audio-player:hover {
+  background: #2a2b30;
+  border-color: #3a3b40;
+  box-shadow: none;
 }
 
 .audio-play-btn {
   background: linear-gradient(135deg, #b188e2 0%, #7d3c98 100%);
-  box-shadow: 0 2px 10px rgba(177, 136, 226, 0.3);
-}
-
-.audio-play-btn:hover {
-  box-shadow: 0 0 25px rgba(177, 136, 226, 0.6),
-              0 0 40px rgba(177, 136, 226, 0.3);
 }
 
 .audio-progress-fill {
   background: linear-gradient(90deg, #b188e2 0%, #9b59b6 100%);
-  box-shadow: 0 0 15px rgba(177, 136, 226, 0.5);
 }
 
 .audio-progress-handle {
   background: #b188e2;
-  box-shadow: 0 0 15px rgba(177, 136, 226, 0.8),
-              0 0 25px rgba(177, 136, 226, 0.4);
 }
 
 .waveform-bar {
@@ -252,12 +266,11 @@ select:disabled {
 }
 
 .custom-audio-player.playing .waveform-bar {
-  box-shadow: 0 0 5px rgba(177, 136, 226, 0.5);
+  box-shadow: none;
 }
 
 .audio-time-display .current-time {
   color: #b188e2;
-  text-shadow: 0 0 5px rgba(177, 136, 226, 0.5);
 }
 
 .audio-transcribe-btn .icon {

@@ -1294,6 +1294,14 @@ html, body {
   background-color: rgba(0, 0, 0, 0.4);
 }
 
+.msg-me p .msg-payment h2,
+.msg-them p .msg-payment h2 {
+  margin: 0;
+  margin-top: auto;
+  margin-bottom: auto;
+  line-height: normal;
+}
+
 /* Nostr Profile Preview (for shared npubs and profile links) */
 .msg-profile-preview {
   display: flex;
@@ -1455,36 +1463,36 @@ html, body {
   vertical-align: -3px;
 }
 
-/* In-message headers */
-.msg-me h1,
-.msg-me h2,
-.msg-me h3,
-.msg-me h4,
-.msg-me h5,
-.msg-me h6,
-.msg-them h1,
-.msg-them h2,
-.msg-them h3,
-.msg-them h4,
-.msg-them h5,
-.msg-them h6 {
+/* In-message markdown headers (exclude payment bubbles) */
+.msg-me p h1,
+.msg-me p h2,
+.msg-me p h3,
+.msg-me p h4,
+.msg-me p h5,
+.msg-me p h6,
+.msg-them p h1,
+.msg-them p h2,
+.msg-them p h3,
+.msg-them p h4,
+.msg-them p h5,
+.msg-them p h6 {
   margin: 0;
   line-height: 1;
 }
 
 /* Header emojis - scale with header text size using em units */
-.msg-me h1 .emoji,
-.msg-me h2 .emoji,
-.msg-me h3 .emoji,
-.msg-me h4 .emoji,
-.msg-me h5 .emoji,
-.msg-me h6 .emoji,
-.msg-them h1 .emoji,
-.msg-them h2 .emoji,
-.msg-them h3 .emoji,
-.msg-them h4 .emoji,
-.msg-them h5 .emoji,
-.msg-them h6 .emoji {
+.msg-me p h1 .emoji,
+.msg-me p h2 .emoji,
+.msg-me p h3 .emoji,
+.msg-me p h4 .emoji,
+.msg-me p h5 .emoji,
+.msg-me p h6 .emoji,
+.msg-them p h1 .emoji,
+.msg-them p h2 .emoji,
+.msg-them p h3 .emoji,
+.msg-them p h4 .emoji,
+.msg-them p h5 .emoji,
+.msg-them p h6 .emoji {
   width: 1em;
   height: 1em;
   vertical-align: -0.15em;
@@ -2265,10 +2273,6 @@ a {
 
 a:hover {
   color: #535bf2;
-}
-
-h1 {
-  text-align: center;
 }
 
 input[type=number]::-webkit-outer-spin-button,
@@ -3838,7 +3842,6 @@ select:disabled:hover {
 
 .audio-play-btn:hover {
     transform: scale(1.1);
-    box-shadow: 0 0 20px rgba(89, 252, 179, 0.5);
 }
 
 .audio-play-btn:active {
@@ -3884,7 +3887,6 @@ select:disabled:hover {
     border-radius: 3px;
     width: 0%;
     transition: width 0.1s ease;
-    box-shadow: 0 0 10px rgba(89, 252, 179, 0.4);
 }
 
 .audio-progress-handle {
@@ -3895,7 +3897,6 @@ select:disabled:hover {
     height: 14px;
     background: #59fcb3;
     border-radius: 50%;
-    box-shadow: 0 0 10px rgba(89, 252, 179, 0.6);
     left: 0%;
     transition: left 0.1s ease;
     opacity: 0;
