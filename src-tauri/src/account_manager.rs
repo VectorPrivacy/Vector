@@ -757,6 +757,29 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
         println!("[Migration 9] Fixed {} DM chats with empty participants", empty_dm_count);
     }
 
+    // Migration 10: Backfill npub for events that have user_id but no npub
+    // Migration 6 incorrectly set npub = NULL for all migrated messages, but the user_id
+    // foreign key points to the profiles table which has the npub. This fixes old group
+    // chat messages so they display the correct sender avatar and username.
+    let events_missing_npub: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE npub IS NULL AND user_id IS NOT NULL",
+        [],
+        |row| row.get(0)
+    ).unwrap_or(0);
+
+    if events_missing_npub > 0 {
+        println!("[Migration 10] Backfilling npub for {} events from user_id -> profiles...", events_missing_npub);
+
+        let updated = conn.execute(
+            r#"UPDATE events
+               SET npub = (SELECT p.npub FROM profiles p WHERE p.id = events.user_id)
+               WHERE npub IS NULL AND user_id IS NOT NULL"#,
+            [],
+        ).map_err(|e| format!("Failed to backfill event npubs: {}", e))?;
+
+        println!("[Migration 10] Backfilled npub for {} events", updated);
+    }
+
     Ok(())
 }
 
@@ -843,6 +866,7 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
 
     // Step 1: Migrate text messages (kind=14) and file attachments (kind=15)
     // We need to determine kind based on whether the message has attachments
+    // JOIN with profiles to recover npub from user_id (fixes missing sender identity in group chats)
     conn.execute(r#"
         INSERT INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
@@ -868,8 +892,9 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
             0 as pending,
             0 as failed,
             m.wrapper_event_id,
-            NULL as npub
+            p.npub
         FROM messages m
+        LEFT JOIN profiles p ON p.id = m.user_id
     "#, []).map_err(|e| format!("Failed to migrate messages: {}", e))?;
 
     // Step 2: Extract and migrate reactions from the JSON arrays
