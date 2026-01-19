@@ -263,3 +263,7 @@ npm run build:bare
 - [Vector Discord Community](https://discord.gg/ar2pnE9Huy)
 - [Tauri Prerequisites Guide](https://v2.tauri.app/start/prerequisites/)
 - [Rust Installation Guide](https://www.rust-lang.org/tools/install)
+
+---
+
+*Last tested on Ubuntu 25.04 (arm64) with Tauri v2.9.1*
