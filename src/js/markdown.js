@@ -64,13 +64,18 @@ function initializeMarked() {
     renderer.link = function(token) {
         const text = token.text || '';
         const href = token.href || '';
-        
+
         // If text equals href, it's an autolink (bare URL) - just return the URL
         // This allows Vector's linkifyUrls to handle it
         if (text === href) {
             return href;
         }
-        
+
+        // If it's an email autolink (mailto:email where text is the email), just return the email
+        if (href === `mailto:${text}`) {
+            return text;
+        }
+
         // Otherwise it's a markdown link [text](url) - return the markdown syntax
         // so Vector's linkifyUrls can process it
         return `[${text}](${href})`;
@@ -233,31 +238,10 @@ function removeParagraphTags(html) {
         span.className = 'markdown-paragraph';
         span.innerHTML = p.innerHTML;
         
-        // Check if we're inside a blockquote
-        const parentBlockquote = p.closest('blockquote');
-        const isInBlockquote = parentBlockquote !== null;
-        
-        // Check if there's a next sibling element
-        const nextSibling = p.nextElementSibling;
-        
-        // Determine if we should add line breaks after this paragraph
-        let shouldAddBreaks = false;
-        
-        if (isInBlockquote) {
-            // Inside blockquote: only add breaks if followed by another paragraph in the same blockquote
-            shouldAddBreaks = nextSibling && nextSibling.tagName === 'P';
-        } else {
-            // Outside blockquote: add breaks if there's any next sibling (paragraph or other block element)
-            shouldAddBreaks = nextSibling !== null;
-        }
-        
-        if (shouldAddBreaks) {
-            const br1 = document.createElement('br');
-            const br2 = document.createElement('br');
-            p.replaceWith(span, br1, br2);
-        } else {
-            p.replaceWith(span);
-        }
+        // Don't add <br><br> after paragraphs - rely on CSS margins for spacing
+        // Block elements (ul, ol, blockquote, pre, div, hr, table, h1-h6) have their own margins
+        // Consecutive paragraphs use .markdown-paragraph margins
+        p.replaceWith(span);
     });
 
 
@@ -268,7 +252,7 @@ function removeParagraphTags(html) {
     
     orderedLists.forEach((ol, index) => {
         const itemCount = ol.querySelectorAll('li').length;
-        
+
         if (index === 0) {
             // First list starts at 1 (default)
             cumulativeCount = itemCount;
@@ -277,6 +261,15 @@ function removeParagraphTags(html) {
             ol.setAttribute('start', cumulativeCount + 1);
             cumulativeCount += itemCount;
         }
+    });
+
+    // Wrap tables in a scrollable container for horizontal overflow on small screens
+    const tables = temp.querySelectorAll('table');
+    tables.forEach((table) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-wrapper';
+        table.parentNode.insertBefore(wrapper, table);
+        wrapper.appendChild(table);
     });
 
     return temp.innerHTML || html;

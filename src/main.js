@@ -5983,14 +5983,16 @@ function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
     pTimestamp.classList.add('msg-inline-timestamp');
     const messageDate = new Date(timestamp);
+    const timeStr = messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
 
-    // Render the time contextually
+    // Render the time contextually (day/date in bold)
     if (isToday(messageDate)) {
-        pTimestamp.textContent = messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+        pTimestamp.innerHTML = `<strong>Today</strong>, ${timeStr}`;
     } else if (isYesterday(messageDate)) {
-        pTimestamp.textContent = `Yesterday, ${messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}`;
+        pTimestamp.innerHTML = `<strong>Yesterday</strong>, ${timeStr}`;
     } else {
-        pTimestamp.textContent = messageDate.toLocaleString();
+        const dateStr = messageDate.toLocaleDateString();
+        pTimestamp.innerHTML = `<strong>${dateStr}</strong>, ${timeStr}`;
     }
 
     if (parent) {
@@ -7250,8 +7252,30 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
 
     // Depending on who it is: render the extras appropriately
-    if (msg.mine) divMessage.append(divExtras, pMessage);
-    else divMessage.append(pMessage, divExtras);
+    if (msg.mine) {
+        // Wrap message and status in a container for proper stacking
+        const msgWrapper = document.createElement('div');
+        msgWrapper.classList.add('msg-wrapper');
+        msgWrapper.appendChild(pMessage);
+
+        // Add status indicator for outgoing messages
+        const statusEl = document.createElement('span');
+        statusEl.classList.add('msg-status');
+        if (msg.failed) {
+            statusEl.classList.add('msg-status-failed');
+            statusEl.textContent = 'Failed';
+        } else if (msg.pending) {
+            statusEl.textContent = 'Sending...';
+        } else {
+            // Show "Sent" status - will be hidden on previous messages in setTimeout
+            statusEl.innerHTML = 'Sent <span class="icon icon-check-circle"></span>';
+        }
+        msgWrapper.appendChild(statusEl);
+
+        divMessage.append(divExtras, msgWrapper);
+    } else {
+        divMessage.append(pMessage, divExtras);
+    }
 
     // After rendering, check message corner styling
     // This needs to be done post-render when the message is in the DOM
@@ -7288,6 +7312,24 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 if (pMsg) {
                     applyBorderRadius(pMsg, cornerProperty, '15px');
                 }
+            }
+
+            // Update message status visibility for outgoing messages
+            // Only the last msg-me should show "Sent" status
+            if (msg.mine) {
+                // Hide status on all other msg-me messages (keep only last visible)
+                const allMsgMe = domChatMessages.querySelectorAll('.msg-me');
+                allMsgMe.forEach((msgEl, index) => {
+                    const isLast = index === allMsgMe.length - 1;
+                    const statusEl = msgEl.querySelector('.msg-status:not(.msg-status-failed)');
+                    if (statusEl && !statusEl.textContent.includes('Sending')) {
+                        if (isLast) {
+                            statusEl.classList.remove('msg-status-hidden');
+                        } else {
+                            statusEl.classList.add('msg-status-hidden');
+                        }
+                    }
+                });
             }
         }
     }, 0);

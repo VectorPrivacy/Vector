@@ -172,6 +172,10 @@
   mask-image: url("./icons/volume-max.svg");
 }
 
+.icon-check-circle {
+  mask-image: url("./icons/check-circle.svg");
+}
+
 .icon-clock {
   mask-image: url("./icons/clock.svg");
 }
@@ -1161,7 +1165,9 @@ html, body {
 .msg-inline-timestamp {
   width: 100%;
   text-align: center;
-  font-size: 14px;
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 5px 0 0px 0;
 }
 
 .msg-me {
@@ -1182,6 +1188,9 @@ html, body {
   border-radius: 100%;
   margin-top: 15px;
   margin-right: 10px;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .msg-me p {
@@ -1192,7 +1201,7 @@ html, body {
   border-width: 1px;
   padding: 12px 15px;
   margin-top: 0;
-  margin-bottom: 6px;
+  margin-bottom: 0;
   border-bottom-right-radius: 0px;
   word-break: break-word;
   font-weight: 100;
@@ -1616,6 +1625,44 @@ html, body {
   cursor: pointer;
 }
 
+/* Message Wrapper (for outgoing messages with status) */
+.msg-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-bottom: 6px;
+}
+
+/* Message Status Indicator (outgoing messages) */
+.msg-status {
+  font-size: 11px;
+  color: #474747;
+  margin-top: 2px;
+  margin-right: 2px;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  pointer-events: none;
+}
+
+.msg-status .icon {
+  display: inline-block;
+  position: static;
+  width: 12px;
+  height: 12px;
+  background-color: #474747;
+  vertical-align: -2px;
+  margin-left: 2px;
+}
+
+.msg-status-failed {
+  color: #ff6464;
+}
+
+.msg-status-hidden {
+  display: none;
+}
+
 /* Edit History Popup */
 .edit-history-popup {
   position: fixed;
@@ -1752,6 +1799,11 @@ html, body {
   max-height: 150px;
   padding: 10px;
   padding-left: 0;
+}
+
+#chat-input::placeholder {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Vector Send Button - white by default, stays visible when active */
@@ -3082,6 +3134,11 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 .neon-toggle:hover {
   box-shadow: 
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+#theme-select {
+  text-align: center;
+  text-align-last: center;
 }
 
 /* Remove default focus outline and apply custom styling */
@@ -5165,10 +5222,16 @@ blockquote {
 }
 
 /* Tables */
+.table-wrapper {
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
 table {
   border-collapse: collapse;
-  width: 100%;
-  margin: 8px 0;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
 }
 
 /* Emphasis */
