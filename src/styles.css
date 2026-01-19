@@ -701,7 +701,6 @@ html, body {
   justify-content: space-between;
   margin: 20px 0;
   padding: 12px 16px;
-  background-color: rgba(0, 0, 0, 0.2);
   border-radius: 30px;
   width: calc(100% - 32px);
   max-width: 600px;
@@ -721,8 +720,7 @@ html, body {
 .profile-npub-copy {
   width: 36px;
   height: 36px;
-  border-radius: 50%;
-  background-color: rgba(0, 0, 0, 0.3);
+  background: none;
   display: flex;
   align-items: center;
   justify-content: center;
