@@ -2400,7 +2400,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(#06060600, #060606);
+  background: linear-gradient(#03030300, #030303);
   pointer-events: none;
 }
 
@@ -3664,7 +3664,7 @@ select:disabled:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #060606;
+  background: #030303;
   animation: fadeInWithoutTransform 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
 }
 

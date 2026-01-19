@@ -3703,9 +3703,12 @@ async function setupRustListeners() {
         
         // Resort chat list order so recent groups bubble up (fallback to metadata)
         arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-        
+
         // Re-render chat list
         renderChatlist();
+
+        // Update the back button notification dot (for unread messages in other chats)
+        updateChatBackNotification();
     });
 
     // Listen for MLS invite received events (real-time)
@@ -4218,6 +4221,9 @@ async function setupRustListeners() {
 
         // Render the Chat List (only when user is viewing it)
         if (!strOpenChat) renderChatlist();
+
+        // Update the back button notification dot (for unread messages in other chats)
+        updateChatBackNotification();
     });
 
     // Listen for existing message updates (works for both DMs and MLS groups)
@@ -6234,7 +6240,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     const fEmojiOnly = isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
     if (fReplying) {
         // Only display if replying
-        pMessage.style.borderColor = `#ffffff`;
+        pMessage.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--reply-highlight-border').trim();
     }
 
     // If it's a reply: inject a preview of the replied-to message
@@ -7358,7 +7364,7 @@ function selectReplyingMessage(e) {
         domChatMessageInput.focus();
     }
     // Add a reply-focus
-    e.target.parentElement.parentElement.querySelector('p').style.borderColor = `#ffffff`;
+    e.target.parentElement.parentElement.querySelector('p').style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--reply-highlight-border').trim();
 }
 
 /**
