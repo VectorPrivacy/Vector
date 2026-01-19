@@ -9363,6 +9363,14 @@ async function sendMessage(messageText) {
                 evt.preventDefault();
                 await sendMessage(domChatMessageInput.value);
             }
+            // ESC key cancels reply/edit mode
+            if (evt.key === 'Escape') {
+                if (strCurrentEditMessageId) {
+                    cancelEdit();
+                } else if (strCurrentReplyReference) {
+                    cancelReply();
+                }
+            }
         });
     }
 
