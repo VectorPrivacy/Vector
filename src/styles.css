@@ -1140,6 +1140,7 @@ html, body {
   flex-direction: column;
   align-items: flex-end;
   overflow-y: scroll;
+  overflow-x: hidden;
   /* Use flex: 1 to fill remaining space between header and chat-box */
   flex: 1;
   min-height: 0;
@@ -1310,6 +1311,8 @@ html, body {
 }
 
 /* Nostr Profile Preview (for shared npubs and profile links) */
+/* Note: This is appended inside <p> elements but browsers move block elements outside <p> tags,
+   so we need explicit width constraints here rather than inheriting from parent */
 .msg-profile-preview {
   display: flex;
   align-items: center;
@@ -1320,7 +1323,10 @@ html, body {
   background-color: var(--accent-transparent);
   gap: 10px;
   width: 100%;
+  max-width: min(470px, calc(100vw - 60px));
+  min-width: 0;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .msg-profile-avatar {
@@ -1337,15 +1343,17 @@ html, body {
 }
 
 .msg-profile-info {
-  display: flex;
-  flex-direction: column;
+  display: block;
   min-width: 0;
+  width: 50%;
   line-height: 18px;
   flex: 1;
   overflow: hidden;
 }
 
 .msg-profile-name {
+  display: block;
+  width: 100%;
   font-weight: 600;
   font-size: 14px;
   color: var(--text);
@@ -1355,6 +1363,8 @@ html, body {
 }
 
 .msg-profile-npub {
+  display: block;
+  width: 100%;
   font-size: 11px;
   color: var(--text-secondary);
   font-family: monospace;
