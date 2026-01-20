@@ -682,16 +682,30 @@ html, body {
   height: 50px;
   margin-top: 30px;
   margin-bottom: 30px;
+  margin-top: 15px;
+  margin-bottom: 50px;
 }
 
 .profile-option {
-  background-color: #393b3c;
   padding: 8px 10px 8px 10px;
   margin-left: 6px;
   margin-right: 6px;
   height: 50px;
   width: 50px;
   border-radius: 12px;
+  border-color: #393b3c;
+  border-style: solid;
+  border-width: 1px;
+  color: #b2b2b2;
+  background-color: #060606;
+  cursor: pointer;
+}
+
+.profile-option:hover {
+  background-color: #161616;
+  border-color: #959899;
+  color: white;
+  opacity: 1;
 }
 
 /* Profile npub Section */
