@@ -140,6 +140,7 @@ const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-au
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
+const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
@@ -228,6 +229,9 @@ function openEmojiPanel(e) {
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
             emojiSearch.focus();
         }
+
+        // Prefetch GIF data in background (non-blocking)
+        prefetchTrendingGifs();
     } else {
         // Hide and reset the UI - use class instead of inline style
         emojiSearch.value = '';
@@ -2124,15 +2128,18 @@ function resetEmojiPicker() {
 
 // Update the emoji search event listener
 emojiSearch.addEventListener('input', (e) => {
+    // Skip emoji search if in GIF mode (GIF search is handled separately)
+    if (pickerMode === PICKER_MODE_GIF) return;
+
     const search = e.target.value.toLowerCase();
-    
+
     if (search) {
          if (emojiSearchIcon) emojiSearchIcon.style.opacity = '0';
         // Hide all sections and show search results
         document.querySelectorAll('.emoji-section').forEach(section => {
             section.style.display = 'none';
         });
-        
+
         const results = searchEmojis(search);
         const resultsContainer = document.createElement('div');
         resultsContainer.className = 'emoji-section';
@@ -2143,29 +2150,29 @@ emojiSearch.addEventListener('input', (e) => {
             </div>
             <div class="emoji-grid" id="emoji-search-results"></div>
         `;
-        
+
         const existingResults = document.getElementById('emoji-search-results-container');
         if (existingResults) {
             existingResults.remove();
         }
-        
+
         document.querySelector('.emoji-main').prepend(resultsContainer);
-        
+
         const resultsGrid = document.getElementById('emoji-search-results');
         resultsGrid.innerHTML = '';
-        
+
         // STRICT FILTERING: Only show emojis that contain the search term in their name
-        const filteredResults = results.filter(emoji => 
+        const filteredResults = results.filter(emoji =>
             emoji.name.toLowerCase().includes(search)
         );
-        
+
         filteredResults.slice(0, 48).forEach(emoji => {
             const span = document.createElement('span');
             span.textContent = emoji.emoji;
             span.title = emoji.name;
             resultsGrid.appendChild(span);
         });
-        
+
         twemojify(resultsGrid);
     } else {
         if (emojiSearchIcon) emojiSearchIcon.style.opacity = ''; // Restore opacity when cleared
@@ -2189,6 +2196,39 @@ document.querySelectorAll('.emoji-category-btn').forEach(btn => {
         section.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
 });
+
+/**
+ * Insert text at the cursor position in the chat input
+ * If no selection, inserts at cursor. If text is selected, replaces it.
+ * @param {string} text - The text to insert
+ * @param {boolean} autoSpace - If true, adds spaces around inserted text when adjacent to non-whitespace
+ */
+function insertAtCursor(text, autoSpace = false) {
+    const input = domChatMessageInput;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const value = input.value;
+
+    // Auto-space: add spaces if inserting next to non-whitespace characters
+    let prefix = '';
+    let suffix = '';
+    if (autoSpace) {
+        const charBefore = start > 0 ? value[start - 1] : '';
+        const charAfter = end < value.length ? value[end] : '';
+        if (charBefore && !/\s/.test(charBefore)) prefix = ' ';
+        if (charAfter && !/\s/.test(charAfter)) suffix = ' ';
+    }
+
+    const before = value.substring(0, start);
+    const after = value.substring(end);
+    const insertText = prefix + text + suffix;
+    input.value = before + insertText + after;
+    // Move cursor to end of inserted text
+    const newPos = start + insertText.length;
+    input.setSelectionRange(newPos, newPos);
+    // Trigger input event to update send/mic button state
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 // Emoji selection handler
 picker.addEventListener('click', (e) => {
@@ -2219,12 +2259,10 @@ picker.addEventListener('click', (e) => {
                     invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
                 }
             } else {
-                // Add to message input
-                domChatMessageInput.value += cEmoji.emoji;
-                // Manually trigger the oninput event to update the send/mic button state
-                domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+                // Add to message input at cursor position (with auto-spacing)
+                insertAtCursor(cEmoji.emoji, true);
             }
-            
+
             // Close the picker - use class instead of inline style
             picker.classList.remove('visible');
             // Focus chat input (desktop only - mobile keyboards are disruptive)
@@ -2235,10 +2273,19 @@ picker.addEventListener('click', (e) => {
     }
 });
 
-// When hitting Enter on the emoji search - choose the first emoji
+// When hitting Enter on the emoji search - choose the first emoji/GIF
 emojiSearch.onkeydown = async (e) => {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter')) {
         e.preventDefault();
+
+        // Handle GIF mode - select first GIF
+        if (pickerMode === PICKER_MODE_GIF) {
+            const firstGif = document.querySelector('#gif-grid .gif-item');
+            if (firstGif && firstGif.dataset.gifId) {
+                selectGif(firstGif.dataset.gifId);
+            }
+            return;
+        }
 
         // Find the first emoji in search results or recent emojis
         let emojiElement;
@@ -2282,10 +2329,8 @@ emojiSearch.onkeydown = async (e) => {
                 invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
-            // Add to message input
-            domChatMessageInput.value += cEmoji.emoji;
-            // Manually trigger the oninput event to update the send/mic button state
-            domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+            // Add to message input at cursor position (with auto-spacing)
+            insertAtCursor(cEmoji.emoji, true);
         }
 
         // Reset the UI state - use class instead of inline style
@@ -2383,6 +2428,658 @@ picker.addEventListener('click', (e) => {
         }
     }
 });
+
+// ==================== GIF PICKER ====================
+
+const gifPickerContent = document.querySelector('.gif-picker-content');
+const emojiPickerContent = document.querySelector('.emoji-picker-content');
+const gifGrid = document.getElementById('gif-grid');
+const gifLoading = document.getElementById('gif-loading');
+const pickerModeButtons = document.querySelectorAll('.picker-mode-btn');
+
+/** Picker mode enum for fast comparison */
+const PICKER_MODE_EMOJI = 0;
+const PICKER_MODE_GIF = 1;
+
+/** Current picker mode */
+let pickerMode = PICKER_MODE_EMOJI;
+
+/** GIF search debounce timer */
+let gifSearchTimeout = null;
+
+/** Track if trending GIFs have been loaded */
+let trendingGifsLoaded = false;
+
+/** IntersectionObserver for lazy loading GIF previews */
+let gifLazyLoadObserver = null;
+
+/** Cached trending GIFs data and timestamp */
+let cachedTrendingGifs = null;
+let cachedTrendingTimestamp = 0;
+const GIF_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/** Maximum number of cached search queries (LRU eviction) */
+const GIF_SEARCH_CACHE_MAX_SIZE = 10;
+
+/** Cached search results (LRU-style) */
+const gifSearchCache = new Map();
+
+/** GIFGalaxy API base URL */
+const GIF_API_BASE = 'https://jskitty.cat/gifgalaxy-test';
+
+/** Preconnect link element for GIFGalaxy */
+let gifPreconnectLink = null;
+
+/** Pagination state for GIFs */
+// Use smaller page size on macOS (WebKit) due to autoplay limitations
+const gifPageSize = navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Firefox') ? 6 : 12;
+let gifCurrentOffset = 0;
+let gifHasMore = true;
+let gifIsLoadingMore = false;
+let gifCurrentMode = 'trending'; // 'trending' or 'search'
+let gifCurrentQuery = '';
+
+/**
+ * Shows skeleton/ghost placeholders in the GIF grid while loading
+ * @param {number} count - Number of skeleton items to show
+ */
+function showGifSkeletons(count) {
+    gifGrid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < count; i++) {
+        const skeleton = document.createElement('div');
+        skeleton.className = 'gif-item gif-skeleton';
+        fragment.appendChild(skeleton);
+    }
+    gifGrid.appendChild(fragment);
+}
+
+/**
+ * Establish early connection to GIF API server
+ * Called when opening a chat to warm up connection before user needs GIFs
+ */
+function preconnectGifServer() {
+    if (gifPreconnectLink) return; // Already connected
+    gifPreconnectLink = document.createElement('link');
+    gifPreconnectLink.rel = 'preconnect';
+    gifPreconnectLink.href = 'https://jskitty.cat';
+    gifPreconnectLink.crossOrigin = 'anonymous';
+    document.head.appendChild(gifPreconnectLink);
+}
+
+/**
+ * Prefetch trending GIFs in background when emoji panel opens
+ * Caches the API response for instant display
+ */
+function prefetchTrendingGifs() {
+    // Skip if cache is still fresh
+    if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
+        return;
+    }
+
+    // Prefetch trending in background (use dynamic page size)
+    fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.results && data.results.length > 0) {
+                cachedTrendingGifs = data.results;
+                cachedTrendingTimestamp = Date.now();
+            }
+        })
+        .catch(() => {}); // Silently fail - this is just an optimization
+}
+
+// ===== Blurhash Decoder (Rust Backend) =====
+// Uses efficient Rust-based decoder with LRU caching
+/** @type {Map<string, string>} Cache of decoded blurhash -> data URL */
+const blurhashCache = new Map();
+/** Maximum cached blurhash entries */
+const BLURHASH_CACHE_MAX_SIZE = 200;
+
+/**
+ * Get a decoded blurhash data URL from cache, or decode via Rust backend
+ * Returns cached value synchronously if available, otherwise triggers async decode
+ * @param {string} blurhash - The blurhash string
+ * @returns {string|null} - Cached data URL or null (will be decoded async)
+ */
+function getCachedBlurhash(blurhash) {
+    if (!blurhash || blurhash.length < 6) return null;
+    return blurhashCache.get(blurhash) || null;
+}
+
+/**
+ * Pre-decode blurhashes for a batch of GIFs using the Rust backend
+ * Results are cached for synchronous access during rendering
+ * @param {Array<{b?: string}>} gifs - Array of GIF objects with optional blurhash field 'b'
+ */
+async function predecodeBlurhashes(gifs) {
+    const uncached = gifs.filter(g => g.b && !blurhashCache.has(g.b));
+    if (uncached.length === 0) return;
+
+    // Decode in parallel (Rust backend is efficient)
+    const decodePromises = uncached.map(async (gif) => {
+        try {
+            const dataUrl = await invoke('decode_blurhash', {
+                blurhash: gif.b,
+                width: 32,
+                height: 32
+            });
+            if (dataUrl && dataUrl.startsWith('data:')) {
+                // LRU eviction if cache is full
+                if (blurhashCache.size >= BLURHASH_CACHE_MAX_SIZE) {
+                    const firstKey = blurhashCache.keys().next().value;
+                    blurhashCache.delete(firstKey);
+                }
+                blurhashCache.set(gif.b, dataUrl);
+            }
+        } catch {
+            // Silently fail - blurhash is just for placeholder
+        }
+    });
+
+    await Promise.all(decodePromises);
+}
+
+// ===== Video Format Detection =====
+// Detect best supported video format for GIF previews (AV1 > WebM > MP4 > GIF)
+// Also builds a fallback chain starting from the best supported format
+const gifFormatFallbackChain = (() => {
+    const video = document.createElement('video');
+    const allFormats = [
+        { ext: 'video.av1', type: 'video', test: 'video/mp4; codecs="av01.0.05M.08"' },
+        { ext: 'video.webm', type: 'video', test: 'video/webm; codecs="vp9"' },
+        { ext: 'video.mp4', type: 'video', test: 'video/mp4; codecs="avc1.42E01E"' },
+        { ext: 'original.gif', type: 'image', test: null } // Always supported
+    ];
+
+    // Find the first supported format and build chain from there
+    let startIndex = allFormats.findIndex(f =>
+        f.test === null || video.canPlayType(f.test) === 'probably' || video.canPlayType(f.test) === 'maybe'
+    );
+    if (startIndex === -1) startIndex = allFormats.length - 1; // Fallback to GIF
+
+    return allFormats.slice(startIndex);
+})();
+const gifPreviewFormat = gifFormatFallbackChain[0];
+
+/**
+ * Switches between emoji and GIF picker modes
+ * @param {number} mode - PICKER_MODE_EMOJI or PICKER_MODE_GIF
+ */
+function setPickerMode(mode) {
+    pickerMode = mode;
+
+    // Update button states (data-mode uses strings for readability)
+    const modeStr = mode === PICKER_MODE_GIF ? 'gif' : 'emoji';
+    pickerModeButtons.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === modeStr);
+    });
+
+    if (mode === PICKER_MODE_EMOJI) {
+        emojiPickerContent.style.display = '';
+        gifPickerContent.style.display = 'none';
+        emojiSearch.placeholder = 'Search Emojis...';
+    } else {
+        emojiPickerContent.style.display = 'none';
+        gifPickerContent.style.display = 'flex';
+        emojiSearch.placeholder = 'Search GIFs...';
+
+        // Load trending GIFs if not already loaded
+        if (!trendingGifsLoaded) {
+            loadTrendingGifs();
+        }
+    }
+
+    // Auto-focus search box on desktop only (mobile keyboards are intrusive)
+    // Only focus if the picker is actually visible to avoid stealing focus
+    if (!platformFeatures.is_mobile && picker.classList.contains('visible')) {
+        emojiSearch.focus();
+    }
+}
+
+/**
+ * Fetches trending GIFs from GIFGalaxy API
+ * Uses cached data if available and fresh
+ */
+async function loadTrendingGifs() {
+    // Reset pagination state
+    gifCurrentOffset = 0;
+    gifHasMore = true;
+    gifIsLoadingMore = false;
+    gifCurrentMode = 'trending';
+    gifCurrentQuery = '';
+
+    // Use cached data if fresh (only for first page)
+    if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
+        gifGrid.innerHTML = '';
+        // Blurhashes should already be cached, but ensure they are
+        await predecodeBlurhashes(cachedTrendingGifs);
+        renderGifs(cachedTrendingGifs, false);
+        gifCurrentOffset = cachedTrendingGifs.length;
+        gifHasMore = cachedTrendingGifs.length >= gifPageSize;
+        trendingGifsLoaded = true;
+        gifLoading.style.display = 'none';
+        return;
+    }
+
+    // Show skeleton placeholders while fetching
+    showGifSkeletons(gifPageSize);
+
+    try {
+        const response = await fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`);
+        const data = await response.json();
+
+        if (data.results && data.results.length > 0) {
+            // Cache the results
+            cachedTrendingGifs = data.results;
+            cachedTrendingTimestamp = Date.now();
+            // Pre-decode blurhashes before rendering
+            await predecodeBlurhashes(data.results);
+            renderGifs(data.results, false);
+            gifCurrentOffset = data.results.length;
+            gifHasMore = data.results.length >= gifPageSize;
+            trendingGifsLoaded = true;
+        } else {
+            showGifEmptyState('No trending GIFs found');
+            gifHasMore = false;
+        }
+    } catch (error) {
+        console.error('[GIF] Failed to load trending:', error);
+        showGifEmptyState('Failed to load GIFs');
+        gifHasMore = false;
+    } finally {
+        gifLoading.style.display = 'none';
+    }
+}
+
+/**
+ * Searches GIFs using the GIFGalaxy API
+ * @param {string} query - The search query
+ */
+async function searchGifs(query) {
+    if (!query.trim()) {
+        // Reset to trending when search is cleared
+        trendingGifsLoaded = false;
+        return loadTrendingGifs();
+    }
+
+    // Reset pagination state for new search
+    gifCurrentOffset = 0;
+    gifHasMore = true;
+    gifIsLoadingMore = false;
+    gifCurrentMode = 'search';
+    gifCurrentQuery = query.trim();
+
+    const cacheKey = gifCurrentQuery.toLowerCase();
+
+    // Check cache first (only for first page)
+    if (gifSearchCache.has(cacheKey)) {
+        const cached = gifSearchCache.get(cacheKey);
+        // Move to end (most recently used)
+        gifSearchCache.delete(cacheKey);
+        gifSearchCache.set(cacheKey, cached);
+        gifGrid.innerHTML = '';
+        // Blurhashes should already be cached, but ensure they are
+        await predecodeBlurhashes(cached);
+        renderGifs(cached, false);
+        gifCurrentOffset = cached.length;
+        gifHasMore = cached.length >= gifPageSize;
+        return;
+    }
+
+    // Show skeleton placeholders while fetching
+    showGifSkeletons(gifPageSize);
+
+    try {
+        const encodedQuery = encodeURIComponent(gifCurrentQuery);
+        const response = await fetch(`${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`);
+        const data = await response.json();
+
+        if (data.results && data.results.length > 0) {
+            // Cache the results (LRU eviction if > 10 entries)
+            if (gifSearchCache.size >= GIF_SEARCH_CACHE_MAX_SIZE) {
+                // Delete oldest entry (first key)
+                const oldestKey = gifSearchCache.keys().next().value;
+                gifSearchCache.delete(oldestKey);
+            }
+            gifSearchCache.set(cacheKey, data.results);
+
+            // Pre-decode blurhashes before rendering
+            await predecodeBlurhashes(data.results);
+            renderGifs(data.results, false);
+            gifCurrentOffset = data.results.length;
+            gifHasMore = data.results.length >= gifPageSize;
+        } else {
+            showGifEmptyState(`No GIFs found for "${query}"`);
+            gifHasMore = false;
+        }
+    } catch (error) {
+        console.error('[GIF] Search failed:', error);
+        showGifEmptyState('Search failed');
+        gifHasMore = false;
+    } finally {
+        gifLoading.style.display = 'none';
+    }
+}
+
+/**
+ * Loads more GIFs for infinite scroll pagination
+ * Appends additional results to the existing grid
+ */
+async function loadMoreGifs() {
+    if (gifIsLoadingMore || !gifHasMore) return;
+    gifIsLoadingMore = true;
+
+    // Show skeleton placeholders for the new batch
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < gifPageSize; i++) {
+        const skeleton = document.createElement('div');
+        skeleton.className = 'gif-item gif-skeleton gif-loading-more';
+        fragment.appendChild(skeleton);
+    }
+    gifGrid.appendChild(fragment);
+
+    try {
+        let url;
+        if (gifCurrentMode === 'trending') {
+            url = `${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=popular`;
+        } else {
+            const encodedQuery = encodeURIComponent(gifCurrentQuery);
+            url = `${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=relevant`;
+        }
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        // Remove skeleton placeholders
+        gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
+
+        if (data.results && data.results.length > 0) {
+            // Pre-decode blurhashes before rendering
+            await predecodeBlurhashes(data.results);
+            renderGifs(data.results, true); // Append mode
+            gifCurrentOffset += data.results.length;
+            gifHasMore = data.results.length >= gifPageSize;
+        } else {
+            gifHasMore = false;
+        }
+    } catch (error) {
+        console.error('[GIF] Failed to load more:', error);
+        // Remove skeleton placeholders on error
+        gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
+        gifHasMore = false;
+    } finally {
+        gifIsLoadingMore = false;
+    }
+}
+
+/**
+ * Renders GIF items to the grid with lazy loading
+ * Uses IntersectionObserver to only load visible items + one row ahead
+ * @param {Array} gifs - Array of GIF data from API
+ * @param {boolean} append - If true, append to existing grid instead of replacing
+ */
+function renderGifs(gifs, append = false) {
+    const mediaUrl = `${GIF_API_BASE}/media`;
+
+    if (!append) {
+        // Clean up previous observer when replacing content
+        if (gifLazyLoadObserver) {
+            gifLazyLoadObserver.disconnect();
+        }
+
+        gifGrid.innerHTML = '';
+
+        // Create IntersectionObserver for lazy loading AND play/pause management
+        // Keep observing to handle play/pause when items scroll in/out of view
+        gifLazyLoadObserver = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                const gifItem = entry.target;
+
+                // Load media if visible and not yet loaded
+                if (entry.isIntersecting && !gifItem.dataset.mediaLoaded) {
+                    loadGifMedia(gifItem, mediaUrl);
+                }
+
+                // Play/pause video based on visibility
+                // Only manage videos that have already initialized (data-ready set by canplay)
+                const video = gifItem.querySelector('video');
+                if (video && video.dataset.ready) {
+                    if (entry.isIntersecting) {
+                        video.play().catch(() => {});
+                    } else {
+                        video.pause();
+                    }
+                }
+            }
+        }, {
+            root: gifGrid,
+            rootMargin: '0px 0px 200px 0px',
+            threshold: 0.1
+        });
+    }
+
+    const fragment = document.createDocumentFragment();
+
+    for (const gif of gifs) {
+        const gifItem = document.createElement('div');
+        gifItem.className = 'gif-item';
+        gifItem.dataset.gifId = gif.i;
+        gifItem.dataset.gifTitle = gif.ti || '';
+
+        // Create placeholder with blurhash background
+        const placeholder = document.createElement('div');
+        placeholder.className = 'gif-placeholder';
+
+        // Apply cached blurhash as background (pre-decoded via Rust backend)
+        if (gif.b) {
+            const cachedBlurhash = getCachedBlurhash(gif.b);
+            if (cachedBlurhash) {
+                placeholder.style.backgroundImage = `url(${cachedBlurhash})`;
+                placeholder.style.backgroundSize = 'cover';
+            }
+        }
+        placeholder.innerHTML = '<span class="loading-spinner"></span>';
+        gifItem.appendChild(placeholder);
+
+        fragment.appendChild(gifItem);
+
+        // Observe for lazy loading (after appending to fragment)
+        gifLazyLoadObserver.observe(gifItem);
+    }
+
+    gifGrid.appendChild(fragment);
+}
+
+/**
+ * Loads the media (video or image) for a GIF item when it becomes visible
+ * @param {HTMLElement} gifItem - The GIF item container
+ * @param {string} mediaUrl - Base URL for media
+ */
+function loadGifMedia(gifItem, mediaUrl) {
+    // Mark as loaded to prevent re-loading
+    gifItem.dataset.mediaLoaded = 'true';
+
+    const gifId = gifItem.dataset.gifId;
+    const gifTitle = gifItem.dataset.gifTitle;
+    const placeholder = gifItem.querySelector('.gif-placeholder');
+
+    // Try loading with fallback chain
+    loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, 0);
+}
+
+/**
+ * Attempts to load a GIF using the format at the given index in the fallback chain
+ * On error, tries the next format in the chain
+ */
+function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex) {
+    if (formatIndex >= gifFormatFallbackChain.length) {
+        // All formats failed - show error icon
+        if (placeholder) placeholder.innerHTML = '<span class="icon icon-image"></span>';
+        return;
+    }
+
+    const format = gifFormatFallbackChain[formatIndex];
+
+    if (format.type === 'video') {
+        // Use video element for efficient formats
+        // Use setAttribute for WebKit/Safari compatibility (properties may not work)
+        const video = document.createElement('video');
+        video.setAttribute('autoplay', '');
+        video.setAttribute('loop', '');
+        video.setAttribute('muted', '');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('preload', 'auto');
+        // Also set properties for browsers that need them
+        video.muted = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.loop = true;
+
+        // Use canplay event - fires when enough data to start playing
+        video.addEventListener('canplay', () => {
+            if (placeholder) placeholder.remove();
+            video.dataset.ready = 'true'; // Mark as ready for observer to manage
+            // Only auto-play if video is actually visible (not just preloaded in margin)
+            // Check if element is in the visible viewport
+            const rect = gifItem.getBoundingClientRect();
+            const gridRect = gifGrid.getBoundingClientRect();
+            const isVisible = rect.top < gridRect.bottom && rect.bottom > gridRect.top;
+            if (isVisible) {
+                video.play().catch(() => {});
+            }
+        }, { once: true });
+
+        video.onerror = () => {
+            // Try next format in the fallback chain
+            video.remove();
+            loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
+        };
+
+        // Set src and explicitly call load() for WebKit
+        video.src = `${mediaUrl}/${gifId}/${format.ext}`;
+        gifItem.appendChild(video);
+        video.load();
+    } else {
+        // Image format (GIF)
+        const img = document.createElement('img');
+        img.alt = gifTitle || 'GIF';
+        img.src = `${mediaUrl}/${gifId}/${format.ext}`;
+
+        img.onload = () => {
+            if (placeholder) placeholder.remove();
+        };
+
+        img.onerror = () => {
+            // Try next format in the fallback chain (if any)
+            img.remove();
+            loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
+        };
+
+        gifItem.appendChild(img);
+    }
+}
+
+/**
+ * Shows an empty state message in the GIF grid
+ * @param {string} message - The message to display
+ */
+function showGifEmptyState(message) {
+    gifGrid.innerHTML = `
+        <div class="gif-empty-state" style="grid-column: 1 / -1;">
+            <span class="icon icon-image"></span>
+            <span>${message}</span>
+        </div>
+    `;
+}
+
+/**
+ * Handles GIF selection - inserts GIF URL at cursor position
+ * If input is empty, auto-sends the GIF. Otherwise, just inserts the URL.
+ * @param {string} gifId - The GIF ID
+ */
+function selectGif(gifId) {
+    const gifUrl = `${GIF_API_BASE}/media/${gifId}/original.gif`;
+    const wasEmpty = !domChatMessageInput.value.trim();
+
+    // Insert the GIF URL at cursor position (with auto-spacing)
+    insertAtCursor(gifUrl, true);
+
+    // Close the picker
+    picker.classList.remove('visible');
+    picker.style.bottom = '';
+    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+
+    // Reset picker state
+    emojiSearch.value = '';
+    setPickerMode(PICKER_MODE_EMOJI);
+    trendingGifsLoaded = false;
+
+    // Focus the input (desktop only)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
+
+    // Auto-send only if input was empty (just the GIF)
+    if (wasEmpty) {
+        domChatMessageInputSend.click();
+    }
+}
+
+// Mode toggle button click handlers
+pickerModeButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setPickerMode(btn.dataset.mode === 'gif' ? PICKER_MODE_GIF : PICKER_MODE_EMOJI);
+    });
+});
+
+// GIF grid click handler
+gifGrid.addEventListener('click', (e) => {
+    e.stopPropagation(); // Prevent bubbling to emoji picker handler
+    const gifItem = e.target.closest('.gif-item');
+    if (gifItem && gifItem.dataset.gifId) {
+        selectGif(gifItem.dataset.gifId);
+    }
+});
+
+// GIF grid scroll handler for infinite scroll
+gifGrid.addEventListener('scroll', () => {
+    // Check if scrolled near bottom (within 100px)
+    const scrollBottom = gifGrid.scrollHeight - gifGrid.scrollTop - gifGrid.clientHeight;
+    if (scrollBottom < 100 && gifHasMore && !gifIsLoadingMore) {
+        loadMoreGifs();
+    }
+});
+
+// Modify the emoji search input to handle GIF search
+const originalEmojiSearchHandler = emojiSearch.oninput;
+emojiSearch.addEventListener('input', (e) => {
+    if (pickerMode === PICKER_MODE_GIF) {
+        // Debounce GIF search
+        clearTimeout(gifSearchTimeout);
+        gifSearchTimeout = setTimeout(() => {
+            searchGifs(e.target.value);
+        }, 300);
+    }
+    // Emoji search is handled by the existing handler
+});
+
+// Reset picker mode when panel closes
+const originalCloseObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+        if (mutation.attributeName === 'class') {
+            if (!picker.classList.contains('visible')) {
+                // Reset to emoji mode when panel closes
+                setPickerMode(PICKER_MODE_EMOJI);
+                trendingGifsLoaded = false;
+            }
+        }
+    }
+});
+originalCloseObserver.observe(picker, { attributes: true });
+
+// ==================== END GIF PICKER ====================
 
 /**
  * Represents a user profile.
@@ -6371,9 +7068,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     } else {
         // Render their text content (using our custom Markdown renderer)
         spanMessage.innerHTML = parseMarkdown(displayContent.trim());
-        
+
         // Make URLs clickable (after markdown parsing, before twemojify)
         linkifyUrls(spanMessage);
+
+        // Process inline image URLs (async - will load images in background)
+        processInlineImages(spanMessage);
     }
 
     // Only process Text Content if any exists
@@ -6419,15 +7119,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
-                
-                // Add file extension badge
-                const extBadge = document.createElement('span');
-                extBadge.className = 'file-ext-badge';
-                extBadge.textContent = cAttachment.extension.toUpperCase();
-                // Initially hide the badge until we check image dimensions
-                extBadge.style.display = 'none';
-                
-                // Add event listener for auto-scrolling and badge size check
+
+                // Add event listener for auto-scrolling
                 imgPreview.addEventListener('load', () => {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
@@ -6439,33 +7132,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         // Normal soft scroll for layout adjustments
                         softChatScroll();
                     }
-                    
-                    // Check badge size relative to image
-                    const imgWidth = imgPreview.offsetWidth;
-                    const imgHeight = imgPreview.offsetHeight;
-                    
-                    // Temporarily show badge to measure it
-                    extBadge.style.display = '';
-                    const badgeWidth = extBadge.offsetWidth;
-                    const badgeHeight = extBadge.offsetHeight;
-                    
-                    // Check if badge would be more than 25% of image width or height
-                    const widthRatio = badgeWidth / imgWidth;
-                    const heightRatio = badgeHeight / imgHeight;
-                    
-                    if (widthRatio > 0.25 || heightRatio > 0.25) {
-                        // Hide badge if it's too large relative to the image
-                        extBadge.style.display = 'none';
-                        // Remove border radius from small images
-                        imgPreview.style.borderRadius = '0';
-                    }
                 }, { once: true });
-                
+
                 // Attach image preview handler
                 attachImagePreview(imgPreview);
-                
+
                 imgContainer.appendChild(imgPreview);
-                imgContainer.appendChild(extBadge);
+
+                // Add file extension badge (handles size checking automatically)
+                attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
+
                 pMessage.appendChild(imgContainer);
                 } else if (platformFeatures.os !== 'linux' && ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
@@ -7157,9 +7833,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             // Render the Preview
             pMessage.appendChild(divPrevContainer);
-        } else if (!msg.preview_metadata) {
+        } else if (!msg.preview_metadata && msg.content) {
             // Grab the message's metadata (currently, only URLs can have extracted metadata)
-            if (msg.content && msg.content.includes('https')) {
+            // Skip fetching metadata for direct image URLs (they render inline instead)
+            if (msg.content.includes('https') && !isImageUrl(msg.content)) {
                 // Pass the chat ID so backend can find both DMs and group chats
                 invoke("fetch_msg_metadata", { chatId: strOpenChat, msgId: msg.id });
             }
@@ -7648,6 +8325,9 @@ async function openChat(contact) {
     // Hide the Navbar
     domNavbar.style.display = `none`;
 
+    // Warm up GIF server connection early (non-blocking)
+    preconnectGifServer();
+
     // Get the chat (could be DM or Group)
     const chat = arrChats.find(c => c.id === contact);
     const isGroup = chat?.chat_type === 'MlsGroup';
@@ -7746,6 +8426,11 @@ async function openChat(contact) {
     
     // Update the back button notification dot
     updateChatBackNotification();
+
+    // Focus chat input on desktop (mobile keyboards are intrusive)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
 }
 
 /**
@@ -9272,6 +9957,7 @@ async function sendMessage(messageText) {
 
         // Clear input and show editing state
         domChatMessageInput.value = '';
+        resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
         domChatMessageInput.style.height = '';
         domChatMessageInput.style.overflowY = 'hidden';
         domChatMessageInput.setAttribute('placeholder', 'Saving edit...');
@@ -9288,6 +9974,7 @@ async function sendMessage(messageText) {
                 if (spanMessage) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
+                    processInlineImages(spanMessage);
                     twemojify(spanMessage);
                 }
                 // Add edited indicator if not already present
@@ -9345,6 +10032,7 @@ async function sendMessage(messageText) {
 
     // Clear input and show sending state
     domChatMessageInput.value = '';
+    resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
     domChatMessageInput.style.height = ''; // Reset textarea height
     domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
@@ -9379,6 +10067,19 @@ async function sendMessage(messageText) {
             }
         });
     }
+
+/**
+ * Immediately reset send/mic buttons to mic state (no animation)
+ * Used after sending messages to avoid animation race conditions
+ */
+function resetSendMicButtons() {
+    // Clear any animation classes
+    domChatMessageInputSend.classList.remove('active', 'button-swap-in', 'button-swap-out');
+    domChatMessageInputVoice.classList.remove('button-swap-in', 'button-swap-out');
+    // Set correct display states
+    domChatMessageInputSend.style.display = 'none';
+    domChatMessageInputVoice.style.display = '';
+}
 
     // Hook up an 'input' listener on the Message Box for typing indicators
 domChatMessageInput.oninput = async () => {
@@ -9568,6 +10269,11 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
+    };
+    domSettingsDisplayImageTypesInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.', true);
     };
     domSettingsNotifMuteInfo.onclick = (e) => {
         e.preventDefault();

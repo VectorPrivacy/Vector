@@ -134,6 +134,28 @@ async function saveSendTypingIndicators(bool) {
 }
 
 // ============================================================================
+// Display Settings
+// ============================================================================
+
+/**
+ * Load the user's Display Image Types setting
+ * @returns {Promise<boolean>}
+ */
+async function loadDisplayImageTypes() {
+    const value = await invoke('get_sql_setting', { key: 'display_image_types' });
+    if (value === null || value === undefined) return false; // Default to disabled
+    return value === 'true' || value === '1';
+}
+
+/**
+ * Set the user's Display Image Types setting
+ * @param {boolean} bool - `true` to enable, `false` to disable
+ */
+async function saveDisplayImageTypes(bool) {
+    return await invoke('set_sql_setting', { key: 'display_image_types', value: bool ? 'true' : 'false' });
+}
+
+// ============================================================================
 // Notification Sound Settings
 // ============================================================================
 

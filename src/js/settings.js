@@ -485,13 +485,39 @@ async function askForAvatar() {
     });
     if (!file) return;
 
+    // Show upload progress spinner
+    const avatarEditBtn = document.querySelector('.profile-avatar-edit');
+    const avatarIcon = avatarEditBtn?.querySelector('.icon');
+    let unlisten = null;
+
+    if (avatarIcon) {
+        // Replace icon with progress spinner
+        avatarIcon.className = 'profile-upload-spinner';
+        avatarIcon.style.setProperty('--progress', '5%');
+
+        // Listen for progress events
+        unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+            if (event.payload.type === 'avatar') {
+                const progress = Math.max(5, event.payload.progress);
+                avatarIcon.style.setProperty('--progress', `${progress}%`);
+            }
+        });
+    }
+
     // Upload the avatar to a NIP-96 server
     let strUploadURL = '';
     try {
-        strUploadURL = await invoke("upload_avatar", { filepath: file });
+        strUploadURL = await invoke("upload_avatar", { filepath: file, uploadType: "avatar" });
     } catch (e) {
+        // Restore icon on failure
+        if (avatarIcon) avatarIcon.className = 'icon icon-plus-circle';
+        if (unlisten) unlisten();
         return await popupConfirm('Avatar Upload Failed!', e, true, '', 'vector_warning.svg');
     }
+
+    // Restore icon on success
+    if (avatarIcon) avatarIcon.className = 'icon icon-plus-circle';
+    if (unlisten) unlisten();
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
@@ -540,13 +566,39 @@ async function askForBanner() {
     });
     if (!file) return;
 
+    // Show upload progress spinner
+    const bannerEditBtn = document.querySelector('.profile-banner-edit');
+    const bannerIcon = bannerEditBtn?.querySelector('.icon');
+    let unlisten = null;
+
+    if (bannerIcon) {
+        // Replace icon with progress spinner
+        bannerIcon.className = 'profile-upload-spinner';
+        bannerIcon.style.setProperty('--progress', '5%');
+
+        // Listen for progress events
+        unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+            if (event.payload.type === 'banner') {
+                const progress = Math.max(5, event.payload.progress);
+                bannerIcon.style.setProperty('--progress', `${progress}%`);
+            }
+        });
+    }
+
     // Upload the banner to a NIP-96 server
     let strUploadURL = '';
     try {
-        strUploadURL = await invoke("upload_avatar", { filepath: file });
+        strUploadURL = await invoke("upload_avatar", { filepath: file, uploadType: "banner" });
     } catch (e) {
+        // Restore icon on failure
+        if (bannerIcon) bannerIcon.className = 'icon icon-edit';
+        if (unlisten) unlisten();
         return await popupConfirm('Banner Upload Failed!', e, true, '', 'vector_warning.svg');
     }
+
+    // Restore icon on success
+    if (bannerIcon) bannerIcon.className = 'icon icon-edit';
+    if (unlisten) unlisten();
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
@@ -854,6 +906,9 @@ domSettingsExport.onclick = async (evt) => {
 let fWebPreviewsEnabled = true;
 let fStripTrackingEnabled = true;
 let fSendTypingIndicators = true;
+
+// Display Settings - Simple global variables
+let fDisplayImageTypes = false;
 
 /**
  * Get storage information from the backend
@@ -1402,6 +1457,15 @@ async function initSettings() {
     sendTypingToggle.addEventListener('change', async (e) => {
         fSendTypingIndicators = e.target.checked;
         await saveSendTypingIndicators(e.target.checked);
+    });
+
+    // Load and initialize display settings
+    fDisplayImageTypes = await loadDisplayImageTypes();
+    const displayImageTypesToggle = document.getElementById('display-image-types-toggle');
+    displayImageTypesToggle.checked = fDisplayImageTypes;
+    displayImageTypesToggle.addEventListener('change', async (e) => {
+        fDisplayImageTypes = e.target.checked;
+        await saveDisplayImageTypes(e.target.checked);
     });
 
     // Initialize notification sound settings (desktop only)

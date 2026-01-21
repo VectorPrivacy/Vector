@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-image-cache"
+description = "Enables the clear_image_cache command without any pre-configured scope."
+commands.allow = ["clear_image_cache"]
+
+[[permission]]
+identifier = "deny-clear-image-cache"
+description = "Denies the clear_image_cache command without any pre-configured scope."
+commands.deny = ["clear_image_cache"]

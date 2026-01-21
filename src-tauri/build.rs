@@ -53,6 +53,11 @@ fn main() {
             "get_compression_status",
             "clear_compression_cache",
             "send_cached_compressed_file",
+            // Image cache commands
+            "get_or_cache_image",
+            "clear_image_cache",
+            "get_image_cache_stats",
+            "cache_url_image",
             "react_to_message",
             "fetch_msg_metadata",
             // Core commands
@@ -66,6 +71,7 @@ fn main() {
             "get_file_hash_index",
             "evict_chat_messages",
             "generate_blurhash_preview",
+            "decode_blurhash",
             "download_attachment",
             "login",
             "notifs",

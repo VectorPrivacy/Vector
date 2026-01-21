@@ -616,9 +616,12 @@ pub async fn update_status(status: String) -> bool {
     }
 }
 
+/// Uploads an avatar or banner image with progress reporting
+/// `upload_type` should be "avatar" or "banner" to specify which is being uploaded
 #[tauri::command]
-pub async fn upload_avatar(filepath: String) -> Result<String, String> {
+pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Result<String, String> {
     let handle = TAURI_APP.get().unwrap();
+    let upload_type = upload_type.unwrap_or_else(|| "avatar".to_string());
 
     // Grab the file as AttachmentFile
     let attachment_file = {
@@ -651,19 +654,48 @@ pub async fn upload_avatar(filepath: String) -> Result<String, String> {
     let mime_type = crate::util::mime_from_extension_safe(&attachment_file.extension, true)
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
-    // Upload the file to the server using Blossom with automatic failover
+    // Upload the file to the server using Blossom with automatic failover and progress
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let signer = client.signer().await.unwrap();
     let servers = crate::get_blossom_servers();
 
-    // Upload using Blossom with failover
-    crate::blossom::upload_blob_with_failover(
+    // Create progress callback that emits events to frontend
+    let handle_clone = handle.clone();
+    let upload_type_clone = upload_type.clone();
+    let progress_callback: crate::blossom::ProgressCallback = std::sync::Arc::new(move |percentage, bytes_uploaded| {
+        let payload = serde_json::json!({
+            "type": upload_type_clone,
+            "progress": percentage.unwrap_or(0),
+            "bytes": bytes_uploaded.unwrap_or(0)
+        });
+        handle_clone.emit("profile_upload_progress", payload)
+            .map_err(|_| "Failed to emit progress event".to_string())
+    });
+
+    // Keep a copy of bytes for pre-caching
+    let bytes_for_cache = attachment_file.bytes.clone();
+
+    // Upload using Blossom with progress tracking and failover
+    let upload_url = crate::blossom::upload_blob_with_progress_and_failover(
         signer.clone(),
         servers,
         attachment_file.bytes,
-        Some(mime_type.as_str())
+        Some(mime_type.as_str()),
+        progress_callback,
+        None, // No retries per server
+        None, // Default retry spacing
     )
-    .await
+    .await?;
+
+    // Pre-cache the uploaded image so it displays immediately without re-downloading
+    let image_type = if upload_type == "banner" {
+        image_cache::ImageType::Banner
+    } else {
+        image_cache::ImageType::Avatar
+    };
+    image_cache::precache_image_bytes(&handle, &upload_url, &bytes_for_cache, image_type);
+
+    Ok(upload_url)
 }
 
 

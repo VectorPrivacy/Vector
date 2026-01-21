@@ -1106,3 +1106,244 @@ function linkifyUrls(element) {
     }
   });
 }
+
+/**
+ * Supported image extensions for inline URL images
+ */
+const INLINE_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg'];
+
+/** Pre-compiled regex for detecting image URLs in text */
+const IMAGE_URL_PATTERN = new RegExp(
+    `https?://[^\\s<>"{}|\\\\^\`\\[\\]]+\\.(${INLINE_IMAGE_EXTENSIONS.join('|')})`,
+    'i'
+);
+
+
+/**
+ * Replace an inline image loading indicator with the actual image
+ * @param {HTMLElement} indicator - The loading indicator element
+ * @param {string} cachedPath - Path to the cached image file
+ */
+function replaceInlineImageIndicator(indicator, cachedPath) {
+    // Get the original link (previous sibling)
+    const link = indicator.previousElementSibling;
+    if (!link || !link.classList.contains('linkified-url')) {
+        indicator.remove();
+        return;
+    }
+
+    // Get the original URL for extension extraction
+    const originalUrl = indicator.dataset.url;
+
+    // Convert cached path to displayable URL
+    const assetUrl = convertFileSrc(cachedPath);
+
+    // Create image container (same structure as attachment images)
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'inline-image-container';
+
+    // Create the image element
+    const img = document.createElement('img');
+    img.className = 'inline-image';
+    img.src = assetUrl;
+
+    // Add load handler for scroll correction (same logic as attachment images)
+    img.addEventListener('load', () => {
+        // Auto-scroll to bottom if within 100ms of chat opening
+        if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+            scrollToBottom(domChatMessages, false);
+        } else {
+            softChatScroll();
+        }
+    }, { once: true });
+
+    // Add error handler to fall back to link
+    img.addEventListener('error', () => {
+        imgContainer.replaceWith(link.cloneNode(true));
+    }, { once: true });
+
+    // Attach image preview handler for click-to-zoom
+    attachImagePreview(img);
+
+    imgContainer.appendChild(img);
+
+    // Add file extension badge (same as attachment images)
+    const extension = getExtensionFromUrl(originalUrl);
+    if (extension) {
+        attachFileExtBadge(img, imgContainer, extension);
+    }
+
+    // Replace the link with the image container
+    link.replaceWith(imgContainer);
+    indicator.remove();
+
+    // Check if message is now image-only (no other text)
+    const element = imgContainer.closest('.message-content, span');
+    if (element) {
+        const textContent = getTextContentWithoutImages(element);
+        if (!textContent.trim()) {
+            const pMessage = element.closest('p');
+            if (pMessage) {
+                pMessage.classList.add('no-background');
+                pMessage.style.overflow = 'visible';
+            }
+        }
+    }
+}
+
+/**
+ * Set up listeners for inline image events
+ * - Progress events update the loading spinner
+ * - Cached events replace ALL matching loading indicators with the image
+ */
+function setupInlineImageListeners() {
+    // Progress updates - find ALL indicators with matching URL
+    window.__TAURI__.event.listen('inline_image_progress', (event) => {
+        const { url, progress } = event.payload;
+        if (progress < 0) return;
+
+        // Find ALL loading indicators for this URL
+        const indicators = document.querySelectorAll(`.inline-image-loading[data-url="${CSS.escape(url)}"]`);
+        const displayProgress = Math.max(5, progress);
+
+        for (const indicator of indicators) {
+            indicator.style.setProperty('--progress', `${displayProgress}%`);
+        }
+    });
+
+    // Image cached (or failed) - replace/remove ALL loading indicators
+    window.__TAURI__.event.listen('inline_image_cached', (event) => {
+        const { url, path } = event.payload;
+        const indicators = document.querySelectorAll(`.inline-image-loading[data-url="${CSS.escape(url)}"]`);
+
+        if (path) {
+            // Success - replace with actual image
+            for (const indicator of indicators) {
+                replaceInlineImageIndicator(indicator, path);
+            }
+        } else {
+            // Failed - just remove the loading indicators (keep the link)
+            for (const indicator of indicators) {
+                indicator.remove();
+            }
+        }
+    });
+}
+
+// Initialize the listeners when the module loads
+setupInlineImageListeners();
+
+/**
+ * Check if text contains an image URL based on extension
+ * Handles both clean URLs and text containing URLs
+ * @param {string} text - URL or text containing a URL to check
+ * @returns {boolean} - True if text contains an image URL
+ */
+function isImageUrl(text) {
+    if (!text) return false;
+
+    // Try parsing as a clean URL first
+    try {
+        const urlObj = new URL(text);
+        const path = urlObj.pathname.toLowerCase();
+        if (INLINE_IMAGE_EXTENSIONS.some(ext => path.endsWith('.' + ext))) {
+            return true;
+        }
+    } catch (e) {
+        // Not a clean URL, try extracting from text
+    }
+ 
+    // Check for image URL pattern in text (uses pre-compiled regex)
+    return IMAGE_URL_PATTERN.test(text);
+}
+
+/**
+ * Process inline image URLs in a message element
+ * Finds links to images and replaces them with cached inline image previews
+ * @param {HTMLElement} element - The message element to process (span inside p)
+ */
+async function processInlineImages(element) {
+    // Skip if web previews (including inline images) are disabled
+    if (!fWebPreviewsEnabled) return;
+
+    // Find all linkified URLs that point to images
+    const links = element.querySelectorAll('a.linkified-url');
+    let processedImages = 0;
+
+    for (const link of links) {
+        const url = link.href;
+
+        // Skip if not an image URL
+        if (!isImageUrl(url)) continue;
+
+        // Skip if already processed
+        if (link.dataset.inlineImageProcessed) continue;
+        link.dataset.inlineImageProcessed = 'true';
+
+        // Add loading indicator after the link with data-url for event-based updates
+        const loadingIndicator = document.createElement('span');
+        loadingIndicator.className = 'inline-image-loading';
+        loadingIndicator.dataset.url = url;
+        link.after(loadingIndicator);
+
+        try {
+            // Call Rust backend to cache the image (emits progress events)
+            const cachedPath = await invoke('cache_url_image', { url });
+
+            if (cachedPath) {
+                // Image was cached immediately (already in cache or just downloaded)
+                // Use the shared helper to replace indicator with image
+                replaceInlineImageIndicator(loadingIndicator, cachedPath);
+                processedImages++;
+            }
+            // If cachedPath is null, another download is in progress.
+            // The inline_image_cached event will update ALL indicators when complete.
+        } catch (e) {
+            // If caching fails, remove indicator and leave the link as-is
+            loadingIndicator.remove();
+            console.warn('[InlineImages] Failed to cache image:', url, e);
+        }
+    }
+
+    // If we processed images, check if the message is image-only (no other text)
+    if (processedImages > 0) {
+        // Get the text content excluding the image containers
+        const textContent = getTextContentWithoutImages(element);
+
+        if (!textContent.trim()) {
+            // Message is image-only - remove bubble styling like attachments
+            const pMessage = element.closest('p');
+            if (pMessage) {
+                pMessage.classList.add('no-background');
+                pMessage.style.overflow = 'visible';
+
+                // Float based on whether it's our message or theirs
+                const msgContainer = pMessage.closest('.msg-mine, .msg-them');
+                if (msgContainer) {
+                    pMessage.style.float = msgContainer.classList.contains('msg-mine') ? 'right' : 'left';
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Get text content of an element excluding inline image containers
+ * Uses efficient child walking instead of DOM cloning
+ * @param {HTMLElement} element - The element to get text from
+ * @returns {string} - Text content without image container content
+ */
+function getTextContentWithoutImages(element) {
+    let text = '';
+    for (const node of element.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            text += node.textContent;
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+            // Skip inline image containers
+            if (!node.classList.contains('inline-image-container')) {
+                text += getTextContentWithoutImages(node);
+            }
+        }
+    }
+    return text;
+}

@@ -57,11 +57,17 @@
     </div>
 
     <main class="container">
-<!-- The Global emoji picker popup -->
+<!-- The Global emoji/GIF picker popup -->
 <div class="emoji-picker" tabindex="-1">
   <div class="emoji-search-container">
-    <input id="emoji-search-input" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-    <span class="emoji-search-icon icon icon-search"></span>
+    <div class="emoji-search-wrapper">
+      <input id="emoji-search-input" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <span class="emoji-search-icon icon icon-search"></span>
+    </div>
+    <div class="picker-mode-toggle">
+      <button class="picker-mode-btn active" data-mode="emoji">Emoji</button>
+      <button class="picker-mode-btn" data-mode="gif">GIF</button>
+    </div>
   </div>
   <div class="emoji-picker-content">
     <div class="emoji-sidebar">
@@ -100,6 +106,13 @@
         </div>
         <div class="emoji-grid" id="emoji-all-grid"></div>
       </div>
+    </div>
+  </div>
+  <!-- GIF Panel (hidden by default) -->
+  <div class="gif-picker-content" style="display: none;">
+    <div class="gif-grid" id="gif-grid"></div>
+    <div class="gif-loading" id="gif-loading" style="display: none;">
+      <span class="loading-spinner"></span>
     </div>
   </div>
 </div>
@@ -772,6 +785,20 @@
             <label class="toggle-container">
               <span><span id="privacy-send-typing-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Send Typing Indicators</span>
               <input type="checkbox" id="privacy-send-typing-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Display Settings Section -->
+        <div id="settings-display" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Display</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="display-image-types-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Display Image Types</span>
+              <input type="checkbox" id="display-image-types-toggle">
               <span class="neon-toggle"></span>
             </label>
           </div>

@@ -2926,6 +2926,9 @@ pub async fn edit_message(
             msg.content = new_content;
             msg.edited = true;
 
+            // Clear preview metadata (URL may have changed or been removed)
+            msg.preview_metadata = None;
+
             // Emit update to frontend
             if let Some(handle) = TAURI_APP.get() {
                 handle.emit("message_update", serde_json::json!({

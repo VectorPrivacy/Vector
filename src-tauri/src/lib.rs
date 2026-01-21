@@ -3481,8 +3481,15 @@ async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<Strin
         img_meta.height,
         1.0 // Default punch value
     );
-    
+
     Ok(base64_image)
+}
+
+/// Generic blurhash decoder - converts a blurhash string to a base64 data URL
+/// Used by the GIF picker for placeholder backgrounds
+#[tauri::command]
+fn decode_blurhash(blurhash: String, width: u32, height: u32) -> String {
+    util::decode_blurhash_to_base64(&blurhash, width, height, 1.0)
 }
 
 #[tauri::command]
@@ -4338,16 +4345,20 @@ async fn get_platform_features() -> PlatformFeatures {
 ///
 /// Current tasks:
 /// - Purge expired notification sound cache (10 min TTL, desktop only)
+/// - Cleanup stale in-progress download tracking entries
 ///
 /// Future tasks could include:
 /// - Image cache cleanup
 /// - Temporary file cleanup
 /// - Memory pressure responses
 #[tauri::command]
-fn run_maintenance() {
+async fn run_maintenance() {
     // Audio: purge expired notification sound cache (desktop only)
     #[cfg(desktop)]
     audio::check_cache_ttl();
+
+    // Cleanup stale download tracking entries
+    image_cache::cleanup_stale_downloads().await;
 }
 
 #[tauri::command]
@@ -6015,6 +6026,7 @@ pub fn run() {
             get_file_hash_index,
             evict_chat_messages,
             generate_blurhash_preview,
+            decode_blurhash,
             download_attachment,
             login,
             #[cfg(debug_assertions)]
@@ -6132,6 +6144,7 @@ pub fn run() {
             image_cache::get_or_cache_image,
             image_cache::clear_image_cache,
             image_cache::get_image_cache_stats,
+            image_cache::cache_url_image,
             // PIVX Promos commands
             pivx::pivx_create_promo,
             pivx::pivx_get_promo_balance,

@@ -18,13 +18,25 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use sha2::{Sha256, Digest};
-use tauri::{AppHandle, Runtime, Manager};
+use tauri::{AppHandle, Runtime, Manager, Emitter};
 use tokio::sync::Semaphore;
 use once_cell::sync::Lazy;
 use log::{info, warn, debug};
+use serde_json::json;
+
+use crate::net::{ProgressReporter, download_with_reporter};
+use std::collections::HashSet;
+use tokio::sync::Mutex;
 
 /// Maximum concurrent image downloads
 static DOWNLOAD_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(4));
+
+/// Track URLs currently being downloaded to prevent duplicate downloads
+/// (e.g., when messages re-render from Pending to Sent)
+static DOWNLOADS_IN_PROGRESS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Maximum entries in DOWNLOADS_IN_PROGRESS before forced cleanup
+const MAX_IN_PROGRESS_ENTRIES: usize = 100;
 
 /// HTTP client for downloading images
 static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
@@ -58,6 +70,8 @@ pub enum ImageType {
     Avatar,
     Banner,
     MiniAppIcon,
+    /// Inline images from URLs posted in chat messages
+    InlineImage,
 }
 
 impl ImageType {
@@ -67,7 +81,58 @@ impl ImageType {
             ImageType::Avatar => "avatars",
             ImageType::Banner => "banners",
             ImageType::MiniAppIcon => "miniapp_icons",
+            ImageType::InlineImage => "inline_images",
         }
+    }
+}
+
+/// Progress reporter for inline image downloads
+/// Emits events to frontend with download progress
+pub struct InlineImageProgressReporter<'a, R: Runtime> {
+    handle: &'a AppHandle<R>,
+    url: String,
+}
+
+impl<'a, R: Runtime> InlineImageProgressReporter<'a, R> {
+    pub fn new(handle: &'a AppHandle<R>, url: &str) -> Self {
+        Self {
+            handle,
+            url: url.to_string(),
+        }
+    }
+}
+
+impl<R: Runtime> ProgressReporter for InlineImageProgressReporter<'_, R> {
+    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+        let mut payload = json!({
+            "url": self.url
+        });
+
+        if let Some(p) = percentage {
+            payload["progress"] = json!(p);
+        } else {
+            payload["progress"] = json!(-1); // Indeterminate
+        }
+
+        if let Some(bytes) = bytes_downloaded {
+            payload["bytesDownloaded"] = json!(bytes);
+        }
+
+        self.handle
+            .emit("inline_image_progress", payload)
+            .map_err(|_| "Failed to emit event")
+    }
+
+    fn report_complete(&self) -> Result<(), &'static str> {
+        self.handle
+            .emit(
+                "inline_image_progress",
+                json!({
+                    "url": self.url,
+                    "progress": 100
+                }),
+            )
+            .map_err(|_| "Failed to emit event")
     }
 }
 
@@ -165,6 +230,56 @@ pub fn get_cached_path<R: Runtime>(
     }
 
     None
+}
+
+/// Pre-cache image bytes we already have (e.g., after uploading)
+/// This avoids re-downloading an image we just uploaded
+/// Returns the local file path if successful
+pub fn precache_image_bytes<R: Runtime>(
+    handle: &AppHandle<R>,
+    url: &str,
+    bytes: &[u8],
+    image_type: ImageType,
+) -> CacheResult {
+    if url.is_empty() {
+        return CacheResult::Failed("Empty URL".to_string());
+    }
+
+    // Check if already cached
+    if let Some(path) = get_cached_path(handle, url, image_type) {
+        return CacheResult::AlreadyCached(path);
+    }
+
+    // Validate the image bytes
+    let extension = match validate_image(bytes) {
+        Some(ext) => ext,
+        None => {
+            warn!("[ImageCache] Invalid image data for precache: {}", url);
+            return CacheResult::Failed("Invalid image format".to_string());
+        }
+    };
+
+    // Get cache directory
+    let cache_dir = match get_cache_dir(handle, image_type) {
+        Ok(d) => d,
+        Err(e) => return CacheResult::Failed(e),
+    };
+
+    // Create filename from URL hash
+    let cache_key = url_to_cache_key(url);
+    let filename = format!("{}.{}", cache_key, extension);
+    let file_path = cache_dir.join(&filename);
+
+    // Write the file
+    if let Err(e) = std::fs::write(&file_path, bytes) {
+        warn!("[ImageCache] Failed to write precache file: {}", e);
+        return CacheResult::Failed(format!("Failed to write: {}", e));
+    }
+
+    let path_str = file_path.to_string_lossy().to_string();
+    info!("[ImageCache] Pre-cached {:?} {} -> {}", image_type, url, path_str);
+
+    CacheResult::Cached(path_str)
 }
 
 /// Download and cache an image from a URL
@@ -375,6 +490,7 @@ pub async fn clear_image_cache<R: Runtime>(
     total += clear_cache(&handle, ImageType::Avatar)?;
     total += clear_cache(&handle, ImageType::Banner)?;
     total += clear_cache(&handle, ImageType::MiniAppIcon)?;
+    total += clear_cache(&handle, ImageType::InlineImage)?;
     Ok(total)
 }
 
@@ -389,6 +505,7 @@ pub async fn get_image_cache_stats<R: Runtime>(
     let mut avatar_count = 0;
     let mut banner_count = 0;
     let mut icon_count = 0;
+    let mut inline_count = 0;
 
     if let Ok(dir) = get_cache_dir(&handle, ImageType::Avatar) {
         avatar_count = std::fs::read_dir(dir).map(|e| e.count()).unwrap_or(0);
@@ -399,11 +516,193 @@ pub async fn get_image_cache_stats<R: Runtime>(
     if let Ok(dir) = get_cache_dir(&handle, ImageType::MiniAppIcon) {
         icon_count = std::fs::read_dir(dir).map(|e| e.count()).unwrap_or(0);
     }
+    if let Ok(dir) = get_cache_dir(&handle, ImageType::InlineImage) {
+        inline_count = std::fs::read_dir(dir).map(|e| e.count()).unwrap_or(0);
+    }
 
     Ok(serde_json::json!({
         "total_size_bytes": size,
         "avatar_count": avatar_count,
         "banner_count": banner_count,
         "miniapp_icon_count": icon_count,
+        "inline_image_count": inline_count,
     }))
+}
+
+/// Check if a URL uses HTTPS (required for inline images for security)
+fn is_https_url(url: &str) -> bool {
+    url.starts_with("https://")
+}
+
+/// Check if a hostname resolves to a private/internal IP range
+/// Blocks SSRF attacks by preventing requests to internal networks
+fn is_private_host(host: &str) -> bool {
+    // Block obvious private hostnames
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".local") || host_lower.ends_with(".internal") {
+        return true;
+    }
+
+    // Try to parse as IP address directly
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_private_ip(ip);
+    }
+
+    // For hostnames, we can't resolve DNS here synchronously
+    // The HTTP client will handle it, but we block obvious patterns
+    false
+}
+
+/// Check if an IP address is in a private/reserved range
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()           // 127.0.0.0/8
+                || ipv4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || ipv4.is_link_local()  // 169.254.0.0/16
+                || ipv4.is_broadcast()   // 255.255.255.255
+                || ipv4.is_unspecified() // 0.0.0.0
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()           // ::1
+                || ipv6.is_unspecified() // ::
+        }
+    }
+}
+
+/// Cleanup stale entries from DOWNLOADS_IN_PROGRESS
+/// Called periodically from maintenance to prevent unbounded growth
+pub async fn cleanup_stale_downloads() {
+    let mut in_progress = DOWNLOADS_IN_PROGRESS.lock().await;
+    if in_progress.len() > MAX_IN_PROGRESS_ENTRIES {
+        // If we have too many entries, something is wrong - clear them all
+        warn!("[ImageCache] Clearing {} stale in-progress entries", in_progress.len());
+        in_progress.clear();
+    }
+}
+
+/// Tauri command: Cache an image URL from chat messages with progress reporting
+/// Downloads, validates, and caches the image, returning the local path
+/// Emits "inline_image_progress" events with { id, progress, bytesDownloaded }
+///
+/// Security: Only HTTPS URLs from non-private hosts are allowed.
+/// URL format validation is done in JS to avoid IPC overhead for invalid URLs.
+#[tauri::command]
+pub async fn cache_url_image<R: Runtime>(
+    handle: AppHandle<R>,
+    url: String,
+) -> Result<Option<String>, String> {
+    // Security: Only allow HTTPS URLs
+    if !is_https_url(&url) {
+        return Err("Only HTTPS URLs are allowed for inline images".to_string());
+    }
+
+    // Security: Block private/internal hosts (SSRF protection)
+    if let Ok(parsed) = url::Url::parse(&url) {
+        if let Some(host) = parsed.host_str() {
+            if is_private_host(host) {
+                return Err("Private/internal hosts are not allowed".to_string());
+            }
+        }
+    }
+
+    // Check if already cached - skip download if so
+    if let Some(path) = get_cached_path(&handle, &url, ImageType::InlineImage) {
+        return Ok(Some(path));
+    }
+
+    // Check if this URL is already being downloaded (e.g., message re-rendered from Pending to Sent)
+    // If so, return None - the frontend will receive the cached path via the inline_image_cached event
+    {
+        let mut in_progress = DOWNLOADS_IN_PROGRESS.lock().await;
+        if in_progress.contains(&url) {
+            debug!("[ImageCache] Download already in progress, frontend will get path via event: {}", url);
+            return Ok(None);
+        }
+        // Mark as in-progress (clone here is necessary for the set)
+        in_progress.insert(url.clone());
+    }
+
+    // Use a scope guard pattern - url is moved into cleanup, avoiding extra clone
+    let cleanup_url = url.clone(); // One clone for cleanup
+    let cleanup = || async move {
+        DOWNLOADS_IN_PROGRESS.lock().await.remove(&cleanup_url);
+    };
+
+    // Acquire semaphore permit to limit concurrent downloads
+    let _permit = match DOWNLOAD_SEMAPHORE.acquire().await {
+        Ok(p) => p,
+        Err(e) => {
+            cleanup().await;
+            return Err(format!("Semaphore error: {}", e));
+        }
+    };
+
+    // Create progress reporter for this download
+    let reporter = InlineImageProgressReporter::new(&handle, &url);
+
+    // Helper to emit failure event so frontend can remove spinner
+    let emit_failure = |handle: &AppHandle<R>, url: &str| {
+        handle.emit("inline_image_cached", json!({
+            "url": url,
+            "path": serde_json::Value::Null
+        })).ok();
+    };
+
+    // Download with progress reporting (10s timeout)
+    debug!("[ImageCache] Downloading inline image with progress: {}", url);
+    let bytes = match download_with_reporter(&url, &reporter, Some(Duration::from_secs(10))).await {
+        Ok(b) => b,
+        Err(e) => {
+            cleanup().await;
+            warn!("[ImageCache] Failed to download inline image {}: {}", url, e);
+            emit_failure(&handle, &url);
+            return Ok(None);
+        }
+    };
+
+    // Validate the image
+    let extension = match validate_image(&bytes) {
+        Some(ext) => ext,
+        None => {
+            cleanup().await;
+            warn!("[ImageCache] Invalid image data from {}", url);
+            emit_failure(&handle, &url);
+            return Ok(None);
+        }
+    };
+
+    // Get cache directory and create filename
+    let cache_dir = match get_cache_dir(&handle, ImageType::InlineImage) {
+        Ok(d) => d,
+        Err(e) => {
+            cleanup().await;
+            return Err(e);
+        }
+    };
+    let cache_key = url_to_cache_key(&url);
+    let filename = format!("{}.{}", cache_key, extension);
+    let file_path = cache_dir.join(&filename);
+
+    // Write the file
+    if let Err(e) = std::fs::write(&file_path, &bytes) {
+        cleanup().await;
+        warn!("[ImageCache] Failed to write cache file: {}", e);
+        return Ok(None);
+    }
+
+    // Done - remove from in-progress
+    cleanup().await;
+
+    let path_str = file_path.to_string_lossy().to_string();
+    info!("[ImageCache] Cached inline image {} -> {}", url, path_str);
+
+    // Emit completion event so ALL loading indicators for this URL get updated
+    // (handles cases like message re-rendering or multiple instances of same image)
+    handle.emit("inline_image_cached", json!({
+        "url": url,
+        "path": path_str.clone()
+    })).ok();
+
+    Ok(Some(path_str))
 }

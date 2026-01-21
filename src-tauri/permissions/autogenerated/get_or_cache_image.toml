@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-or-cache-image"
+description = "Enables the get_or_cache_image command without any pre-configured scope."
+commands.allow = ["get_or_cache_image"]
+
+[[permission]]
+identifier = "deny-get-or-cache-image"
+description = "Denies the get_or_cache_image command without any pre-configured scope."
+commands.deny = ["get_or_cache_image"]

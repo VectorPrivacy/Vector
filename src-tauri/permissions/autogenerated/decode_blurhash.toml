@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-decode-blurhash"
+description = "Enables the decode_blurhash command without any pre-configured scope."
+commands.allow = ["decode_blurhash"]
+
+[[permission]]
+identifier = "deny-decode-blurhash"
+description = "Denies the decode_blurhash command without any pre-configured scope."
+commands.deny = ["decode_blurhash"]
