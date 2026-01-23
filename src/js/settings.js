@@ -1318,12 +1318,8 @@ async function initNotificationSettings() {
         updateCustomFilename(sound.path);
     } else if (sound && sound.type === 'None') {
         soundSelect.value = 'none';
-    } else if (sound && sound.type === 'Sonar') {
-        soundSelect.value = 'sonar';
     } else if (sound && sound.type === 'Techno') {
         soundSelect.value = 'techno';
-    } else if (sound && sound.type === 'Synth') {
-        soundSelect.value = 'synth';
     } else {
         soundSelect.value = 'default';
     }
@@ -1352,12 +1348,8 @@ async function initNotificationSettings() {
             customGroup.style.display = 'none';
             if (value === 'none') {
                 currentNotificationSettings.sound = { type: 'None' };
-            } else if (value === 'sonar') {
-                currentNotificationSettings.sound = { type: 'Sonar' };
             } else if (value === 'techno') {
                 currentNotificationSettings.sound = { type: 'Techno' };
-            } else if (value === 'synth') {
-                currentNotificationSettings.sound = { type: 'Synth' };
             } else {
                 currentNotificationSettings.sound = { type: 'Default' };
             }

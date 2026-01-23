@@ -235,14 +235,10 @@ fn load_raw_samples(path: &Path) -> Result<Vec<f32>, String> {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "path")]
 pub enum NotificationSound {
-    /// Default built-in sound (notif-default.mp3)
+    /// Default built-in sound - Prélude (notif-prelude.mp3)
     Default,
-    /// Sonar ping sound (notif-sonar.mp3)
-    Sonar,
     /// Techno ping sound (notif-techno.mp3)
     Techno,
-    /// Synth ping sound (notif-synth.mp3)
-    Synth,
     /// No sound (silent)
     None,
     /// Custom user-selected sound file
@@ -656,10 +652,8 @@ fn get_bundled_sound_path<R: Runtime>(
     };
 
     match sound {
-        NotificationSound::Default => find_sound("notif-default.mp3"),
-        NotificationSound::Sonar => find_sound("notif-sonar.mp3"),
+        NotificationSound::Default => find_sound("notif-prelude.mp3"),
         NotificationSound::Techno => find_sound("notif-techno.mp3"),
-        NotificationSound::Synth => find_sound("notif-synth.mp3"),
         NotificationSound::Custom(path) => {
             // If path is empty or doesn't exist, fall back to default sound
             if path.is_empty() {
@@ -855,9 +849,7 @@ fn parse_notification_sound(value: &str) -> NotificationSound {
     } else {
         match value {
             "default" => NotificationSound::Default,
-            "sonar" => NotificationSound::Sonar,
             "techno" => NotificationSound::Techno,
-            "synth" => NotificationSound::Synth,
             "none" => NotificationSound::None,
             _ => NotificationSound::Default,
         }
@@ -868,9 +860,7 @@ fn parse_notification_sound(value: &str) -> NotificationSound {
 fn serialize_notification_sound(sound: &NotificationSound) -> String {
     match sound {
         NotificationSound::Default => "default".to_string(),
-        NotificationSound::Sonar => "sonar".to_string(),
         NotificationSound::Techno => "techno".to_string(),
-        NotificationSound::Synth => "synth".to_string(),
         NotificationSound::None => "none".to_string(),
         NotificationSound::Custom(path) => format!("custom:{}", path),
     }
