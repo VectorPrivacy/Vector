@@ -1,11 +1,46 @@
 # Running Vector with Firejail & Proxychains
 
-This guide explains how to run Vector in a sandboxed environment using [Firejail](https://github.com/netblue30/firejail) and route traffic through proxies using [Proxychains](https://github.com/haad/proxychains).
+This guide explains how to run Vector in a **maximum-security sandbox** using [Firejail](https://github.com/netblue30/firejail) and optionally route traffic through proxies using [Proxychains](https://github.com/haad/proxychains).
 
 ## Overview
 
 - **Firejail**: A SUID sandbox program that restricts the running environment using Linux namespaces and seccomp-bpf
 - **Proxychains**: Forces TCP connections through SOCKS4/5 or HTTP proxies (e.g., Tor)
+
+## Security Model
+
+Our profile uses a **whitelist approach** with maximum hardening:
+
+| Protection | Description |
+|------------|-------------|
+| **Whitelist filesystem** | Only 5 HOME paths accessible, everything else blocked |
+| **Single binary** | `private-bin Vector` - no shells, no utilities |
+| **noexec** | All writable directories marked non-executable |
+| **Read-only system** | `/usr`, `/opt`, `/boot`, `/var` all read-only |
+| **Private /etc** | Only 15 essential entries (SSL, fonts, DNS) |
+| **Private /tmp** | Isolated temporary directory |
+| **No mount access** | USB drives and external media blocked |
+| **All caps dropped** | No Linux capabilities |
+| **No privileges** | noroot, nonewprivs, nogroups |
+| **Seccomp** | Syscall filtering enabled |
+| **Resource limits** | Max 200 procs, 2048 fds, 1GB file size |
+| **Identity spoofing** | Fake machine-id and hostname |
+| **Env sanitization** | SSH/GPG agent sockets stripped |
+| **D-Bus filtering** | Minimal portal + file manager access |
+
+### What an attacker CANNOT do (even with code execution):
+- Access any files outside whitelisted paths
+- Run shell commands (no bash/sh available)
+- Execute downloaded malware (noexec on all writable dirs)
+- Escalate privileges
+- Access SSH keys, GPG keys, browser data, crypto wallets
+- Access USB drives or external media
+- Read system passwords or sensitive /etc files
+- Fork bomb or exhaust resources
+- Identify the real machine
+
+### Trade-off
+OS notifications are disabled due to complex GNOME/GTK D-Bus requirements. In-app notifications still work.
 
 ## Prerequisites
 
@@ -33,298 +68,189 @@ Vector's default build includes **whisper-rs** (AI transcription) which uses SIM
 **Always use the bare build for sandboxed environments:**
 
 ```bash
-# Build without whisper (AI features)
 npm run build:bare
 ```
 
 The resulting binary will be at:
 ```
-src-tauri/target/release/vector
+src-tauri/target/release/Vector
 ```
 
-## Vector's Required Directories
+## Setup
 
-Vector needs access to these directories:
-
-| Directory | Purpose |
-|-----------|---------|
-| `~/.local/share/io.vectorapp/` | Main app data (databases, cache, miniapps) |
-| `~/.local/share/vector/` | WebKit HSTS storage |
-| `~/Downloads/vector/` | Downloaded media files |
-
-## Firejail Configuration
-
-### Step 1: Create the Profile
-
-Create the Vector firejail profile:
+### Step 1: Install the Profile
 
 ```bash
 mkdir -p ~/.config/firejail
+cp docs/security/vector.profile ~/.config/firejail/vector.profile
 ```
 
-Copy the profile from [`vector.profile`](vector.profile) in this directory, or use the content below:
+### Step 2: Create Proxychains Config (Optional)
 
-```ini
-# Firejail profile for Vector Privacy Messenger
-# https://github.com/VectorPrivacy/Vector
-
-# Persistent local customizations (create vector.local for overrides)
-include vector.local
-
-# Persistent global definitions
-include globals.local
-
-# Vector data directories
-noblacklist ${HOME}/.local/share/io.vectorapp
-noblacklist ${HOME}/.local/share/vector
-noblacklist ${HOME}/Downloads/vector
-
-# Restrictions
-# Note: disable-devel.inc and disable-exec.inc are NOT included
-# as they may block WebKitGTK components
-include disable-common.inc
-include disable-programs.inc
-
-# Security hardening
-caps.drop all
-netfilter
-nodvd
-nonewprivs
-noroot
-notv
-nou2f
-novideo
-protocol unix,inet,inet6
-seccomp
-
-# D-Bus (notifications)
-dbus-user filter
-dbus-user.talk org.freedesktop.Notifications
-dbus-user.talk org.freedesktop.portal.*
-dbus-system none
-
-# Audio (voice messages and notifications)
-ignore nosound
-```
-
-> **Note:** This profile was tested on Ubuntu 25.10 with firejail 0.9.72 and proxychains-ng 4.17. More restrictive profiles (with `disable-devel.inc`, `disable-exec.inc`, `private-dev`, `private-etc`) may prevent Vector from starting due to WebKitGTK requirements.
-
-### Step 2: Create Local Overrides (Optional)
-
-For custom tweaks, create `~/.config/firejail/vector.local`:
-
-```ini
-# Local overrides for Vector firejail profile
-
-# Uncomment to allow microphone (for voice messages)
-# ignore noinput
-
-# Uncomment to allow webcam (if ever needed)
-# ignore novideo
-
-# Uncomment for additional debugging
-# ignore seccomp
-```
-
-### Step 3: Test the Profile
+If using proxychains for Tor routing:
 
 ```bash
-# Test with debug output
-firejail --debug --profile=~/.config/firejail/vector.profile /path/to/vector
-
-# Quick test
-firejail --profile=~/.config/firejail/vector.profile /path/to/vector
-```
-
-## Proxychains Configuration
-
-### Step 1: Configure Proxychains
-
-Edit `/etc/proxychains4.conf` (or `~/.proxychains/proxychains.conf`):
-
-```ini
-# Proxychains configuration for Vector
-
-# Dynamic chain - skip dead proxies
+mkdir -p ~/.proxychains
+cat > ~/.proxychains/proxychains.conf << 'EOF'
 dynamic_chain
-
-# Quiet mode - less output
 quiet_mode
-
-# Proxy DNS requests through the proxy
 proxy_dns
 
-# Timeouts
 tcp_read_time_out 15000
 tcp_connect_time_out 8000
 
-# Proxy list
 [ProxyList]
-# Tor (default)
 socks5 127.0.0.1 9050
-
-# Or use a custom SOCKS5 proxy:
-# socks5 127.0.0.1 1080
+EOF
 ```
 
-### Step 2: Start Tor (if using Tor)
+## Running Vector
+
+### Firejail Only (Maximum Security)
 
 ```bash
-# Install Tor
-sudo apt-get install tor
+cd /path/to/vector
+firejail --whitelist=`pwd` --read-only=`pwd` \
+  --profile=~/.config/firejail/vector.profile ./Vector
+```
 
-# Start Tor service
+### Firejail + Proxychains (Maximum Security + Tor)
+
+```bash
+# Start Tor first
 sudo systemctl start tor
 
-# Verify Tor is running
-curl --socks5 127.0.0.1:9050 https://check.torproject.org/api/ip
+# Run Vector through Tor
+cd /path/to/vector
+firejail --whitelist=`pwd` --read-only=`pwd` \
+  --profile=~/.config/firejail/vector.profile proxychains4 ./Vector
 ```
 
-## Running Vector with Both
+### Shell Alias (Recommended)
 
-### Method 1: Firejail Only
+Add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-firejail --profile=~/.config/firejail/vector.profile /path/to/vector
+alias vector-secure='cd /path/to/vector && firejail --whitelist=`pwd` --read-only=`pwd` --profile=~/.config/firejail/vector.profile ./Vector'
+alias vector-tor='cd /path/to/vector && firejail --whitelist=`pwd` --read-only=`pwd` --profile=~/.config/firejail/vector.profile proxychains4 ./Vector'
 ```
 
-### Method 2: Proxychains Only
+### Desktop Launcher
 
-```bash
-proxychains4 /path/to/vector
-```
-
-### Method 3: Firejail + Proxychains (Maximum Isolation)
-
-```bash
-firejail --profile=~/.config/firejail/vector.profile proxychains4 /path/to/vector
-```
-
-### Creating a Desktop Launcher
-
-Create `~/.local/share/applications/vector-sandboxed.desktop`:
+Create `~/.local/share/applications/vector-secure.desktop`:
 
 ```ini
 [Desktop Entry]
-Name=Vector (Sandboxed)
-Comment=Private Messenger - Sandboxed with Firejail
-Exec=firejail --profile=%h/.config/firejail/vector.profile /path/to/vector
+Name=Vector (Secure)
+Comment=Vector Privacy Messenger - Maximum Security Sandbox
+Exec=sh -c 'cd /path/to/vector && firejail --whitelist=`pwd` --read-only=`pwd` --profile=%h/.config/firejail/vector.profile ./Vector'
 Icon=vector
 Type=Application
 Categories=Network;InstantMessaging;
 Terminal=false
 ```
 
+## Whitelisted Paths
+
+Vector can **only** access these directories:
+
+| Path | Access | Purpose |
+|------|--------|---------|
+| `~/.config/user-dirs.dirs` | Read-only | XDG config for path resolution |
+| `~/.proxychains/` | Read-only | Proxy configuration |
+| `~/.local/share/io.vectorapp/` | Read/Write | App data, databases, cache |
+| `~/.local/share/vector/` | Read/Write | WebKit HSTS storage |
+| `~/Downloads/vector/` | Read/Write | Downloaded attachments |
+| Binary directory (via CLI) | Read-only | The Vector executable |
+
+Everything else in HOME is **automatically blocked**.
+
 ## Troubleshooting
 
 ### "Illegal instruction" Crash
 
-**Cause:** CPU instruction incompatibility, usually from whisper-rs or crypto libraries.
+**Cause:** CPU instruction incompatibility from whisper-rs.
 
-**Solution:**
-1. Use the bare build: `npm run build:bare`
-2. If still failing, try without seccomp:
-   ```bash
-   firejail --profile=~/.config/firejail/vector.profile --ignore=seccomp /path/to/vector
-   ```
+**Solution:** Use the bare build: `npm run build:bare`
 
-### Network Connection Issues
+### Stuck at "Decrypting your keys"
 
-**Cause:** Firejail blocking network or DNS.
+**Cause:** `private-dev` blocks /dev/urandom.
 
-**Solution:** Verify network protocol settings:
+**Solution:** Do NOT enable `private-dev` in the profile.
+
+### Downloads Not Completing
+
+**Cause:** Missing XDG user-dirs config in whitelist.
+
+**Solution:** Ensure profile has:
 ```ini
-# In vector.profile, ensure:
-protocol unix,inet,inet6
+whitelist ${HOME}/.config/user-dirs.dirs
+read-only ${HOME}/.config/user-dirs.dirs
 ```
 
-### D-Bus / Notifications Not Working
+### "Reveal in Explorer" Not Working
 
-**Cause:** D-Bus filtering too strict.
+**Cause:** File manager D-Bus permissions missing.
 
-**Solution:** Add to `vector.local`:
+**Solution:** Ensure profile has:
 ```ini
-ignore dbus-user filter
-dbus-user none
-```
-
-Or allow specific services:
-```ini
-dbus-user.talk org.freedesktop.Notifications
+dbus-user.talk org.freedesktop.FileManager1
+dbus-user.talk org.gnome.Nautilus
 ```
 
 ### Audio Not Working
 
-**Cause:** PulseAudio/PipeWire access blocked.
+**Cause:** Sound blocked by default.
 
-**Solution:** Add to `vector.local`:
+**Solution:** Ensure profile has:
 ```ini
 ignore nosound
 ```
 
-### Cannot Download Files
-
-**Cause:** Download directory not whitelisted.
-
-**Solution:** Ensure this is in profile:
-```ini
-mkdir ${HOME}/Downloads/vector
-whitelist ${HOME}/Downloads/vector
-```
-
-### WebKit Cache Issues
-
-**Cause:** Private cache too restrictive.
-
-**Solution:** Remove or comment out:
-```ini
-# private-cache
-```
-
 ## Debugging
 
-### Check What's Blocked
+### Check Sandbox Status
 
 ```bash
-# See blacklisted directories
-firejail --debug-blacklists --profile=~/.config/firejail/vector.profile /path/to/vector
-
-# See whitelisted directories
-firejail --debug-whitelists --profile=~/.config/firejail/vector.profile /path/to/vector
-
-# Full debug output
-firejail --debug --profile=~/.config/firejail/vector.profile /path/to/vector 2>&1 | tee firejail-debug.log
-```
-
-### Monitor Running Sandbox
-
-```bash
-# List sandboxed processes
 firejail --list
-
-# Monitor specific sandbox
-firemon --seccomp PID
 ```
 
-### Test Proxychains Connection
+### See Whitelisted Directories
 
 ```bash
-# Test proxy is working
-proxychains4 curl https://check.torproject.org/api/ip
+firejail --debug-whitelists --profile=~/.config/firejail/vector.profile -- /bin/true
+```
 
-# Test with verbose output
-proxychains4 -f /etc/proxychains4.conf curl -v https://example.com
+### Full Debug Output
+
+```bash
+firejail --debug --profile=~/.config/firejail/vector.profile ./Vector 2>&1 | tee debug.log
+```
+
+### Test Proxychains
+
+```bash
+proxychains4 curl https://check.torproject.org/api/ip
 ```
 
 ## Security Considerations
 
-1. **Bare build recommended**: The whisper feature uses Vulkan/SIMD which may conflict with seccomp filters
+1. **Whitelist approach**: Only explicitly listed directories are accessible - everything else is blocked automatically
 
-2. **Proxy DNS**: Always enable `proxy_dns` in proxychains to prevent DNS leaks
+2. **No shell access**: `private-bin Vector` means no bash, sh, or any utilities - even with code execution, an attacker has no tools
 
-3. **Tor limitations**: Nostr relays using WebSocket (WSS) work over Tor, but performance may be slower
+3. **noexec everywhere**: Downloaded files and cached data cannot be executed
 
-4. **Profile auditing**: Firejail profiles use blacklists by default - audit your profile to ensure nothing sensitive is exposed
+4. **Read-only binary**: The `--read-only=\`pwd\`` flag prevents the app from modifying itself
+
+5. **Private /etc**: Only essential system config files are visible
+
+6. **Spoofed identity**: machine-id and hostname are randomized per session
+
+7. **Environment sanitized**: SSH/GPG agent sockets are stripped
+
+8. **Proxy DNS**: Always enable `proxy_dns` in proxychains to prevent DNS leaks
 
 ## References
 
@@ -335,6 +261,6 @@ proxychains4 -f /etc/proxychains4.conf curl -v https://example.com
 
 ---
 
-> **Note:** Our pre-built profile is a best-effort approach to isolate Vector to the furthest extent, while still maintaining 100% feature support. There may be areas that could be hardened further, or potentially unforeseen bugs. In either case, please feel free to [contribute suggestions](https://github.com/VectorPrivacy/Vector/issues)!
+> **Security Note:** This profile provides near-maximum isolation while maintaining full Vector functionality (except OS notifications). The only remaining attack surface is the network connection (required for messaging) and the 5 whitelisted directories.
 
 *Last tested: January 2026 on Ubuntu 25.10 with Vector bare build*
