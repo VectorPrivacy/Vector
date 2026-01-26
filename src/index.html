@@ -559,7 +559,7 @@
           </button>
         </div>
         <div class="emoji-search-container" style="padding: 10px 0px;">
-          <span class="emoji-search-icon icon icon-search" style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
+          <span class="emoji-search-icon icon icon-search" style="width: 25px !important; height: 25px !important;"></span>
           <input id="group-member-search-input" placeholder="Search members..." style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
         </div>
         <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
@@ -695,7 +695,10 @@
             <h2 class="chat-new-subtitle">Select Members</h2>
             <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
             <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input" style="width: 75%" />
+              <div class="emoji-search-container" style="padding: 0; background: transparent; width: 75%;">
+                <span class="emoji-search-icon icon icon-search"></span>
+                <input id="create-group-filter" placeholder="Search contacts..." style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
+              </div>
               <div id="create-group-list" class="create-group-list"></div>
             </div>
           </center>

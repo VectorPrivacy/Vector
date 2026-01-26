@@ -2465,7 +2465,7 @@ const GIF_SEARCH_CACHE_MAX_SIZE = 10;
 const gifSearchCache = new Map();
 
 /** GIFGalaxy API base URL */
-const GIF_API_BASE = 'https://jskitty.cat/gifgalaxy-test';
+const GIF_API_BASE = 'https://gifverse.net';
 
 /** Preconnect link element for GIFGalaxy */
 let gifPreconnectLink = null;
@@ -2502,7 +2502,7 @@ function preconnectGifServer() {
     if (gifPreconnectLink) return; // Already connected
     gifPreconnectLink = document.createElement('link');
     gifPreconnectLink.rel = 'preconnect';
-    gifPreconnectLink.href = 'https://jskitty.cat';
+    gifPreconnectLink.href = 'https://gifverse.net';
     gifPreconnectLink.crossOrigin = 'anonymous';
     document.head.appendChild(gifPreconnectLink);
 }
@@ -3463,7 +3463,40 @@ async function init() {
         await invoke("fetch_messages", { init: true });
         return;
     }
-    
+
+    // Set up UI maintenance interval first (before any async calls that might fail)
+    // Runs every 5 seconds to clear expired typing indicators and update timestamps
+    let maintenanceTick = 0;
+    setInterval(() => {
+        maintenanceTick++;
+
+        // Clear expired typing indicators (every tick)
+        const now = Date.now() / 1000;
+        arrChats.forEach(chat => {
+            if (chat.active_typers && chat.active_typers.length > 0) {
+                // Clear the array if we haven't received an update in 30 seconds
+                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
+                    chat.active_typers = [];
+
+                    // If this is the open chat, refresh the display
+                    if (strOpenChat === chat.id) {
+                        updateChatHeaderSubtext(chat);
+                    }
+
+                    // Refresh chat list
+                    if (domChats.style.display !== 'none') {
+                        renderChatlist();
+                    }
+                }
+            }
+        });
+
+        // Update chatlist timestamps every 6th tick (~30 seconds)
+        if (maintenanceTick % 6 === 0 && domChats.style.display !== 'none') {
+            updateChatlistTimestamps();
+        }
+    }, 5000);
+
     // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
     await invoke("fetch_messages", { init: true });
 
@@ -3474,38 +3507,6 @@ async function init() {
 
     // Display Invites (MLS Welcomes)
     await loadMLSInvites();
-
-    // Run a very slow loop to update dynamic elements, like "last message time"
-    setInterval(() => {
-        // If the chatlist is open: update timestamps
-        if (domChats.style.display !== 'none') {
-            updateChatlistTimestamps();
-        }
-    }, 30000);
-
-    // Run a faster loop to clear expired typing indicators (every 5 seconds)
-    setInterval(() => {
-        // Check all chats for expired typing indicators
-        const now = Date.now() / 1000;
-        arrChats.forEach(chat => {
-            if (chat.active_typers && chat.active_typers.length > 0) {
-                // Clear the array if we haven't received an update in 30 seconds
-                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
-                    chat.active_typers = [];
-                    
-                    // If this is the open chat, refresh the display
-                    if (strOpenChat === chat.id) {
-                        updateChatHeaderSubtext(chat);
-                    }
-                    
-                    // Refresh chat list
-                    if (domChats.style.display !== 'none') {
-                        renderChatlist();
-                    }
-                }
-            }
-        });
-    }, 5000);
 }
 
 /**
@@ -9014,11 +9015,12 @@ async function openInviteMemberToGroup(chat) {
     // Search input
     const searchContainer = document.createElement('div');
     searchContainer.className = 'emoji-search-container';
+    searchContainer.style.padding = '10px 0px';
     searchContainer.style.marginBottom = '16px';
+    searchContainer.style.background = 'transparent';
     
     const searchIcon = document.createElement('span');
     searchIcon.className = 'emoji-search-icon icon icon-search';
-    searchIcon.style.setProperty('margin-left', '20px', 'important');
     searchIcon.style.setProperty('width', '25px', 'important');
     searchIcon.style.setProperty('height', '25px', 'important');
     searchContainer.appendChild(searchIcon);

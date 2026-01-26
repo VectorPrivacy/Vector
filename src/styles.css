@@ -2226,6 +2226,18 @@ html, body {
 
 /* Legacy input rule - search input styles are in .emoji-search-wrapper input */
 
+/* Fix for inputs directly in container (without wrapper) - ensure they take full width */
+.emoji-search-container > input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Icons directly in container position inside input on the left */
+.emoji-search-container > .emoji-search-icon {
+  left: 12px !important;
+  right: auto !important;
+}
+
 .emoji-picker span {
   cursor: pointer;
   opacity: 1;
