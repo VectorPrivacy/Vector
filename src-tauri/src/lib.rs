@@ -3921,24 +3921,17 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     STATE.lock().await.profiles.push(profile);
 
     // Initialize profile database and set as current account
+    // Always init DB - this handles both new and existing accounts:
+    // - Creates schema if needed (IF NOT EXISTS)
+    // - Runs any pending migrations atomically
+    // - Pools the connection for fast subsequent access
     if let Some(handle) = TAURI_APP.get() {
-        let app_data = handle.path().app_local_data_dir().ok();
-        if let Some(data_dir) = app_data {
-            let profile_db = data_dir.join(&npub).join("vector.db");
-            if profile_db.exists() {
-                // Existing account - just set as current
-                let _ = crate::account_manager::set_current_account(npub.clone());
-                println!("[Login] Set current account for SQL mode: {}", npub);
-            } else {
-                // New account - initialize database and set as current
-                if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
-                    eprintln!("[Login] Failed to initialize profile database: {}", e);
-                } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
-                    eprintln!("[Login] Failed to set current account: {}", e);
-                } else {
-                    println!("[Login] Initialized new profile database and set current account: {}", npub);
-                }
-            }
+        if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
+            eprintln!("[Login] Failed to initialize profile database: {}", e);
+        } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
+            eprintln!("[Login] Failed to set current account: {}", e);
+        } else {
+            println!("[Login] Database initialized and account set: {}", npub);
         }
     }
 

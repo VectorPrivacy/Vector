@@ -888,7 +888,7 @@ pub async fn save_mls_group<R: Runtime>(
 pub async fn load_mls_groups<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<Vec<crate::mls::MlsGroupMetadata>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // Load from mls_groups table
     let mut stmt = conn.prepare(
@@ -911,8 +911,6 @@ pub async fn load_mls_groups<R: Runtime>(
     let groups: Vec<crate::mls::MlsGroupMetadata> = rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to collect groups: {}", e))?;
 
-    drop(stmt);
-    crate::account_manager::return_db_connection(conn);
     Ok(groups)
 }
 
@@ -951,7 +949,7 @@ pub async fn save_mls_keypackages<R: Runtime>(
 pub async fn load_mls_keypackages<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let mut stmt = conn.prepare(
         "SELECT owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at FROM mls_keypackages"
@@ -972,8 +970,6 @@ pub async fn load_mls_keypackages<R: Runtime>(
     let packages: Vec<serde_json::Value> = rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to collect MLS keypackages: {}", e))?;
 
-    drop(stmt);
-    crate::account_manager::return_db_connection(conn);
     Ok(packages)
 }
 
@@ -1000,7 +996,7 @@ pub async fn save_mls_event_cursors<R: Runtime>(
 pub async fn load_mls_event_cursors<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<HashMap<String, crate::mls::EventCursor>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let mut stmt = conn.prepare(
         "SELECT group_id, last_seen_event_id, last_seen_at FROM mls_event_cursors"
@@ -1019,8 +1015,6 @@ pub async fn load_mls_event_cursors<R: Runtime>(
     let cursors: HashMap<String, crate::mls::EventCursor> = rows.collect::<Result<HashMap<_, _>, _>>()
         .map_err(|e| format!("Failed to collect MLS event cursors: {}", e))?;
 
-    drop(stmt);
-    crate::account_manager::return_db_connection(conn);
     Ok(cursors)
 }
 
@@ -1089,11 +1083,12 @@ pub async fn build_file_hash_index<R: Runtime>(
 
     let mut index: HashMap<String, AttachmentRef> = HashMap::new();
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    // Query file attachment events (kind=15) from the events table
-    // Attachments are stored in the tags field as JSON
+    // Use guard - connection returned automatically after query, before heavy processing
     let attachment_data: Vec<(String, String, String)> = {
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+
+        // Query file attachment events (kind=15) from the events table
+        // Attachments are stored in the tags field as JSON
         let mut stmt = conn.prepare(
             "SELECT e.id, c.chat_identifier, e.tags
              FROM events e
@@ -1112,10 +1107,8 @@ pub async fn build_file_hash_index<R: Runtime>(
         // Collect immediately to consume the iterator while stmt is still alive
         let result: Result<Vec<_>, _> = rows.collect();
         result.map_err(|e| format!("Failed to collect attachment rows: {}", e))?
-    }; // stmt is dropped here
-
-    // Return connection to pool before processing
-    crate::account_manager::return_db_connection(conn);
+        // conn guard dropped here, connection returned to pool
+    };
 
     // Process the collected data
     const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -1425,7 +1418,7 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
     downloaded: bool,
     path: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // Get the current tags JSON from the events table
     let tags_json: String = conn.query_row(
@@ -1456,7 +1449,6 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
         att.downloading = false;
         att.path = path.to_string();
     } else {
-        crate::account_manager::return_db_connection(conn);
         return Err("Attachment not found in event".to_string());
     }
 
@@ -1480,8 +1472,6 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
         "UPDATE events SET tags = ?1 WHERE id = ?2",
         rusqlite::params![updated_tags_json, msg_id],
     ).map_err(|e| format!("Failed to update event: {}", e))?;
-
-    crate::account_manager::return_db_connection(conn);
 
     Ok(())
 }
@@ -1616,7 +1606,7 @@ pub fn get_miniapps_history<R: Runtime>(
     handle: &AppHandle<R>,
     limit: Option<i64>,
 ) -> Result<Vec<MiniAppHistoryEntry>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let limit_val = limit.unwrap_or(50);
 
@@ -1648,8 +1638,6 @@ pub fn get_miniapps_history<R: Runtime>(
         entries.filter_map(|e| e.ok()).collect()
     };
 
-    drop(stmt);
-    crate::account_manager::return_db_connection(conn);
     Ok(result)
 }
 
@@ -1759,7 +1747,7 @@ pub fn get_miniapp_granted_permissions<R: Runtime>(
     handle: &AppHandle<R>,
     file_hash: &str,
 ) -> Result<String, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let mut stmt = conn.prepare(
         "SELECT permission FROM miniapp_permissions WHERE file_hash = ?1 AND granted = 1"
@@ -1771,9 +1759,6 @@ pub fn get_miniapp_granted_permissions<R: Runtime>(
     .map_err(|e| format!("Failed to query permissions: {}", e))?
     .filter_map(|r| r.ok())
     .collect();
-
-    drop(stmt);
-    crate::account_manager::return_db_connection(conn);
 
     Ok(permissions.join(","))
 }
@@ -1814,7 +1799,7 @@ pub fn set_miniapp_permissions<R: Runtime>(
     file_hash: &str,
     permissions: &[(&str, bool)],
 ) -> Result<(), String> {
-    let mut conn = crate::account_manager::get_db_connection(handle)?;
+    let mut conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1840,7 +1825,6 @@ pub fn set_miniapp_permissions<R: Runtime>(
     tx.commit()
         .map_err(|e| format!("Failed to commit permission changes: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
     Ok(())
 }
 
@@ -2176,11 +2160,12 @@ pub async fn get_events<R: Runtime>(
     offset: usize,
 ) -> Result<Vec<StoredEvent>, String> {
     // Do all SQLite work synchronously in a block to avoid Send issues
+    // Connection guard ensures connection is returned even on early error returns
     let events: Vec<StoredEvent> = {
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
         // Build query based on whether kinds filter is provided
-        let events = if let Some(k) = kinds {
+        if let Some(k) = kinds {
             // Build numbered placeholders for the IN clause
             // chat_id=?1, kinds=?2,?3,..., limit=?N, offset=?N+1
             let kind_placeholders: String = (0..k.len())
@@ -2206,7 +2191,7 @@ pub async fn get_events<R: Runtime>(
                 .map_err(|e| format!("Failed to prepare events query: {}", e))?;
 
             // Use rusqlite params! macro with dynamic kinds
-            let result: Vec<StoredEvent> = match k.len() {
+            match k.len() {
                 1 => {
                     let rows = stmt.query_map(
                         rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64],
@@ -2222,10 +2207,7 @@ pub async fn get_events<R: Runtime>(
                     rows.filter_map(|r| r.ok()).collect()
                 },
                 _ => return Err("Unsupported number of kinds".to_string()),
-            };
-
-            drop(stmt);
-            result
+            }
         } else {
             let sql = r#"
                 SELECT id, kind, chat_id, user_id, content, tags, reference_id,
@@ -2243,14 +2225,9 @@ pub async fn get_events<R: Runtime>(
                 rusqlite::params![chat_id, limit as i64, offset as i64],
                 parse_event_row
             ).map_err(|e| format!("Failed to query events: {}", e))?;
-            let result: Vec<StoredEvent> = rows.filter_map(|r| r.ok()).collect();
-
-            drop(stmt);
-            result
-        };
-
-        crate::account_manager::return_db_connection(conn);
-        events
+            rows.filter_map(|r| r.ok()).collect()
+        }
+        // conn guard dropped here, connection returned to pool
     };
 
     // Decrypt message content for text messages (this is the async part)
@@ -2301,7 +2278,7 @@ pub async fn get_related_events<R: Runtime>(
         return Ok(Vec::new());
     }
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let placeholders: String = reference_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
@@ -2347,9 +2324,6 @@ pub async fn get_related_events<R: Runtime>(
     .filter_map(|r| r.ok())
     .collect();
 
-    // Drop statement to release borrow on conn
-    drop(stmt);
-    crate::account_manager::return_db_connection(conn);
     Ok(events)
 }
 
@@ -2371,8 +2345,9 @@ async fn get_reply_contexts<R: Runtime>(
     }
 
     // Do all SQLite work synchronously in a block to avoid Send issues
+    // Connection guard ensures connection is returned even on early error returns
     let (events, edits): (Vec<(String, i32, String, Option<String>)>, Vec<(String, String)>) = {
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
         // Build placeholders for IN clause
         let placeholders: String = (0..message_ids.len())
@@ -2432,10 +2407,9 @@ async fn get_reply_contexts<R: Runtime>(
         }).map_err(|e| format!("Failed to query edits: {}", e))?;
 
         let edits_result: Vec<(String, String)> = edit_rows.filter_map(|r| r.ok()).collect();
-        drop(edit_stmt);
 
-        crate::account_manager::return_db_connection(conn);
         (events_result, edits_result)
+        // conn guard dropped here, connection returned to pool
     };
 
     // Build a map of message_id -> latest edit content (first one since ordered DESC)
