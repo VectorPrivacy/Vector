@@ -233,15 +233,20 @@ function removeParagraphTags(html) {
     temp.innerHTML = html.trim();
 
     const paragraphs = temp.querySelectorAll('p');
-    paragraphs.forEach((p) => {
+    paragraphs.forEach((p, index) => {
         const span = document.createElement('span');
         span.className = 'markdown-paragraph';
         span.innerHTML = p.innerHTML;
-        
-        // Don't add <br><br> after paragraphs - rely on CSS margins for spacing
-        // Block elements (ul, ol, blockquote, pre, div, hr, table, h1-h6) have their own margins
-        // Consecutive paragraphs use .markdown-paragraph margins
-        p.replaceWith(span);
+
+        // Add <br><br> between consecutive paragraphs to preserve double-newline spacing
+        // (Skip for the last paragraph - no trailing breaks needed)
+        if (index < paragraphs.length - 1) {
+            const br1 = document.createElement('br');
+            const br2 = document.createElement('br');
+            p.replaceWith(span, br1, br2);
+        } else {
+            p.replaceWith(span);
+        }
     });
 
 
