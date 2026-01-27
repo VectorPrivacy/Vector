@@ -1915,7 +1915,7 @@ html, body {
 }
 
 #chat-input-send.active .icon {
-  background-color: #59fcb3;
+  background-color: var(--icon-color-primary);
   opacity: 1;
 }
 
@@ -3432,6 +3432,7 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 /* Style options to match whisper model */
 #theme-select option {
   background: #161616;
+  text-align: center;
   padding: 10px;
 }
 
@@ -3449,6 +3450,13 @@ select:focus::-ms-value {
   width: 100%;
   margin-left: auto;
   margin-right: auto;
+}
+
+/* Sound Notification Selection container styles */
+#notif-sound-select option {
+  background: #161616;
+  padding: 10px;
+  text-align: center;
 }
 
 /* Delete model button with trash bin icon */
@@ -4558,6 +4566,8 @@ select:disabled:hover {
 .relay-dialog-close:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
+  transform: scale(1.1);
+  transition: transform 0.25s ease;
 }
 
 .relay-dialog-content {
@@ -8546,6 +8556,7 @@ hr {
 .notif-custom-container {
   display: flex;
   align-items: center;
+  text-align: center;
   margin-bottom: 10px;
 }
 
