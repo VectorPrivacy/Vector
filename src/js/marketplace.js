@@ -599,8 +599,8 @@ async function handleAppInstallOrPlay(app, btn) {
     const launchingText = getAppLaunchingText(app);
 
     if (app.update_available) {
-        // Update available - download the update
-        btn.innerHTML = '<span class="icon icon-loading"></span>';
+        // Update available - download the update with progress spinner
+        btn.innerHTML = '<span class="marketplace-progress-spinner" data-app-id="' + escapeHtml(app.id) + '"></span>';
         btn.disabled = true;
         btn.classList.add('updating');
 
@@ -668,8 +668,8 @@ async function handleAppInstallOrPlay(app, btn) {
             btn.disabled = false;
         }
     } else {
-        // Need to install first
-        btn.innerHTML = '<span class="icon icon-loading"></span>';
+        // Need to install first - use progress spinner
+        btn.innerHTML = '<span class="marketplace-progress-spinner" data-app-id="' + escapeHtml(app.id) + '"></span>';
         btn.disabled = true;
         btn.classList.add('installing');
 
@@ -1129,8 +1129,8 @@ async function handleAppDetailsAction(app, btn) {
             btn.disabled = false;
         }
     } else {
-        // Need to install first
-        btn.innerHTML = '<span class="icon icon-loading"></span>';
+        // Need to install first - use progress spinner
+        btn.innerHTML = '<span class="marketplace-progress-spinner" data-app-id="' + escapeHtml(app.id) + '"></span>';
         btn.disabled = true;
         btn.classList.add('installing');
 
@@ -1201,7 +1201,7 @@ async function handleAppDetailsPlay(app, btn) {
  * @param {HTMLElement} btn - The update button
  */
 async function handleAppDetailsUpdate(app, btn) {
-    btn.innerHTML = '<span class="icon icon-loading"></span>';
+    btn.innerHTML = '<span class="marketplace-progress-spinner" data-app-id="' + escapeHtml(app.id) + '"></span>';
     btn.disabled = true;
     btn.classList.add('updating');
 
@@ -1706,7 +1706,7 @@ async function initMarketplace(container) {
     container.innerHTML = `
         <div class="marketplace-loading">
             <span class="icon icon-loading marketplace-loading-icon"></span>
-            <p>Loading marketplace...</p>
+            <p>Loading The Nexus...</p>
         </div>
     `;
 
@@ -1746,7 +1746,7 @@ async function initMarketplace(container) {
         container.innerHTML = `
             <div class="marketplace-error">
                 <span class="icon icon-warning marketplace-error-icon"></span>
-                <p>Failed to load marketplace</p>
+                <p>Failed to load Nexus</p>
                 <p class="marketplace-error-hint">${escapeHtml(error.toString())}</p>
                 <button class="marketplace-retry-btn" onclick="initMarketplace(this.parentElement.parentElement)">
                     Retry
@@ -1871,7 +1871,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
     overlay.innerHTML = `
         <div class="publish-app-container">
             <div class="publish-app-header">
-                <h2>Publish to Marketplace</h2>
+                <h2>Publish to Nexus</h2>
             </div>
             <div class="publish-app-content">
                 <div class="publish-app-icon-container">
@@ -2155,12 +2155,43 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
             setTimeout(() => overlay.style.display = 'none', 300);
 
             // Show success message
-            popupConfirm('Published!', `${name} has been published to the marketplace.`, true, '', 'vector-check.svg');
+            popupConfirm('Published!', `${name} has been published to the Nexus.`, true, '', 'vector-check.svg');
         } catch (error) {
             console.error('Failed to publish:', error);
             submitBtn.disabled = false;
-            submitBtn.innerHTML = '<span class="icon icon-star"></span> Publish';
+            submitBtn.innerHTML = '<span class="icon icon-loading"></span> Publish';
             alert('Failed to publish: ' + error.toString());
         }
     };
 }
+
+// ============================================================================
+// Install Progress Listener
+// ============================================================================
+
+/**
+ * Set up listener for marketplace install progress events
+ * Updates progress spinners in real-time during downloads
+ */
+function setupMarketplaceProgressListener() {
+    window.__TAURI__.event.listen('marketplace_install_progress', (event) => {
+        const { app_id, progress } = event.payload;
+
+        // Find all progress spinners for this app
+        const spinners = document.querySelectorAll(`.marketplace-progress-spinner[data-app-id="${CSS.escape(app_id)}"]`);
+        const displayProgress = Math.max(5, progress);
+
+        for (const spinner of spinners) {
+            spinner.style.setProperty('--progress', `${displayProgress}%`);
+        }
+
+        // Also update any Mini Apps panel downloading spinners
+        const miniappSpinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-app-id="${CSS.escape(app_id)}"]`);
+        for (const spinner of miniappSpinners) {
+            spinner.style.setProperty('--progress', `${displayProgress}%`);
+        }
+    });
+}
+
+// Initialize the progress listener
+setupMarketplaceProgressListener();

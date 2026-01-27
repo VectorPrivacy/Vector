@@ -146,6 +146,7 @@
     "allow-miniapp-get-realtime-status",
     "allow-miniapp-record-opened",
     "allow-miniapp-get-history",
+    "allow-miniapp-remove-from-history",
     "allow-miniapp-toggle-favorite",
     "allow-miniapp-set-favorite",
     "allow-marketplace-fetch-apps",

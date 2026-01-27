@@ -6108,6 +6108,7 @@ pub fn run() {
             // Mini Apps history commands
             miniapps::commands::miniapp_record_opened,
             miniapps::commands::miniapp_get_history,
+            miniapps::commands::miniapp_remove_from_history,
             miniapps::commands::miniapp_toggle_favorite,
             miniapps::commands::miniapp_set_favorite,
             // Mini Apps marketplace commands

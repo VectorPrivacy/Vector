@@ -45,7 +45,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use crate::net::ProgressReporter;
 use log::{info, warn};
 
 use crate::blossom;
@@ -110,6 +111,39 @@ pub struct MarketplaceApp {
     /// Requested permissions (comma-separated string for easy serialization)
     /// Format: "microphone,camera,fullscreen"
     pub requested_permissions: String,
+}
+
+/// Progress reporter for marketplace downloads
+/// Emits "marketplace_install_progress" events to the frontend
+pub struct MarketplaceProgressReporter<'a, R: Runtime> {
+    handle: &'a AppHandle<R>,
+    app_id: &'a str,
+}
+
+impl<'a, R: Runtime> MarketplaceProgressReporter<'a, R> {
+    pub fn new(handle: &'a AppHandle<R>, app_id: &'a str) -> Self {
+        Self { handle, app_id }
+    }
+}
+
+impl<'a, R: Runtime> ProgressReporter for MarketplaceProgressReporter<'a, R> {
+    fn report_progress(&self, percentage: Option<u8>, _bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+        let progress = percentage.unwrap_or(0);
+        let _ = self.handle.emit("marketplace_install_progress", serde_json::json!({
+            "app_id": self.app_id,
+            "progress": progress
+        }));
+        Ok(())
+    }
+
+    fn report_complete(&self) -> Result<(), &'static str> {
+        let _ = self.handle.emit("marketplace_install_progress", serde_json::json!({
+            "app_id": self.app_id,
+            "progress": 100,
+            "complete": true
+        }));
+        Ok(())
+    }
 }
 
 /// Installation status of a marketplace app
@@ -488,6 +522,23 @@ async fn cache_miniapp_icon<R: Runtime>(
     }
 }
 
+/// Force re-cache a Mini App icon (removes old cache first, then downloads fresh)
+/// Used during install/update when the icon may have changed
+async fn recache_miniapp_icon<R: Runtime>(
+    handle: &AppHandle<R>,
+    app_id: &str,
+    icon_url: &str,
+) {
+    // Remove old cached icon first to force re-download
+    if let Err(e) = image_cache::remove_cached_image(handle, icon_url, ImageType::MiniAppIcon) {
+        // Log but don't fail - the old cache might not exist
+        info!("[Marketplace] Could not remove old icon cache for {}: {}", app_id, e);
+    }
+
+    // Now cache the (potentially new) icon
+    cache_miniapp_icon(handle, app_id, icon_url).await;
+}
+
 /// Download and install a marketplace app
 pub async fn install_marketplace_app<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
@@ -522,22 +573,18 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
 
     info!("Downloading marketplace app {} from {}", app_id, app.download_url);
 
-    // Download the file
-    let response = reqwest::get(&app.download_url)
-        .await
-        .map_err(|e| format!("Failed to download app: {}", e))?;
-
-    if !response.status().is_success() {
-        let mut state = MARKETPLACE_STATE.write().await;
-        state.set_install_status(app_id, InstallStatus::Failed { 
-            error: format!("Download failed with status: {}", response.status()) 
-        });
-        return Err(format!("Download failed with status: {}", response.status()));
-    }
-
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| format!("Failed to read download: {}", e))?;
+    // Use the same download system as attachments for consistent progress reporting
+    let reporter = MarketplaceProgressReporter::new(handle, app_id);
+    let bytes = match crate::net::download_with_reporter(&app.download_url, &reporter, None).await {
+        Ok(data) => data,
+        Err(e) => {
+            let mut state = MARKETPLACE_STATE.write().await;
+            state.set_install_status(app_id, InstallStatus::Failed {
+                error: e.to_string()
+            });
+            return Err(e.to_string());
+        }
+    };
 
     // Verify the hash matches
     use sha2::{Sha256, Digest};
@@ -559,11 +606,18 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
 
     let path_str = file_path.to_string_lossy().to_string();
 
-    // Update status to installed
+    // Update status to installed and emit completion event
     {
         let mut state = MARKETPLACE_STATE.write().await;
         state.set_install_status(app_id, InstallStatus::Installed { path: path_str.clone() });
     }
+
+    // Emit 100% completion event
+    let _ = handle.emit("marketplace_install_progress", serde_json::json!({
+        "app_id": app_id,
+        "progress": 100,
+        "complete": true
+    }));
 
     // Record to Mini Apps history so it appears in the Mini Apps panel
     // Include categories, marketplace_id, and version for proper linking
@@ -579,6 +633,16 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     ) {
         warn!("Failed to record installed app to history: {}", e);
         // Don't fail the install if history recording fails
+    }
+
+    // Re-cache the app icon (it may have changed or this is a fresh install)
+    if let Some(ref icon_url) = app.icon_url {
+        let handle_clone = handle.clone();
+        let app_id_clone = app_id.to_string();
+        let icon_url_clone = icon_url.clone();
+        tokio::spawn(async move {
+            recache_miniapp_icon(&handle_clone, &app_id_clone, &icon_url_clone).await;
+        });
     }
 
     info!("Successfully installed marketplace app {} to {}", app_id, path_str);
@@ -708,29 +772,23 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     let temp_file_name = format!("{}.xdc.tmp", app.id);
     let temp_file_path = miniapps_dir.join(&temp_file_name);
 
-    info!("Downloading update for marketplace app {} from {}", app_id, app.download_url);
-
-    // Download the new version to temp file
-    let response = reqwest::get(&app.download_url)
-        .await
-        .map_err(|e| format!("Failed to download update: {}", e))?;
-
-    if !response.status().is_success() {
-        let mut state = MARKETPLACE_STATE.write().await;
-        state.set_install_status(app_id, InstallStatus::Failed {
-            error: format!("Download failed with status: {}", response.status())
-        });
-        return Err(format!("Download failed with status: {}", response.status()));
-    }
-
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| format!("Failed to read download: {}", e))?;
+    // Use the same download system as attachments for consistent progress reporting
+    let reporter = MarketplaceProgressReporter::new(handle, app_id);
+    let bytes_vec = match crate::net::download_with_reporter(&app.download_url, &reporter, None).await {
+        Ok(data) => data,
+        Err(e) => {
+            let mut state = MARKETPLACE_STATE.write().await;
+            state.set_install_status(app_id, InstallStatus::Failed {
+                error: e.to_string()
+            });
+            return Err(e.to_string());
+        }
+    };
 
     // Verify the hash matches (this is also the new file's permission hash)
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    hasher.update(&bytes_vec);
     let new_file_hash = hex::encode(hasher.finalize());
 
     if new_file_hash != app.blossom_hash {
@@ -745,7 +803,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     }
 
     // Write to temp file first
-    std::fs::write(&temp_file_path, &bytes)
+    std::fs::write(&temp_file_path, &bytes_vec)
         .map_err(|e| {
             let _ = std::fs::remove_file(&temp_file_path);
             format!("Failed to write temp file: {}", e)
@@ -794,10 +852,27 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
         state.set_app_version_info(app_id, Some(app.version.clone()), false);
     }
 
+    // Emit 100% completion event
+    let _ = handle.emit("marketplace_install_progress", serde_json::json!({
+        "app_id": app_id,
+        "progress": 100,
+        "complete": true
+    }));
+
     // Update the version in the database
     if let Err(e) = crate::db::update_miniapp_version(handle, app_id, &app.version) {
         warn!("Failed to update app version in history: {}", e);
         // Don't fail the update if version recording fails
+    }
+
+    // Re-cache the app icon (icons can change with updates)
+    if let Some(ref icon_url) = app.icon_url {
+        let handle_clone = handle.clone();
+        let app_id_clone = app_id.to_string();
+        let icon_url_clone = icon_url.clone();
+        tokio::spawn(async move {
+            recache_miniapp_icon(&handle_clone, &app_id_clone, &icon_url_clone).await;
+        });
     }
 
     info!("Successfully updated marketplace app {} to version {} at {}", app_id, app.version, path_str);

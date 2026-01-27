@@ -1344,6 +1344,16 @@ pub async fn miniapp_get_history(
         .map_err(|e| Error::DatabaseError(e))
 }
 
+/// Removes a Mini App from history by name
+#[tauri::command]
+pub async fn miniapp_remove_from_history(
+    app: AppHandle,
+    name: String,
+) -> Result<(), Error> {
+    crate::db::remove_miniapp_from_history(&app, &name)
+        .map_err(|e| Error::DatabaseError(e))
+}
+
 #[tauri::command]
 pub async fn miniapp_toggle_favorite(
     app: AppHandle,
@@ -1456,7 +1466,7 @@ pub async fn marketplace_sync_install_status(
 
             let update_available = match &installed_version {
                 Some(installed_ver) => installed_ver != &marketplace_version,
-                None => true, // No version recorded (pre-update install), assume update needed
+                None => false, // No version recorded - assume current (file exists, so treat as up-to-date)
             };
 
             let mut state = MARKETPLACE_STATE.write().await;

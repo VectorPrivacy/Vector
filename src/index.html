@@ -136,25 +136,27 @@
   </div>
   <!-- Mini Apps list view (hidden by default) -->
   <div class="attachment-panel-content" id="attachment-panel-miniapps-view" style="display: none;">
-    <button class="attachment-panel-item" id="attachment-panel-back">
-      <div class="attachment-panel-btn">
+    <!-- Fixed top bar with Back button and Search -->
+    <div class="miniapps-topbar">
+      <button class="miniapps-back-btn" id="attachment-panel-back">
         <span class="icon icon-chevron-double-left"></span>
+        <span>Back</span>
+      </button>
+      <div class="miniapps-search-container">
+        <span class="icon icon-search"></span>
+        <input type="text" class="miniapps-search-input" id="miniapps-search" placeholder="Search">
       </div>
-      <span class="attachment-panel-label">Back</span>
-    </button>
-    <button class="attachment-panel-item" id="attachment-panel-marketplace">
-      <div class="attachment-panel-btn attachment-panel-marketplace-btn">
-        <span class="icon icon-star"></span>
-      </div>
-      <span class="attachment-panel-label">Marketplace</span>
-    </button>
-    <button class="attachment-panel-item" id="attachment-panel-pivx">
-      <div class="attachment-panel-btn attachment-panel-pivx-btn">
-        <span class="icon icon-pivx"></span>
-      </div>
-      <span class="attachment-panel-label">PIVX</span>
-    </button>
-    <!-- Mini Apps will be dynamically inserted here -->
+    </div>
+    <!-- Mini Apps grid -->
+    <div class="miniapps-grid" id="miniapps-grid">
+      <button class="attachment-panel-item" id="attachment-panel-marketplace" draggable="false">
+        <div class="attachment-panel-btn attachment-panel-marketplace-btn">
+          <span class="icon icon-nexus"></span>
+        </div>
+        <span class="attachment-panel-label">Nexus</span>
+      </button>
+      <!-- PIVX and Mini Apps will be dynamically inserted here based on usage history -->
+    </div>
   </div>
   <!-- PIVX Wallet view (hidden by default) -->
   <div class="attachment-panel-content pivx-wallet-panel" id="attachment-panel-pivx-view" style="display: none;">
@@ -195,13 +197,13 @@
   </div>
 </div>
 
-<!-- Mini Apps Marketplace Panel -->
+<!-- Mini Apps Nexus Panel -->
 <div class="marketplace-panel" id="marketplace-panel" style="display: none;">
   <div class="marketplace-header">
     <div class="btn nav-back-btn marketplace-back-btn" id="marketplace-back-btn">
       <span class="icon icon-chevron-double-left nav-icon"></span>
     </div>
-    <h2 class="marketplace-title">Marketplace</h2>
+    <h2 class="marketplace-title">Nexus</h2>
   </div>
   <div class="marketplace-search-container">
     <span class="marketplace-search-icon icon icon-search"></span>
@@ -804,6 +806,10 @@
               <input type="checkbox" id="display-image-types-toggle">
               <span class="neon-toggle"></span>
             </label>
+          </div>
+
+          <div class="form-group" id="restore-pivx-group" style="display: none;">
+            <button id="restore-pivx-btn" class="btn cancel-btn">Restore PIVX Wallet</button>
           </div>
         </div>
 

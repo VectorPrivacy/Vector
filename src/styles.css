@@ -202,6 +202,11 @@
   background-color: transparent !important;
   background-image: url("./icons/pivx.svg");
   background-size: contain;
+}
+
+.icon-nexus {
+  -webkit-mask-image: url("./icons/nexus.svg");
+  mask-image: url("./icons/nexus.svg");
   background-repeat: no-repeat;
   background-position: center;
 }
@@ -2458,14 +2463,221 @@ html, body {
   align-items: flex-start;
 }
 
-/* Mini Apps view - simple centered flexbox */
+/* Mini Apps view - column layout with top bar */
 #attachment-panel-miniapps-view {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 12px;
-  justify-content: center;
-  align-items: flex-start;
   width: 100%;
+}
+
+/* Mini Apps top bar with Back button and Search */
+.miniapps-topbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.miniapps-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--icon-color-primary);
+  border: none;
+  border-radius: 20px;
+  padding: 6px 14px 6px 10px;
+  cursor: pointer;
+  transition: transform 0.15s ease, filter 0.15s ease;
+  flex-shrink: 0;
+}
+
+.miniapps-back-btn:hover {
+  filter: brightness(1.1);
+}
+
+.miniapps-back-btn:active {
+  transform: scale(0.95);
+}
+
+.miniapps-back-btn .icon {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  width: 20px;
+  height: 20px;
+  background-color: #000;
+  flex-shrink: 0;
+}
+
+.miniapps-back-btn span:last-child {
+  font-size: 12px;
+  font-weight: 600;
+  color: #000;
+}
+
+.miniapps-search-container {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 0 12px;
+  gap: 8px;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.miniapps-search-container:focus-within {
+  border-color: var(--icon-color-primary);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.miniapps-search-container .icon {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  background-color: var(--icon-color-primary);
+  flex-shrink: 0;
+}
+
+.miniapps-search-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.miniapps-search-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Mini Apps grid - responsive with ~10px snap threshold for 4-per-row default */
+.miniapps-grid {
+  display: grid;
+  /* minmax(65px, 1fr) allows items to grow/shrink; higher min prevents 5-col reflow */
+  grid-template-columns: repeat(auto-fill, minmax(65px, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-height: 195px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 1px;
+  padding-top: 6px; /* Room for delete badges in edit mode */
+  padding-right: 12px; /* Scrollbar Room */
+}
+
+/* Responsive item sizing within mini apps grid */
+.miniapps-grid .attachment-panel-item {
+  width: 100%;
+  max-width: 80px; /* ~24px growth threshold above 56px base before reflow */
+  justify-self: center;
+}
+
+/* Responsive button sizing - scales with grid cell */
+.miniapps-grid .attachment-panel-btn {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+}
+
+/* Hidden state for search filtering */
+.miniapps-grid .attachment-panel-item.hidden-by-search {
+  display: none;
+}
+
+/* No results message for Mini Apps search */
+.miniapps-no-results {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.miniapps-no-results p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.miniapps-no-results-hint {
+  margin-top: 6px !important;
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  opacity: 0.7;
+}
+
+/* Mini Apps Edit Mode */
+.miniapps-grid.edit-mode .attachment-panel-item:not(#attachment-panel-marketplace) {
+  animation: miniapp-wobble 0.12s ease-in-out infinite alternate;
+}
+
+/* Stagger the wobble animation for a more organic feel */
+.miniapps-grid.edit-mode .attachment-panel-item:nth-child(odd) {
+  animation-delay: 0.06s;
+}
+
+@keyframes miniapp-wobble {
+  0% { transform: rotate(-2deg); }
+  100% { transform: rotate(2deg); }
+}
+
+/* Red X delete badge */
+.miniapp-delete-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  background: #e53935;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.miniapp-delete-badge:hover {
+  transform: scale(1.15);
+  background: #c62828;
+}
+
+.miniapp-delete-badge:active {
+  transform: scale(0.95);
+}
+
+.miniapp-delete-badge .icon {
+  width: 12px;
+  height: 12px;
+  background-color: white;
+}
+
+/* Make attachment-panel-item position relative for badge positioning */
+.miniapps-grid .attachment-panel-item {
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
 }
 
 .attachment-panel-item {
@@ -2478,10 +2690,6 @@ html, body {
   cursor: pointer;
   padding: 0;
   transition: transform 0.2s ease;
-}
-
-.attachment-panel-item:hover {
-  transform: scale(1.05);
 }
 
 .attachment-panel-item:hover .attachment-panel-btn {
@@ -2505,6 +2713,9 @@ html, body {
   border: 1px solid transparent;
   transition: background 0.2s ease, border-color 0.2s ease;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .attachment-panel-btn .icon {
@@ -2513,10 +2724,14 @@ html, body {
   left: 0;
   right: 0;
   bottom: 0;
-  width: 26px;
+  width: 23px;
   height: 26px;
   margin: auto;
   background-color: rgba(255, 255, 255, 0.7);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 
 .attachment-panel-label {
@@ -2528,6 +2743,9 @@ html, body {
   text-align: center;
   white-space: nowrap;
   max-width: 64px;
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
 }
 
 .attachment-panel-label.cutoff {
@@ -6026,7 +6244,18 @@ hr {
 
 /* Marketplace button in attachment panel */
 .attachment-panel-marketplace-btn {
-  background-color: rgba(255, 255, 255, 0.15) !important;
+  background-color: #131313;
+  border-color: #59fcb3 !important;
+}
+
+.attachment-panel-marketplace-btn .icon-nexus {
+  width: 70% !important;
+  height: 70% !important;
+  background-color: #59fcb3 !important;
+}
+
+#attachment-panel-marketplace .attachment-panel-label {
+  color: #59fcb3 !important;
 }
 
 /* PIVX button in attachment panel */
@@ -7528,6 +7757,55 @@ hr {
   50% {
     box-shadow: 0 0 16px rgba(89, 252, 179, 0.5);
   }
+}
+
+/* Marketplace download progress spinner (conic gradient style) */
+.marketplace-progress-spinner {
+  --progress: 5%;
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  /* Progress ring using conic-gradient */
+  background: conic-gradient(
+    rgba(255, 255, 255, 0.9) 0% var(--progress),
+    rgba(255, 255, 255, 0.2) var(--progress) 100%
+  );
+  /* Create ring effect with inner circle mask */
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
+  animation: inline-image-spin 2s linear infinite;
+  transition: --progress 0.15s ease-out;
+}
+
+/* Mini Apps panel - downloading app overlay */
+.miniapp-downloading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 12px;
+  z-index: 5;
+}
+
+.miniapp-downloading-spinner {
+  --progress: 5%;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--icon-color-primary) 0% var(--progress),
+    rgba(255, 255, 255, 0.2) var(--progress) 100%
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
+  animation: inline-image-spin 2s linear infinite;
+  transition: --progress 0.15s ease-out;
 }
 
 /* Version update indicator */
