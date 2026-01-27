@@ -187,7 +187,7 @@ input[type="checkbox"]:checked + .neon-toggle {
 .neon-toggle:hover {
   box-shadow: 
     0 0 8px #6202D450,
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 input[type="checkbox"]:checked + .neon-toggle:hover {

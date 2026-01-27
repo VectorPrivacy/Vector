@@ -114,7 +114,7 @@ button {
 }
 
 button:hover {
-  background-color: (152, 255, 214, 0.5);
+  background-color: rgba(152, 255, 214, 0.5);
 }
 
 .corner-float {

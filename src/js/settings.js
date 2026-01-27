@@ -680,7 +680,7 @@ async function selectFile() {
  * @param {string} mode - The theme mode, i.e: light, dark
  */
 function applyTheme(theme = 'vector', mode = 'dark') {
-  document.body.classList.remove('vector-theme', 'chatstr-theme', 'pivx-theme');
+  document.body.classList.remove('vector-theme', 'chatstr-theme', 'gifverse-theme', 'pivx-theme');
   document.body.classList.add(`${theme}-theme`);
   
   domTheme.href = `/themes/${theme}/${mode}.css`;

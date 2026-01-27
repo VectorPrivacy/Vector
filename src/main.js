@@ -8741,7 +8741,7 @@ async function renderGroupOverview(chat) {
             memberDiv.appendChild(bgDiv);
             
             memberDiv.addEventListener('mouseenter', () => {
-                const primaryColor = '#59fcb3';
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
                 bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
                 bgDiv.style.opacity = '1';
             });
