@@ -6277,12 +6277,12 @@ hr {
 
 .pivx-dock-btn-primary .pivx-dock-icon .icon {
   background-color: white;
+  transition: transform 0.15s ease;
 }
 
 .pivx-dock-btn-primary:hover .pivx-dock-icon {
   background: #642D8F;
   transform: scale(1.1);
-  transition: transform 0.15s ease;
 }
 
 .pivx-dock-label {
