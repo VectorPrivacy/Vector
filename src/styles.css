@@ -2507,6 +2507,11 @@ html, body {
   background-color: rgba(255, 255, 255, 0.7);
 }
 
+.attachment-panel-btn .icon-pivx {
+  width: 44px;
+  height: 44px;
+}
+
 .attachment-panel-label {
   position: relative;
   font-size: 11px;
@@ -6019,7 +6024,8 @@ hr {
 
 /* PIVX button in attachment panel */
 .attachment-panel-pivx-btn {
-  background: linear-gradient(to right, #3e306d, #534792) !important;
+  background: linear-gradient(to bottom, #452568, #110B1B) !important;
+  border: 1px solid #110B1B;
 }
 
 /* ============================================================================
@@ -6028,7 +6034,7 @@ hr {
 
 /* Attachment panel border when PIVX is active */
 .attachment-panel.pivx-active {
-  border-color: #282828;
+  border: 1px solid #262626;
 }
 
 /* PIVX Wallet Panel Content */
@@ -6064,7 +6070,7 @@ hr {
 .pivx-close-btn .icon {
   width: 14px;
   height: 14px;
-  background-color: #52478c;
+  background-color: #642D8F;
   position: relative;
   margin: 0;
 }
@@ -6084,15 +6090,15 @@ hr {
   align-items: center;
   gap: 16px;
   padding: 16px 20px;
-  background: linear-gradient(to right, #52478c 0%, #111013 100%);
+  background: linear-gradient(to right, #452568 0%, #110B1B 100%);
   border-radius: 12px;
-  border: 1px solid #52478c;
+  border: 2px solid #642D8F;
   opacity: 0; /* Hidden by default, animated in when panel opens */
 }
 
 .pivx-balance-logo {
-  width: 72px;
-  height: 72px;
+  width: 80px;
+  height: 80px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -6100,8 +6106,8 @@ hr {
 }
 
 .pivx-balance-logo img {
-  width: 64px;
-  height: 64px;
+  width: 80px;
+  height: 80px;
 }
 
 .pivx-balance-info {
@@ -6246,12 +6252,10 @@ hr {
   height: 44px;
   background: rgba(255, 255, 255, 0.12);
   border-radius: 12px;
-  transition: box-shadow 0.15s ease, background 0.15s ease;
 }
 
 .pivx-dock-btn:hover .pivx-dock-icon {
   background: rgba(255, 255, 255, 0.18);
-  box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
 }
 
 .pivx-dock-icon .icon {
@@ -6268,7 +6272,7 @@ hr {
 
 /* Primary button (Send) - purple highlight */
 .pivx-dock-btn-primary .pivx-dock-icon {
-  background: linear-gradient(to right, #3e306d, #534792);
+  background: #642D8F;
 }
 
 .pivx-dock-btn-primary .pivx-dock-icon .icon {
@@ -6276,8 +6280,9 @@ hr {
 }
 
 .pivx-dock-btn-primary:hover .pivx-dock-icon {
-  background: linear-gradient(to right, #4a3c7a, #6358a3);
-  box-shadow: 0 4px 12px rgba(92, 77, 154, 0.4);
+  background: #642D8F;
+  transform: scale(1.1);
+  transition: transform 0.15s ease;
 }
 
 .pivx-dock-label {
@@ -6297,8 +6302,8 @@ hr {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.85);
-  backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.90);
+  backdrop-filter: blur(4px);
   display: none;
   align-items: center;
   justify-content: center;
@@ -6314,11 +6319,11 @@ hr {
 
 .pivx-dialog {
   background: rgba(20, 20, 20, 0.95);
-  border: 1px solid rgba(92, 77, 154, 0.3);
+  border: 2px solid #262626;
   border-radius: 16px;
   width: min(400px, calc(100vw - 40px));
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.9);
 }
 
 .pivx-dialog-header {
@@ -6326,8 +6331,8 @@ hr {
   justify-content: space-between;
   align-items: center;
   padding: 15px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  background: linear-gradient(to right, #3e306d, #534792);
+  border-bottom: 2px solid #262626;
+  background: linear-gradient(to right, #110B1B 0%, #452568 100%);
 }
 
 .pivx-dialog-header h3 {
@@ -6391,22 +6396,21 @@ hr {
 }
 
 .pivx-copy-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  width: 100%;
+  padding: 14px;
+  background: #642D8F;
+  border: none;
   border-radius: 8px;
-  color: #fff;
-  font-size: 14px;
+  color: white;
+  font-size: 16px;
+  font-weight: 500;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .pivx-copy-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  opacity: 0.9;
+  transform: scale(1.02);
 }
 
 .pivx-copy-btn .icon {
@@ -6459,7 +6463,7 @@ hr {
   width: 28px;
   height: 28px;
   border: 3px solid rgba(255, 255, 255, 0.2);
-  border-top-color: #7b68ee;
+  border-top-color: #B359FC;
   border-radius: 50%;
   animation: pivx-spin 1s linear infinite;
 }
@@ -6554,7 +6558,7 @@ hr {
 
 .pivx-send-promo-item.selected {
   background: rgba(92, 77, 154, 0.4);
-  border-color: #7b68ee;
+  border-color: #B359FC;
 }
 
 .pivx-send-promo-item-amount {
@@ -6579,8 +6583,8 @@ hr {
 
 .pivx-send-custom-toggle,
 .pivx-send-back-toggle {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
+  font-size: 16px;
+  color: #B359FC;
   cursor: pointer;
   text-align: center;
   padding: 8px;
@@ -6590,15 +6594,28 @@ hr {
 
 .pivx-send-custom-toggle:hover,
 .pivx-send-back-toggle:hover {
-  color: #7b68ee;
+  color: #B359FC80;
 }
 
 .pivx-send-custom-warning {
-  font-size: 11px;
-  color: #FCE459;
+  font-size: 12px;
+  color: #B2B2B2;
   border-radius: 6px;
   padding: 10px 12px;
-  margin-bottom: 10px;
+  margin-bottom: 20px;
+  background: #56565620;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+}
+
+.pivx-send-custom-warning .icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  position: relative;
+  padding: 0 4px 0 0;
 }
 
 .pivx-amount-input-container {
@@ -6643,7 +6660,7 @@ hr {
   gap: 8px;
   font-size: 12px;
   color: rgba(255, 255, 255, 0.5);
-  padding: 4px 0;
+  padding: 6px 0 20px 0;
 }
 
 .pivx-send-available #pivx-send-available-amount {
@@ -6674,17 +6691,18 @@ hr {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.6);
   text-align: center;
+  margin: -6px;
 }
 
 #pivx-send-recipient {
-  color: #8b5cf6;
+  color: #B359FC;
   font-weight: 500;
 }
 
 .pivx-send-confirm-btn {
   width: 100%;
   padding: 14px;
-  background: linear-gradient(to right, #3e306d, #534792);
+  background: #642D8F;
   border: none;
   border-radius: 8px;
   color: white;
@@ -6764,8 +6782,8 @@ hr {
 }
 
 .pivx-withdraw-max-btn {
-  background: rgba(92, 77, 154, 0.3);
-  color: #8b5cf6;
+  background: #B359FC30;
+  color: #B359FC;
   padding: 2px 8px;
   border-radius: 4px;
   font-size: 11px;
@@ -6775,14 +6793,14 @@ hr {
 }
 
 .pivx-withdraw-max-btn:hover {
-  background: rgba(92, 77, 154, 0.5);
+  background: #B359FC50;
 }
 
 .pivx-withdraw-fee-info {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.4);
   text-align: center;
-  margin-bottom: 12px;
+  margin-bottom: -6px;
 }
 
 /* PIVX Settings Dialog */
@@ -6810,7 +6828,7 @@ hr {
 }
 
 .pivx-settings-input:focus {
-  border-color: rgba(92, 77, 154, 0.5);
+  border-color: #B359FC;
 }
 
 .pivx-settings-input::placeholder {
@@ -6820,7 +6838,7 @@ hr {
 .pivx-settings-select {
   padding: 12px;
   background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid #383838 !important;
   border-radius: 8px;
   color: #fff;
   font-size: 14px;
@@ -6835,7 +6853,7 @@ hr {
 }
 
 .pivx-settings-select:focus {
-  border-color: rgba(92, 77, 154, 0.5);
+  border-color: #B359FC !important;
 }
 
 .pivx-settings-select option {
@@ -6852,20 +6870,20 @@ hr {
 
 .pivx-settings-save-btn {
   width: 100%;
-  padding: 12px;
-  background: linear-gradient(to right, #3e306d, #534792);
+  padding: 14px;
+  background: #642D8F;
   border: none;
   border-radius: 8px;
   color: white;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s ease;
-  margin-top: 10px;
 }
 
 .pivx-settings-save-btn:hover {
   opacity: 0.9;
+  transform: scale(1.02);
 }
 
 /* PIVX Payment Message Bubble - matches .msg-payment style */

@@ -525,7 +525,7 @@ async function refreshPivxWallet() {
         pivxCurrentWalletBalance = balance;
 
         if (domPivxBalanceAmount) {
-            domPivxBalanceAmount.innerHTML = `${balance.toFixed(2)} <span style="color: #564b8d;">PIV</span>`;
+            domPivxBalanceAmount.innerHTML = `${balance.toFixed(2)} <span style="color: #642D8F;">PIV</span>`;
             // Trigger fade-in animation
             void domPivxBalanceAmount.offsetWidth; // Force reflow
             domPivxBalanceAmount.classList.add('pivx-fade-in');
@@ -556,7 +556,7 @@ async function refreshPivxWallet() {
     } catch (err) {
         console.error('Failed to refresh PIVX wallet:', err);
         if (domPivxBalanceAmount) {
-            domPivxBalanceAmount.innerHTML = `0.00 <span style="color: #564b8d;">PIV</span>`;
+            domPivxBalanceAmount.innerHTML = `0.00 <span style="color: #642D8F;">PIV</span>`;
             void domPivxBalanceAmount.offsetWidth;
             domPivxBalanceAmount.classList.add('pivx-fade-in');
         }
