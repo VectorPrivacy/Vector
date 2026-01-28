@@ -5375,18 +5375,21 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
             
             // Get welcome details and accept it (engine work in no-await scope)
-            let (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex) = {
+            let (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex, invite_sent_at) = {
                 let engine = mls.engine().map_err(|e| e.to_string())?;
-                
+
                 let id = nostr_sdk::EventId::from_hex(&welcome_event_id_hex).map_err(|e| e.to_string())?;
                 let welcome_opt = engine.get_welcome(&id).map_err(|e| e.to_string())?;
                 let welcome = welcome_opt.ok_or_else(|| "Welcome not found".to_string())?;
-                
+
                 // Extract metadata before accepting
                 let nostr_group_id_bytes = welcome.nostr_group_id.clone();
                 let group_name = welcome.group_name.clone();
                 let welcomer_hex = welcome.welcomer.to_hex();
                 let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
+                // Get the invite-sent timestamp from the welcome event (not acceptance time!)
+                // This is critical for accurate sync windows
+                let invite_sent_at = welcome.event.created_at.as_u64();
 
                 // Accept the welcome - this updates engine state internally
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
@@ -5431,8 +5434,9 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 println!("[MLS]   - wire_id (h tag): {}", nostr_group_id);
                 println!("[MLS]   - engine_group_id: {}", engine_group_id);
                 println!("[MLS]   - group_name: {}", group_name);
-                
-                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex)
+                println!("[MLS]   - invite_sent_at: {}", invite_sent_at);
+
+                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex, invite_sent_at)
             }; // engine dropped here
             
             // Now persist the group metadata (awaitable section)
@@ -5459,18 +5463,19 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 }
             } else {
                 // Build metadata for the accepted group
+                // Use invite_sent_at (from welcome event) for created_at so sync fetches from the right time
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|e| e.to_string())?
                     .as_secs();
-                
+
                 let metadata = mls::MlsGroupMetadata {
                     group_id: nostr_group_id.clone(),         // Wire ID for relay filtering (h tag)
                     engine_group_id: engine_group_id.clone(), // Internal engine ID for local operations
                     creator_pubkey: welcomer_hex,             // The welcomer becomes the creator from our perspective
                     name: group_name,
                     avatar_ref: None,
-                    created_at: now_secs,
+                    created_at: invite_sent_at,               // Use invite-sent time, NOT acceptance time!
                     updated_at: now_secs,
                     evicted: false,                           // Accepting a welcome means we're joining, not evicted
                 };
