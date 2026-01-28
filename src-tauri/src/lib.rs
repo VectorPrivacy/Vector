@@ -2024,7 +2024,13 @@ async fn notifs() -> Result<bool, String> {
                         let emit_record = tokio::task::spawn_blocking(move || {
                             // Use runtime handle to drive async operations from blocking context
                             let rt = tokio::runtime::Handle::current();
-                            
+
+                            // EventTracker: Skip if already processed (pre-check before MDK call)
+                            if crate::mls::is_mls_event_processed(&app_handle, &ev.id.to_hex()) {
+                                // Already processed by sync or previous live handler - skip
+                                return None;
+                            }
+
                             // Create MLS service and process message
                             let svc = MlsService::new_persistent(&app_handle).ok()?;
                             let engine = svc.engine().ok()?;
@@ -2384,7 +2390,10 @@ async fn notifs() -> Result<bool, String> {
                                                     }
                                                 }
                                             });
-    
+
+                                            // EventTracker: Track as processed after successful handling
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
+
                                             processed
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Commit { mls_group_id } => {
@@ -2430,6 +2439,8 @@ async fn notifs() -> Result<bool, String> {
                                                     }
                                                 }
                                             }
+                                            // EventTracker: Track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Proposal(_proposal) => {
@@ -2440,15 +2451,22 @@ async fn notifs() -> Result<bool, String> {
                                                     "group_id": group_id_for_persist
                                                 })).ok();
                                             }
+                                            // EventTracker: Track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
                                             // Unprocessable result - could be many reasons (out of order, can't decrypt, etc.)
                                             // Don't try to detect eviction here - wait for next message to trigger error-based detection
+                                            // Note: We do NOT track Unprocessable events - they may succeed on retry
                                             None
                                         }
                                         // Other message types (ExternalJoinProposal) are not persisted as chat messages
-                                        _ => None,
+                                        _ => {
+                                            // EventTracker: Track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
+                                            None
+                                        }
                                     }
                                 }
                                 Err(e) => {

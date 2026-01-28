@@ -832,9 +832,28 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     // =========================================================================
-    // Future migrations (11+) follow the same pattern:
+    // Migration 11: Create mls_processed_events table for EventTracker
+    // This tracks which MLS wrapper events have been processed to prevent
+    // re-processing and enable proper deduplication.
+    // =========================================================================
+    run_atomic_migration(conn, 11, "Create mls_processed_events table", |tx| {
+        tx.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS mls_processed_events (
+                event_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                processed_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mls_processed_events_group ON mls_processed_events(group_id);
+            CREATE INDEX IF NOT EXISTS idx_mls_processed_events_created ON mls_processed_events(created_at);
+        "#).map_err(|e| format!("Failed to create mls_processed_events table: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Future migrations (12+) follow the same pattern:
     //
-    // run_atomic_migration(conn, 11, "Description here", |tx| {
+    // run_atomic_migration(conn, 12, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;
