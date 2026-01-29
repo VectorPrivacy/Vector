@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS mls_keypackages (
     owner_pubkey TEXT NOT NULL,
     device_id TEXT NOT NULL,
     keypackage_ref TEXT NOT NULL,
+    created_at INTEGER,
     fetched_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
 );
@@ -851,62 +852,67 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     // =========================================================================
-    // Migration 12: v0.3.0 MLS engine upgrade — wipe all group chat data
+    // Migration 12: v0.3.0 MLS engine upgrade — complete MLS reset
+    //
     // The MDK upgrade (7c3157c) changed from a dual-connection OpenMLS
-    // architecture to a unified single-connection engine. The old MLS
-    // crypto state is incompatible, so all group data must be wiped.
+    // architecture to a unified single-connection engine. Additionally,
+    // MIP-00/MIP-02 now require an ["encoding", "base64"] tag on all MLS
+    // events (keypackages, welcomes, etc.) for security.
+    //
+    // This migration:
+    // 1. Wipes all group chat data (DMs preserved)
+    // 2. Recreates mls_keypackages with created_at column for primary device detection
+    // 3. Flags keypackage regeneration to publish with new encoding tag
+    //
     // Users will need to re-join their groups after upgrading.
-    // DM data (chat_type=0) is preserved.
     // =========================================================================
-    run_atomic_migration(conn, 12, "Wipe MLS group data for v0.3.0 engine upgrade", |tx| {
+    run_atomic_migration(conn, 12, "v0.3.0 MLS reset: wipe data, add created_at, force keypackage regen", |tx| {
         // Delete group chats (chat_type=1) — CASCADE deletes their events + messages
         tx.execute("DELETE FROM chats WHERE chat_type = 1", [])
             .map_err(|e| format!("Failed to delete group chats: {}", e))?;
+
         // Clear all MLS metadata tables
         tx.execute("DELETE FROM mls_groups", [])
             .map_err(|e| format!("Failed to clear mls_groups: {}", e))?;
-        tx.execute("DELETE FROM mls_keypackages", [])
-            .map_err(|e| format!("Failed to clear mls_keypackages: {}", e))?;
         tx.execute("DELETE FROM mls_event_cursors", [])
             .map_err(|e| format!("Failed to clear mls_event_cursors: {}", e))?;
         tx.execute("DELETE FROM mls_processed_events", [])
             .map_err(|e| format!("Failed to clear mls_processed_events: {}", e))?;
-        println!("[DB] Migration 12: Wiped all MLS group chat data for v0.3.0 engine upgrade.");
-        Ok(())
-    })?;
 
-    // =========================================================================
-    // Migration 13: Force fresh keypackage regeneration (new MDK format)
-    // This sets a flag read by connect() to regenerate keypackages with cache=false.
-    // Needed as a separate migration because migration 12 may have already run
-    // before this flag was introduced.
-    // =========================================================================
-    run_atomic_migration(conn, 13, "Flag keypackage regeneration for v0.3.0", |tx| {
+        // Recreate mls_keypackages with created_at column
+        tx.execute("DROP TABLE IF EXISTS mls_keypackages", [])
+            .map_err(|e| format!("Failed to drop mls_keypackages: {}", e))?;
+        tx.execute(
+            "CREATE TABLE mls_keypackages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_pubkey TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                keypackage_ref TEXT NOT NULL,
+                created_at INTEGER,
+                fetched_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            )",
+            [],
+        ).map_err(|e| format!("Failed to recreate mls_keypackages: {}", e))?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey)",
+            [],
+        ).map_err(|e| format!("Failed to create keypackages index: {}", e))?;
+
+        // Flag keypackage regeneration (connect() will publish with new encoding tag)
         tx.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_force_keypackage_regen', '1')",
             [],
         ).map_err(|e| format!("Failed to set keypackage regen flag: {}", e))?;
+
+        println!("[DB] Migration 12: Complete MLS reset for v0.3.0 (encoding tag support).");
         Ok(())
     })?;
 
     // =========================================================================
-    // Migration 14: Add created_at column to mls_keypackages
-    // This stores the event's created_at timestamp (when the keypackage was
-    // actually signed) vs fetched_at (when we downloaded it). Required for
-    // correct primary device detection.
-    // =========================================================================
-    run_atomic_migration(conn, 14, "Add created_at to mls_keypackages", |tx| {
-        tx.execute(
-            "ALTER TABLE mls_keypackages ADD COLUMN created_at INTEGER",
-            [],
-        ).map_err(|e| format!("Failed to add created_at column: {}", e))?;
-        Ok(())
-    })?;
-
-    // =========================================================================
-    // Future migrations (15+) follow the same pattern:
+    // Future migrations (13+) follow the same pattern:
     //
-    // run_atomic_migration(conn, 15, "Description here", |tx| {
+    // run_atomic_migration(conn, 13, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;

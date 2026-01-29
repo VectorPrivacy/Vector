@@ -68,6 +68,7 @@ pub enum MlsError {
     InvalidKeyPackage,
     GroupNotFound,
     MemberNotFound,
+    OutdatedKeyPackage(String), // Member npub with outdated keypackage
     StorageError(String),
     NetworkError(String),
     CryptoError(String),
@@ -82,6 +83,11 @@ impl std::fmt::Display for MlsError {
             MlsError::InvalidKeyPackage => write!(f, "Invalid key package"),
             MlsError::GroupNotFound => write!(f, "Group not found"),
             MlsError::MemberNotFound => write!(f, "Member not found"),
+            MlsError::OutdatedKeyPackage(npub) => write!(
+                f,
+                "Member {} has an outdated keypackage. They need to update their app and reconnect.",
+                npub
+            ),
             MlsError::StorageError(e) => write!(f, "Storage error: {}", e),
             MlsError::NetworkError(e) => write!(f, "Network error: {}", e),
             MlsError::CryptoError(e) => write!(f, "Crypto error: {}", e),
@@ -91,6 +97,15 @@ impl std::fmt::Display for MlsError {
 }
 
 impl std::error::Error for MlsError {}
+
+/// Check if a keypackage event has the required encoding tag (MIP-00/MIP-02).
+/// Returns true if the event has ["encoding", "base64"] tag, false otherwise.
+fn has_encoding_tag(event: &nostr_sdk::Event) -> bool {
+    event.tags.iter().any(|tag| {
+        let tag_vec: Vec<String> = tag.clone().to_vec();
+        tag_vec.len() >= 2 && tag_vec[0] == "encoding" && tag_vec[1] == "base64"
+    })
+}
 
 /// MLS group metadata stored encrypted in "mls_groups"
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +491,10 @@ impl MlsService {
             };
 
             if let Some(ev) = kp_event {
+                // Validate keypackage has encoding tag (MIP-00/MIP-02 requirement)
+                if !has_encoding_tag(&ev) {
+                    return Err(MlsError::OutdatedKeyPackage(member_npub.clone()));
+                }
                 member_kp_events.push(ev);
                 invited_recipients.push(member_pk);
             } else {
@@ -726,6 +745,11 @@ impl MlsService {
         let kp_event = kp_event.ok_or_else(|| {
             MlsError::NetworkError(format!("No keypackage found for {}:{}", member_pubkey, device_id))
         })?;
+
+        // Validate keypackage has encoding tag (MIP-00/MIP-02 requirement)
+        if !has_encoding_tag(&kp_event) {
+            return Err(MlsError::OutdatedKeyPackage(member_pubkey.to_string()));
+        }
 
         // Find the group's MLS group ID
         let groups = self.read_groups().await?;
