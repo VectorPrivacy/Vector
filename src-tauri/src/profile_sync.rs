@@ -48,7 +48,7 @@ impl SyncPriority {
 
 /// Entry in the sync queue
 #[derive(Debug, Clone)]
-struct QueueEntry {
+pub(crate) struct QueueEntry {
     npub: String,
     added_at: Instant,
 }

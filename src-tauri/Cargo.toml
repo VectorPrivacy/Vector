@@ -19,39 +19,38 @@ name = "vector_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.5.1", features = [] }
+tauri-build = { version = "2.5.3", features = [] }
 
 [dependencies]
-nostr-sdk = { version = "0.44", features = ["nip06", "nip44", "nip59"] }
+nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
 mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
 mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
 mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
-bip39 = { version = "2.2.0", features = ["rand"] }
-tokio = { version = "1.48.0", features = ["sync", "time"] }
+bip39 = { version = "2.2.2", features = ["rand"] }
+tokio = { version = "1.49.0", features = ["sync", "time"] }
 futures-util = "0.3.31"
-tauri = { version = "2.9.1", features = ["protocol-asset", "image-png"] }
+tauri = { version = "2.9.5", features = ["protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-reqwest = { version = "0.12.24", features = ["rustls-tls", "stream", "blocking", "multipart"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "blocking", "multipart"] }
 scraper = "0.24.0"
 aes = "0.8.4"
 aes-gcm = "0.10.3"
 hex = "0.4.3"
-generic-array = "0.14.7"
 sha2 = "0.10.9"
 once_cell = "1.21.3"
 lazy_static = "1.5.0"
 argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
-tauri-plugin-opener = "2.5.0"
-tauri-plugin-notification = "2.3.1"
-tauri-plugin-dialog = "2.4.0"
-tauri-plugin-fs = "2.4.2"
+tauri-plugin-opener = "2.5.2"
+tauri-plugin-notification = "2.3.3"
+tauri-plugin-dialog = "2.4.2"
+tauri-plugin-fs = "2.4.5"
 tauri-plugin-clipboard-manager = "2.3.0"
 tauri-plugin-process = "2.3.0"
-tauri-plugin-deep-link = "2.4.5"
-image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico"] }
+tauri-plugin-deep-link = "2.4.6"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico"] }
 blurhash = "0.2.3"
 base64 = "0.22.1"
 cpal = "0.16.0"
@@ -59,33 +58,35 @@ hound = "3.5.1"
 rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Mini Apps (WebXDC) support
-zip = "2.1"
-toml = "0.8"
-thiserror = "1.0"
-anyhow = "1.0"
-log = "0.4"
-http = "1.1"
-url = "2.5"
-mime_guess = "2.0"
+zip = "2.4"
+toml = "0.8.23"
+anyhow = "1.0.99"
+log = "0.4.27"
+http = "1.3"
+url = "2.5.7"
+mime_guess = "2.0.5"
+
 # Realtime peer channels (Iroh P2P)
 iroh = "0.34"
 iroh-gossip = "0.34"
-parking_lot = "0.12"
-data-encoding = "2.6"
+parking_lot = "0.12.4"
+data-encoding = "2.9"
 rand = "0.8"
+
 # PIVX Promos (addressless crypto payments)
 secp256k1 = { version = "0.29", features = ["rand", "hashes"] }
-ripemd = "0.1"
-bs58 = "0.5"
-num-bigint = "0.4"
-num-traits = "0.2"
+ripemd = "0.1.3"
+bs58 = "0.5.1"
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"
 ndk-context = "0.1.1"
-openssl = { version = "0.10", features = ["vendored"] }
+openssl = { version = "0.10.75", features = ["vendored"] }
 
 # Whisper (with cross-platform acceleration features - excluded on Android)
 [target.'cfg(all(not(target_os = "android"), target_os = "macos"))'.dependencies]

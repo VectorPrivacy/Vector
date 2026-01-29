@@ -24,29 +24,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
-use std::sync::Arc;
 use tauri::{AppHandle, Runtime, Emitter};
 use tokio::sync::Mutex as TokioMutex;
 use once_cell::sync::Lazy;
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
 use crate::db::{save_chat, save_chat_messages};
-
-/// Per-group processing locks to prevent race conditions between live subscription
-/// and sync handlers. When processing MLS events for a group, acquire this lock first.
-/// This prevents the live handler from processing a commit while sync is in the middle
-/// of processing earlier events, which could cause epoch ordering issues.
-static GROUP_PROCESSING_LOCKS: Lazy<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
-    Lazy::new(|| TokioMutex::new(HashMap::new()));
-
-/// Acquire the processing lock for a specific group.
-/// Returns an Arc to the group's mutex that can be locked.
-pub async fn get_group_lock(group_id: &str) -> Arc<TokioMutex<()>> {
-    let mut locks = GROUP_PROCESSING_LOCKS.lock().await;
-    locks.entry(group_id.to_string())
-        .or_insert_with(|| Arc::new(TokioMutex::new(())))
-        .clone()
-}
 
 /// Tracks consecutive processing failures per group for desync detection.
 /// If a group has too many consecutive failures, it likely means the member
@@ -75,12 +58,6 @@ pub async fn record_group_failure(group_id: &str) -> bool {
 pub async fn record_group_success(group_id: &str) {
     let mut counts = GROUP_FAILURE_COUNTS.lock().await;
     counts.insert(group_id.to_string(), 0);
-}
-
-/// Check if a group is currently marked as potentially desynced.
-pub async fn is_group_potentially_desynced(group_id: &str) -> bool {
-    let counts = GROUP_FAILURE_COUNTS.lock().await;
-    counts.get(group_id).copied().unwrap_or(0) >= DESYNC_FAILURE_THRESHOLD
 }
 
 /// MLS-specific error types following this crate's error style
@@ -269,8 +246,7 @@ fn wipe_legacy_mls_database(db_path: &std::path::Path) -> bool {
 /// Main MLS service facade
 ///
 /// Responsibilities:
-/// - Initialize and manage MLS groups using nostr-mls
-/// - Handle device keypackage publishing and management
+/// - Initialize and manage MLS groups using MDK
 /// - Process incoming MLS events from nostr relays
 /// - Manage encrypted group metadata and message storage
 ///
@@ -331,22 +307,6 @@ impl MlsService {
         let storage = MdkSqliteStorage::new_unencrypted(&self.db_path)
             .map_err(|e| MlsError::StorageError(format!("open sqlite storage: {}", e)))?;
         Ok(MDK::new(storage))
-    }
-
-    /// Publish the device's keypackage to enable others to add this device to groups
-    ///
-    /// This will:
-    /// 1. Generate a new keypackage for the device if needed
-    /// 2. Publish it to TRUSTED_RELAYS via nostr-mls
-    /// 3. Update "mls_keypackage_index" with the reference
-    pub async fn publish_device_keypackage(&self, device_id: &str) -> Result<(), MlsError> {
-        // TODO: Use nostr-mls to generate and publish keypackage
-        // TODO: Store keypackage reference in "mls_keypackage_index"
-        // TODO: Use TRUSTED_RELAYS for publishing
-        
-        // Stub implementation
-        let _ = device_id;
-        Ok(())
     }
 
     /// Create a new MLS group

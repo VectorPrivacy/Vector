@@ -2131,23 +2131,6 @@ pub fn event_exists<R: Runtime>(
     Ok(exists)
 }
 
-/// Check if an event exists by wrapper event ID (for deduplication during sync)
-pub fn event_exists_by_wrapper<R: Runtime>(
-    handle: &AppHandle<R>,
-    wrapper_event_id: &str,
-) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)",
-        rusqlite::params![wrapper_event_id],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to check event by wrapper: {}", e))?;
-
-    crate::account_manager::return_db_connection(conn);
-    Ok(exists)
-}
-
 /// Get events for a chat with pagination
 ///
 /// Returns events ordered by created_at descending (newest first).
@@ -2670,73 +2653,3 @@ pub async fn get_message_views<R: Runtime>(
     Ok(messages)
 }
 
-/// Update an event's pending/failed status
-pub fn update_event_status<R: Runtime>(
-    handle: &AppHandle<R>,
-    event_id: &str,
-    pending: bool,
-    failed: bool,
-) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    conn.execute(
-        "UPDATE events SET pending = ?1, failed = ?2 WHERE id = ?3",
-        rusqlite::params![pending as i32, failed as i32, event_id],
-    ).map_err(|e| format!("Failed to update event status: {}", e))?;
-
-    crate::account_manager::return_db_connection(conn);
-    Ok(())
-}
-
-/// Delete an event by ID
-pub fn delete_event<R: Runtime>(
-    handle: &AppHandle<R>,
-    event_id: &str,
-) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    conn.execute(
-        "DELETE FROM events WHERE id = ?1",
-        rusqlite::params![event_id],
-    ).map_err(|e| format!("Failed to delete event: {}", e))?;
-
-    crate::account_manager::return_db_connection(conn);
-    Ok(())
-}
-
-/// Get the total count of message events in a chat
-pub fn get_message_count<R: Runtime>(
-    handle: &AppHandle<R>,
-    chat_id: i64,
-) -> Result<i64, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3)",
-        rusqlite::params![
-            chat_id,
-            event_kind::PRIVATE_DIRECT_MESSAGE as i32,
-            event_kind::FILE_ATTACHMENT as i32
-        ],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to count messages: {}", e))?;
-
-    crate::account_manager::return_db_connection(conn);
-    Ok(count)
-}
-
-/// Get the storage version from settings
-pub fn get_storage_version<R: Runtime>(
-    handle: &AppHandle<R>,
-) -> Result<i32, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
-
-    let version: i32 = conn.query_row(
-        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'storage_version'",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(1); // Default to version 1 (old format)
-
-    crate::account_manager::return_db_connection(conn);
-    Ok(version)
-}

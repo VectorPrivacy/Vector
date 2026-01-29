@@ -705,17 +705,6 @@ pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Update status for marketplace apps
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UpdateStatus {
-    /// Downloading the update
-    Downloading { progress: u8 },
-    /// Update installed successfully
-    Updated { path: String, new_version: String },
-    /// Update failed
-    Failed { error: String },
-}
-
 /// Update a marketplace app to a new version
 /// Downloads to a temp file first, verifies hash, then replaces the old file
 /// This ensures the old version is only deleted after the new version is successfully downloaded
