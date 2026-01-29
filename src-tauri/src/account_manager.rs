@@ -890,9 +890,23 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     // =========================================================================
-    // Future migrations (14+) follow the same pattern:
+    // Migration 14: Add created_at column to mls_keypackages
+    // This stores the event's created_at timestamp (when the keypackage was
+    // actually signed) vs fetched_at (when we downloaded it). Required for
+    // correct primary device detection.
+    // =========================================================================
+    run_atomic_migration(conn, 14, "Add created_at to mls_keypackages", |tx| {
+        tx.execute(
+            "ALTER TABLE mls_keypackages ADD COLUMN created_at INTEGER",
+            [],
+        ).map_err(|e| format!("Failed to add created_at column: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Future migrations (15+) follow the same pattern:
     //
-    // run_atomic_migration(conn, 14, "Description here", |tx| {
+    // run_atomic_migration(conn, 15, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;

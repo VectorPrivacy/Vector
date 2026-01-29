@@ -43,7 +43,11 @@ use serde::{Deserialize, Serialize};
 /// These are the standard Nostr kinds plus Vector-specific extensions.
 /// Unknown kinds are stored but rendered as placeholders.
 pub mod event_kind {
+    /// MLS Group Chat Message (text content) - White Noise compatible
+    /// Used for text messages inside MLS groups (Kind 9)
+    pub const MLS_CHAT_MESSAGE: u16 = 9;
     /// NIP-14: Private Direct Message (text content)
+    /// Used for DMs and legacy MLS messages
     pub const PRIVATE_DIRECT_MESSAGE: u16 = 14;
     /// Vector-specific: File attachment with encryption metadata
     pub const FILE_ATTACHMENT: u16 = 15;
@@ -55,7 +59,7 @@ pub mod event_kind {
     pub const APPLICATION_SPECIFIC: u16 = 30078;
     /// MLS Welcome message
     pub const MLS_WELCOME: u16 = 443;
-    /// MLS Group message
+    /// MLS Group message (wrapper)
     pub const MLS_GROUP_MESSAGE: u16 = 444;
     /// MLS Key Package
     pub const MLS_KEY_PACKAGE: u16 = 443;
@@ -145,7 +149,9 @@ impl StoredEvent {
 
     /// Check if this is a message event (text or file)
     pub fn is_message(&self) -> bool {
-        self.kind == event_kind::PRIVATE_DIRECT_MESSAGE || self.kind == event_kind::FILE_ATTACHMENT
+        self.kind == event_kind::MLS_CHAT_MESSAGE
+            || self.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+            || self.kind == event_kind::FILE_ATTACHMENT
     }
 
     /// Check if this is a reaction event
@@ -157,7 +163,8 @@ impl StoredEvent {
     pub fn is_known_kind(&self) -> bool {
         matches!(
             self.kind,
-            event_kind::PRIVATE_DIRECT_MESSAGE
+            event_kind::MLS_CHAT_MESSAGE
+                | event_kind::PRIVATE_DIRECT_MESSAGE
                 | event_kind::FILE_ATTACHMENT
                 | event_kind::REACTION
                 | event_kind::APPLICATION_SPECIFIC

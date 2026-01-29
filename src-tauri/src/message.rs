@@ -9,6 +9,7 @@ use once_cell::sync::Lazy;
 
 use crate::crypto;
 use crate::db::{self, save_chat};
+use crate::mls::MlsService;
 use crate::net;
 use crate::STATE;
 use crate::util::{self, calculate_file_hash};
@@ -182,9 +183,9 @@ pub struct ImageMetadata {
 pub struct Attachment {
     /// The SHA256 hash of the file as a unique file ID
     pub id: String,
-    // The encryption key
+    // The encryption key (empty for MLS - derived from group secret)
     pub key: String,
-    // The encryption nonce
+    // The encryption nonce (empty for MLS - derived from group secret)
     pub nonce: String,
     /// The file extension
     pub extension: String,
@@ -204,6 +205,18 @@ pub struct Attachment {
     /// This is transmitted in the Nostr event and used to derive the realtime channel topic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webxdc_topic: Option<String>,
+    /// MLS group ID for key derivation (MIP-04)
+    /// When present, encryption key is derived from MLS group secret instead of explicit key/nonce
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Original file hash before encryption (MIP-04 'x' field)
+    /// Used for file deduplication and integrity verification
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_hash: Option<String>,
+    /// MIP-04 scheme version (e.g., "mip04-v1", "mip04-v2")
+    /// Required for correct key derivation during decryption
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_version: Option<String>,
 }
 
 impl Default for Attachment {
@@ -220,6 +233,9 @@ impl Default for Attachment {
             downloading: false,
             downloaded: true,
             webxdc_topic: None,
+            group_id: None,
+            original_hash: None,
+            scheme_version: None,
         }
     }
 }
@@ -257,7 +273,7 @@ pub struct EditEntry {
 async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
     // Find the message in chats and mark it as failed
     let mut state = STATE.lock().await;
-    
+
     // Search through all chats to find the message with this pending ID
     for chat in &mut state.chats {
         if chat.has_participant(receiver) {
@@ -265,7 +281,7 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
                 // Mark the message as failed
                 message.failed = true;
                 message.pending = false;
-                
+
                 // Update the frontend
                 let handle = TAURI_APP.get().unwrap();
                 handle.emit("message_update", serde_json::json!({
@@ -273,7 +289,7 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
                     "message": message,
                     "chat_id": receiver
                 })).unwrap();
-                
+
                 // Save the failed message to our DB
                 let message_to_save = message.clone();
                 drop(state); // Release lock before async DB operation
@@ -282,6 +298,121 @@ async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
             }
         }
     }
+}
+
+/// Result of MLS media encryption using MIP-04
+#[derive(Debug)]
+pub struct MlsMediaUploadResult {
+    /// The imeta tag to include in the Kind 9 event
+    pub imeta_tag: Tag,
+    /// The uploaded URL for storing in attachment
+    pub url: String,
+    /// Encrypted file size
+    pub encrypted_size: u64,
+    /// Original file hash (hex)
+    pub original_hash: String,
+    /// Encryption nonce (hex) - required for MLS decryption
+    pub nonce: String,
+    /// MIP-04 scheme version (e.g., "mip04-v2")
+    pub scheme_version: String,
+}
+
+/// Encrypt and upload a file using MIP-04 for MLS groups
+///
+/// This uses the MDK's EncryptedMediaManager to encrypt files with keys derived
+/// from the MLS group secret, creating a White Noise-compatible imeta tag.
+async fn encrypt_and_upload_mls_media<R: Runtime>(
+    handle: &AppHandle<R>,
+    group_id: &str,
+    file: &AttachmentFile,
+    filename: &str,
+    progress_callback: crate::blossom::ProgressCallback,
+) -> Result<MlsMediaUploadResult, String> {
+    use mdk_core::encrypted_media::MediaProcessingOptions;
+
+    // Get the MDK engine and create media manager for this group
+    let mls_service = MlsService::new_persistent(handle)
+        .map_err(|e| format!("Failed to create MLS service: {}", e))?;
+
+    // Look up the group metadata to get the engine_group_id
+    let groups = mls_service.read_groups().await
+        .map_err(|e| format!("Failed to read groups: {}", e))?;
+    let group_meta = groups.iter()
+        .find(|g| g.group_id == group_id)
+        .ok_or_else(|| format!("Group not found: {}", group_id))?;
+
+    if group_meta.engine_group_id.is_empty() {
+        return Err("Group has no engine_group_id".to_string());
+    }
+
+    // Parse the engine group ID (this is what MDK uses internally)
+    let engine_gid_bytes = hex::decode(&group_meta.engine_group_id)
+        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?;
+    let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
+
+    // Get MDK engine and media manager
+    let mdk = mls_service.engine()
+        .map_err(|e| format!("Failed to get MDK engine: {}", e))?;
+    let media_manager = mdk.media_manager(gid);
+
+    // Determine MIME type from file extension
+    let mime_type = util::mime_from_extension(&file.extension);
+
+    // Configure media processing options
+    // Disable blurhash generation since we already have it in img_meta
+    let options = MediaProcessingOptions {
+        sanitize_exif: true,
+        generate_blurhash: file.img_meta.is_none(), // Only generate if we don't have it
+        max_dimension: None,
+        max_file_size: None,
+        max_filename_length: None,
+    };
+
+    // Encrypt the file using MDK's media_manager
+    let upload = media_manager
+        .encrypt_for_upload_with_options(&file.bytes, &mime_type, filename, &options)
+        .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
+
+    // Upload the encrypted data to Blossom
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let signer = client.signer().await
+        .map_err(|e| format!("Failed to get signer: {}", e))?;
+    let servers = crate::get_blossom_servers();
+
+    let url = crate::blossom::upload_blob_with_progress_and_failover(
+        signer,
+        servers,
+        upload.encrypted_data.clone(),
+        Some(&mime_type),
+        progress_callback,
+        Some(3),
+        Some(std::time::Duration::from_secs(2)),
+    ).await.map_err(|e| format!("Blossom upload failed: {}", e))?;
+
+    // Create the imeta tag using MDK
+    let imeta_tag = media_manager.create_imeta_tag(&upload, &url);
+
+    // Convert nostr::Tag to nostr_sdk Tag
+    // Both use the same underlying type, but we need to ensure compatibility
+    let tag_values: Vec<String> = imeta_tag.to_vec();
+    let sdk_imeta_tag = Tag::parse(&tag_values)
+        .map_err(|e| format!("Failed to parse imeta tag: {}", e))?;
+
+    // Extract scheme version from the imeta tag (MDK uses DEFAULT_SCHEME_VERSION)
+    // The tag format includes "v mip04-v2" or similar
+    let scheme_version = tag_values.iter()
+        .find(|s| s.starts_with("v "))
+        .map(|s| s.strip_prefix("v ").unwrap_or("mip04-v2").to_string())
+        .unwrap_or_else(|| "mip04-v2".to_string());
+
+    Ok(MlsMediaUploadResult {
+        imeta_tag: sdk_imeta_tag,
+        url,
+        encrypted_size: upload.encrypted_size,
+        original_hash: hex::encode(upload.original_hash),
+        nonce: hex::encode(upload.nonce),
+        scheme_version,
+    })
 }
 
 #[tauri::command]
@@ -376,17 +507,184 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         if !is_group_chat {
             EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
         } else {
-            // For MLS groups, create a basic rumor without p-tag
-            EventBuilder::new(Kind::from_u16(14), msg.content)
+            // For MLS groups, use Kind 9 (White Noise compatible)
+            EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), msg.content)
         }
     } else {
         let attached_file = file.unwrap();
 
         // Calculate the file hash first (before encryption)
         let file_hash = calculate_file_hash(&attached_file.bytes);
-        
+
         // The SHA-256 hash of an empty file - we should never reuse this
         const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        // ============================================================
+        // MLS GROUP ATTACHMENTS: Use MIP-04 encryption with imeta tags
+        // ============================================================
+        // NOTE: Unlike DMs, MLS attachments are NOT deduplicated across sends.
+        // MLS uses forward secrecy - when members join/leave, the group secret
+        // changes (new epoch). Files encrypted with old keys can't be decrypted
+        // by new members. Each send must re-encrypt with the current group key.
+        // ============================================================
+        if is_group_chat {
+            // For WebXDC (.xdc) files, generate topic ID upfront
+            let webxdc_topic = if attached_file.extension.to_lowercase() == "xdc" {
+                let topic_id = generate_topic_id();
+                Some(encode_topic_id(&topic_id))
+            } else {
+                None
+            };
+
+            // Prepare filename for the upload
+            let filename = format!("{}.{}", &file_hash, &attached_file.extension);
+
+            // Store the file locally first
+            let base_directory = if cfg!(target_os = "ios") {
+                tauri::path::BaseDirectory::Document
+            } else {
+                tauri::path::BaseDirectory::Download
+            };
+            let dir = handle.path().resolve("vector", base_directory).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let hash_file_path = dir.join(&filename);
+            std::fs::write(&hash_file_path, &attached_file.bytes).unwrap();
+
+            // Create progress callback for MLS upload
+            let pending_id_for_callback = Arc::clone(&pending_id);
+            let handle_for_callback = handle.clone();
+            let progress_callback: crate::blossom::ProgressCallback = std::sync::Arc::new(move |percentage, _bytes| {
+                if let Some(pct) = percentage {
+                    handle_for_callback.emit("attachment_upload_progress", serde_json::json!({
+                        "id": pending_id_for_callback.as_ref(),
+                        "progress": pct
+                    })).unwrap();
+                }
+                Ok(())
+            });
+
+            // Encrypt and upload using MIP-04 (always fresh - no deduplication for MLS)
+            let mls_upload_result = match encrypt_and_upload_mls_media(
+                handle,
+                &receiver,
+                &attached_file,
+                &filename,
+                progress_callback,
+            ).await {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!("[MIP-04 Error] MLS media upload failed: {}", e);
+                    mark_message_failed(Arc::clone(&pending_id), &receiver).await;
+                    return Err(format!("Failed to upload MLS media: {}", e));
+                }
+            };
+
+            // Update the pending message with the uploaded attachment
+            {
+                let pending_id_for_update = Arc::clone(&pending_id);
+                let mut state = STATE.lock().await;
+                let message = state.chats.iter_mut()
+                    .find(|chat| chat.id() == &receiver)
+                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_update))
+                    .unwrap();
+
+                // Add the Attachment in-state
+                message.attachments.push(Attachment {
+                    id: file_hash.clone(),
+                    key: String::new(),  // MLS uses derived keys, not explicit
+                    nonce: mls_upload_result.nonce.clone(),
+                    extension: attached_file.extension.clone(),
+                    url: mls_upload_result.url.clone(),
+                    path: hash_file_path.to_string_lossy().to_string(),
+                    size: mls_upload_result.encrypted_size,
+                    img_meta: attached_file.img_meta.clone(),
+                    downloading: false,
+                    downloaded: true,
+                    webxdc_topic: webxdc_topic.clone(),
+                    group_id: Some(receiver.clone()),
+                    original_hash: Some(mls_upload_result.original_hash.clone()),
+                    scheme_version: Some(mls_upload_result.scheme_version.clone()),
+                });
+
+                // Emit update to frontend
+                handle.emit("mls_message_new", serde_json::json!({
+                    "group_id": &receiver,
+                    "message": &message
+                })).unwrap();
+            }
+
+            // Build Kind 9 event with text content and imeta tag
+            let mut mls_rumor = EventBuilder::new(
+                Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
+                msg.content.clone()
+            ).tag(mls_upload_result.imeta_tag);
+
+            // Add webxdc-topic if this is an XDC file
+            if let Some(ref topic_encoded) = webxdc_topic {
+                mls_rumor = mls_rumor.tag(Tag::custom(
+                    TagKind::custom("webxdc-topic"),
+                    [topic_encoded.clone()]
+                ));
+            }
+
+            // Add reply reference if present
+            if !msg.replied_to.is_empty() {
+                mls_rumor = mls_rumor.tag(Tag::custom(
+                    TagKind::e(),
+                    [msg.replied_to.clone(), String::from(""), String::from("reply")],
+                ));
+            }
+
+            // Add millisecond precision tag
+            let final_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            let milliseconds = final_time.as_millis() % 1000;
+            mls_rumor = mls_rumor.tag(Tag::custom(
+                TagKind::custom("ms"),
+                [milliseconds.to_string()],
+            ));
+
+            // Build the rumor
+            let built_rumor = mls_rumor.build(my_public_key);
+            let event_id = built_rumor.id.expect("UnsignedEvent should have id after build").to_hex();
+
+            // Send via MLS using the existing send_mls_message function
+            crate::mls::send_mls_message(&receiver, built_rumor, Some(pending_id.to_string())).await
+                .map_err(|e| format!("Failed to send MLS message: {}", e))?;
+
+            // Update message state to non-pending (send_mls_message handles failures)
+            {
+                let mut state = STATE.lock().await;
+                if let Some(message) = state.chats.iter_mut()
+                    .find(|chat| chat.id() == &receiver)
+                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id))
+                {
+                    // Update with actual event ID
+                    let old_id = message.id.clone();
+                    message.id = event_id.clone();
+                    message.pending = false;
+
+                    // Emit update to frontend
+                    handle.emit("message_update", serde_json::json!({
+                        "old_id": old_id,
+                        "message": message,
+                        "chat_id": &receiver
+                    })).unwrap();
+
+                    // Save to database
+                    let message_to_save = message.clone();
+                    drop(state);
+                    let _ = crate::db::save_message(handle.clone(), &receiver, &message_to_save).await;
+                }
+            }
+
+            return Ok(true);
+        }
+
+        // ============================================================
+        // DM ATTACHMENTS: Continue with existing Kind 15 approach
+        // ============================================================
 
         // Check for existing attachment with same hash across all profiles BEFORE encrypting
         // BUT: Never reuse empty file hashes - always force a new upload
@@ -440,7 +738,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                             img_meta: None,
                             downloading: false,
                             downloaded: false,
-                            webxdc_topic: None, // Not stored in attachment index
+                            webxdc_topic: None,   // Not stored in attachment index
+                            group_id: None,       // DM attachments don't use MLS encryption
+                            original_hash: None,  // Not stored in attachment index
+                            scheme_version: None, // DM attachments don't use MIP-04
                         }));
                     }
                 }
@@ -544,6 +845,9 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 downloading: false,
                 downloaded: true,
                 webxdc_topic: webxdc_topic.clone(),
+                group_id: if is_group_chat { Some(receiver.clone()) } else { None },
+                original_hash: Some(file_hash.clone()),
+                scheme_version: None, // DM attachments use explicit key/nonce, not MIP-04
             });
 
             // Send the pending file upload to our frontend with appropriate event

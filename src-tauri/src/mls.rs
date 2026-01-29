@@ -2218,7 +2218,7 @@ impl MlsService {
             // 3) Kim sends an MLS application message and publishes the wrapper to the relay
             let group_id = &kim_group.mls_group_id; // Already a GroupId in MDK
             println!("[MLS Smoke Test] Kim sending application message...");
-            let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "Vector-MLS-Test: hello")
+            let rumor = EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), "Vector-MLS-Test: hello")
                 .tag(Tag::custom(
                     TagKind::Custom(std::borrow::Cow::Borrowed("vector-mls-test")),
                     vec!["true"],

@@ -3448,20 +3448,29 @@ fn show_notification_generic(data: NotificationData) {
 
 
 /// Decrypts and saves an attachment to disk
-/// 
+///
+/// For MLS attachments (when group_id is present), uses MDK's MIP-04 decryption.
+/// For DM attachments, uses explicit key/nonce with AES-GCM.
+///
 /// Returns the path to the decrypted file if successful, or an error message if unsuccessful
 async fn decrypt_and_save_attachment<R: tauri::Runtime>(
     handle: &AppHandle<R>,
     encrypted_data: &[u8],
     attachment: &Attachment
 ) -> Result<std::path::PathBuf, String> {
-    // Attempt to decrypt the attachment
-    let decrypted_data = crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
-        .map_err(|e| e.to_string())?;
-    
+    // Decrypt the attachment using the appropriate method
+    let decrypted_data = if let Some(ref group_id) = attachment.group_id {
+        // MLS attachment - use MDK's MIP-04 decryption
+        decrypt_mls_attachment(handle, encrypted_data, attachment, group_id).await?
+    } else {
+        // DM attachment - use explicit key/nonce with AES-GCM
+        crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
+            .map_err(|e| e.to_string())?
+    };
+
     // Calculate the hash of the decrypted file
     let file_hash = calculate_file_hash(&decrypted_data);
-    
+
     // Choose the appropriate base directory based on platform
     let base_directory = if cfg!(target_os = "ios") {
         tauri::path::BaseDirectory::Document
@@ -3471,7 +3480,7 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
 
     // Resolve the directory path using the determined base directory
     let dir = handle.path().resolve("vector", base_directory).unwrap();
-    
+
     // Use hash-based filename
     let file_path = dir.join(format!("{}.{}", file_hash, attachment.extension));
 
@@ -3480,8 +3489,86 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
 
     // Save the file to disk
     std::fs::write(&file_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
-    
+
     Ok(file_path)
+}
+
+/// Decrypt an MLS attachment using MDK's MIP-04 decryption
+///
+/// This derives the encryption key from the MLS group secret using the original file hash
+/// and other metadata stored in the MediaReference.
+async fn decrypt_mls_attachment<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
+    encrypted_data: &[u8],
+    attachment: &Attachment,
+    group_id: &str,
+) -> Result<Vec<u8>, String> {
+    use mdk_core::encrypted_media::MediaReference;
+
+    // Create MLS service
+    let mls_service = mls::MlsService::new_persistent(handle)
+        .map_err(|e| format!("Failed to create MLS service: {}", e))?;
+
+    // Look up the group metadata to get the engine_group_id
+    let groups = mls_service.read_groups().await
+        .map_err(|e| format!("Failed to read groups: {}", e))?;
+    let group_meta = groups.iter()
+        .find(|g| g.group_id == group_id)
+        .ok_or_else(|| format!("Group not found: {}", group_id))?;
+
+    if group_meta.engine_group_id.is_empty() {
+        return Err("Group has no engine_group_id".to_string());
+    }
+
+    // Parse the engine group ID
+    let engine_gid_bytes = hex::decode(&group_meta.engine_group_id)
+        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?;
+    let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
+
+    // Get MDK engine and media manager
+    let mdk = mls_service.engine()
+        .map_err(|e| format!("Failed to get MDK engine: {}", e))?;
+    let media_manager = mdk.media_manager(gid);
+
+    // Parse the original_hash from the attachment
+    let original_hash_hex = attachment.original_hash.as_ref()
+        .ok_or("MLS attachment missing original_hash")?;
+    let original_hash_bytes = hex::decode(original_hash_hex)
+        .map_err(|e| format!("Invalid original_hash hex: {}", e))?;
+    let original_hash: [u8; 32] = original_hash_bytes.try_into()
+        .map_err(|_| "Invalid original_hash length (expected 32 bytes)")?;
+
+    // Parse the nonce from the attachment
+    let nonce_bytes = hex::decode(&attachment.nonce)
+        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
+    let nonce: [u8; 12] = nonce_bytes.try_into()
+        .map_err(|_| "Invalid nonce length (expected 12 bytes)")?;
+
+    // Build the filename from original_hash (must match what was used during encryption!)
+    // The filename is part of the AAD and must match exactly for decryption to succeed
+    let filename = format!("{}.{}", original_hash_hex, attachment.extension);
+
+    // Determine MIME type from extension
+    let mime_type = util::mime_from_extension(&attachment.extension);
+
+    // Get scheme version from attachment (default to v2 if not stored)
+    let scheme_version = attachment.scheme_version.clone()
+        .unwrap_or_else(|| "mip04-v2".to_string());
+
+    // Create a MediaReference for decryption
+    let media_ref = MediaReference {
+        url: attachment.url.clone(),
+        original_hash,
+        mime_type,
+        filename,
+        dimensions: attachment.img_meta.as_ref().map(|m| (m.width, m.height)),
+        scheme_version,
+        nonce,
+    };
+
+    // Decrypt using MDK
+    media_manager.decrypt_from_download(encrypted_data, &media_ref)
+        .map_err(|e| format!("MIP-04 decryption failed: {}", e))
 }
 
 #[tauri::command]
@@ -5108,6 +5195,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
             "keypackage_ref": kp_event.id.to_hex(),
+            "created_at": kp_event.created_at.as_secs(),
             "fetched_at": now,
             "expires_at": 0u64
         }));
@@ -5863,6 +5951,7 @@ async fn refresh_keypackages_for_contact(
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
             "keypackage_ref": keypackage_ref,
+            "created_at": e.created_at.as_secs(),
             "fetched_at": Timestamp::now().as_secs(),
             "expires_at": 0u64
         }));
@@ -5908,6 +5997,7 @@ async fn refresh_keypackages_for_contact(
         });
         index.push(new_entry);
     }
+
     let _ = db::save_mls_keypackages(handle.clone(), &index).await;
 
     Ok(results)

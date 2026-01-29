@@ -24,7 +24,7 @@ tauri-build = { version = "2.5.3", features = [] }
 [dependencies]
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
-mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c", features = ["mip04"] }
 mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
 mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
 bip39 = { version = "2.2.2", features = ["rand"] }

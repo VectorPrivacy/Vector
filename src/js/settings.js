@@ -752,13 +752,7 @@ async function checkPrimaryDeviceStatus() {
             return;
         }
         
-        // Find the latest keypackage (highest fetched_at timestamp)
-        const latestKeypackage = userKeypackages.reduce((latest, current) => {
-            return (current.fetched_at > latest.fetched_at) ? current : latest;
-        });
-        
-        // Check if this device created the latest keypackage
-        // Get the local device_id to find keypackages created by this device
+        // Get the local device_id first
         let myDeviceId;
         try {
             myDeviceId = await invoke('load_mls_device_id');
@@ -766,21 +760,32 @@ async function checkPrimaryDeviceStatus() {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
+        // Find the latest keypackage (highest created_at timestamp - when it was actually created, not fetched)
+        // Falls back to fetched_at for legacy entries without created_at
+        const latestKeypackage = userKeypackages.reduce((latest, current) => {
+            const currentTime = current.created_at || current.fetched_at;
+            const latestTime = latest.created_at || latest.fetched_at;
+            return (currentTime > latestTime) ? current : latest;
+        });
+
         // Find keypackages that have our device_id (created locally)
         const myKeypackages = userKeypackages.filter(kp =>
             kp.device_id === myDeviceId
         );
-        
+
         // Get the most recent keypackage created by this device
+        // Uses created_at (when actually created) with fallback to fetched_at for legacy entries
         const myLatestKeypackage = myKeypackages.length > 0
-            ? myKeypackages.reduce((latest, current) =>
-                (current.fetched_at > latest.fetched_at) ? current : latest
-              )
+            ? myKeypackages.reduce((latest, current) => {
+                const currentTime = current.created_at || current.fetched_at;
+                const latestTime = latest.created_at || latest.fetched_at;
+                return (currentTime > latestTime) ? current : latest;
+              })
             : null;
-        
+
         const myLatestKeypackageRef = myLatestKeypackage?.keypackage_ref;
-        
+
         // This device is primary if its latest keypackage matches the overall latest
         const isPrimary = myLatestKeypackageRef && latestKeypackage.keypackage_ref === myLatestKeypackageRef;
         updatePrimaryDeviceDot(isPrimary);

@@ -930,13 +930,14 @@ pub async fn save_mls_keypackages<R: Runtime>(
         let owner_pubkey = pkg.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or("");
         let device_id = pkg.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
         let keypackage_ref = pkg.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or("");
+        let created_at = pkg.get("created_at").and_then(|v| v.as_u64());
         let fetched_at = pkg.get("fetched_at").and_then(|v| v.as_u64()).unwrap_or(0);
         let expires_at = pkg.get("expires_at").and_then(|v| v.as_u64()).unwrap_or(0);
 
         conn.execute(
-            "INSERT INTO mls_keypackages (owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![owner_pubkey, device_id, keypackage_ref, fetched_at as i64, expires_at as i64],
+            "INSERT INTO mls_keypackages (owner_pubkey, device_id, keypackage_ref, created_at, fetched_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![owner_pubkey, device_id, keypackage_ref, created_at.map(|v| v as i64), fetched_at as i64, expires_at as i64],
         ).map_err(|e| format!("Failed to insert MLS keypackage: {}", e))?;
     }
 
@@ -952,19 +953,24 @@ pub async fn load_mls_keypackages<R: Runtime>(
     let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let mut stmt = conn.prepare(
-        "SELECT owner_pubkey, device_id, keypackage_ref, fetched_at, expires_at FROM mls_keypackages"
+        "SELECT owner_pubkey, device_id, keypackage_ref, created_at, fetched_at, expires_at FROM mls_keypackages"
     ).map_err(|e| format!("Failed to prepare MLS keypackages query: {}", e))?;
 
     let rows = stmt.query_map([], |row| {
-        let fetched_at: i64 = row.get(3)?;
-        let expires_at: i64 = row.get(4)?;
-        Ok(serde_json::json!({
+        let created_at: Option<i64> = row.get(3)?;
+        let fetched_at: i64 = row.get(4)?;
+        let expires_at: i64 = row.get(5)?;
+        let mut json = serde_json::json!({
             "owner_pubkey": row.get::<_, String>(0)?,
             "device_id": row.get::<_, String>(1)?,
             "keypackage_ref": row.get::<_, String>(2)?,
             "fetched_at": fetched_at as u64,
             "expires_at": expires_at as u64,
-        }))
+        });
+        if let Some(ts) = created_at {
+            json["created_at"] = serde_json::json!(ts as u64);
+        }
+        Ok(json)
     }).map_err(|e| format!("Failed to query MLS keypackages: {}", e))?;
 
     let packages: Vec<serde_json::Value> = rows.collect::<Result<Vec<_>, _>>()
@@ -1187,9 +1193,9 @@ pub async fn get_chat_message_count<R: Runtime>(
         |row| row.get(0)
     ).map_err(|e| format!("Chat not found: {}", e))?;
 
-    // Count message events (kind 14 = DM, kind 15 = file) from events table
+    // Count message events (kind 9 = MLS chat, kind 14 = DM, kind 15 = file) from events table
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (14, 15)",
+        "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (9, 14, 15)",
         rusqlite::params![chat_int_id],
         |row| row.get(0)
     ).map_err(|e| format!("Failed to count messages: {}", e))?;
@@ -1252,7 +1258,7 @@ pub async fn get_messages_around_id<R: Runtime>(
     let older_count: i64 = {
         let conn = crate::account_manager::get_db_connection(handle)?;
         let count = conn.query_row(
-            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (14, 15) AND created_at < ?2",
+            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (9, 14, 15) AND created_at < ?2",
             rusqlite::params![chat_int_id, target_timestamp],
             |row| row.get(0)
         ).map_err(|e| format!("Failed to count older messages: {}", e))?;
@@ -1904,7 +1910,8 @@ pub async fn save_event<R: Runtime>(
         .unwrap_or_else(|_| "[]".to_string());
 
     // For message and edit events, encrypt the content
-    let content = if event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+    let content = if event.kind == event_kind::MLS_CHAT_MESSAGE
+        || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         || event.kind == event_kind::MESSAGE_EDIT
     {
         internal_encrypt(event.content.clone(), None).await
@@ -2189,6 +2196,13 @@ pub async fn get_events<R: Runtime>(
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
                 },
+                3 => {
+                    let rows = stmt.query_map(
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, k[2] as i32, limit as i64, offset as i64],
+                        parse_event_row
+                    ).map_err(|e| format!("Failed to query events: {}", e))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                },
                 _ => return Err("Unsupported number of kinds".to_string()),
             }
         } else {
@@ -2216,7 +2230,7 @@ pub async fn get_events<R: Runtime>(
     // Decrypt message content for text messages (this is the async part)
     let mut decrypted_events = Vec::with_capacity(events.len());
     for mut event in events {
-        if event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
+        if event.kind == event_kind::MLS_CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
             event.content = internal_decrypt(event.content, None).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
         }
@@ -2410,8 +2424,10 @@ async fn get_reply_contexts<R: Runtime>(
         // Use latest edit content if available, otherwise use original
         let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
 
-        // Decrypt content for text messages
-        let decrypted_content = if kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32 {
+        // Decrypt content for text messages (Kind 9 or Kind 14)
+        let decrypted_content = if kind == event_kind::MLS_CHAT_MESSAGE as i32
+            || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
+        {
             internal_decrypt(content_to_decrypt, None).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string())
         } else {
@@ -2460,8 +2476,8 @@ pub async fn get_message_views<R: Runtime>(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
-    // Step 1: Get message events (kind 14 and 15)
-    let message_kinds = [event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
+    // Step 1: Get message events (kind 9, 14, and 15)
+    let message_kinds = [event_kind::MLS_CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
     let message_events = get_events(handle, chat_id, Some(&message_kinds), limit, offset).await?;
 
     if message_events.is_empty() {
