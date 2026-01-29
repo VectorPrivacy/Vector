@@ -2182,7 +2182,7 @@ async function playMiniAppAndInvite() {
     
     // Determine if this is a group chat (MLS) or DM
     const chat = arrChats.find(c => c.id === targetChatId);
-    const isGroupChat = chat && chat.type === 'GroupChat';
+    const isGroupChat = chat && chat.chat_type === 'MlsGroup';
     const eventName = isGroupChat ? 'mls_message_new' : 'message_new';
     
     // Set up a one-time listener to catch the new message and open the Mini App

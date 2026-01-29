@@ -83,10 +83,10 @@ impl std::fmt::Display for MlsError {
             MlsError::InvalidKeyPackage => write!(f, "Invalid key package"),
             MlsError::GroupNotFound => write!(f, "Group not found"),
             MlsError::MemberNotFound => write!(f, "Member not found"),
-            MlsError::OutdatedKeyPackage(npub) => write!(
+            MlsError::OutdatedKeyPackage(name) => write!(
                 f,
-                "Member {} has an outdated keypackage. They need to update their app and reconnect.",
-                npub
+                "{} has an outdated keypackage. They need to update their app and reconnect.",
+                name
             ),
             MlsError::StorageError(e) => write!(f, "Storage error: {}", e),
             MlsError::NetworkError(e) => write!(f, "Network error: {}", e),
@@ -493,7 +493,18 @@ impl MlsService {
             if let Some(ev) = kp_event {
                 // Validate keypackage has encoding tag (MIP-00/MIP-02 requirement)
                 if !has_encoding_tag(&ev) {
-                    return Err(MlsError::OutdatedKeyPackage(member_npub.clone()));
+                    // Get display name for better error message
+                    let display_name = {
+                        let state = STATE.lock().await;
+                        state.get_profile(member_npub)
+                            .and_then(|p| {
+                                if !p.name.is_empty() { Some(p.name.clone()) }
+                                else if !p.display_name.is_empty() { Some(p.display_name.clone()) }
+                                else { None }
+                            })
+                            .unwrap_or_else(|| member_npub.clone())
+                    };
+                    return Err(MlsError::OutdatedKeyPackage(display_name));
                 }
                 member_kp_events.push(ev);
                 invited_recipients.push(member_pk);
@@ -748,7 +759,18 @@ impl MlsService {
 
         // Validate keypackage has encoding tag (MIP-00/MIP-02 requirement)
         if !has_encoding_tag(&kp_event) {
-            return Err(MlsError::OutdatedKeyPackage(member_pubkey.to_string()));
+            // Get display name for better error message
+            let display_name = {
+                let state = STATE.lock().await;
+                state.get_profile(&member_pubkey)
+                    .and_then(|p| {
+                        if !p.name.is_empty() { Some(p.name.clone()) }
+                        else if !p.display_name.is_empty() { Some(p.display_name.clone()) }
+                        else { None }
+                    })
+                    .unwrap_or_else(|| member_pubkey.to_string())
+            };
+            return Err(MlsError::OutdatedKeyPackage(display_name));
         }
 
         // Find the group's MLS group ID

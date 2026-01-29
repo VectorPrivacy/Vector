@@ -723,19 +723,19 @@ async function checkPrimaryDeviceStatus() {
         } catch (error) {
             // Continue with local data if network fetch fails
         }
-        
+
         // Get all keypackages for the current account (now includes fresh network data)
         const keypackages = await invoke('load_mls_keypackages');
-        
+
         if (!keypackages || keypackages.length === 0) {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
         let userKeypackages = keypackages.filter(kp =>
             kp.owner_pubkey === strPubkey
         );
-        
+
         // Deduplicate entries with the same keypackage_ref (event ID)
         // Since device_id is purely local, we use keypackage_ref as the common identifier
         const deduped = new Map();
@@ -746,12 +746,12 @@ async function checkPrimaryDeviceStatus() {
             }
         }
         userKeypackages = Array.from(deduped.values());
-        
+
         if (userKeypackages.length === 0) {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
         // Get the local device_id first
         let myDeviceId;
         try {
@@ -789,7 +789,7 @@ async function checkPrimaryDeviceStatus() {
         // This device is primary if its latest keypackage matches the overall latest
         const isPrimary = myLatestKeypackageRef && latestKeypackage.keypackage_ref === myLatestKeypackageRef;
         updatePrimaryDeviceDot(isPrimary);
-        
+
     } catch (error) {
         console.error('Error checking primary device status:', error);
         updatePrimaryDeviceDot(false);

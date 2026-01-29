@@ -3544,12 +3544,21 @@ async fn decrypt_mls_attachment<R: tauri::Runtime>(
     let nonce: [u8; 12] = nonce_bytes.try_into()
         .map_err(|_| "Invalid nonce length (expected 12 bytes)")?;
 
-    // Build the filename from original_hash (must match what was used during encryption!)
+    // Use the stored filename if available (must match what was used during encryption!)
     // The filename is part of the AAD and must match exactly for decryption to succeed
-    let filename = format!("{}.{}", original_hash_hex, attachment.extension);
+    let filename = attachment.mls_filename.clone()
+        .unwrap_or_else(|| format!("{}.{}", original_hash_hex, attachment.extension));
 
     // Determine MIME type from extension
-    let mime_type = util::mime_from_extension(&attachment.extension);
+    let raw_mime_type = util::mime_from_extension(&attachment.extension);
+
+    // Normalize MIME type the same way as during encryption
+    // MDK only accepts standard MIME types, so non-image files use octet-stream
+    let mime_type = if raw_mime_type.starts_with("image/") {
+        raw_mime_type
+    } else {
+        "application/octet-stream".to_string()
+    };
 
     // Get scheme version from attachment (default to v2 if not stored)
     let scheme_version = attachment.scheme_version.clone()
@@ -3559,7 +3568,7 @@ async fn decrypt_mls_attachment<R: tauri::Runtime>(
     let media_ref = MediaReference {
         url: attachment.url.clone(),
         original_hash,
-        mime_type,
+        mime_type: mime_type.clone(),
         filename,
         dimensions: attachment.img_meta.as_ref().map(|m| (m.width, m.height)),
         scheme_version,
@@ -5146,14 +5155,25 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
                     std::time::Duration::from_secs(5)
                 ).await {
                     Ok(mut events) => {
-                        // Check if we got any events - if so, the cached KeyPackage exists on relay
-                        if events.next().await.is_some() {
-                            return Ok(serde_json::json!({
-                                "device_id": device_id,
-                                "owner_pubkey": owner_pubkey_b32,
-                                "keypackage_ref": ref_id,
-                                "cached": true
-                            }));
+                        // Check if we got any events - if so, verify it has the encoding tag
+                        if let Some(event) = events.next().await {
+                            // Check for encoding tag (MIP-00/MIP-02 requirement)
+                            let has_encoding = event.tags.iter().any(|tag| {
+                                let slice = tag.as_slice();
+                                slice.len() >= 2 && slice[0] == "encoding" && slice[1] == "base64"
+                            });
+
+                            if has_encoding {
+                                println!("[MLS][KeyPackage] Cached keypackage has encoding tag, using cached");
+                                return Ok(serde_json::json!({
+                                    "device_id": device_id,
+                                    "owner_pubkey": owner_pubkey_b32,
+                                    "keypackage_ref": ref_id,
+                                    "cached": true
+                                }));
+                            } else {
+                                println!("[MLS][KeyPackage] Cached keypackage missing encoding tag, will regenerate");
+                            }
                         }
                     }
                     _ => {}
@@ -5175,30 +5195,91 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
             .map_err(|e| e.to_string())?
     }; // engine and mls_service dropped here before any await
 
+    // Filter out the protected tag ("-") which causes many relays to reject the event.
+    // MDK adds this tag but it breaks compatibility with relays enforcing NIP-70.
+    let filtered_tags: Vec<_> = kp_tags
+        .into_iter()
+        .filter(|t| t.as_slice().first().map(|s| s.as_str()) != Some("-"))
+        .collect();
+
     // Build and sign event with nostr client
     let kp_event = client
-        .sign_event_builder(EventBuilder::new(Kind::MlsKeyPackage, kp_encoded).tags(kp_tags))
+        .sign_event_builder(EventBuilder::new(Kind::MlsKeyPackage, kp_encoded).tags(filtered_tags))
         .await
         .map_err(|e| e.to_string())?;
 
-    // Publish to TRUSTED_RELAYS
-    client
-        .send_event_to(TRUSTED_RELAYS.iter().copied(), &kp_event)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Debug: Print event details before publishing
+    println!("[MLS KeyPackage] Event ID: {}", kp_event.id.to_hex());
+    println!("[MLS KeyPackage] Kind: {}", kp_event.kind.as_u16());
+    println!("[MLS KeyPackage] Tags count: {}", kp_event.tags.len());
+    for (i, tag) in kp_event.tags.iter().enumerate() {
+        println!("[MLS KeyPackage] Tag {}: {:?}", i, tag.as_slice());
+    }
+
+    // Publish to TRUSTED_RELAYS with retry logic for slow connections
+    let mut send_result = None;
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &kp_event).await {
+            Ok(result) => {
+                // Check if at least one relay succeeded
+                if !result.success.is_empty() {
+                    println!("[MLS KeyPackage] Publish succeeded on attempt {}: {:?}", attempt, result);
+                    send_result = Some(result);
+                    break;
+                } else {
+                    // All relays failed, retry
+                    println!("[MLS KeyPackage] Attempt {}/3: all relays failed, retrying in {}s...",
+                        attempt, attempt * 5);
+                    last_error = format!("All relays failed: {:?}", result.failed);
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs((attempt * 5) as u64)).await;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[MLS KeyPackage] Attempt {}/3 error: {}", attempt, e);
+                last_error = e.to_string();
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs((attempt * 5) as u64)).await;
+                }
+            }
+        }
+    }
+
+    // If no successful publish after retries, return error
+    let send_result = send_result.ok_or_else(|| {
+        format!("Failed to publish keypackage after 3 attempts: {}", last_error)
+    })?;
+
+    println!("[MLS KeyPackage] Publish result: {:?}", send_result);
 
     // Upsert into mls_keypackage_index
     {
         let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
         let now = Timestamp::now().as_secs();
+        let new_kp_ref = kp_event.id.to_hex();
+
+        // Remove any existing entries that match either:
+        // 1. Same owner+device (old keypackage from this device)
+        // 2. Same keypackage_ref (stale network entry with wrong device_id)
+        index.retain(|entry| {
+            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(&owner_pubkey_b32);
+            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(&device_id);
+            let same_ref = entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(&new_kp_ref);
+            // Keep entries that don't match either condition
+            !((same_owner && same_device) || same_ref)
+        });
+
         index.push(serde_json::json!({
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
-            "keypackage_ref": kp_event.id.to_hex(),
+            "keypackage_ref": new_kp_ref,
             "created_at": kp_event.created_at.as_secs(),
             "fetched_at": now,
             "expires_at": 0u64
         }));
+
         let _ = db::save_mls_keypackages(handle.clone(), &index).await;
     }
 
@@ -5876,6 +5957,16 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
                                 .collect();
                             break;
                         }
+                    }
+                }
+            }
+
+            // Fallback: If admins list is empty, use creator_pubkey from stored metadata
+            // This ensures non-admins can still see who the group owner/admin is
+            if admins.is_empty() {
+                if let Some(meta) = meta_groups.iter().find(|g| g.group_id == wire_id) {
+                    if !meta.creator_pubkey.is_empty() {
+                        admins.push(meta.creator_pubkey.clone());
                     }
                 }
             }

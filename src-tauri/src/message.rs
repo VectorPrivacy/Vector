@@ -217,6 +217,10 @@ pub struct Attachment {
     /// Required for correct key derivation during decryption
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheme_version: Option<String>,
+    /// MIP-04 filename used during encryption (for AAD matching)
+    /// Must be stored exactly as used during encryption for decryption to succeed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mls_filename: Option<String>,
 }
 
 impl Default for Attachment {
@@ -236,6 +240,7 @@ impl Default for Attachment {
             group_id: None,
             original_hash: None,
             scheme_version: None,
+            mls_filename: None,
         }
     }
 }
@@ -358,6 +363,14 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     // Determine MIME type from file extension
     let mime_type = util::mime_from_extension(&file.extension);
 
+    // Normalize MIME type for MDK - it has strict validation and rejects many types
+    // Use the original for images (which MDK handles well), otherwise use octet-stream
+    let mdk_mime_type = if mime_type.starts_with("image/") {
+        mime_type.clone()
+    } else {
+        "application/octet-stream".to_string()
+    };
+
     // Configure media processing options
     // Disable blurhash generation since we already have it in img_meta
     let options = MediaProcessingOptions {
@@ -370,7 +383,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
 
     // Encrypt the file using MDK's media_manager
     let upload = media_manager
-        .encrypt_for_upload_with_options(&file.bytes, &mime_type, filename, &options)
+        .encrypt_for_upload_with_options(&file.bytes, &mdk_mime_type, filename, &options)
         .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
 
     // Upload the encrypted data to Blossom
@@ -394,7 +407,30 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
 
     // Convert nostr::Tag to nostr_sdk Tag
     // Both use the same underlying type, but we need to ensure compatibility
-    let tag_values: Vec<String> = imeta_tag.to_vec();
+    let mut tag_values: Vec<String> = imeta_tag.to_vec();
+
+    // Note: We keep the normalized MIME type (e.g., application/octet-stream) in the imeta tag
+    // because MDK also validates MIME types when parsing on the receive side.
+    // The receiver can identify file type from the extension in the filename.
+
+    // Append our pre-generated blurhash and dimensions if available
+    // MDK doesn't include these when generate_blurhash is false
+    if let Some(ref img_meta) = file.img_meta {
+        // Add blurhash if not already present
+        if !tag_values.iter().any(|s| s.starts_with("blurhash ")) && !img_meta.blurhash.is_empty() {
+            tag_values.push(format!("blurhash {}", img_meta.blurhash));
+        }
+        // Add dimensions if not already present
+        if !tag_values.iter().any(|s| s.starts_with("dim ")) {
+            tag_values.push(format!("dim {}x{}", img_meta.width, img_meta.height));
+        }
+    }
+
+    // Ensure size is included in the imeta tag (required for auto-download on receive side)
+    if !tag_values.iter().any(|s| s.starts_with("size ")) && upload.encrypted_size > 0 {
+        tag_values.push(format!("size {}", upload.encrypted_size));
+    }
+
     let sdk_imeta_tag = Tag::parse(&tag_values)
         .map_err(|e| format!("Failed to parse imeta tag: {}", e))?;
 
@@ -604,6 +640,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     group_id: Some(receiver.clone()),
                     original_hash: Some(mls_upload_result.original_hash.clone()),
                     scheme_version: Some(mls_upload_result.scheme_version.clone()),
+                    mls_filename: Some(filename.clone()),
                 });
 
                 // Emit update to frontend
@@ -742,6 +779,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                             group_id: None,       // DM attachments don't use MLS encryption
                             original_hash: None,  // Not stored in attachment index
                             scheme_version: None, // DM attachments don't use MIP-04
+                            mls_filename: None,   // DM attachments don't use MIP-04
                         }));
                     }
                 }
@@ -848,6 +886,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 group_id: if is_group_chat { Some(receiver.clone()) } else { None },
                 original_hash: Some(file_hash.clone()),
                 scheme_version: None, // DM attachments use explicit key/nonce, not MIP-04
+                mls_filename: None,   // DM attachments use explicit key/nonce, not MIP-04
             });
 
             // Send the pending file upload to our frontend with appropriate event

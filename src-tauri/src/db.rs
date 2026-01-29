@@ -1919,10 +1919,10 @@ pub async fn save_event<R: Runtime>(
         event.content.clone()
     };
 
-    // Use INSERT OR IGNORE to skip if event already exists (deduplication)
+    // Use INSERT OR REPLACE to update if event already exists (allows attachment updates)
     conn.execute(
         r#"
-        INSERT OR IGNORE INTO events (
+        INSERT OR REPLACE INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
             created_at, received_at, mine, pending, failed, wrapper_event_id, npub
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
@@ -2527,20 +2527,26 @@ pub async fn get_message_views<R: Runtime>(
     let mut events_needing_legacy_lookup: Vec<String> = Vec::new();
 
     for event in &message_events {
-        if event.kind != event_kind::FILE_ATTACHMENT {
+        // Check for attachments in FILE_ATTACHMENT (kind 15) and MLS_CHAT_MESSAGE (kind 9) events
+        // MLS groups use MIP-04 imeta attachments embedded in kind 9 messages
+        if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::MLS_CHAT_MESSAGE {
             continue;
         }
 
         // Try to parse attachments from the "attachments" tag (new events)
         if let Some(attachments_json) = event.get_tag("attachments") {
             if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(attachments_json) {
-                attachments_by_msg.insert(event.id.clone(), attachments);
-                continue;
+                if !attachments.is_empty() {
+                    attachments_by_msg.insert(event.id.clone(), attachments);
+                    continue;
+                }
             }
         }
 
-        // No attachments tag found - this is an old migrated event, need legacy lookup
-        events_needing_legacy_lookup.push(event.id.clone());
+        // No attachments tag found for kind 15 - this is an old migrated event, need legacy lookup
+        if event.kind == event_kind::FILE_ATTACHMENT {
+            events_needing_legacy_lookup.push(event.id.clone());
+        }
     }
 
     // Fall back to messages table for old migrated events without attachments tag

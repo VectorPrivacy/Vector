@@ -395,17 +395,27 @@ async fn parse_mls_imeta_attachments(
             .unwrap_or_else(|| hex::encode(media_ref.original_hash));
 
         // Build image metadata from dimensions if available
-        let img_meta = media_ref.dimensions.map(|(width, height)| {
+        let img_meta = media_ref.dimensions.and_then(|(width, height)| {
             // Look for blurhash in the original tag
             let blurhash = tag.as_slice().iter()
                 .find(|s| s.starts_with("blurhash "))
-                .map(|s| s.strip_prefix("blurhash ").unwrap_or("").to_string())
-                .unwrap_or_default();
+                .map(|s| s.strip_prefix("blurhash ").unwrap_or("").to_string());
 
-            ImageMetadata {
-                blurhash,
-                width,
-                height,
+            // Only create ImageMetadata if we have a valid blurhash (at least 6 chars)
+            match blurhash {
+                Some(bh) if bh.len() >= 6 => Some(ImageMetadata {
+                    blurhash: bh,
+                    width,
+                    height,
+                }),
+                _ => {
+                    // Still return dimensions without blurhash for sizing purposes
+                    Some(ImageMetadata {
+                        blurhash: String::new(),
+                        width,
+                        height,
+                    })
+                }
             }
         });
 
@@ -424,6 +434,13 @@ async fn parse_mls_imeta_attachments(
         // Check if file already exists locally
         let downloaded = std::path::Path::new(&file_path).exists();
 
+        // Extract size from imeta tag (format: "size 12345")
+        let size = tag.as_slice().iter()
+            .find(|s| s.starts_with("size "))
+            .and_then(|s| s.strip_prefix("size "))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
         attachments.push(Attachment {
             id: encrypted_hash,
             key: String::new(),  // MLS uses derived keys
@@ -431,7 +448,7 @@ async fn parse_mls_imeta_attachments(
             extension,
             url: media_ref.url.clone(),
             path: file_path,
-            size: 0,  // Will be determined on download
+            size,
             img_meta,
             downloading: false,
             downloaded,
@@ -439,6 +456,7 @@ async fn parse_mls_imeta_attachments(
             group_id: Some(context.conversation_id.clone()),
             original_hash: Some(hex::encode(media_ref.original_hash)),
             scheme_version: Some(media_ref.scheme_version.clone()),
+            mls_filename: Some(media_ref.filename.clone()),
         });
     }
 
@@ -610,6 +628,7 @@ async fn process_file_attachment(
         group_id: None,       // Kind 15 attachments use explicit key/nonce, not MLS
         original_hash: Some(file_hash), // ox tag value (original file hash)
         scheme_version: None, // Kind 15 uses explicit encryption, not MIP-04
+        mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04
     };
     
     // Create the message with attachment
