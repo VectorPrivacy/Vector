@@ -332,7 +332,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
         developer,
         source_url,
         publisher,
-        published_at: event.created_at.as_u64(),
+        published_at: event.created_at.as_secs(),
         installed: false,
         local_path: None,
         installed_version: None,

@@ -2622,13 +2622,15 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
             let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
             
             // Build NIP-25 Reaction rumor
-            let rumor = EventBuilder::reaction_extended(
-                reference_event,
-                receiver_pubkey,
-                Some(Kind::PrivateDirectMessage),
-                &emoji,
-            )
-            .build(my_public_key);
+            let reaction_target = nostr_sdk::nips::nip25::ReactionTarget {
+                event_id: reference_event,
+                public_key: receiver_pubkey,
+                coordinate: None,
+                kind: Some(Kind::PrivateDirectMessage),
+                relay_hint: None,
+            };
+            let rumor = EventBuilder::reaction(reaction_target, &emoji)
+                .build(my_public_key);
             let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
             
             // Send reaction to the receiver
@@ -2862,7 +2864,7 @@ pub async fn edit_message(
         .tag(Tag::event(reference_event))
         .build(my_public_key);
     let edit_id = rumor.id.ok_or("Failed to get edit rumor ID")?.to_hex();
-    let created_at = rumor.created_at.as_u64();
+    let created_at = rumor.created_at.as_secs();
 
     match chat_type {
         ChatType::DirectMessage => {

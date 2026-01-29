@@ -401,7 +401,7 @@ async fn fetch_messages<R: Runtime>(
     if relay_url.is_some() {
         // Single relay sync - always fetch last 2 days
         let now = Timestamp::now();
-        let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+        let two_days_ago = now.as_secs() - (60 * 60 * 24 * 2);
         
         let filter = Filter::new()
             .pubkey(my_public_key)
@@ -576,10 +576,10 @@ async fn fetch_messages<R: Runtime>(
             state.sync_total_iterations = 0;
 
             // Initial 2-day window: now - 2 days → now
-            let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+            let two_days_ago = now.as_secs() - (60 * 60 * 24 * 2);
 
             state.sync_window_start = two_days_ago;
-            state.sync_window_end = now.as_u64();
+            state.sync_window_end = now.as_secs();
 
             (
                 Timestamp::from_secs(two_days_ago),
@@ -655,8 +655,8 @@ async fn fetch_messages<R: Runtime>(
     // Emit our current "Sync Range" to the frontend (only for general syncs, not single-relay)
     if relay_url.is_none() {
         handle.emit("sync_progress", serde_json::json!({
-            "since": since_timestamp.as_u64(),
-            "until": until_timestamp.as_u64(),
+            "since": since_timestamp.as_secs(),
+            "until": until_timestamp.as_secs(),
             "mode": format!("{:?}", STATE.lock().await.sync_mode)
         })).unwrap();
     }
@@ -750,7 +750,7 @@ async fn fetch_messages<R: Runtime>(
                     state.sync_window_start = oldest_ts - (60 * 60 * 24 * 2); // 2 days before oldest
                 } else {
                     // Still start backward sync, but from recent history
-                    let now = Timestamp::now().as_u64();
+                    let now = Timestamp::now().as_secs();
                     let thirty_days_ago = now - (60 * 60 * 24 * 30);
 
                     state.sync_window_end = thirty_days_ago;
@@ -1346,6 +1346,14 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
             // Special handling for MLS Welcomes (not processed by rumor processor)
             if rumor.kind == Kind::MlsWelcome {
+                // Dedup: the same welcome can arrive from multiple relays simultaneously
+                {
+                    let cache = WRAPPER_ID_CACHE.lock().await;
+                    if cache.contains(&wrapper_event_id) {
+                        return false;
+                    }
+                }
+
                 // Convert rumor Event -> UnsignedEvent
                 let unsigned_opt = serde_json::to_string(&rumor)
                     .ok()
@@ -1380,6 +1388,11 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     .unwrap_or(false);
 
                     if processed {
+                        // Mark this wrapper as processed to prevent duplicates from other relays
+                        {
+                            let mut cache = WRAPPER_ID_CACHE.lock().await;
+                            cache.insert(wrapper_event_id.clone());
+                        }
                         // Only notify UI after initial sync is complete
                         // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
                         let should_emit = {
@@ -2392,7 +2405,7 @@ async fn notifs() -> Result<bool, String> {
                                             });
 
                                             // EventTracker: Track as processed after successful handling
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
 
                                             processed
                                         }
@@ -2440,10 +2453,10 @@ async fn notifs() -> Result<bool, String> {
                                                 }
                                             }
                                             // EventTracker: Track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
-                                        mdk_core::prelude::MessageProcessingResult::Proposal(_proposal) => {
+                                        mdk_core::prelude::MessageProcessingResult::Proposal(_update_result) => {
                                             // Proposal received (e.g., leave proposal)
                                             // Emit event to notify UI that group state may have changed
                                             if let Some(handle) = TAURI_APP.get() {
@@ -2452,7 +2465,17 @@ async fn notifs() -> Result<bool, String> {
                                                 })).ok();
                                             }
                                             // EventTracker: Track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            None
+                                        }
+                                        mdk_core::prelude::MessageProcessingResult::PendingProposal { .. } => {
+                                            // Pending proposal - track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            None
+                                        }
+                                        mdk_core::prelude::MessageProcessingResult::IgnoredProposal { .. } => {
+                                            // Ignored proposal - track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
@@ -2464,7 +2487,7 @@ async fn notifs() -> Result<bool, String> {
                                         // Other message types (ExternalJoinProposal) are not persisted as chat messages
                                         _ => {
                                             // EventTracker: Track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_u64());
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                     }
@@ -3926,7 +3949,7 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
-        .opts(ClientOptions::new().gossip(false))
+        .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
@@ -4016,6 +4039,42 @@ async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
 
     // Connect!
     client.connect().await;
+
+    // Post-connect: force-regenerate device KeyPackage if flagged by migration 13
+    // (v0.3.0 upgrade: old keypackages used incompatible MLS engine format)
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        if crate::account_manager::get_current_account().is_err() {
+            return;
+        }
+
+        let handle = match TAURI_APP.get() {
+            Some(h) => h.clone(),
+            None => return,
+        };
+
+        // Check if migration flagged a forced keypackage regeneration
+        let force_regen = db::get_sql_setting(handle.clone(), "mls_force_keypackage_regen".into())
+            .ok()
+            .flatten()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        if force_regen {
+            println!("[MLS] v0.3.0 upgrade: forcing fresh KeyPackage regeneration...");
+            match regenerate_device_keypackage(false).await {
+                Ok(info) => {
+                    let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("[MLS] Device KeyPackage regenerated (new format): device_id={}", device_id);
+                    // Clear the flag so we don't regenerate again
+                    let _ = db::remove_setting(handle, "mls_force_keypackage_regen".into());
+                }
+                Err(e) => println!("[MLS] Device KeyPackage regeneration FAILED: {}", e),
+            }
+        }
+    });
+
     true
 }
 
@@ -4072,13 +4131,25 @@ async fn encrypt(input: String, password: Option<String>) -> String {
     tokio::spawn(async move {
         // Brief delay to allow encryption key to be set
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        
+
         // Skip if no account selected (migration pending)
         if crate::account_manager::get_current_account().is_err() {
             println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
             return;
         }
-        
+
+        // Skip if a forced regen is pending (connect() post-connect handler owns this)
+        let handle = match TAURI_APP.get() {
+            Some(h) => h.clone(),
+            None => return,
+        };
+        let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+            .ok().flatten().map(|v| v == "1").unwrap_or(false);
+        if force_pending {
+            println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
+            return;
+        }
+
         println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
         match regenerate_device_keypackage(true).await {
             Ok(info) => {
@@ -4086,7 +4157,7 @@ async fn encrypt(input: String, password: Option<String>) -> String {
                 let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
                 println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
             }
-            Err(e) => eprintln!("[MLS] Device KeyPackage bootstrap failed: {}", e),
+            Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
         }
     });
 
@@ -4111,7 +4182,19 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
                 println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
                 return;
             }
-            
+
+            // Skip if a forced regen is pending (connect() post-connect handler owns this)
+            let handle = match TAURI_APP.get() {
+                Some(h) => h.clone(),
+                None => return,
+            };
+            let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+                .ok().flatten().map(|v| v == "1").unwrap_or(false);
+            if force_pending {
+                println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
+                return;
+            }
+
             println!("[MLS] Ensuring persistent device KeyPackage...");
             match regenerate_device_keypackage(true).await {
                 Ok(info) => {
@@ -4119,7 +4202,7 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
                     let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
                     println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
                 }
-                Err(e) => eprintln!("[MLS] Device KeyPackage bootstrap failed: {}", e),
+                Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
             }
         });
     }
@@ -4172,9 +4255,9 @@ async fn deep_rescan<R: Runtime>(handle: AppHandle<R>) -> Result<bool, String> {
         state.sync_total_iterations = 0;
         
         // Start with a 2-day window from now
-        let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+        let two_days_ago = now.as_secs() - (60 * 60 * 24 * 2);
         state.sync_window_start = two_days_ago;
-        state.sync_window_end = now.as_u64();
+        state.sync_window_end = now.as_secs();
     }
 
     // Trigger the first fetch
@@ -4246,7 +4329,7 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
-        .opts(ClientOptions::new().gossip(false))
+        .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
@@ -4886,7 +4969,7 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
     // Check if they have a valid badge claim from the event period
     while let Some(event) = events.next().await {
         if event.content == "fawkes_badge_claimed" {
-            let timestamp = event.created_at.as_u64();
+            let timestamp = event.created_at.as_secs();
             // Verify the timestamp is within the valid event window
             if timestamp >= FAWKES_DAY_START && timestamp < FAWKES_DAY_END {
                 return Ok(true);
@@ -5020,7 +5103,7 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
     // Upsert into mls_keypackage_index
     {
         let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
-        let now = Timestamp::now().as_u64();
+        let now = Timestamp::now().as_secs();
         index.push(serde_json::json!({
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
@@ -5318,7 +5401,7 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
             let engine = mls.engine().map_err(|e| e.to_string())?;
 
-            let pending = engine.get_pending_welcomes().map_err(|e| e.to_string())?;
+            let pending = engine.get_pending_welcomes(None).map_err(|e| e.to_string())?;
 
             let mut out: Vec<SimpleWelcome> = Vec::with_capacity(pending.len());
             for w in pending {
@@ -5407,7 +5490,7 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
                 // Get the invite-sent timestamp from the welcome event (not acceptance time!)
                 // This is critical for accurate sync windows
-                let invite_sent_at = welcome.event.created_at.as_u64();
+                let invite_sent_at = welcome.event.created_at.as_secs();
 
                 // Accept the welcome - this updates engine state internally
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
@@ -5780,7 +5863,7 @@ async fn refresh_keypackages_for_contact(
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
             "keypackage_ref": keypackage_ref,
-            "fetched_at": Timestamp::now().as_u64(),
+            "fetched_at": Timestamp::now().as_secs(),
             "expires_at": 0u64
         }));
     }
@@ -5791,19 +5874,40 @@ async fn refresh_keypackages_for_contact(
     // Load existing index
     let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
 
-    // Remove any existing entries for this owner+device_id to avoid duplicates
-    for new_entry in &new_entries {
-        let owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
-        let device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
+    // Dedup existing entries by keypackage_ref — keep first occurrence per ref.
+    // This cleans up stale duplicates where the same keypackage was stored twice
+    // (once with the real device_id from local generation, once with event_id from network).
+    {
+        let mut seen_refs = std::collections::HashSet::new();
         index.retain(|entry| {
-            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner);
-            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(device);
-            !(same_owner && same_device)
+            let r = entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            seen_refs.insert(r)
         });
     }
 
-    // Append new entries and persist
-    index.extend(new_entries.into_iter());
+    // Merge new entries into the index, preserving local entries that share the same
+    // keypackage_ref (they have the correct device_id, whereas network entries use event_id).
+    for new_entry in new_entries {
+        let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
+        let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
+        let new_device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
+
+        // Skip if a local entry already has this keypackage_ref (preserves correct device_id)
+        let ref_exists = index.iter().any(|entry| {
+            entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(new_ref)
+        });
+        if ref_exists {
+            continue;
+        }
+
+        // Remove any existing entry for the same owner+device_id, then add the new one
+        index.retain(|entry| {
+            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(new_owner);
+            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(new_device);
+            !(same_owner && same_device)
+        });
+        index.push(new_entry);
+    }
     let _ = db::save_mls_keypackages(handle.clone(), &index).await;
 
     Ok(results)

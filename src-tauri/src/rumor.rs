@@ -198,7 +198,7 @@ async fn process_unknown_event(
         .content(rumor.content)
         .tags(tags)
         .reference_id(reference_id)
-        .created_at(rumor.created_at.as_u64())
+        .created_at(rumor.created_at.as_secs())
         .mine(context.is_mine)
         .npub(rumor.pubkey.to_bech32().ok())
         .build();
@@ -487,7 +487,7 @@ async fn process_edit_event(
         .content(rumor.content.clone())
         .tags(tags)
         .reference_id(Some(message_id.clone()))
-        .created_at(rumor.created_at.as_u64())
+        .created_at(rumor.created_at.as_secs())
         .mine(context.is_mine)
         .npub(rumor.pubkey.to_bech32().ok())
         .build();
@@ -576,7 +576,7 @@ async fn process_app_specific(
             .chat_id(0) // Will be set by caller
             .content(&rumor.content)
             .tags(tags)
-            .created_at(rumor.created_at.as_u64())
+            .created_at(rumor.created_at.as_secs())
             .mine(context.is_mine)
             .npub(Some(rumor.pubkey.to_bech32().unwrap_or_default()))
             .build();
@@ -677,14 +677,14 @@ fn extract_millisecond_timestamp(rumor: &RumorEvent) -> u64 {
                 if let Ok(ms_value) = ms_str.parse::<u64>() {
                     // Validate that ms is between 0-999
                     if ms_value <= 999 {
-                        return rumor.created_at.as_u64() * 1000 + ms_value;
+                        return rumor.created_at.as_secs() * 1000 + ms_value;
                     }
                 }
             }
             // Fallback to seconds if ms tag is invalid
-            rumor.created_at.as_u64() * 1000
+            rumor.created_at.as_secs() * 1000
         }
-        None => rumor.created_at.as_u64() * 1000
+        None => rumor.created_at.as_secs() * 1000
     }
 }
 

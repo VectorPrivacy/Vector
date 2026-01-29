@@ -851,9 +851,48 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     // =========================================================================
-    // Future migrations (12+) follow the same pattern:
+    // Migration 12: v0.3.0 MLS engine upgrade — wipe all group chat data
+    // The MDK upgrade (7c3157c) changed from a dual-connection OpenMLS
+    // architecture to a unified single-connection engine. The old MLS
+    // crypto state is incompatible, so all group data must be wiped.
+    // Users will need to re-join their groups after upgrading.
+    // DM data (chat_type=0) is preserved.
+    // =========================================================================
+    run_atomic_migration(conn, 12, "Wipe MLS group data for v0.3.0 engine upgrade", |tx| {
+        // Delete group chats (chat_type=1) — CASCADE deletes their events + messages
+        tx.execute("DELETE FROM chats WHERE chat_type = 1", [])
+            .map_err(|e| format!("Failed to delete group chats: {}", e))?;
+        // Clear all MLS metadata tables
+        tx.execute("DELETE FROM mls_groups", [])
+            .map_err(|e| format!("Failed to clear mls_groups: {}", e))?;
+        tx.execute("DELETE FROM mls_keypackages", [])
+            .map_err(|e| format!("Failed to clear mls_keypackages: {}", e))?;
+        tx.execute("DELETE FROM mls_event_cursors", [])
+            .map_err(|e| format!("Failed to clear mls_event_cursors: {}", e))?;
+        tx.execute("DELETE FROM mls_processed_events", [])
+            .map_err(|e| format!("Failed to clear mls_processed_events: {}", e))?;
+        println!("[DB] Migration 12: Wiped all MLS group chat data for v0.3.0 engine upgrade.");
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 13: Force fresh keypackage regeneration (new MDK format)
+    // This sets a flag read by connect() to regenerate keypackages with cache=false.
+    // Needed as a separate migration because migration 12 may have already run
+    // before this flag was introduced.
+    // =========================================================================
+    run_atomic_migration(conn, 13, "Flag keypackage regeneration for v0.3.0", |tx| {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_force_keypackage_regen', '1')",
+            [],
+        ).map_err(|e| format!("Failed to set keypackage regen flag: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Future migrations (14+) follow the same pattern:
     //
-    // run_atomic_migration(conn, 12, "Description here", |tx| {
+    // run_atomic_migration(conn, 14, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;
