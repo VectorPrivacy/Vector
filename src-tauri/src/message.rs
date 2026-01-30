@@ -1876,16 +1876,16 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         #[cfg(not(target_os = "android"))]
         {
             let path = std::path::Path::new(&file_path);
-            
+
             // Check if file exists first
             if !path.exists() {
                 return Err(format!("File does not exist: {}", file_path));
             }
-            
+
             // Read file bytes
             let bytes = std::fs::read(&file_path)
                 .map_err(|e| format!("Failed to read file: {}", e))?;
-            
+
             // Check if file is empty
             if bytes.is_empty() {
                 return Err(format!("File is empty (0 bytes): {}", file_path));
@@ -1912,10 +1912,10 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 let bytes = cached_bytes.clone();
                 let extension = ext.clone();
                 drop(cache);
-                
+
                 // Clear the cache after use
                 ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
-                
+
                 AttachmentFile {
                     bytes,
                     img_meta: None,
@@ -1923,8 +1923,37 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 }
             } else {
                 drop(cache);
-                // Fall back to reading directly (may fail if permission expired)
-                filesystem::read_android_uri(file_path)?
+                // Check if this is a content:// URI or a regular file path
+                if file_path.starts_with("content://") {
+                    // Content URI - use Android ContentResolver
+                    filesystem::read_android_uri(file_path)?
+                } else {
+                    // Regular file path (e.g., marketplace apps) - use standard file I/O
+                    let path = std::path::Path::new(&file_path);
+
+                    if !path.exists() {
+                        return Err(format!("File does not exist: {}", file_path));
+                    }
+
+                    let bytes = std::fs::read(&file_path)
+                        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+                    if bytes.is_empty() {
+                        return Err(format!("File is empty (0 bytes): {}", file_path));
+                    }
+
+                    let extension = file_path
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("bin")
+                        .to_lowercase();
+
+                    AttachmentFile {
+                        bytes,
+                        img_meta: None,
+                        extension,
+                    }
+                }
             }
         }
     };
@@ -2353,16 +2382,16 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
         #[cfg(not(target_os = "android"))]
         {
             let path = std::path::Path::new(&file_path);
-            
+
             // Check if file exists first
             if !path.exists() {
                 return Err(format!("File does not exist: {}", file_path));
             }
-            
+
             // Read file bytes
             let bytes = std::fs::read(&file_path)
                 .map_err(|e| format!("Failed to read file: {}", e))?;
-            
+
             // Check if file is empty
             if bytes.is_empty() {
                 return Err(format!("File is empty (0 bytes): {}", file_path));
@@ -2389,10 +2418,10 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 let bytes = cached_bytes.clone();
                 let extension = ext.clone();
                 drop(cache);
-                
+
                 // Clear the cache after use
                 ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
-                
+
                 AttachmentFile {
                     bytes,
                     img_meta: None,
@@ -2400,8 +2429,37 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 }
             } else {
                 drop(cache);
-                // Fall back to reading directly (may fail if permission expired)
-                filesystem::read_android_uri(file_path)?
+                // Check if this is a content:// URI or a regular file path
+                if file_path.starts_with("content://") {
+                    // Content URI - use Android ContentResolver
+                    filesystem::read_android_uri(file_path)?
+                } else {
+                    // Regular file path (e.g., marketplace apps) - use standard file I/O
+                    let path = std::path::Path::new(&file_path);
+
+                    if !path.exists() {
+                        return Err(format!("File does not exist: {}", file_path));
+                    }
+
+                    let bytes = std::fs::read(&file_path)
+                        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+                    if bytes.is_empty() {
+                        return Err(format!("File is empty (0 bytes): {}", file_path));
+                    }
+
+                    let extension = file_path
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("bin")
+                        .to_lowercase();
+
+                    AttachmentFile {
+                        bytes,
+                        img_meta: None,
+                        extension,
+                    }
+                }
             }
         }
     };
