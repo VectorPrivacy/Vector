@@ -202,6 +202,8 @@
   background-color: transparent !important;
   background-image: url("./icons/pivx.svg");
   background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 
 .icon-nexus {
@@ -2735,8 +2737,8 @@ html, body {
 }
 
 .attachment-panel-btn .icon-pivx {
-  width: 44px;
-  height: 44px;
+  width: 65%;
+  height: 65%;
 }
 
 .attachment-panel-label {
