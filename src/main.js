@@ -1969,10 +1969,6 @@ function startMiniAppHold(e) {
     const item = e.target.closest('.attachment-panel-item');
     if (!item || item.id === 'attachment-panel-marketplace') return;
 
-    // Prevent drag behavior on hold
-    e.preventDefault();
-    e.stopPropagation();
-
     // Clear any existing timer
     if (miniAppsHoldTimer) {
         clearTimeout(miniAppsHoldTimer);
@@ -1999,6 +1995,7 @@ function cancelMiniAppHold() {
  */
 function suppressClickAfterEditMode(e) {
     if (miniAppsEditModeJustActivated) {
+        miniAppsEditModeJustActivated = false; // Reset flag so future clicks work
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
