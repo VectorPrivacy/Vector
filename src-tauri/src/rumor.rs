@@ -30,6 +30,7 @@ use nostr_sdk::prelude::*;
 use tauri::Manager;
 use crate::{Message, Attachment, Reaction, TAURI_APP, StoredEvent, StoredEventBuilder};
 use crate::message::ImageMetadata;
+use crate::mls::MlsService;
 
 /// Protocol-agnostic rumor event representation
 ///
@@ -88,6 +89,13 @@ pub enum RumorProcessingResult {
         profile_id: String,
         until: u64,
     },
+    /// A leave request from a group member (admin should auto-remove them)
+    LeaveRequest {
+        /// The event ID of the leave request (for deduplication)
+        event_id: String,
+        /// The pubkey of the member requesting to leave (npub)
+        member_pubkey: String,
+    },
     /// A WebXDC peer advertisement for realtime channels
     WebxdcPeerAdvertisement {
         topic_id: String,
@@ -144,8 +152,11 @@ pub async fn process_rumor(
     context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
     match rumor.kind {
-        // Text messages
+        // Text messages - Kind 9 (MLS/White Noise) or Kind 14 (DMs/legacy)
         Kind::PrivateDirectMessage => {
+            process_text_message(rumor, context).await
+        }
+        k if k.as_u16() == crate::stored_event::event_kind::MLS_CHAT_MESSAGE => {
             process_text_message(rumor, context).await
         }
         // File attachments
@@ -198,7 +209,7 @@ async fn process_unknown_event(
         .content(rumor.content)
         .tags(tags)
         .reference_id(reference_id)
-        .created_at(rumor.created_at.as_u64())
+        .created_at(rumor.created_at.as_secs())
         .mine(context.is_mine)
         .npub(rumor.pubkey.to_bech32().ok())
         .build();
@@ -209,16 +220,43 @@ async fn process_unknown_event(
 /// Process a text message rumor
 ///
 /// Extracts text content, reply references, and millisecond-precision timestamps.
+/// For MLS groups, also checks for imeta tags (MIP-04 file attachments).
 async fn process_text_message(
     rumor: RumorEvent,
     context: RumorContext,
 ) -> Result<RumorProcessingResult, String> {
     // Extract reply reference if present
     let replied_to = extract_reply_reference(&rumor);
-    
+
     // Extract millisecond-precision timestamp
     let ms_timestamp = extract_millisecond_timestamp(&rumor);
-    
+
+    // Check for imeta tags (MIP-04 file attachments in MLS groups)
+    let attachments = if context.conversation_type == ConversationType::MlsGroup {
+        parse_mls_imeta_attachments(&rumor, &context).await
+    } else {
+        Vec::new()
+    };
+
+    // Extract webxdc-topic for Mini Apps (realtime channel isolation)
+    let webxdc_topic = rumor.tags
+        .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
+        .and_then(|tag| tag.content())
+        .map(|s| s.to_string());
+
+    // If we have attachments, apply webxdc_topic to them
+    let attachments = if let Some(topic) = webxdc_topic {
+        attachments.into_iter().map(|mut att| {
+            att.webxdc_topic = Some(topic.clone());
+            att
+        }).collect()
+    } else {
+        attachments
+    };
+
+    // Determine result type based on whether we have attachments
+    let has_attachments = !attachments.is_empty();
+
     // Create the message
     let msg = Message {
         id: rumor.id.to_hex(),
@@ -229,7 +267,7 @@ async fn process_text_message(
         replied_to_has_attachment: None,
         preview_metadata: None,
         at: ms_timestamp,
-        attachments: Vec::new(),
+        attachments,
         reactions: Vec::new(),
         mine: context.is_mine,
         pending: false,
@@ -245,8 +283,207 @@ async fn process_text_message(
         edited: false,
         edit_history: None,
     };
-    
-    Ok(RumorProcessingResult::TextMessage(msg))
+
+    // Return as FileAttachment if we have MIP-04 attachments, otherwise TextMessage
+    if has_attachments {
+        Ok(RumorProcessingResult::FileAttachment(msg))
+    } else {
+        Ok(RumorProcessingResult::TextMessage(msg))
+    }
+}
+
+/// Parse MIP-04 imeta tags from an MLS group message
+///
+/// Extracts file attachments from imeta tags using MDK's encrypted media parser.
+/// Returns a list of Attachment objects with group_id set for MLS decryption.
+async fn parse_mls_imeta_attachments(
+    rumor: &RumorEvent,
+    context: &RumorContext,
+) -> Vec<Attachment> {
+    // Find all imeta tags
+    let imeta_tags: Vec<&Tag> = rumor.tags.iter()
+        .filter(|t| t.kind() == TagKind::Custom(Cow::Borrowed("imeta")))
+        .collect();
+
+    if imeta_tags.is_empty() {
+        return Vec::new();
+    }
+
+    // Try to get MDK media manager for this group
+    let handle = match TAURI_APP.get() {
+        Some(h) => h,
+        None => {
+            eprintln!("[MIP-04] App handle not available for imeta parsing");
+            return Vec::new();
+        }
+    };
+
+    let mls_service = match MlsService::new_persistent(handle) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[MIP-04] Failed to create MLS service: {}", e);
+            return Vec::new();
+        }
+    };
+
+    // Look up the group metadata to get the engine_group_id
+    let groups = match mls_service.read_groups().await {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("[MIP-04] Failed to read groups: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let group_meta = match groups.iter().find(|g| g.group_id == context.conversation_id) {
+        Some(g) => g,
+        None => {
+            eprintln!("[MIP-04] Group not found: {}", context.conversation_id);
+            return Vec::new();
+        }
+    };
+
+    if group_meta.engine_group_id.is_empty() {
+        eprintln!("[MIP-04] Group has no engine_group_id");
+        return Vec::new();
+    }
+
+    // Parse the engine group ID
+    let engine_gid_bytes = match hex::decode(&group_meta.engine_group_id) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[MIP-04] Invalid engine_group_id hex: {}", e);
+            return Vec::new();
+        }
+    };
+    let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
+
+    // Get MDK engine and media manager
+    let mdk = match mls_service.engine() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[MIP-04] Failed to get MDK engine: {}", e);
+            return Vec::new();
+        }
+    };
+    let media_manager = mdk.media_manager(gid);
+
+    let mut attachments = Vec::new();
+
+    for tag in imeta_tags {
+        // Convert nostr_sdk::Tag to nostr::Tag for MDK parsing
+        let tag_values: Vec<String> = tag.as_slice().iter().map(|s| s.to_string()).collect();
+        let mdk_tag = match nostr::Tag::parse(&tag_values) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[MIP-04] Failed to parse imeta tag: {}", e);
+                continue;
+            }
+        };
+
+        // Parse the imeta tag using MDK
+        let media_ref = match media_manager.parse_imeta_tag(&mdk_tag) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[MIP-04] Failed to parse imeta: {}", e);
+                continue;
+            }
+        };
+
+        // Extract file extension from filename or URL
+        let extension = media_ref.filename
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        // Extract hash from URL (Blossom URLs typically have hash as the path)
+        let encrypted_hash = extract_hash_from_blossom_url(&media_ref.url)
+            .unwrap_or_else(|| hex::encode(media_ref.original_hash));
+
+        // Build image metadata from dimensions if available
+        let img_meta = media_ref.dimensions.and_then(|(width, height)| {
+            // Look for blurhash in the original tag
+            let blurhash = tag.as_slice().iter()
+                .find(|s| s.starts_with("blurhash "))
+                .map(|s| s.strip_prefix("blurhash ").unwrap_or("").to_string());
+
+            // Only create ImageMetadata if we have a valid blurhash (at least 6 chars)
+            match blurhash {
+                Some(bh) if bh.len() >= 6 => Some(ImageMetadata {
+                    blurhash: bh,
+                    width,
+                    height,
+                }),
+                _ => {
+                    // Still return dimensions without blurhash for sizing purposes
+                    Some(ImageMetadata {
+                        blurhash: String::new(),
+                        width,
+                        height,
+                    })
+                }
+            }
+        });
+
+        // Get download directory for file path
+        let base_directory = if cfg!(target_os = "ios") {
+            tauri::path::BaseDirectory::Document
+        } else {
+            tauri::path::BaseDirectory::Download
+        };
+        let dir = handle.path().resolve("vector", base_directory)
+            .unwrap_or_default();
+        let file_path = dir.join(format!("{}.{}", &encrypted_hash, &extension))
+            .to_string_lossy()
+            .to_string();
+
+        // Check if file already exists locally
+        let downloaded = std::path::Path::new(&file_path).exists();
+
+        // Extract size from imeta tag (format: "size 12345")
+        let size = tag.as_slice().iter()
+            .find(|s| s.starts_with("size "))
+            .and_then(|s| s.strip_prefix("size "))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        attachments.push(Attachment {
+            id: encrypted_hash,
+            key: String::new(),  // MLS uses derived keys
+            nonce: hex::encode(media_ref.nonce),
+            extension,
+            url: media_ref.url.clone(),
+            path: file_path,
+            size,
+            img_meta,
+            downloading: false,
+            downloaded,
+            webxdc_topic: None,  // Set by caller if present
+            group_id: Some(context.conversation_id.clone()),
+            original_hash: Some(hex::encode(media_ref.original_hash)),
+            scheme_version: Some(media_ref.scheme_version.clone()),
+            mls_filename: Some(media_ref.filename.clone()),
+        });
+    }
+
+    attachments
+}
+
+/// Extract SHA256 hash from a Blossom URL
+///
+/// Blossom URLs typically follow the format: https://server.com/<sha256hash>[.ext]
+fn extract_hash_from_blossom_url(url: &str) -> Option<String> {
+    // Get the path component
+    let path = url.split('/').last()?;
+    // Remove file extension if present
+    let hash_part = path.split('.').next()?;
+    // Validate it looks like a SHA256 hash (64 hex chars)
+    if hash_part.len() == 64 && hash_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hash_part.to_string())
+    } else {
+        None
+    }
 }
 
 /// Process a file attachment rumor
@@ -384,7 +621,7 @@ async fn process_file_attachment(
     
     // Create the attachment
     let attachment = Attachment {
-        id: file_hash,
+        id: file_hash.clone(),
         key: decryption_key,
         nonce: decryption_nonce,
         extension: extension.to_string(),
@@ -395,6 +632,10 @@ async fn process_file_attachment(
         downloading: false,
         downloaded,
         webxdc_topic,
+        group_id: None,       // Kind 15 attachments use explicit key/nonce, not MLS
+        original_hash: Some(file_hash), // ox tag value (original file hash)
+        scheme_version: None, // Kind 15 uses explicit encryption, not MIP-04
+        mls_filename: None,   // Kind 15 uses explicit encryption, not MIP-04
     };
     
     // Create the message with attachment
@@ -487,7 +728,7 @@ async fn process_edit_event(
         .content(rumor.content.clone())
         .tags(tags)
         .reference_id(Some(message_id.clone()))
-        .created_at(rumor.created_at.as_u64())
+        .created_at(rumor.created_at.as_secs())
         .mine(context.is_mine)
         .npub(rumor.pubkey.to_bech32().ok())
         .build();
@@ -539,7 +780,18 @@ async fn process_app_specific(
             until: expiry_timestamp,
         });
     }
-    
+
+    // Check if this is a leave request (member wants to leave the group)
+    if is_leave_request(&rumor) {
+        let member_pubkey = rumor.pubkey.to_bech32()
+            .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
+
+        return Ok(RumorProcessingResult::LeaveRequest {
+            event_id: rumor.id.to_hex(),
+            member_pubkey,
+        });
+    }
+
     // Check if this is a PIVX payment
     if is_pivx_payment(&rumor) {
         // Extract gift code from tags
@@ -576,7 +828,7 @@ async fn process_app_specific(
             .chat_id(0) // Will be set by caller
             .content(&rumor.content)
             .tags(tags)
-            .created_at(rumor.created_at.as_u64())
+            .created_at(rumor.created_at.as_secs())
             .mine(context.is_mine)
             .npub(Some(rumor.pubkey.to_bech32().unwrap_or_default()))
             .build();
@@ -677,14 +929,14 @@ fn extract_millisecond_timestamp(rumor: &RumorEvent) -> u64 {
                 if let Ok(ms_value) = ms_str.parse::<u64>() {
                     // Validate that ms is between 0-999
                     if ms_value <= 999 {
-                        return rumor.created_at.as_u64() * 1000 + ms_value;
+                        return rumor.created_at.as_secs() * 1000 + ms_value;
                     }
                 }
             }
             // Fallback to seconds if ms tag is invalid
-            rumor.created_at.as_u64() * 1000
+            rumor.created_at.as_secs() * 1000
         }
-        None => rumor.created_at.as_u64() * 1000
+        None => rumor.created_at.as_secs() * 1000
     }
 }
 
@@ -717,9 +969,28 @@ fn is_typing_indicator(rumor: &RumorEvent) -> bool {
         .and_then(|tag| tag.content())
         .map(|content| content == "vector")
         .unwrap_or(false);
-    
+
     // Check content
     let is_typing_content = rumor.content == "typing";
-    
+
     has_vector_tag && is_typing_content
+}
+
+/// Check if rumor is a leave request
+///
+/// Validates that the rumor has:
+/// - d tag with value "vector"
+/// - content "leave"
+fn is_leave_request(rumor: &RumorEvent) -> bool {
+    // Check d tag
+    let has_vector_tag = rumor.tags
+        .find(TagKind::d())
+        .and_then(|tag| tag.content())
+        .map(|content| content == "vector")
+        .unwrap_or(false);
+
+    // Check content
+    let is_leave_content = rumor.content == "leave";
+
+    has_vector_tag && is_leave_content
 }

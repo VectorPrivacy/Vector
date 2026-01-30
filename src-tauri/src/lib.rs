@@ -401,7 +401,7 @@ async fn fetch_messages<R: Runtime>(
     if relay_url.is_some() {
         // Single relay sync - always fetch last 2 days
         let now = Timestamp::now();
-        let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+        let two_days_ago = now.as_secs() - (60 * 60 * 24 * 2);
         
         let filter = Filter::new()
             .pubkey(my_public_key)
@@ -576,10 +576,10 @@ async fn fetch_messages<R: Runtime>(
             state.sync_total_iterations = 0;
 
             // Initial 2-day window: now - 2 days → now
-            let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+            let two_days_ago = now.as_secs() - (60 * 60 * 24 * 2);
 
             state.sync_window_start = two_days_ago;
-            state.sync_window_end = now.as_u64();
+            state.sync_window_end = now.as_secs();
 
             (
                 Timestamp::from_secs(two_days_ago),
@@ -655,8 +655,8 @@ async fn fetch_messages<R: Runtime>(
     // Emit our current "Sync Range" to the frontend (only for general syncs, not single-relay)
     if relay_url.is_none() {
         handle.emit("sync_progress", serde_json::json!({
-            "since": since_timestamp.as_u64(),
-            "until": until_timestamp.as_u64(),
+            "since": since_timestamp.as_secs(),
+            "until": until_timestamp.as_secs(),
             "mode": format!("{:?}", STATE.lock().await.sync_mode)
         })).unwrap();
     }
@@ -750,7 +750,7 @@ async fn fetch_messages<R: Runtime>(
                     state.sync_window_start = oldest_ts - (60 * 60 * 24 * 2); // 2 days before oldest
                 } else {
                     // Still start backward sync, but from recent history
-                    let now = Timestamp::now().as_u64();
+                    let now = Timestamp::now().as_secs();
                     let thirty_days_ago = now - (60 * 60 * 24 * 30);
 
                     state.sync_window_end = thirty_days_ago;
@@ -1249,6 +1249,41 @@ async fn get_messages_around_id<R: Runtime>(
     Ok(messages)
 }
 
+/// Get system events (member joined/left, etc.) for a chat
+/// Returns events in frontend-friendly format for rendering as timestamps
+#[tauri::command]
+async fn get_system_events<R: Runtime>(
+    handle: AppHandle<R>,
+    conversation_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let events = db::get_system_events_for_chat(&handle, &conversation_id).await?;
+
+    // Convert StoredEvents to frontend-friendly format
+    let system_events: Vec<serde_json::Value> = events.iter().map(|event| {
+        // Extract event type from tags (stored as integer)
+        let event_type: u8 = event.tags.iter()
+            .find(|tag| tag.len() >= 2 && tag[0] == "event-type")
+            .and_then(|tag| tag[1].parse().ok())
+            .unwrap_or(255); // 255 = unknown
+
+        // Extract member npub from tags
+        let member_npub = event.tags.iter()
+            .find(|tag| tag.len() >= 2 && tag[0] == "member")
+            .map(|tag| tag[1].clone())
+            .unwrap_or_default();
+
+        serde_json::json!({
+            "id": event.id,
+            "event_type": event_type,
+            "content": event.content,
+            "member_npub": member_npub,
+            "at": event.created_at * 1000, // Convert to milliseconds for JS
+        })
+    }).collect();
+
+    Ok(system_events)
+}
+
 /// Evict messages from the backend cache for a specific chat
 /// Called by frontend when LRU eviction occurs to keep caches in sync
 #[tauri::command]
@@ -1346,6 +1381,14 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
 
             // Special handling for MLS Welcomes (not processed by rumor processor)
             if rumor.kind == Kind::MlsWelcome {
+                // Dedup: the same welcome can arrive from multiple relays simultaneously
+                {
+                    let cache = WRAPPER_ID_CACHE.lock().await;
+                    if cache.contains(&wrapper_event_id) {
+                        return false;
+                    }
+                }
+
                 // Convert rumor Event -> UnsignedEvent
                 let unsigned_opt = serde_json::to_string(&rumor)
                     .ok()
@@ -1380,6 +1423,11 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                     .unwrap_or(false);
 
                     if processed {
+                        // Mark this wrapper as processed to prevent duplicates from other relays
+                        {
+                            let mut cache = WRAPPER_ID_CACHE.lock().await;
+                            cache.insert(wrapper_event_id.clone());
+                        }
                         // Only notify UI after initial sync is complete
                         // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
                         let should_emit = {
@@ -1459,6 +1507,10 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                 }));
                             }
                             
+                            true
+                        }
+                        RumorProcessingResult::LeaveRequest { .. } => {
+                            // Leave requests only apply to MLS groups, not DMs
                             true
                         }
                         RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
@@ -2024,7 +2076,13 @@ async fn notifs() -> Result<bool, String> {
                         let emit_record = tokio::task::spawn_blocking(move || {
                             // Use runtime handle to drive async operations from blocking context
                             let rt = tokio::runtime::Handle::current();
-                            
+
+                            // EventTracker: Skip if already processed (pre-check before MDK call)
+                            if crate::mls::is_mls_event_processed(&app_handle, &ev.id.to_hex()) {
+                                // Already processed by sync or previous live handler - skip
+                                return None;
+                            }
+
                             // Create MLS service and process message
                             let svc = MlsService::new_persistent(&app_handle).ok()?;
                             let engine = svc.engine().ok()?;
@@ -2306,6 +2364,102 @@ async fn notifs() -> Result<bool, String> {
                                                                 
                                                                 None // Don't emit as message
                                                             }
+                                                            RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
+                                                                // Deduplicate by event ID - skip if already processed
+                                                                if db::event_exists(&app_handle, &event_id).unwrap_or(false) {
+                                                                    println!("[MLS] Live: Skipping duplicate leave request: {}", event_id);
+                                                                    return None;
+                                                                }
+
+                                                                // A member is requesting to leave - if we're admin, auto-remove them
+                                                                println!("[MLS] Live: Leave request received from {} in group {}", member_pubkey, group_id_for_persist);
+
+                                                                // Get member's display name for the system event
+                                                                let member_name = {
+                                                                    let state = crate::STATE.lock().await;
+                                                                    state.get_profile(&member_pubkey)
+                                                                        .map(|p| {
+                                                                            if !p.nickname.is_empty() { p.nickname.clone() }
+                                                                            else if !p.name.is_empty() { p.name.clone() }
+                                                                            else { member_pubkey.chars().take(12).collect::<String>() + "..." }
+                                                                        })
+                                                                };
+
+                                                                // Check if we're admin for this group
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let mls_svc = match MlsService::new_persistent(handle) {
+                                                                        Ok(s) => s,
+                                                                        Err(e) => {
+                                                                            eprintln!("[MLS] Live: Failed to create MLS service: {}", e);
+                                                                            return None;
+                                                                        }
+                                                                    };
+
+                                                                    // Get my hex pubkey for comparison
+                                                                    let my_hex = if let Some(client) = NOSTR_CLIENT.get() {
+                                                                        if let Ok(signer) = client.signer().await {
+                                                                            if let Ok(pk) = signer.get_public_key().await {
+                                                                                pk.to_hex()
+                                                                            } else { String::new() }
+                                                                        } else { String::new() }
+                                                                    } else { String::new() };
+
+                                                                    // Get group metadata to check admin status
+                                                                    let am_i_admin = if let Ok(groups) = mls_svc.read_groups().await {
+                                                                        if let Some(meta) = groups.iter().find(|g| g.group_id == group_id_for_persist) {
+                                                                            println!("[MLS] Live: Found group metadata, creator={}", meta.creator_pubkey);
+                                                                            // Compare with my pubkey (npub or hex)
+                                                                            meta.creator_pubkey == my_npub_for_block || meta.creator_pubkey == my_hex
+                                                                        } else {
+                                                                            println!("[MLS] Live: Group metadata not found for {}", group_id_for_persist);
+                                                                            false
+                                                                        }
+                                                                    } else {
+                                                                        println!("[MLS] Live: Failed to read groups");
+                                                                        false
+                                                                    };
+
+                                                                    println!("[MLS] Live: am_i_admin={}, my_npub={}, my_hex={}", am_i_admin, my_npub_for_block, my_hex);
+
+                                                                    if am_i_admin {
+                                                                        println!("[MLS] Live: I'm admin, auto-removing member: {}", member_pubkey);
+
+                                                                        // Save system event - only emit if actually inserted (not duplicate)
+                                                                        let was_inserted = db::save_system_event_by_id(
+                                                                            handle,
+                                                                            &event_id,
+                                                                            &group_id_for_persist,
+                                                                            crate::db::SystemEventType::MemberLeft,
+                                                                            &member_pubkey,
+                                                                            member_name.as_deref(),
+                                                                        ).await.unwrap_or(false);
+
+                                                                        if was_inserted {
+                                                                            // Emit event to frontend only if we saved it (not a duplicate)
+                                                                            let _ = handle.emit("system_event", serde_json::json!({
+                                                                                "conversation_id": group_id_for_persist,
+                                                                                "event_id": event_id,
+                                                                                "event_type": crate::db::SystemEventType::MemberLeft.as_u8(),
+                                                                                "member_pubkey": member_pubkey,
+                                                                                "member_name": member_name,
+                                                                            }));
+
+                                                                            // Remove the member
+                                                                            if let Err(e) = mls_svc.remove_member_device(&group_id_for_persist, &member_pubkey, "").await {
+                                                                                eprintln!("[MLS] Live: Failed to auto-remove member {}: {}", member_pubkey, e);
+                                                                            } else {
+                                                                                println!("[MLS] Live: Successfully removed member {} from group {}", member_pubkey, group_id_for_persist);
+                                                                            }
+                                                                        } else {
+                                                                            println!("[MLS] Live: Skipping duplicate system event: {}", event_id);
+                                                                        }
+                                                                    } else {
+                                                                        println!("[MLS] Live: Not admin, ignoring leave request from {}", member_pubkey);
+                                                                    }
+                                                                }
+
+                                                                None // Don't emit as message
+                                                            }
                                                             RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
                                                                 // Handle WebXDC peer advertisement - add peer to realtime channel
                                                                 handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
@@ -2384,7 +2538,10 @@ async fn notifs() -> Result<bool, String> {
                                                     }
                                                 }
                                             });
-    
+
+                                            // EventTracker: Track as processed after successful handling
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+
                                             processed
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Commit { mls_group_id } => {
@@ -2430,9 +2587,11 @@ async fn notifs() -> Result<bool, String> {
                                                     }
                                                 }
                                             }
+                                            // EventTracker: Track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
-                                        mdk_core::prelude::MessageProcessingResult::Proposal(_proposal) => {
+                                        mdk_core::prelude::MessageProcessingResult::Proposal(_update_result) => {
                                             // Proposal received (e.g., leave proposal)
                                             // Emit event to notify UI that group state may have changed
                                             if let Some(handle) = TAURI_APP.get() {
@@ -2440,15 +2599,32 @@ async fn notifs() -> Result<bool, String> {
                                                     "group_id": group_id_for_persist
                                                 })).ok();
                                             }
+                                            // EventTracker: Track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            None
+                                        }
+                                        mdk_core::prelude::MessageProcessingResult::PendingProposal { .. } => {
+                                            // Pending proposal - track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            None
+                                        }
+                                        mdk_core::prelude::MessageProcessingResult::IgnoredProposal { .. } => {
+                                            // Ignored proposal - track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
                                             // Unprocessable result - could be many reasons (out of order, can't decrypt, etc.)
                                             // Don't try to detect eviction here - wait for next message to trigger error-based detection
+                                            // Note: We do NOT track Unprocessable events - they may succeed on retry
                                             None
                                         }
                                         // Other message types (ExternalJoinProposal) are not persisted as chat messages
-                                        _ => None,
+                                        _ => {
+                                            // EventTracker: Track as processed
+                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            None
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -3407,20 +3583,29 @@ fn show_notification_generic(data: NotificationData) {
 
 
 /// Decrypts and saves an attachment to disk
-/// 
+///
+/// For MLS attachments (when group_id is present), uses MDK's MIP-04 decryption.
+/// For DM attachments, uses explicit key/nonce with AES-GCM.
+///
 /// Returns the path to the decrypted file if successful, or an error message if unsuccessful
 async fn decrypt_and_save_attachment<R: tauri::Runtime>(
     handle: &AppHandle<R>,
     encrypted_data: &[u8],
     attachment: &Attachment
 ) -> Result<std::path::PathBuf, String> {
-    // Attempt to decrypt the attachment
-    let decrypted_data = crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
-        .map_err(|e| e.to_string())?;
-    
+    // Decrypt the attachment using the appropriate method
+    let decrypted_data = if let Some(ref group_id) = attachment.group_id {
+        // MLS attachment - use MDK's MIP-04 decryption
+        decrypt_mls_attachment(handle, encrypted_data, attachment, group_id).await?
+    } else {
+        // DM attachment - use explicit key/nonce with AES-GCM
+        crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
+            .map_err(|e| e.to_string())?
+    };
+
     // Calculate the hash of the decrypted file
     let file_hash = calculate_file_hash(&decrypted_data);
-    
+
     // Choose the appropriate base directory based on platform
     let base_directory = if cfg!(target_os = "ios") {
         tauri::path::BaseDirectory::Document
@@ -3430,7 +3615,7 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
 
     // Resolve the directory path using the determined base directory
     let dir = handle.path().resolve("vector", base_directory).unwrap();
-    
+
     // Use hash-based filename
     let file_path = dir.join(format!("{}.{}", file_hash, attachment.extension));
 
@@ -3439,8 +3624,95 @@ async fn decrypt_and_save_attachment<R: tauri::Runtime>(
 
     // Save the file to disk
     std::fs::write(&file_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
-    
+
     Ok(file_path)
+}
+
+/// Decrypt an MLS attachment using MDK's MIP-04 decryption
+///
+/// This derives the encryption key from the MLS group secret using the original file hash
+/// and other metadata stored in the MediaReference.
+async fn decrypt_mls_attachment<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
+    encrypted_data: &[u8],
+    attachment: &Attachment,
+    group_id: &str,
+) -> Result<Vec<u8>, String> {
+    use mdk_core::encrypted_media::MediaReference;
+
+    // Create MLS service
+    let mls_service = mls::MlsService::new_persistent(handle)
+        .map_err(|e| format!("Failed to create MLS service: {}", e))?;
+
+    // Look up the group metadata to get the engine_group_id
+    let groups = mls_service.read_groups().await
+        .map_err(|e| format!("Failed to read groups: {}", e))?;
+    let group_meta = groups.iter()
+        .find(|g| g.group_id == group_id)
+        .ok_or_else(|| format!("Group not found: {}", group_id))?;
+
+    if group_meta.engine_group_id.is_empty() {
+        return Err("Group has no engine_group_id".to_string());
+    }
+
+    // Parse the engine group ID
+    let engine_gid_bytes = hex::decode(&group_meta.engine_group_id)
+        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?;
+    let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
+
+    // Get MDK engine and media manager
+    let mdk = mls_service.engine()
+        .map_err(|e| format!("Failed to get MDK engine: {}", e))?;
+    let media_manager = mdk.media_manager(gid);
+
+    // Parse the original_hash from the attachment
+    let original_hash_hex = attachment.original_hash.as_ref()
+        .ok_or("MLS attachment missing original_hash")?;
+    let original_hash_bytes = hex::decode(original_hash_hex)
+        .map_err(|e| format!("Invalid original_hash hex: {}", e))?;
+    let original_hash: [u8; 32] = original_hash_bytes.try_into()
+        .map_err(|_| "Invalid original_hash length (expected 32 bytes)")?;
+
+    // Parse the nonce from the attachment
+    let nonce_bytes = hex::decode(&attachment.nonce)
+        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
+    let nonce: [u8; 12] = nonce_bytes.try_into()
+        .map_err(|_| "Invalid nonce length (expected 12 bytes)")?;
+
+    // Use the stored filename if available (must match what was used during encryption!)
+    // The filename is part of the AAD and must match exactly for decryption to succeed
+    let filename = attachment.mls_filename.clone()
+        .unwrap_or_else(|| format!("{}.{}", original_hash_hex, attachment.extension));
+
+    // Determine MIME type from extension
+    let raw_mime_type = util::mime_from_extension(&attachment.extension);
+
+    // Normalize MIME type the same way as during encryption
+    // MDK only accepts standard MIME types, so non-image files use octet-stream
+    let mime_type = if raw_mime_type.starts_with("image/") {
+        raw_mime_type
+    } else {
+        "application/octet-stream".to_string()
+    };
+
+    // Get scheme version from attachment (default to v2 if not stored)
+    let scheme_version = attachment.scheme_version.clone()
+        .unwrap_or_else(|| "mip04-v2".to_string());
+
+    // Create a MediaReference for decryption
+    let media_ref = MediaReference {
+        url: attachment.url.clone(),
+        original_hash,
+        mime_type: mime_type.clone(),
+        filename,
+        dimensions: attachment.img_meta.as_ref().map(|m| (m.width, m.height)),
+        scheme_version,
+        nonce,
+    };
+
+    // Decrypt using MDK
+    media_manager.decrypt_from_download(encrypted_data, &media_ref)
+        .map_err(|e| format!("MIP-04 decryption failed: {}", e))
 }
 
 #[tauri::command]
@@ -3908,7 +4180,7 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
-        .opts(ClientOptions::new().gossip(false))
+        .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
@@ -3921,24 +4193,17 @@ async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     STATE.lock().await.profiles.push(profile);
 
     // Initialize profile database and set as current account
+    // Always init DB - this handles both new and existing accounts:
+    // - Creates schema if needed (IF NOT EXISTS)
+    // - Runs any pending migrations atomically
+    // - Pools the connection for fast subsequent access
     if let Some(handle) = TAURI_APP.get() {
-        let app_data = handle.path().app_local_data_dir().ok();
-        if let Some(data_dir) = app_data {
-            let profile_db = data_dir.join(&npub).join("vector.db");
-            if profile_db.exists() {
-                // Existing account - just set as current
-                let _ = crate::account_manager::set_current_account(npub.clone());
-                println!("[Login] Set current account for SQL mode: {}", npub);
-            } else {
-                // New account - initialize database and set as current
-                if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
-                    eprintln!("[Login] Failed to initialize profile database: {}", e);
-                } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
-                    eprintln!("[Login] Failed to set current account: {}", e);
-                } else {
-                    println!("[Login] Initialized new profile database and set current account: {}", npub);
-                }
-            }
+        if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
+            eprintln!("[Login] Failed to initialize profile database: {}", e);
+        } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
+            eprintln!("[Login] Failed to set current account: {}", e);
+        } else {
+            println!("[Login] Database initialized and account set: {}", npub);
         }
     }
 
@@ -4005,6 +4270,42 @@ async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
 
     // Connect!
     client.connect().await;
+
+    // Post-connect: force-regenerate device KeyPackage if flagged by migration 13
+    // (v0.3.0 upgrade: old keypackages used incompatible MLS engine format)
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        if crate::account_manager::get_current_account().is_err() {
+            return;
+        }
+
+        let handle = match TAURI_APP.get() {
+            Some(h) => h.clone(),
+            None => return,
+        };
+
+        // Check if migration flagged a forced keypackage regeneration
+        let force_regen = db::get_sql_setting(handle.clone(), "mls_force_keypackage_regen".into())
+            .ok()
+            .flatten()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        if force_regen {
+            println!("[MLS] v0.3.0 upgrade: forcing fresh KeyPackage regeneration...");
+            match regenerate_device_keypackage(false).await {
+                Ok(info) => {
+                    let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("[MLS] Device KeyPackage regenerated (new format): device_id={}", device_id);
+                    // Clear the flag so we don't regenerate again
+                    let _ = db::remove_setting(handle, "mls_force_keypackage_regen".into());
+                }
+                Err(e) => println!("[MLS] Device KeyPackage regeneration FAILED: {}", e),
+            }
+        }
+    });
+
     true
 }
 
@@ -4061,13 +4362,25 @@ async fn encrypt(input: String, password: Option<String>) -> String {
     tokio::spawn(async move {
         // Brief delay to allow encryption key to be set
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        
+
         // Skip if no account selected (migration pending)
         if crate::account_manager::get_current_account().is_err() {
             println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
             return;
         }
-        
+
+        // Skip if a forced regen is pending (connect() post-connect handler owns this)
+        let handle = match TAURI_APP.get() {
+            Some(h) => h.clone(),
+            None => return,
+        };
+        let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+            .ok().flatten().map(|v| v == "1").unwrap_or(false);
+        if force_pending {
+            println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
+            return;
+        }
+
         println!("[MLS] Ensuring persistent device KeyPackage after PIN setup...");
         match regenerate_device_keypackage(true).await {
             Ok(info) => {
@@ -4075,7 +4388,7 @@ async fn encrypt(input: String, password: Option<String>) -> String {
                 let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
                 println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
             }
-            Err(e) => eprintln!("[MLS] Device KeyPackage bootstrap failed: {}", e),
+            Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
         }
     });
 
@@ -4100,7 +4413,19 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
                 println!("[MLS] Skipping KeyPackage bootstrap - no account selected (migration may be pending)");
                 return;
             }
-            
+
+            // Skip if a forced regen is pending (connect() post-connect handler owns this)
+            let handle = match TAURI_APP.get() {
+                Some(h) => h.clone(),
+                None => return,
+            };
+            let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+                .ok().flatten().map(|v| v == "1").unwrap_or(false);
+            if force_pending {
+                println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
+                return;
+            }
+
             println!("[MLS] Ensuring persistent device KeyPackage...");
             match regenerate_device_keypackage(true).await {
                 Ok(info) => {
@@ -4108,7 +4433,7 @@ async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String,
                     let cached = info.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
                     println!("[MLS] Device KeyPackage ready: device_id={}, cached={}", device_id, cached);
                 }
-                Err(e) => eprintln!("[MLS] Device KeyPackage bootstrap failed: {}", e),
+                Err(e) => println!("[MLS] Device KeyPackage bootstrap FAILED: {}", e),
             }
         });
     }
@@ -4161,9 +4486,9 @@ async fn deep_rescan<R: Runtime>(handle: AppHandle<R>) -> Result<bool, String> {
         state.sync_total_iterations = 0;
         
         // Start with a 2-day window from now
-        let two_days_ago = now.as_u64() - (60 * 60 * 24 * 2);
+        let two_days_ago = now.as_secs() - (60 * 60 * 24 * 2);
         state.sync_window_start = two_days_ago;
-        state.sync_window_end = now.as_u64();
+        state.sync_window_end = now.as_secs();
     }
 
     // Trigger the first fetch
@@ -4235,7 +4560,7 @@ async fn create_account() -> Result<LoginKeyPair, String> {
     // Initialise the Nostr client
     let client = Client::builder()
         .signer(keys.clone())
-        .opts(ClientOptions::new().gossip(false))
+        .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
@@ -4875,7 +5200,7 @@ async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
     // Check if they have a valid badge claim from the event period
     while let Some(event) = events.next().await {
         if event.content == "fawkes_badge_claimed" {
-            let timestamp = event.created_at.as_u64();
+            let timestamp = event.created_at.as_secs();
             // Verify the timestamp is within the valid event window
             if timestamp >= FAWKES_DAY_START && timestamp < FAWKES_DAY_END {
                 return Ok(true);
@@ -4965,14 +5290,25 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
                     std::time::Duration::from_secs(5)
                 ).await {
                     Ok(mut events) => {
-                        // Check if we got any events - if so, the cached KeyPackage exists on relay
-                        if events.next().await.is_some() {
-                            return Ok(serde_json::json!({
-                                "device_id": device_id,
-                                "owner_pubkey": owner_pubkey_b32,
-                                "keypackage_ref": ref_id,
-                                "cached": true
-                            }));
+                        // Check if we got any events - if so, verify it has the encoding tag
+                        if let Some(event) = events.next().await {
+                            // Check for encoding tag (MIP-00/MIP-02 requirement)
+                            let has_encoding = event.tags.iter().any(|tag| {
+                                let slice = tag.as_slice();
+                                slice.len() >= 2 && slice[0] == "encoding" && slice[1] == "base64"
+                            });
+
+                            if has_encoding {
+                                println!("[MLS][KeyPackage] Cached keypackage has encoding tag, using cached");
+                                return Ok(serde_json::json!({
+                                    "device_id": device_id,
+                                    "owner_pubkey": owner_pubkey_b32,
+                                    "keypackage_ref": ref_id,
+                                    "cached": true
+                                }));
+                            } else {
+                                println!("[MLS][KeyPackage] Cached keypackage missing encoding tag, will regenerate");
+                            }
                         }
                     }
                     _ => {}
@@ -4994,29 +5330,91 @@ async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Value, 
             .map_err(|e| e.to_string())?
     }; // engine and mls_service dropped here before any await
 
+    // Filter out the protected tag ("-") which causes many relays to reject the event.
+    // MDK adds this tag but it breaks compatibility with relays enforcing NIP-70.
+    let filtered_tags: Vec<_> = kp_tags
+        .into_iter()
+        .filter(|t| t.as_slice().first().map(|s| s.as_str()) != Some("-"))
+        .collect();
+
     // Build and sign event with nostr client
     let kp_event = client
-        .sign_event_builder(EventBuilder::new(Kind::MlsKeyPackage, kp_encoded).tags(kp_tags))
+        .sign_event_builder(EventBuilder::new(Kind::MlsKeyPackage, kp_encoded).tags(filtered_tags))
         .await
         .map_err(|e| e.to_string())?;
 
-    // Publish to TRUSTED_RELAYS
-    client
-        .send_event_to(TRUSTED_RELAYS.iter().copied(), &kp_event)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Debug: Print event details before publishing
+    println!("[MLS KeyPackage] Event ID: {}", kp_event.id.to_hex());
+    println!("[MLS KeyPackage] Kind: {}", kp_event.kind.as_u16());
+    println!("[MLS KeyPackage] Tags count: {}", kp_event.tags.len());
+    for (i, tag) in kp_event.tags.iter().enumerate() {
+        println!("[MLS KeyPackage] Tag {}: {:?}", i, tag.as_slice());
+    }
+
+    // Publish to TRUSTED_RELAYS with retry logic for slow connections
+    let mut send_result = None;
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &kp_event).await {
+            Ok(result) => {
+                // Check if at least one relay succeeded
+                if !result.success.is_empty() {
+                    println!("[MLS KeyPackage] Publish succeeded on attempt {}: {:?}", attempt, result);
+                    send_result = Some(result);
+                    break;
+                } else {
+                    // All relays failed, retry
+                    println!("[MLS KeyPackage] Attempt {}/3: all relays failed, retrying in {}s...",
+                        attempt, attempt * 5);
+                    last_error = format!("All relays failed: {:?}", result.failed);
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs((attempt * 5) as u64)).await;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[MLS KeyPackage] Attempt {}/3 error: {}", attempt, e);
+                last_error = e.to_string();
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs((attempt * 5) as u64)).await;
+                }
+            }
+        }
+    }
+
+    // If no successful publish after retries, return error
+    let send_result = send_result.ok_or_else(|| {
+        format!("Failed to publish keypackage after 3 attempts: {}", last_error)
+    })?;
+
+    println!("[MLS KeyPackage] Publish result: {:?}", send_result);
 
     // Upsert into mls_keypackage_index
     {
         let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
-        let now = Timestamp::now().as_u64();
+        let now = Timestamp::now().as_secs();
+        let new_kp_ref = kp_event.id.to_hex();
+
+        // Remove any existing entries that match either:
+        // 1. Same owner+device (old keypackage from this device)
+        // 2. Same keypackage_ref (stale network entry with wrong device_id)
+        index.retain(|entry| {
+            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(&owner_pubkey_b32);
+            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(&device_id);
+            let same_ref = entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(&new_kp_ref);
+            // Keep entries that don't match either condition
+            !((same_owner && same_device) || same_ref)
+        });
+
         index.push(serde_json::json!({
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
-            "keypackage_ref": kp_event.id.to_hex(),
+            "keypackage_ref": new_kp_ref,
+            "created_at": kp_event.created_at.as_secs(),
             "fetched_at": now,
             "expires_at": 0u64
         }));
+
         let _ = db::save_mls_keypackages(handle.clone(), &index).await;
     }
 
@@ -5294,6 +5692,8 @@ struct SimpleWelcome {
     // Welcomer (hex)
     welcomer: String,
     member_count: u32,
+    // Timestamp of the welcome event (for deduplication - keep most recent)
+    created_at: u64,
 }
 
 /// List pending MLS welcomes (invites)
@@ -5307,7 +5707,7 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
             let engine = mls.engine().map_err(|e| e.to_string())?;
 
-            let pending = engine.get_pending_welcomes().map_err(|e| e.to_string())?;
+            let pending = engine.get_pending_welcomes(None).map_err(|e| e.to_string())?;
 
             let mut out: Vec<SimpleWelcome> = Vec::with_capacity(pending.len());
             for w in pending {
@@ -5324,8 +5724,25 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                     group_relays: w.group_relays.iter().map(|r| r.to_string()).collect(),
                     welcomer: w.welcomer.to_bech32().map_err(|e| e.to_string())?,
                     member_count: w.member_count,
+                    created_at: w.event.created_at.as_secs(),
                 });
             }
+
+            // Deduplicate welcomes by nostr_group_id, keeping only the most recent one
+            // (based on event timestamp, not member count which can decrease with kicks)
+            let mut deduped: std::collections::HashMap<String, SimpleWelcome> = std::collections::HashMap::new();
+            for welcome in out {
+                let group_id = welcome.nostr_group_id.clone();
+                if let Some(existing) = deduped.get(&group_id) {
+                    // Keep the one with the later timestamp (most recent invite)
+                    if welcome.created_at > existing.created_at {
+                        deduped.insert(group_id, welcome);
+                    }
+                } else {
+                    deduped.insert(group_id, welcome);
+                }
+            }
+            let out: Vec<SimpleWelcome> = deduped.into_values().collect();
 
             Ok::<Vec<SimpleWelcome>, String>(out)
         })
@@ -5382,18 +5799,21 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
             
             // Get welcome details and accept it (engine work in no-await scope)
-            let (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex) = {
+            let (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex, invite_sent_at) = {
                 let engine = mls.engine().map_err(|e| e.to_string())?;
-                
+
                 let id = nostr_sdk::EventId::from_hex(&welcome_event_id_hex).map_err(|e| e.to_string())?;
                 let welcome_opt = engine.get_welcome(&id).map_err(|e| e.to_string())?;
                 let welcome = welcome_opt.ok_or_else(|| "Welcome not found".to_string())?;
-                
+
                 // Extract metadata before accepting
                 let nostr_group_id_bytes = welcome.nostr_group_id.clone();
                 let group_name = welcome.group_name.clone();
                 let welcomer_hex = welcome.welcomer.to_hex();
                 let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
+                // Get the invite-sent timestamp from the welcome event (not acceptance time!)
+                // This is critical for accurate sync windows
+                let invite_sent_at = welcome.event.created_at.as_secs();
 
                 // Accept the welcome - this updates engine state internally
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
@@ -5438,8 +5858,9 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 println!("[MLS]   - wire_id (h tag): {}", nostr_group_id);
                 println!("[MLS]   - engine_group_id: {}", engine_group_id);
                 println!("[MLS]   - group_name: {}", group_name);
-                
-                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex)
+                println!("[MLS]   - invite_sent_at: {}", invite_sent_at);
+
+                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex, invite_sent_at)
             }; // engine dropped here
             
             // Now persist the group metadata (awaitable section)
@@ -5454,6 +5875,11 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                     println!("[MLS] Re-invited to previously evicted group: {}", nostr_group_id);
                     // Clear the evicted flag and update metadata
                     groups[idx].evicted = false;
+                    // CRITICAL: Update created_at to the NEW invite time, not the old one.
+                    // The cursor was removed on eviction, so sync_group_since_cursor will use
+                    // created_at as the starting point. If we don't update it, sync will try
+                    // to process old events from before the kick that can't be decrypted.
+                    groups[idx].created_at = invite_sent_at;
                     groups[idx].updated_at = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|e| e.to_string())?
@@ -5466,18 +5892,19 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                 }
             } else {
                 // Build metadata for the accepted group
+                // Use invite_sent_at (from welcome event) for created_at so sync fetches from the right time
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|e| e.to_string())?
                     .as_secs();
-                
+
                 let metadata = mls::MlsGroupMetadata {
                     group_id: nostr_group_id.clone(),         // Wire ID for relay filtering (h tag)
                     engine_group_id: engine_group_id.clone(), // Internal engine ID for local operations
                     creator_pubkey: welcomer_hex,             // The welcomer becomes the creator from our perspective
                     name: group_name,
                     avatar_ref: None,
-                    created_at: now_secs,
+                    created_at: invite_sent_at,               // Use invite-sent time, NOT acceptance time!
                     updated_at: now_secs,
                     evicted: false,                           // Accepting a welcome means we're joining, not evicted
                 };
@@ -5693,6 +6120,16 @@ async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, String>
                 }
             }
 
+            // Fallback: If admins list is empty, use creator_pubkey from stored metadata
+            // This ensures non-admins can still see who the group owner/admin is
+            if admins.is_empty() {
+                if let Some(meta) = meta_groups.iter().find(|g| g.group_id == wire_id) {
+                    if !meta.creator_pubkey.is_empty() {
+                        admins.push(meta.creator_pubkey.clone());
+                    }
+                }
+            }
+
             Ok(GroupMembers {
                 group_id: wire_id,
                 members,
@@ -5764,7 +6201,8 @@ async fn refresh_keypackages_for_contact(
             "owner_pubkey": owner_pubkey_b32,
             "device_id": device_id,
             "keypackage_ref": keypackage_ref,
-            "fetched_at": Timestamp::now().as_u64(),
+            "created_at": e.created_at.as_secs(),
+            "fetched_at": Timestamp::now().as_secs(),
             "expires_at": 0u64
         }));
     }
@@ -5775,19 +6213,41 @@ async fn refresh_keypackages_for_contact(
     // Load existing index
     let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
 
-    // Remove any existing entries for this owner+device_id to avoid duplicates
-    for new_entry in &new_entries {
-        let owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
-        let device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
+    // Dedup existing entries by keypackage_ref — keep first occurrence per ref.
+    // This cleans up stale duplicates where the same keypackage was stored twice
+    // (once with the real device_id from local generation, once with event_id from network).
+    {
+        let mut seen_refs = std::collections::HashSet::new();
         index.retain(|entry| {
-            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner);
-            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(device);
-            !(same_owner && same_device)
+            let r = entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            seen_refs.insert(r)
         });
     }
 
-    // Append new entries and persist
-    index.extend(new_entries.into_iter());
+    // Merge new entries into the index, preserving local entries that share the same
+    // keypackage_ref (they have the correct device_id, whereas network entries use event_id).
+    for new_entry in new_entries {
+        let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
+        let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
+        let new_device = new_entry.get("device_id").and_then(|v| v.as_str()).unwrap_or_default();
+
+        // Skip if a local entry already has this keypackage_ref (preserves correct device_id)
+        let ref_exists = index.iter().any(|entry| {
+            entry.get("keypackage_ref").and_then(|v| v.as_str()) == Some(new_ref)
+        });
+        if ref_exists {
+            continue;
+        }
+
+        // Remove any existing entry for the same owner+device_id, then add the new one
+        index.retain(|entry| {
+            let same_owner = entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(new_owner);
+            let same_device = entry.get("device_id").and_then(|v| v.as_str()) == Some(new_device);
+            !(same_owner && same_device)
+        });
+        index.push(new_entry);
+    }
+
     let _ = db::save_mls_keypackages(handle.clone(), &index).await;
 
     Ok(results)
@@ -6022,6 +6482,7 @@ pub fn run() {
             get_chat_messages_paginated,
             get_message_views,
             get_messages_around_id,
+            get_system_events,
             get_chat_message_count,
             get_file_hash_index,
             evict_chat_messages,
@@ -6115,6 +6576,7 @@ pub fn run() {
             // Mini Apps history commands
             miniapps::commands::miniapp_record_opened,
             miniapps::commands::miniapp_get_history,
+            miniapps::commands::miniapp_remove_from_history,
             miniapps::commands::miniapp_toggle_favorite,
             miniapps::commands::miniapp_set_favorite,
             // Mini Apps marketplace commands

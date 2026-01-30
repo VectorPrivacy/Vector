@@ -42,8 +42,9 @@
 //! The value is a comma-separated list of permission names.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fmt;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::str::FromStr;
 
 /// Available permissions that Mini Apps can request
@@ -237,6 +238,7 @@ impl FromStr for MiniAppPermission {
 }
 
 /// Parse a comma-separated string of permissions into a set
+#[cfg(test)]
 pub fn parse_permissions(permissions_str: &str) -> HashSet<MiniAppPermission> {
     permissions_str
         .split(',')
@@ -245,14 +247,8 @@ pub fn parse_permissions(permissions_str: &str) -> HashSet<MiniAppPermission> {
 }
 
 /// Serialize a set of permissions to a comma-separated string
+#[cfg(test)]
 pub fn serialize_permissions(permissions: &HashSet<MiniAppPermission>) -> String {
-    let mut perms: Vec<_> = permissions.iter().map(|p| p.to_string()).collect();
-    perms.sort();
-    perms.join(",")
-}
-
-/// Serialize a vec of permissions to a comma-separated string
-pub fn serialize_permissions_vec(permissions: &[MiniAppPermission]) -> String {
     let mut perms: Vec<_> = permissions.iter().map(|p| p.to_string()).collect();
     perms.sort();
     perms.join(",")

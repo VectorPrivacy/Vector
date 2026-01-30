@@ -67,6 +67,7 @@ fn main() {
             "get_chat_messages_paginated",
             "get_message_views",
             "get_messages_around_id",
+            "get_system_events",
             "get_chat_message_count",
             "get_file_hash_index",
             "evict_chat_messages",
@@ -138,6 +139,12 @@ fn main() {
             "miniapp_get_updates",
             "miniapp_send_update",
             "miniapp_list_open",
+            // Mini Apps history commands
+            "miniapp_record_opened",
+            "miniapp_get_history",
+            "miniapp_remove_from_history",
+            "miniapp_toggle_favorite",
+            "miniapp_set_favorite",
             // Mini Apps realtime channel commands (Iroh P2P)
             "miniapp_join_realtime_channel",
             "miniapp_send_realtime_data",
@@ -159,6 +166,15 @@ fn main() {
             "marketplace_update_app",
             "marketplace_publish_app",
             "marketplace_get_trusted_publisher",
+            "marketplace_get_app_by_hash",
+            // Mini Apps permissions commands
+            "miniapp_get_available_permissions",
+            "miniapp_get_granted_permissions",
+            "miniapp_get_granted_permissions_for_window",
+            "miniapp_set_permission",
+            "miniapp_set_permissions",
+            "miniapp_has_permission_prompt",
+            "miniapp_revoke_all_permissions",
             // Whisper commands (conditional)
             "delete_whisper_model",
             "list_models",

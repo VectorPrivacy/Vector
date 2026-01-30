@@ -2,8 +2,8 @@ use crate::rand;
 use crate::rand::Rng;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use aes::Aes256;
+use aes::cipher::typenum::U16;
 use aes_gcm::{AesGcm, AeadInPlace, KeyInit};
-use generic_array::{GenericArray, typenum::U16};
 use argon2::{Argon2, Params, Version};
 use chacha20poly1305::{
     aead::Aead,
@@ -39,23 +39,24 @@ pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, S
     let nonce_bytes = hex::decode(&params.nonce).unwrap();
 
     // Initialize AES-GCM cipher
-    let cipher = AesGcm::<Aes256, U16>::new(
-        GenericArray::from_slice(&key_bytes)
-    );
+    let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
+        .map_err(|_| String::from("Invalid encryption key"))?;
 
     // Prepare nonce
-    let nonce = GenericArray::from_slice(&nonce_bytes);
+    let nonce_arr: [u8; 16] = nonce_bytes.try_into()
+        .map_err(|_| String::from("Invalid nonce length"))?;
+    let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
 
     // Create output buffer
     let mut buffer = data.to_vec();
 
     // Encrypt in place and get authentication tag
     let tag = cipher
-        .encrypt_in_place_detached(nonce, &[], &mut buffer)
+        .encrypt_in_place_detached(&nonce, &[], &mut buffer)
         .map_err(|_| String::from("Failed to Encrypt Data"))?;
 
     // Append the authentication tag to the encrypted data
-    buffer.extend_from_slice(tag.as_slice());
+    buffer.extend_from_slice(&tag);
 
     Ok(buffer)
 }
@@ -100,11 +101,11 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
         .expect("Key should be valid");
     
     // Create the nonce
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    
+    let nonce: Nonce = nonce_bytes.into();
+
     // Encrypt the input
     let ciphertext = cipher
-        .encrypt(nonce, input.as_bytes())
+        .encrypt(&nonce, input.as_bytes())
         .expect("Encryption should not fail");
     
     // Prepend the nonce to our ciphertext
@@ -154,7 +155,9 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
     };
     
     // Create the nonce and decrypt
-    let plaintext = match cipher.decrypt(Nonce::from_slice(nonce_bytes), actual_ciphertext) {
+    let nonce_arr: [u8; 12] = nonce_bytes.try_into().map_err(|_| ())?;
+    let nonce: Nonce = nonce_arr.into();
+    let plaintext = match cipher.decrypt(&nonce, actual_ciphertext) {
         Ok(pt) => pt,
         Err(_) => return Err(())
     };
@@ -189,20 +192,23 @@ pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Re
     let (ciphertext, tag_bytes) = encrypted_data.split_at(encrypted_data.len() - 16);
 
     // Initialize AES-GCM cipher
-    let cipher = AesGcm::<Aes256, U16>::new(
-        GenericArray::from_slice(&key_bytes)
-    );
+    let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
+        .map_err(|_| String::from("Invalid decryption key"))?;
 
     // Prepare nonce and tag
-    let nonce = GenericArray::from_slice(&nonce_bytes);
-    let tag = aes_gcm::Tag::from_slice(tag_bytes);
+    let nonce_arr: [u8; 16] = nonce_bytes.try_into()
+        .map_err(|_| String::from("Invalid nonce length"))?;
+    let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
+    let tag_arr: [u8; 16] = tag_bytes.try_into()
+        .map_err(|_| String::from("Invalid tag length"))?;
+    let tag = aes_gcm::Tag::<U16>::from(tag_arr);
 
     // Create output buffer
     let mut buffer = ciphertext.to_vec();
 
     // Perform decryption
     let decryption = cipher
-        .decrypt_in_place_detached(nonce, &[], &mut buffer, tag);
+        .decrypt_in_place_detached(&nonce, &[], &mut buffer, &tag);
 
     // Check that it went well
     if decryption.is_err() {

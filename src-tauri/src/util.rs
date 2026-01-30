@@ -460,7 +460,12 @@ pub fn generate_blurhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Op
 /// Returns a data URL string that can be used directly in an <img> src attribute
 pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch: f32) -> String {
     const EMPTY_DATA_URL: &str = "data:image/png;base64,";
-    
+
+    // Blurhash must be at least 6 characters - return early if invalid
+    if blurhash.len() < 6 {
+        return EMPTY_DATA_URL.to_string();
+    }
+
     let decoded_data = match decode(blurhash, width, height, punch) {
         Ok(data) => data,
         Err(e) => {

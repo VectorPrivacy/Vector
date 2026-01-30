@@ -5,6 +5,13 @@ const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
+// System event types (matches Rust SystemEventType enum)
+const SystemEventType = {
+    MemberLeft: 0,
+    MemberJoined: 1,
+    MemberRemoved: 2,
+};
+
 const domTheme = document.getElementById('theme');
 
 const domLoginStart = document.getElementById('login-start');
@@ -92,6 +99,8 @@ const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
 const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
 const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
 const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
+const domMiniAppsGrid = document.getElementById('miniapps-grid');
+const domMiniAppsSearch = document.getElementById('miniapps-search');
 const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
 const domAttachmentPanelMarketplace = document.getElementById('attachment-panel-marketplace');
 const domAttachmentPanelPivx = document.getElementById('attachment-panel-pivx');
@@ -149,6 +158,8 @@ const domSettingsDonorsInfo = document.getElementById('donors-info');
 const domDonorPivx = document.getElementById('donor-pivx');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
+const domRestorePivxGroup = document.getElementById('restore-pivx-group');
+const domRestorePivxBtn = document.getElementById('restore-pivx-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
@@ -284,6 +295,8 @@ function closeAttachmentPanel() {
     domAttachmentPanel.classList.remove('visible');
     domAttachmentPanel.style.bottom = '';
     domChatMessageInputFile.classList.remove('open');
+    // Deactivate edit mode if active
+    deactivateMiniAppsEditMode();
     // Reset to main view when closing
     showAttachmentPanelMain();
 }
@@ -350,11 +363,17 @@ async function showAttachmentPanelMiniApps() {
         domAttachmentPanelPivxView.style.display = 'none';
     }
 
+    // Clear search input and reset filter
+    if (domMiniAppsSearch) {
+        domMiniAppsSearch.value = '';
+        filterMiniApps('');
+    }
+
     // Load Mini Apps history from backend
     await loadMiniAppsHistory();
-    
+
     // Animate items with staggered delay
-    animateAttachmentPanelItems(domAttachmentPanelMiniAppsView);
+    animateAttachmentPanelItems(domMiniAppsGrid);
 }
 
 /**
@@ -432,6 +451,9 @@ function showToast(message) {
  * Shows the PIVX wallet panel and hides the main Mini Apps view
  */
 function showPivxWalletPanel() {
+    // Track PIVX usage for history-based positioning
+    localStorage.setItem('pivx_last_used', Date.now().toString());
+
     if (domAttachmentPanelMiniAppsView) {
         domAttachmentPanelMiniAppsView.style.display = 'none';
     }
@@ -491,7 +513,7 @@ function hidePivxWalletPanel() {
     }
     if (domAttachmentPanelMiniAppsView) {
         domAttachmentPanelMiniAppsView.style.display = 'flex';
-        animateAttachmentPanelItems(domAttachmentPanelMiniAppsView);
+        animateAttachmentPanelItems(domMiniAppsGrid);
     }
     if (domAttachmentPanel) {
         domAttachmentPanel.classList.remove('pivx-active');
@@ -1478,86 +1500,536 @@ function animateAttachmentPanelItems(container) {
         // Add animation with staggered delay
         item.style.animationDelay = `${index * staggerDelay}s`;
         item.classList.add('animate-in');
+
+        // Remove animate-in class when animation finishes to avoid conflicts with other animations
+        item.addEventListener('animationend', () => {
+            item.classList.remove('animate-in');
+            item.style.animationDelay = '';
+        }, { once: true });
     });
 }
 
 /**
  * Loads and renders the Mini Apps history in the panel
+ * PIVX is treated as a virtual app and positioned based on usage history
  */
 async function loadMiniAppsHistory() {
     try {
-        const history = await invoke('miniapp_get_history', { limit: 20 });
+        let history = await invoke('miniapp_get_history', { limit: null });
 
-        // Clear existing Mini App items (keep the Back, Marketplace, and PIVX buttons)
-        const existingItems = domAttachmentPanelMiniAppsView.querySelectorAll('.attachment-panel-item:not(#attachment-panel-back):not(#attachment-panel-marketplace):not(#attachment-panel-pivx), .attachment-panel-empty');
-        existingItems.forEach(item => item.remove());
+        // Pre-install default apps for new users (empty history)
+        const preInstallDone = localStorage.getItem('miniapps_preinstall_done') === 'true';
+        if (history.length === 0 && !preInstallDone) {
+            // Mark as done first to prevent re-triggering
+            localStorage.setItem('miniapps_preinstall_done', 'true');
 
-        // Ensure PIVX button exists and has click handler
-        let pivxBtn = document.getElementById('attachment-panel-pivx');
-        if (!pivxBtn) {
-            pivxBtn = document.createElement('button');
-            pivxBtn.className = 'attachment-panel-item';
+            // Clear any existing items first (except Marketplace button)
+            const existingItems = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace), .attachment-panel-empty');
+            existingItems.forEach(item => item.remove());
+
+            // Default apps to pre-install (by app ID with display names)
+            const defaultApps = [
+                { id: 'vectify', name: 'Vectify' },
+                { id: 'deadlock', name: 'State of Surveillance' }
+            ];
+
+            // IMMEDIATELY show placeholder UI before fetching marketplace data
+            const staggerDelay = 0.03; // Same delay used for regular mini apps
+            let animIndex = 0;
+
+            for (const { id: appId, name: displayName } of defaultApps) {
+                const item = document.createElement('button');
+                item.className = 'attachment-panel-item attachment-panel-miniapp animate-in';
+                item.id = `miniapp-downloading-${appId}`;
+                item.draggable = false;
+                item.style.position = 'relative';
+                item.style.animationDelay = `${animIndex * staggerDelay}s`;
+
+                // Show generic loading state initially
+                item.innerHTML = `
+                    <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                        <span class="icon icon-play"></span>
+                        <div class="miniapp-downloading-overlay">
+                            <div class="miniapp-downloading-spinner" data-app-id="${escapeHtml(appId)}"></div>
+                        </div>
+                    </div>
+                    <span class="attachment-panel-label cutoff">${escapeHtml(displayName)}</span>
+                `;
+                item.dataset.appName = displayName.toLowerCase();
+                item.addEventListener('animationend', () => {
+                    item.classList.remove('animate-in');
+                    item.style.animationDelay = '';
+                }, { once: true });
+                domMiniAppsGrid.appendChild(item);
+                animIndex++;
+            }
+
+            // Add PIVX after the downloading apps
+            const pivxBtn = document.createElement('button');
+            pivxBtn.className = 'attachment-panel-item animate-in';
             pivxBtn.id = 'attachment-panel-pivx';
+            pivxBtn.draggable = false;
+            pivxBtn.style.animationDelay = `${animIndex * staggerDelay}s`;
             pivxBtn.innerHTML = `
                 <div class="attachment-panel-btn attachment-panel-pivx-btn">
                     <span class="icon icon-pivx"></span>
                 </div>
                 <span class="attachment-panel-label">PIVX</span>
             `;
-            // Insert after Marketplace button
-            const marketplaceBtn = document.getElementById('attachment-panel-marketplace');
-            if (marketplaceBtn && marketplaceBtn.nextSibling) {
-                domAttachmentPanelMiniAppsView.insertBefore(pivxBtn, marketplaceBtn.nextSibling);
-            } else {
-                domAttachmentPanelMiniAppsView.appendChild(pivxBtn);
+            pivxBtn.dataset.appName = 'pivx';
+            pivxBtn.addEventListener('mouseenter', () => showGlobalTooltip('PIVX Wallet', pivxBtn));
+            pivxBtn.addEventListener('mouseleave', () => hideGlobalTooltip());
+            pivxBtn.addEventListener('animationend', () => {
+                pivxBtn.classList.remove('animate-in');
+                pivxBtn.style.animationDelay = '';
+            }, { once: true });
+            pivxBtn.onclick = () => {
+                if (miniAppsEditMode) return;
+                hideGlobalTooltip();
+                showPivxWalletPanel();
+            };
+            domMiniAppsGrid.appendChild(pivxBtn);
+
+            // Now fetch marketplace data and start downloads in background
+            try {
+                await fetchMarketplaceApps(true);
+
+                const appsToInstall = [];
+
+                // Update placeholders with actual app metadata and start downloads
+                for (const { id: appId } of defaultApps) {
+                    const app = marketplaceApps.find(a => a.id === appId);
+                    const placeholder = document.getElementById(`miniapp-downloading-${appId}`);
+
+                    if (app && placeholder) {
+                        appsToInstall.push(app);
+
+                        // Update with actual icon and name
+                        const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
+                        const iconHtml = iconSrc
+                            ? `<img src="${escapeHtml(iconSrc)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit;" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`
+                            : '<span class="icon icon-play"></span>';
+
+                        placeholder.innerHTML = `
+                            <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                                ${iconHtml}
+                                <div class="miniapp-downloading-overlay">
+                                    <div class="miniapp-downloading-spinner" data-app-id="${escapeHtml(appId)}"></div>
+                                </div>
+                            </div>
+                            <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
+                        `;
+                        placeholder.dataset.appName = app.name.toLowerCase();
+                    } else if (!app && placeholder) {
+                        console.warn(`[Mini Apps] Default app "${appId}" not found in marketplace`);
+                        placeholder.remove();
+                    }
+                }
+
+                // Start all downloads in parallel - transform placeholders when complete
+                const installPromises = appsToInstall.map(async (app) => {
+                    try {
+                        await installMarketplaceApp(app.id);
+
+                        // Transform the downloading placeholder into a normal clickable app
+                        const placeholder = document.getElementById(`miniapp-downloading-${app.id}`);
+                        if (placeholder) {
+                            // Remove the downloading overlay
+                            const overlay = placeholder.querySelector('.miniapp-downloading-overlay');
+                            if (overlay) overlay.remove();
+
+                            // Remove the temporary ID
+                            placeholder.removeAttribute('id');
+
+                            // Add click handler to open the app
+                            placeholder.onclick = async () => {
+                                if (miniAppsEditMode) return;
+                                hideGlobalTooltip();
+                                // Fetch the updated app info from history
+                                const historyApps = await invoke('miniapp_get_history', { limit: null });
+                                const historyApp = historyApps.find(h => h.marketplace_id === app.id || h.name === app.name);
+                                if (historyApp) {
+                                    await openMiniAppFromHistory(historyApp);
+                                }
+                            };
+
+                            // Add tooltip
+                            placeholder.addEventListener('mouseenter', () => showGlobalTooltip(app.name, placeholder));
+                            placeholder.addEventListener('mouseleave', () => hideGlobalTooltip());
+                        }
+
+                        return { success: true, app };
+                    } catch (installErr) {
+                        console.error(`[Mini Apps] Failed to pre-install ${app.id}:`, installErr);
+                        // Remove failed placeholder
+                        const placeholder = document.getElementById(`miniapp-downloading-${app.id}`);
+                        if (placeholder) placeholder.remove();
+                        return { success: false, app, error: installErr };
+                    }
+                });
+
+                // Wait for all installs to complete (UI updates happen individually above)
+                await Promise.all(installPromises);
+
+                // Return early - don't do the normal render since we already set up the UI
+                return;
+            } catch (preInstallErr) {
+                console.error('[Mini Apps] Pre-install failed:', preInstallErr);
             }
         }
-        // Always ensure click handler is attached
-        pivxBtn.onclick = () => showPivxWalletPanel();
-        
-        // Add Mini App items
-        for (const app of history) {
-            const item = document.createElement('button');
-            item.className = 'attachment-panel-item attachment-panel-miniapp';
-            
-            // Start with a placeholder icon, then load the actual icon
-            item.innerHTML = `
-                <div class="attachment-panel-btn attachment-panel-miniapp-btn">
-                    <span class="icon icon-play"></span>
-                </div>
-                <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
-            `;
-            
-            // Add tooltip on hover for the entire item
-            item.addEventListener('mouseenter', (e) => {
-                showGlobalTooltip(app.name, item);
-            });
-            item.addEventListener('mouseleave', () => {
-                hideGlobalTooltip();
-            });
-            
-            item.onclick = async () => {
-                hideGlobalTooltip();
-                closeAttachmentPanel();
-                // Open the Mini App using the stored attachment reference
-                await openMiniAppFromHistory(app);
-            };
-            domAttachmentPanelMiniAppsView.appendChild(item);
-            
-            // Load the Mini App icon asynchronously
-            loadMiniAppIcon(app, item.querySelector('.attachment-panel-btn'));
+
+        // Clear existing Mini App items (keep only Marketplace)
+        const existingItems = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace), .attachment-panel-empty');
+        existingItems.forEach(item => item.remove());
+
+        // Check if PIVX is hidden by user
+        const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
+
+        // Get PIVX last used timestamp from localStorage (stored in ms, convert to seconds)
+        const pivxLastUsedMs = parseInt(localStorage.getItem('pivx_last_used') || '0', 10);
+        const pivxLastOpenedAt = Math.floor(pivxLastUsedMs / 1000);
+
+        // Create combined list of apps with PIVX as a virtual entry (if not hidden)
+        const allApps = [
+            // Add PIVX as a virtual app entry (only if not hidden)
+            ...(!pivxHidden ? [{ name: 'PIVX', isPivx: true, last_opened_at: pivxLastOpenedAt }] : []),
+            // Add history apps with their timestamps (backend uses last_opened_at in seconds)
+            ...history.map(app => ({ ...app, isPivx: false, last_opened_at: app.last_opened_at || 0 }))
+        ];
+
+        // Sort by last_opened_at timestamp (most recent first)
+        allApps.sort((a, b) => b.last_opened_at - a.last_opened_at);
+
+        // Add all app items in sorted order
+        for (const app of allApps) {
+            if (app.isPivx) {
+                // Create PIVX button
+                const pivxBtn = document.createElement('button');
+                pivxBtn.className = 'attachment-panel-item';
+                pivxBtn.id = 'attachment-panel-pivx';
+                pivxBtn.draggable = false;
+                pivxBtn.innerHTML = `
+                    <div class="attachment-panel-btn attachment-panel-pivx-btn">
+                        <span class="icon icon-pivx"></span>
+                    </div>
+                    <span class="attachment-panel-label">PIVX</span>
+                `;
+                // Store app name for search filtering
+                pivxBtn.dataset.appName = 'pivx';
+
+                // Add tooltip on hover
+                pivxBtn.addEventListener('mouseenter', () => {
+                    showGlobalTooltip('PIVX Wallet', pivxBtn);
+                });
+                pivxBtn.addEventListener('mouseleave', () => {
+                    hideGlobalTooltip();
+                });
+
+                pivxBtn.onclick = () => {
+                    // Don't launch if in edit mode
+                    if (miniAppsEditMode) return;
+                    hideGlobalTooltip();
+                    showPivxWalletPanel();
+                };
+                domMiniAppsGrid.appendChild(pivxBtn);
+            } else {
+                // Create Mini App button
+                const item = document.createElement('button');
+                item.className = 'attachment-panel-item attachment-panel-miniapp';
+                item.draggable = false;
+
+                // Start with a placeholder icon, then load the actual icon
+                item.innerHTML = `
+                    <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                        <span class="icon icon-play"></span>
+                    </div>
+                    <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
+                `;
+
+                // Store the app name for search filtering
+                item.dataset.appName = app.name.toLowerCase();
+
+                // Add tooltip on hover for the entire item
+                item.addEventListener('mouseenter', () => {
+                    showGlobalTooltip(app.name, item);
+                });
+                item.addEventListener('mouseleave', () => {
+                    hideGlobalTooltip();
+                });
+
+                item.onclick = async () => {
+                    // Don't launch if in edit mode
+                    if (miniAppsEditMode) return;
+                    hideGlobalTooltip();
+                    // Open the Mini App using the stored attachment reference
+                    await openMiniAppFromHistory(app);
+                };
+                domMiniAppsGrid.appendChild(item);
+
+                // Load the Mini App icon asynchronously
+                loadMiniAppIcon(app, item.querySelector('.attachment-panel-btn'));
+            }
         }
-        
-        // If no history, show a message
-        if (history.length === 0) {
+
+        // If no apps at all (only PIVX which is always there), show empty message
+        if (history.length === 0 && pivxLastOpenedAt === 0) {
             const emptyMsg = document.createElement('div');
             emptyMsg.className = 'attachment-panel-empty';
             emptyMsg.textContent = 'No recent Mini Apps';
-            domAttachmentPanelMiniAppsView.appendChild(emptyMsg);
+            domMiniAppsGrid.appendChild(emptyMsg);
         }
     } catch (e) {
         console.error('Failed to load Mini Apps history:', e);
     }
+}
+
+/**
+ * Filters the Mini Apps grid based on search query
+ * Hides Marketplace when search is active
+ * @param {string} query - The search query
+ */
+function filterMiniApps(query) {
+    const normalizedQuery = query.toLowerCase().trim();
+    const isSearching = normalizedQuery.length > 0;
+
+    // Get all items in the grid
+    const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item');
+    let visibleCount = 0;
+
+    items.forEach(item => {
+        const appName = item.dataset.appName;
+
+        // Always hide Marketplace when searching
+        if (item.id === 'attachment-panel-marketplace') {
+            item.classList.toggle('hidden-by-search', isSearching);
+            if (!isSearching) visibleCount++;
+            return;
+        }
+
+        // Filter all apps (including PIVX) by name
+        if (appName) {
+            const matches = !isSearching || appName.includes(normalizedQuery);
+            item.classList.toggle('hidden-by-search', !matches);
+            if (matches) visibleCount++;
+        }
+    });
+
+    // Also hide/show empty message based on visible items
+    const emptyMsg = domMiniAppsGrid.querySelector('.attachment-panel-empty');
+    if (emptyMsg) {
+        emptyMsg.classList.toggle('hidden-by-search', isSearching);
+    }
+
+    // Show/hide "no results" message
+    let noResultsMsg = domMiniAppsGrid.querySelector('.miniapps-no-results');
+    if (isSearching && visibleCount === 0) {
+        if (!noResultsMsg) {
+            noResultsMsg = document.createElement('div');
+            noResultsMsg.className = 'miniapps-no-results';
+            noResultsMsg.innerHTML = `
+                <p>No Mini Apps found</p>
+                <p class="miniapps-no-results-hint">Try a different search, or check out the Nexus!</p>
+            `;
+            domMiniAppsGrid.appendChild(noResultsMsg);
+        }
+        noResultsMsg.style.display = '';
+    } else if (noResultsMsg) {
+        noResultsMsg.style.display = 'none';
+    }
+}
+
+// ========== Mini Apps Edit Mode ==========
+
+let miniAppsEditMode = false;
+let miniAppsHoldTimer = null;
+let miniAppsEditModeJustActivated = false;
+
+/**
+ * Activates edit mode for the Mini Apps grid
+ * Shows red X badges on all apps (except Marketplace) for removal
+ */
+function activateMiniAppsEditMode() {
+    if (miniAppsEditMode) return;
+    miniAppsEditMode = true;
+    miniAppsEditModeJustActivated = true;
+
+    // Add edit-mode class for wobble animation
+    domMiniAppsGrid.classList.add('edit-mode');
+
+    // Add delete badges to all apps except Marketplace
+    const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace)');
+    items.forEach(item => {
+        // Don't add badge if already exists
+        if (item.querySelector('.miniapp-delete-badge')) return;
+
+        const badge = document.createElement('div');
+        badge.className = 'miniapp-delete-badge';
+        badge.innerHTML = '<span class="icon icon-x"></span>';
+
+        // Get app info for deletion
+        const appName = item.dataset.appName;
+        const isPivx = item.id === 'attachment-panel-pivx';
+
+        badge.onclick = async (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+
+            const displayName = isPivx ? 'PIVX Wallet' : item.querySelector('.attachment-panel-label')?.textContent || appName;
+
+            const confirmed = await popupConfirm(
+                'Remove App?',
+                `Are you sure you want to remove <b>${escapeHtml(displayName)}</b> from your recent Mini Apps?`,
+                false
+            );
+
+            if (confirmed) {
+                if (isPivx) {
+                    // For PIVX, set hidden flag (can be restored in Settings)
+                    localStorage.setItem('pivx_hidden', 'true');
+                } else {
+                    // For regular apps, remove from backend history
+                    try {
+                        await invoke('miniapp_remove_from_history', { name: displayName });
+                    } catch (err) {
+                        console.error('Failed to remove Mini App from history:', err);
+                    }
+                }
+
+                // Deactivate edit mode and refresh the list
+                deactivateMiniAppsEditMode();
+                await loadMiniAppsHistory();
+                animateAttachmentPanelItems(domMiniAppsGrid);
+            }
+        };
+
+        item.appendChild(badge);
+    });
+
+    // Add global click listener to exit edit mode
+    // Remove any existing listener first to prevent duplicates
+    document.removeEventListener('click', handleEditModeClickOutside, true);
+    // Add with a small delay so the mouseup click from hold doesn't immediately trigger it
+    setTimeout(() => {
+        if (miniAppsEditMode) {
+            document.addEventListener('click', handleEditModeClickOutside, true);
+        }
+    }, 50);
+}
+
+/**
+ * Deactivates edit mode for the Mini Apps grid
+ */
+function deactivateMiniAppsEditMode() {
+    if (!miniAppsEditMode) return;
+    miniAppsEditMode = false;
+    miniAppsEditModeJustActivated = false;
+
+    // Remove edit-mode class
+    domMiniAppsGrid.classList.remove('edit-mode');
+
+    // Remove all delete badges
+    const badges = domMiniAppsGrid.querySelectorAll('.miniapp-delete-badge');
+    badges.forEach(badge => badge.remove());
+
+    // Remove global click listener
+    document.removeEventListener('click', handleEditModeClickOutside, true);
+}
+
+/**
+ * Handles clicks outside of delete badges to exit edit mode
+ */
+function handleEditModeClickOutside(e) {
+    // If we just activated edit mode, ignore this click (it's from the hold release)
+    if (miniAppsEditModeJustActivated) {
+        miniAppsEditModeJustActivated = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
+
+    // If clicking on a delete badge, let it handle itself
+    if (e.target.closest('.miniapp-delete-badge')) return;
+
+    // If clicking on a popup, let it handle itself (don't exit edit mode)
+    if (e.target.closest('#popup-container')) return;
+
+    // Otherwise, deactivate edit mode
+    e.preventDefault();
+    e.stopPropagation();
+    deactivateMiniAppsEditMode();
+}
+
+/**
+ * Starts the hold timer for entering edit mode
+ * @param {Event} e - The mousedown/touchstart event
+ */
+function startMiniAppHold(e) {
+    // Don't start hold on Marketplace or if already in edit mode
+    if (miniAppsEditMode) return;
+    const item = e.target.closest('.attachment-panel-item');
+    if (!item || item.id === 'attachment-panel-marketplace') return;
+
+    // Prevent drag behavior on hold
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Clear any existing timer
+    if (miniAppsHoldTimer) {
+        clearTimeout(miniAppsHoldTimer);
+    }
+
+    miniAppsHoldTimer = setTimeout(() => {
+        miniAppsHoldTimer = null;
+        activateMiniAppsEditMode();
+    }, 500); // 0.5 second hold
+}
+
+/**
+ * Cancels the hold timer
+ */
+function cancelMiniAppHold() {
+    if (miniAppsHoldTimer) {
+        clearTimeout(miniAppsHoldTimer);
+        miniAppsHoldTimer = null;
+    }
+}
+
+/**
+ * Suppresses click events right after edit mode activation
+ */
+function suppressClickAfterEditMode(e) {
+    if (miniAppsEditModeJustActivated) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+    }
+}
+
+/**
+ * Sets up hold-to-edit event listeners on the Mini Apps grid
+ */
+function setupMiniAppsEditMode() {
+    if (!domMiniAppsGrid) return;
+
+    // Prevent any drag behavior on the grid items
+    domMiniAppsGrid.addEventListener('dragstart', (e) => {
+        e.preventDefault();
+        return false;
+    });
+
+    // Mouse events
+    domMiniAppsGrid.addEventListener('mousedown', startMiniAppHold);
+    domMiniAppsGrid.addEventListener('mouseup', cancelMiniAppHold);
+    domMiniAppsGrid.addEventListener('mouseleave', cancelMiniAppHold);
+
+    // Suppress clicks immediately after edit mode activation
+    domMiniAppsGrid.addEventListener('click', suppressClickAfterEditMode, true);
+
+    // Touch events for mobile
+    domMiniAppsGrid.addEventListener('touchstart', startMiniAppHold, { passive: false });
+    domMiniAppsGrid.addEventListener('touchend', cancelMiniAppHold);
+    domMiniAppsGrid.addEventListener('touchcancel', cancelMiniAppHold);
+    domMiniAppsGrid.addEventListener('touchmove', cancelMiniAppHold);
 }
 
 /**
@@ -1717,7 +2189,7 @@ async function playMiniAppAndInvite() {
     
     // Determine if this is a group chat (MLS) or DM
     const chat = arrChats.find(c => c.id === targetChatId);
-    const isGroupChat = chat && chat.type === 'GroupChat';
+    const isGroupChat = chat && chat.chat_type === 'MlsGroup';
     const eventName = isGroupChat ? 'mls_message_new' : 'message_new';
     
     // Set up a one-time listener to catch the new message and open the Mini App
@@ -1980,7 +2452,6 @@ async function playMiniAppSoloInternal(app) {
  * Open Mini App from history - shows the launch dialog
  */
 async function openMiniAppFromHistory(app) {
-    closeAttachmentPanel();
     await showMiniAppLaunchDialog(app);
 }
 
@@ -2465,7 +2936,7 @@ const GIF_SEARCH_CACHE_MAX_SIZE = 10;
 const gifSearchCache = new Map();
 
 /** GIFGalaxy API base URL */
-const GIF_API_BASE = 'https://jskitty.cat/gifgalaxy-test';
+const GIF_API_BASE = 'https://gifverse.net';
 
 /** Preconnect link element for GIFGalaxy */
 let gifPreconnectLink = null;
@@ -2502,7 +2973,7 @@ function preconnectGifServer() {
     if (gifPreconnectLink) return; // Already connected
     gifPreconnectLink = document.createElement('link');
     gifPreconnectLink.rel = 'preconnect';
-    gifPreconnectLink.href = 'https://jskitty.cat';
+    gifPreconnectLink.href = 'https://gifverse.net';
     gifPreconnectLink.crossOrigin = 'anonymous';
     document.head.appendChild(gifPreconnectLink);
 }
@@ -3463,7 +3934,40 @@ async function init() {
         await invoke("fetch_messages", { init: true });
         return;
     }
-    
+
+    // Set up UI maintenance interval first (before any async calls that might fail)
+    // Runs every 5 seconds to clear expired typing indicators and update timestamps
+    let maintenanceTick = 0;
+    setInterval(() => {
+        maintenanceTick++;
+
+        // Clear expired typing indicators (every tick)
+        const now = Date.now() / 1000;
+        arrChats.forEach(chat => {
+            if (chat.active_typers && chat.active_typers.length > 0) {
+                // Clear the array if we haven't received an update in 30 seconds
+                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
+                    chat.active_typers = [];
+
+                    // If this is the open chat, refresh the display
+                    if (strOpenChat === chat.id) {
+                        updateChatHeaderSubtext(chat);
+                    }
+
+                    // Refresh chat list
+                    if (domChats.style.display !== 'none') {
+                        renderChatlist();
+                    }
+                }
+            }
+        });
+
+        // Update chatlist timestamps every 6th tick (~30 seconds)
+        if (maintenanceTick % 6 === 0 && domChats.style.display !== 'none') {
+            updateChatlistTimestamps();
+        }
+    }, 5000);
+
     // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
     await invoke("fetch_messages", { init: true });
 
@@ -3474,38 +3978,6 @@ async function init() {
 
     // Display Invites (MLS Welcomes)
     await loadMLSInvites();
-
-    // Run a very slow loop to update dynamic elements, like "last message time"
-    setInterval(() => {
-        // If the chatlist is open: update timestamps
-        if (domChats.style.display !== 'none') {
-            updateChatlistTimestamps();
-        }
-    }, 30000);
-
-    // Run a faster loop to clear expired typing indicators (every 5 seconds)
-    setInterval(() => {
-        // Check all chats for expired typing indicators
-        const now = Date.now() / 1000;
-        arrChats.forEach(chat => {
-            if (chat.active_typers && chat.active_typers.length > 0) {
-                // Clear the array if we haven't received an update in 30 seconds
-                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
-                    chat.active_typers = [];
-                    
-                    // If this is the open chat, refresh the display
-                    if (strOpenChat === chat.id) {
-                        updateChatHeaderSubtext(chat);
-                    }
-                    
-                    // Refresh chat list
-                    if (domChats.style.display !== 'none') {
-                        renderChatlist();
-                    }
-                }
-            }
-        });
-    }, 5000);
 }
 
 /**
@@ -3961,6 +4433,11 @@ function generateChatPreviewText(chat) {
         return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false };
     }
 
+    // System event (member joined/left, etc.)
+    if (cLastMsg.system_event) {
+        return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
+    }
+
     // Regular text message
     return { text: senderPrefix + cLastMsg.content, isTyping: false, needsTwemoji: true };
 }
@@ -4000,6 +4477,10 @@ function renderChat(chat) {
         if (avatarSrc) {
             const imgAvatar = document.createElement('img');
             imgAvatar.src = avatarSrc;
+            // Fallback to placeholder if image fails to load
+            imgAvatar.onerror = () => {
+                imgAvatar.replaceWith(createPlaceholderAvatar(false, 50));
+            };
             divAvatarContainer.appendChild(imgAvatar);
         } else {
             // Otherwise, generate a placeholder avatar
@@ -4527,6 +5008,69 @@ async function setupRustListeners() {
             renderChatlist();
         } catch (e) {
             console.error('Error handling mls_group_initial_sync:', e);
+        }
+    });
+
+    // Listen for system events (member joined/left, etc.)
+    await listen('system_event', async (evt) => {
+        try {
+            const { conversation_id, event_id, event_type, member_pubkey, member_name } = evt.payload || {};
+            console.log('[System Event] Received:', event_id, event_type);
+
+            // Deduplication by event_id
+            const chat = arrChats.find(c => c.id === conversation_id);
+            if (chat && chat.messages.some(msg => msg.id === event_id)) {
+                console.log('[System Event] Skipping duplicate:', event_id);
+                return;
+            }
+
+            // Build display content
+            const displayName = member_name || member_pubkey?.substring(0, 12) + '...';
+            let content;
+            switch (event_type) {
+                case SystemEventType.MemberLeft:
+                    content = `${displayName} has left`;
+                    break;
+                case SystemEventType.MemberJoined:
+                    content = `${displayName} has joined`;
+                    break;
+                case SystemEventType.MemberRemoved:
+                    content = `${displayName} was removed`;
+                    break;
+                default:
+                    content = `System event ${event_type}: ${displayName}`;
+            }
+
+            // Create system event message using the event_id
+            const systemMsg = {
+                id: event_id,
+                at: Date.now(),
+                content: content,
+                mine: false,
+                attachments: [],
+                system_event: {
+                    event_type: event_type,
+                    member_npub: member_pubkey,
+                }
+            };
+
+            // Add to chat messages
+            if (chat) {
+                chat.messages.push(systemMsg);
+                eventCache.addEvent(conversation_id, systemMsg);
+            }
+
+            // If this chat is currently open, render the system event
+            if (strOpenChat === conversation_id && domChatMessages) {
+                const systemElement = insertSystemEvent(content);
+                domChatMessages.appendChild(systemElement);
+                softChatScroll();
+            }
+
+            // Re-render chatlist
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling system_event:', e);
         }
     });
 
@@ -6706,6 +7250,25 @@ function insertTimestamp(timestamp, parent = null) {
 }
 
 /**
+ * Helper function to create and insert a system event (member joined/left, etc.)
+ * Uses the same styling as timestamps (centered, lower opacity)
+ * @param {string} content - The system event text (e.g., "John has left")
+ * @param {HTMLElement} parent - Optional parent to append to
+ * @returns {HTMLElement} - The created system event element
+ */
+function insertSystemEvent(content, parent = null) {
+    const pSystemEvent = document.createElement('p');
+    pSystemEvent.classList.add('msg-inline-timestamp'); // Reuse timestamp styling
+    pSystemEvent.textContent = content;
+
+    if (parent) {
+        parent.appendChild(pSystemEvent);
+    }
+
+    return pSystemEvent;
+}
+
+/**
  * Convert a Message in to a rendered HTML Element
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
@@ -6742,6 +7305,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         );
         divMessage.appendChild(pivxBubble);
         return divMessage;
+    }
+
+    // Check for system event - render like a timestamp (centered, lower opacity)
+    if (msg.system_event) {
+        return insertSystemEvent(msg.content);
     }
 
     // Check if we're in a group chat
@@ -8391,8 +8959,7 @@ async function openChat(contact) {
                             message: payment.message
                         }
                     };
-                    initialMessages.push(paymentMsg);
-                    // Also add to cache so procedural scroll includes it
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
                     eventCache.addEvent(contact, paymentMsg);
                 }
             }
@@ -8401,6 +8968,36 @@ async function openChat(contact) {
         }
     } catch (e) {
         console.warn('Failed to load PIVX payments:', e);
+    }
+
+    // Load system events (member joined/left, etc.) for this chat and merge them
+    try {
+        const systemEvents = await invoke('get_system_events', { conversationId: contact });
+        if (systemEvents && systemEvents.length > 0) {
+            for (const event of systemEvents) {
+                // Check if this event already exists in messages
+                const existing = initialMessages.find(m => m.id === event.id);
+                if (!existing) {
+                    const systemMsg = {
+                        id: event.id,
+                        at: event.at,
+                        content: event.content,
+                        mine: false,
+                        attachments: [],
+                        system_event: {
+                            event_type: event.event_type,
+                            member_npub: event.member_npub,
+                        }
+                    };
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
+                    eventCache.addEvent(contact, systemMsg);
+                }
+            }
+            // Re-sort by timestamp after adding system events
+            initialMessages.sort((a, b) => a.at - b.at);
+        }
+    } catch (e) {
+        console.warn('Failed to load system events:', e);
     }
 
     // Get cache stats for procedural scroll
@@ -8907,37 +9504,37 @@ async function renderGroupOverview(chat) {
         domGroupInviteMemberBtn.style.display = 'none';
     }
     
-    // Leave Group button - TEMPORARILY HIDDEN until fully tested
-    // domGroupLeaveBtn.style.display = 'flex';
-    // domGroupLeaveBtn.onclick = async () => {
-    //     // Confirm before leaving using popupConfirm
-    //     const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
-    //     const confirmed = await popupConfirm(
-    //         'Leave Group',
-    //         `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
-    //         false, // Not a notice, show cancel button
-    //         '', // No input
-    //         'vector_warning.svg'
-    //     );
-    //
-    //     if (!confirmed) return;
-    //
-    //     try {
-    //         await invoke('leave_mls_group', { groupId: chat.id });
-    //
-    //         // Close the group overview
-    //         domGroupOverview.style.display = 'none';
-    //         domGroupOverview.removeAttribute('data-group-id');
-    //
-    //         // Open the chat list
-    //         openChatlist();
-    //
-    //         // The group will be removed from the chat list via the mls_group_left event
-    //     } catch (error) {
-    //         console.error('Failed to leave group:', error);
-    //         await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
-    //     }
-    // };
+    // Leave Group button
+    domGroupLeaveBtn.style.display = 'flex';
+    domGroupLeaveBtn.onclick = async () => {
+        // Confirm before leaving using popupConfirm
+        const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+        const confirmed = await popupConfirm(
+            'Leave Group',
+            `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
+            false, // Not a notice, show cancel button
+            '', // No input
+            'vector_warning.svg'
+        );
+
+        if (!confirmed) return;
+
+        try {
+            await invoke('leave_mls_group', { groupId: chat.id });
+
+            // Close the group overview
+            domGroupOverview.style.display = 'none';
+            domGroupOverview.removeAttribute('data-group-id');
+
+            // Open the chat list
+            openChatlist();
+
+            // The group will be removed from the chat list via the mls_group_left event
+        } catch (error) {
+            console.error('Failed to leave group:', error);
+            await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
+        }
+    };
     
     // Back button - return to the group chat
     domGroupOverviewBackBtn.onclick = () => {
@@ -9014,11 +9611,12 @@ async function openInviteMemberToGroup(chat) {
     // Search input
     const searchContainer = document.createElement('div');
     searchContainer.className = 'emoji-search-container';
+    searchContainer.style.padding = '10px 0px';
     searchContainer.style.marginBottom = '16px';
+    searchContainer.style.background = 'transparent';
     
     const searchIcon = document.createElement('span');
     searchIcon.className = 'emoji-search-icon icon icon-search';
-    searchIcon.style.setProperty('margin-left', '20px', 'important');
     searchIcon.style.setProperty('width', '25px', 'important');
     searchIcon.style.setProperty('height', '25px', 'important');
     searchContainer.appendChild(searchIcon);
@@ -9284,6 +9882,12 @@ function openSettings() {
 
     // Update the Storage Breakdown
     initStorageSection();
+
+    // Show/hide Restore PIVX Wallet button based on hidden state
+    const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
+    if (domRestorePivxGroup) {
+        domRestorePivxGroup.style.display = pivxHidden ? '' : 'none';
+    }
 
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
@@ -9751,6 +10355,16 @@ window.addEventListener("DOMContentLoaded", async () => {
     domAttachmentPanelBack.onclick = () => {
         showAttachmentPanelMain();
     };
+
+    // Handle search input in Mini Apps view
+    if (domMiniAppsSearch) {
+        domMiniAppsSearch.addEventListener('input', (e) => {
+            filterMiniApps(e.target.value);
+        });
+    }
+
+    // Setup hold-to-edit mode for Mini Apps
+    setupMiniAppsEditMode();
 
     // Mini App Launch Dialog event handlers
     domMiniAppLaunchCancel.onclick = closeMiniAppLaunchDialog;
@@ -10327,6 +10941,20 @@ domChatMessageInput.oninput = async () => {
         openUrl('https://pivx.org');
     };
 
+    // Restore PIVX Wallet button - restores hidden PIVX app
+    if (domRestorePivxBtn) {
+        domRestorePivxBtn.onclick = async () => {
+            localStorage.removeItem('pivx_hidden');
+            // Hide the restore button
+            if (domRestorePivxGroup) {
+                domRestorePivxGroup.style.display = 'none';
+            }
+            // Refresh Mini Apps list if it's loaded
+            await loadMiniAppsHistory();
+            popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
+        };
+    }
+
     // Add npub copy functionality for chat-new section
     document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
         const npub = document.getElementById('share-npub')?.textContent;
@@ -10471,9 +11099,11 @@ document.addEventListener('click', (e) => {
     if (domAttachmentPanel.classList.contains('visible')) {
         const clickedInsidePanel = domAttachmentPanel.contains(e.target);
         const clickedFileButton = domChatMessageInputFile.contains(e.target);
-        // Don't close if clicking inside PIVX dialogs
+        // Don't close if clicking inside PIVX dialogs, popup prompts, or Mini App launch dialog
         const clickedInsidePivxDialog = e.target.closest('.pivx-dialog-overlay');
-        if (!clickedInsidePanel && !clickedFileButton && !clickedInsidePivxDialog) {
+        const clickedInsidePopup = e.target.closest('#popup-container');
+        const clickedInsideLaunchDialog = e.target.closest('#miniapp-launch-overlay');
+        if (!clickedInsidePanel && !clickedFileButton && !clickedInsidePivxDialog && !clickedInsidePopup && !clickedInsideLaunchDialog) {
             closeAttachmentPanel();
         }
     }
