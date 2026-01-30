@@ -4270,7 +4270,7 @@ function renderInviteItem(invite) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
-    divInvite.style.borderColor = '#59fcb3';
+    divInvite.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
 
     // Avatar container with group placeholder
     const divAvatarContainer = document.createElement('div');
@@ -4457,7 +4457,7 @@ function renderChat(chat) {
 
     // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
-    if (nUnread) divContact.style.borderColor = '#59fcb3';
+    if (nUnread) divContact.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
     divContact.classList.add('chatlist-contact');
     divContact.id = `chatlist-${chat.id}`;
 
@@ -4567,7 +4567,7 @@ function renderChat(chat) {
     }
     // Apply 'Unread' final styling
     if (nUnread) {
-        pTimeAgo.style.color = '#59fcb3';
+        pTimeAgo.style.color = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
     } else {
         // Add 'read' class for smaller font size when no unread messages
         pTimeAgo.classList.add('read');
