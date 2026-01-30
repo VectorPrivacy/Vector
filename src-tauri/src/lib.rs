@@ -1249,6 +1249,41 @@ async fn get_messages_around_id<R: Runtime>(
     Ok(messages)
 }
 
+/// Get system events (member joined/left, etc.) for a chat
+/// Returns events in frontend-friendly format for rendering as timestamps
+#[tauri::command]
+async fn get_system_events<R: Runtime>(
+    handle: AppHandle<R>,
+    conversation_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let events = db::get_system_events_for_chat(&handle, &conversation_id).await?;
+
+    // Convert StoredEvents to frontend-friendly format
+    let system_events: Vec<serde_json::Value> = events.iter().map(|event| {
+        // Extract event type from tags (stored as integer)
+        let event_type: u8 = event.tags.iter()
+            .find(|tag| tag.len() >= 2 && tag[0] == "event-type")
+            .and_then(|tag| tag[1].parse().ok())
+            .unwrap_or(255); // 255 = unknown
+
+        // Extract member npub from tags
+        let member_npub = event.tags.iter()
+            .find(|tag| tag.len() >= 2 && tag[0] == "member")
+            .map(|tag| tag[1].clone())
+            .unwrap_or_default();
+
+        serde_json::json!({
+            "id": event.id,
+            "event_type": event_type,
+            "content": event.content,
+            "member_npub": member_npub,
+            "at": event.created_at * 1000, // Convert to milliseconds for JS
+        })
+    }).collect();
+
+    Ok(system_events)
+}
+
 /// Evict messages from the backend cache for a specific chat
 /// Called by frontend when LRU eviction occurs to keep caches in sync
 #[tauri::command]
@@ -1472,6 +1507,10 @@ async fn handle_event(event: Event, is_new: bool) -> bool {
                                 }));
                             }
                             
+                            true
+                        }
+                        RumorProcessingResult::LeaveRequest { .. } => {
+                            // Leave requests only apply to MLS groups, not DMs
                             true
                         }
                         RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
@@ -2323,6 +2362,102 @@ async fn notifs() -> Result<bool, String> {
                                                                     }));
                                                                 }
                                                                 
+                                                                None // Don't emit as message
+                                                            }
+                                                            RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
+                                                                // Deduplicate by event ID - skip if already processed
+                                                                if db::event_exists(&app_handle, &event_id).unwrap_or(false) {
+                                                                    println!("[MLS] Live: Skipping duplicate leave request: {}", event_id);
+                                                                    return None;
+                                                                }
+
+                                                                // A member is requesting to leave - if we're admin, auto-remove them
+                                                                println!("[MLS] Live: Leave request received from {} in group {}", member_pubkey, group_id_for_persist);
+
+                                                                // Get member's display name for the system event
+                                                                let member_name = {
+                                                                    let state = crate::STATE.lock().await;
+                                                                    state.get_profile(&member_pubkey)
+                                                                        .map(|p| {
+                                                                            if !p.nickname.is_empty() { p.nickname.clone() }
+                                                                            else if !p.name.is_empty() { p.name.clone() }
+                                                                            else { member_pubkey.chars().take(12).collect::<String>() + "..." }
+                                                                        })
+                                                                };
+
+                                                                // Check if we're admin for this group
+                                                                if let Some(handle) = TAURI_APP.get() {
+                                                                    let mls_svc = match MlsService::new_persistent(handle) {
+                                                                        Ok(s) => s,
+                                                                        Err(e) => {
+                                                                            eprintln!("[MLS] Live: Failed to create MLS service: {}", e);
+                                                                            return None;
+                                                                        }
+                                                                    };
+
+                                                                    // Get my hex pubkey for comparison
+                                                                    let my_hex = if let Some(client) = NOSTR_CLIENT.get() {
+                                                                        if let Ok(signer) = client.signer().await {
+                                                                            if let Ok(pk) = signer.get_public_key().await {
+                                                                                pk.to_hex()
+                                                                            } else { String::new() }
+                                                                        } else { String::new() }
+                                                                    } else { String::new() };
+
+                                                                    // Get group metadata to check admin status
+                                                                    let am_i_admin = if let Ok(groups) = mls_svc.read_groups().await {
+                                                                        if let Some(meta) = groups.iter().find(|g| g.group_id == group_id_for_persist) {
+                                                                            println!("[MLS] Live: Found group metadata, creator={}", meta.creator_pubkey);
+                                                                            // Compare with my pubkey (npub or hex)
+                                                                            meta.creator_pubkey == my_npub_for_block || meta.creator_pubkey == my_hex
+                                                                        } else {
+                                                                            println!("[MLS] Live: Group metadata not found for {}", group_id_for_persist);
+                                                                            false
+                                                                        }
+                                                                    } else {
+                                                                        println!("[MLS] Live: Failed to read groups");
+                                                                        false
+                                                                    };
+
+                                                                    println!("[MLS] Live: am_i_admin={}, my_npub={}, my_hex={}", am_i_admin, my_npub_for_block, my_hex);
+
+                                                                    if am_i_admin {
+                                                                        println!("[MLS] Live: I'm admin, auto-removing member: {}", member_pubkey);
+
+                                                                        // Save system event - only emit if actually inserted (not duplicate)
+                                                                        let was_inserted = db::save_system_event_by_id(
+                                                                            handle,
+                                                                            &event_id,
+                                                                            &group_id_for_persist,
+                                                                            crate::db::SystemEventType::MemberLeft,
+                                                                            &member_pubkey,
+                                                                            member_name.as_deref(),
+                                                                        ).await.unwrap_or(false);
+
+                                                                        if was_inserted {
+                                                                            // Emit event to frontend only if we saved it (not a duplicate)
+                                                                            let _ = handle.emit("system_event", serde_json::json!({
+                                                                                "conversation_id": group_id_for_persist,
+                                                                                "event_id": event_id,
+                                                                                "event_type": crate::db::SystemEventType::MemberLeft.as_u8(),
+                                                                                "member_pubkey": member_pubkey,
+                                                                                "member_name": member_name,
+                                                                            }));
+
+                                                                            // Remove the member
+                                                                            if let Err(e) = mls_svc.remove_member_device(&group_id_for_persist, &member_pubkey, "").await {
+                                                                                eprintln!("[MLS] Live: Failed to auto-remove member {}: {}", member_pubkey, e);
+                                                                            } else {
+                                                                                println!("[MLS] Live: Successfully removed member {} from group {}", member_pubkey, group_id_for_persist);
+                                                                            }
+                                                                        } else {
+                                                                            println!("[MLS] Live: Skipping duplicate system event: {}", event_id);
+                                                                        }
+                                                                    } else {
+                                                                        println!("[MLS] Live: Not admin, ignoring leave request from {}", member_pubkey);
+                                                                    }
+                                                                }
+
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
@@ -5557,6 +5692,8 @@ struct SimpleWelcome {
     // Welcomer (hex)
     welcomer: String,
     member_count: u32,
+    // Timestamp of the welcome event (for deduplication - keep most recent)
+    created_at: u64,
 }
 
 /// List pending MLS welcomes (invites)
@@ -5587,8 +5724,25 @@ async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                     group_relays: w.group_relays.iter().map(|r| r.to_string()).collect(),
                     welcomer: w.welcomer.to_bech32().map_err(|e| e.to_string())?,
                     member_count: w.member_count,
+                    created_at: w.event.created_at.as_secs(),
                 });
             }
+
+            // Deduplicate welcomes by nostr_group_id, keeping only the most recent one
+            // (based on event timestamp, not member count which can decrease with kicks)
+            let mut deduped: std::collections::HashMap<String, SimpleWelcome> = std::collections::HashMap::new();
+            for welcome in out {
+                let group_id = welcome.nostr_group_id.clone();
+                if let Some(existing) = deduped.get(&group_id) {
+                    // Keep the one with the later timestamp (most recent invite)
+                    if welcome.created_at > existing.created_at {
+                        deduped.insert(group_id, welcome);
+                    }
+                } else {
+                    deduped.insert(group_id, welcome);
+                }
+            }
+            let out: Vec<SimpleWelcome> = deduped.into_values().collect();
 
             Ok::<Vec<SimpleWelcome>, String>(out)
         })
@@ -5721,6 +5875,11 @@ async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String
                     println!("[MLS] Re-invited to previously evicted group: {}", nostr_group_id);
                     // Clear the evicted flag and update metadata
                     groups[idx].evicted = false;
+                    // CRITICAL: Update created_at to the NEW invite time, not the old one.
+                    // The cursor was removed on eviction, so sync_group_since_cursor will use
+                    // created_at as the starting point. If we don't update it, sync will try
+                    // to process old events from before the kick that can't be decrypted.
+                    groups[idx].created_at = invite_sent_at;
                     groups[idx].updated_at = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|e| e.to_string())?
@@ -6323,6 +6482,7 @@ pub fn run() {
             get_chat_messages_paginated,
             get_message_views,
             get_messages_around_id,
+            get_system_events,
             get_chat_message_count,
             get_file_hash_index,
             evict_chat_messages,

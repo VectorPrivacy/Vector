@@ -65,6 +65,7 @@
     "allow-get-chat-messages-paginated",
     "allow-get-message-views",
     "allow-get-messages-around-id",
+    "allow-get-system-events",
     "allow-get-chat-message-count",
     "allow-get-file-hash-index",
     "allow-evict-chat-messages",

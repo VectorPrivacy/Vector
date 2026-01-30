@@ -89,6 +89,13 @@ pub enum RumorProcessingResult {
         profile_id: String,
         until: u64,
     },
+    /// A leave request from a group member (admin should auto-remove them)
+    LeaveRequest {
+        /// The event ID of the leave request (for deduplication)
+        event_id: String,
+        /// The pubkey of the member requesting to leave (npub)
+        member_pubkey: String,
+    },
     /// A WebXDC peer advertisement for realtime channels
     WebxdcPeerAdvertisement {
         topic_id: String,
@@ -773,7 +780,18 @@ async fn process_app_specific(
             until: expiry_timestamp,
         });
     }
-    
+
+    // Check if this is a leave request (member wants to leave the group)
+    if is_leave_request(&rumor) {
+        let member_pubkey = rumor.pubkey.to_bech32()
+            .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
+
+        return Ok(RumorProcessingResult::LeaveRequest {
+            event_id: rumor.id.to_hex(),
+            member_pubkey,
+        });
+    }
+
     // Check if this is a PIVX payment
     if is_pivx_payment(&rumor) {
         // Extract gift code from tags
@@ -951,9 +969,28 @@ fn is_typing_indicator(rumor: &RumorEvent) -> bool {
         .and_then(|tag| tag.content())
         .map(|content| content == "vector")
         .unwrap_or(false);
-    
+
     // Check content
     let is_typing_content = rumor.content == "typing";
-    
+
     has_vector_tag && is_typing_content
+}
+
+/// Check if rumor is a leave request
+///
+/// Validates that the rumor has:
+/// - d tag with value "vector"
+/// - content "leave"
+fn is_leave_request(rumor: &RumorEvent) -> bool {
+    // Check d tag
+    let has_vector_tag = rumor.tags
+        .find(TagKind::d())
+        .and_then(|tag| tag.content())
+        .map(|content| content == "vector")
+        .unwrap_or(false);
+
+    // Check content
+    let is_leave_content = rumor.content == "leave";
+
+    has_vector_tag && is_leave_content
 }

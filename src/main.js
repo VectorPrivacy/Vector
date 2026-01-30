@@ -5,6 +5,13 @@ const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
+// System event types (matches Rust SystemEventType enum)
+const SystemEventType = {
+    MemberLeft: 0,
+    MemberJoined: 1,
+    MemberRemoved: 2,
+};
+
 const domTheme = document.getElementById('theme');
 
 const domLoginStart = document.getElementById('login-start');
@@ -4426,6 +4433,11 @@ function generateChatPreviewText(chat) {
         return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false };
     }
 
+    // System event (member joined/left, etc.)
+    if (cLastMsg.system_event) {
+        return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
+    }
+
     // Regular text message
     return { text: senderPrefix + cLastMsg.content, isTyping: false, needsTwemoji: true };
 }
@@ -4996,6 +5008,69 @@ async function setupRustListeners() {
             renderChatlist();
         } catch (e) {
             console.error('Error handling mls_group_initial_sync:', e);
+        }
+    });
+
+    // Listen for system events (member joined/left, etc.)
+    await listen('system_event', async (evt) => {
+        try {
+            const { conversation_id, event_id, event_type, member_pubkey, member_name } = evt.payload || {};
+            console.log('[System Event] Received:', event_id, event_type);
+
+            // Deduplication by event_id
+            const chat = arrChats.find(c => c.id === conversation_id);
+            if (chat && chat.messages.some(msg => msg.id === event_id)) {
+                console.log('[System Event] Skipping duplicate:', event_id);
+                return;
+            }
+
+            // Build display content
+            const displayName = member_name || member_pubkey?.substring(0, 12) + '...';
+            let content;
+            switch (event_type) {
+                case SystemEventType.MemberLeft:
+                    content = `${displayName} has left`;
+                    break;
+                case SystemEventType.MemberJoined:
+                    content = `${displayName} has joined`;
+                    break;
+                case SystemEventType.MemberRemoved:
+                    content = `${displayName} was removed`;
+                    break;
+                default:
+                    content = `System event ${event_type}: ${displayName}`;
+            }
+
+            // Create system event message using the event_id
+            const systemMsg = {
+                id: event_id,
+                at: Date.now(),
+                content: content,
+                mine: false,
+                attachments: [],
+                system_event: {
+                    event_type: event_type,
+                    member_npub: member_pubkey,
+                }
+            };
+
+            // Add to chat messages
+            if (chat) {
+                chat.messages.push(systemMsg);
+                eventCache.addEvent(conversation_id, systemMsg);
+            }
+
+            // If this chat is currently open, render the system event
+            if (strOpenChat === conversation_id && domChatMessages) {
+                const systemElement = insertSystemEvent(content);
+                domChatMessages.appendChild(systemElement);
+                softChatScroll();
+            }
+
+            // Re-render chatlist
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling system_event:', e);
         }
     });
 
@@ -7175,6 +7250,25 @@ function insertTimestamp(timestamp, parent = null) {
 }
 
 /**
+ * Helper function to create and insert a system event (member joined/left, etc.)
+ * Uses the same styling as timestamps (centered, lower opacity)
+ * @param {string} content - The system event text (e.g., "John has left")
+ * @param {HTMLElement} parent - Optional parent to append to
+ * @returns {HTMLElement} - The created system event element
+ */
+function insertSystemEvent(content, parent = null) {
+    const pSystemEvent = document.createElement('p');
+    pSystemEvent.classList.add('msg-inline-timestamp'); // Reuse timestamp styling
+    pSystemEvent.textContent = content;
+
+    if (parent) {
+        parent.appendChild(pSystemEvent);
+    }
+
+    return pSystemEvent;
+}
+
+/**
  * Convert a Message in to a rendered HTML Element
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
@@ -7211,6 +7305,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         );
         divMessage.appendChild(pivxBubble);
         return divMessage;
+    }
+
+    // Check for system event - render like a timestamp (centered, lower opacity)
+    if (msg.system_event) {
+        return insertSystemEvent(msg.content);
     }
 
     // Check if we're in a group chat
@@ -8860,8 +8959,7 @@ async function openChat(contact) {
                             message: payment.message
                         }
                     };
-                    initialMessages.push(paymentMsg);
-                    // Also add to cache so procedural scroll includes it
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
                     eventCache.addEvent(contact, paymentMsg);
                 }
             }
@@ -8870,6 +8968,36 @@ async function openChat(contact) {
         }
     } catch (e) {
         console.warn('Failed to load PIVX payments:', e);
+    }
+
+    // Load system events (member joined/left, etc.) for this chat and merge them
+    try {
+        const systemEvents = await invoke('get_system_events', { conversationId: contact });
+        if (systemEvents && systemEvents.length > 0) {
+            for (const event of systemEvents) {
+                // Check if this event already exists in messages
+                const existing = initialMessages.find(m => m.id === event.id);
+                if (!existing) {
+                    const systemMsg = {
+                        id: event.id,
+                        at: event.at,
+                        content: event.content,
+                        mine: false,
+                        attachments: [],
+                        system_event: {
+                            event_type: event.event_type,
+                            member_npub: event.member_npub,
+                        }
+                    };
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
+                    eventCache.addEvent(contact, systemMsg);
+                }
+            }
+            // Re-sort by timestamp after adding system events
+            initialMessages.sort((a, b) => a.at - b.at);
+        }
+    } catch (e) {
+        console.warn('Failed to load system events:', e);
     }
 
     // Get cache stats for procedural scroll
@@ -9376,37 +9504,37 @@ async function renderGroupOverview(chat) {
         domGroupInviteMemberBtn.style.display = 'none';
     }
     
-    // Leave Group button - TEMPORARILY HIDDEN until fully tested
-    // domGroupLeaveBtn.style.display = 'flex';
-    // domGroupLeaveBtn.onclick = async () => {
-    //     // Confirm before leaving using popupConfirm
-    //     const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
-    //     const confirmed = await popupConfirm(
-    //         'Leave Group',
-    //         `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
-    //         false, // Not a notice, show cancel button
-    //         '', // No input
-    //         'vector_warning.svg'
-    //     );
-    //
-    //     if (!confirmed) return;
-    //
-    //     try {
-    //         await invoke('leave_mls_group', { groupId: chat.id });
-    //
-    //         // Close the group overview
-    //         domGroupOverview.style.display = 'none';
-    //         domGroupOverview.removeAttribute('data-group-id');
-    //
-    //         // Open the chat list
-    //         openChatlist();
-    //
-    //         // The group will be removed from the chat list via the mls_group_left event
-    //     } catch (error) {
-    //         console.error('Failed to leave group:', error);
-    //         await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
-    //     }
-    // };
+    // Leave Group button
+    domGroupLeaveBtn.style.display = 'flex';
+    domGroupLeaveBtn.onclick = async () => {
+        // Confirm before leaving using popupConfirm
+        const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+        const confirmed = await popupConfirm(
+            'Leave Group',
+            `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
+            false, // Not a notice, show cancel button
+            '', // No input
+            'vector_warning.svg'
+        );
+
+        if (!confirmed) return;
+
+        try {
+            await invoke('leave_mls_group', { groupId: chat.id });
+
+            // Close the group overview
+            domGroupOverview.style.display = 'none';
+            domGroupOverview.removeAttribute('data-group-id');
+
+            // Open the chat list
+            openChatlist();
+
+            // The group will be removed from the chat list via the mls_group_left event
+        } catch (error) {
+            console.error('Failed to leave group:', error);
+            await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
+        }
+    };
     
     // Back button - return to the group chat
     domGroupOverviewBackBtn.onclick = () => {

@@ -19,6 +19,31 @@ static CHAT_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
 static USER_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+/// System event types for MLS groups (stored as integers for efficiency)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum SystemEventType {
+    MemberLeft = 0,
+    MemberJoined = 1,
+    MemberRemoved = 2,
+}
+
+impl SystemEventType {
+    /// Get the display message for this event type
+    pub fn display_message(&self, display_name: &str) -> String {
+        match self {
+            SystemEventType::MemberLeft => format!("{} has left", display_name),
+            SystemEventType::MemberJoined => format!("{} has joined", display_name),
+            SystemEventType::MemberRemoved => format!("{} was removed", display_name),
+        }
+    }
+
+    /// Convert to integer for storage/serialization
+    pub fn as_u8(&self) -> u8 {
+        *self as u8
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct SlimProfile {
@@ -1965,6 +1990,77 @@ pub async fn save_pivx_payment_event<R: Runtime>(
     save_event(handle, &event).await
 }
 
+/// Save a system event (member joined/left) to the events table
+///
+/// Uses INSERT OR IGNORE for deduplication. Returns `true` if the event was
+/// actually inserted (new), `false` if it already existed (duplicate).
+/// Callers should only emit frontend events if this returns `true`.
+pub async fn save_system_event_by_id<R: Runtime>(
+    handle: &AppHandle<R>,
+    event_id: &str,
+    conversation_id: &str,
+    event_type: SystemEventType,
+    member_npub: &str,
+    member_name: Option<&str>,
+) -> Result<bool, String> {
+    use crate::stored_event::event_kind;
+
+    // Resolve chat_id from conversation identifier
+    let chat_id = get_or_create_chat_id(handle, conversation_id)?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Build the display content
+    let display_name = member_name.unwrap_or(member_npub);
+    let content = event_type.display_message(display_name);
+
+    // Build tags for identification (store event_type as integer)
+    let tags: Vec<Vec<String>> = vec![
+        vec!["d".to_string(), "system-event".to_string()],
+        vec!["event-type".to_string(), event_type.as_u8().to_string()],
+        vec!["member".to_string(), member_npub.to_string()],
+    ];
+
+    let tags_json = serde_json::to_string(&tags)
+        .map_err(|e| format!("Failed to serialize tags: {}", e))?;
+
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Use INSERT OR IGNORE - returns 0 rows affected if duplicate
+    let rows_affected = conn.execute(
+        r#"
+        INSERT OR IGNORE INTO events (
+            id, kind, chat_id, user_id, content, tags, reference_id,
+            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "#,
+        rusqlite::params![
+            event_id,
+            event_kind::APPLICATION_SPECIFIC as i32,
+            chat_id,
+            None::<i64>,
+            content,
+            tags_json,
+            None::<String>,
+            now_secs as i64,
+            now_secs as i64,
+            0, // mine = false
+            0, // pending = false
+            0, // failed = false
+            None::<String>,
+            member_npub,
+        ],
+    ).map_err(|e| format!("Failed to save system event: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+
+    // Return true if we actually inserted (not a duplicate)
+    Ok(rows_affected > 0)
+}
+
 /// Get PIVX payment events for a chat
 ///
 /// Returns all PIVX payment events (kind 30078 with d=pivx-payment tag) for a conversation.
@@ -2035,6 +2131,77 @@ pub async fn get_pivx_payments_for_chat<R: Runtime>(
 
     crate::account_manager::return_db_connection(conn);
     Ok(payments)
+}
+
+/// Get system events for a chat (member joined/left, etc.)
+///
+/// Returns all system events (kind 30078 with d=system-event tag) for a conversation.
+pub async fn get_system_events_for_chat<R: Runtime>(
+    handle: &AppHandle<R>,
+    conversation_id: &str,
+) -> Result<Vec<StoredEvent>, String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Get chat_id from conversation identifier
+    let chat_id: i64 = conn.query_row(
+        "SELECT id FROM chats WHERE chat_identifier = ?1",
+        rusqlite::params![conversation_id],
+        |row| row.get(0)
+    ).map_err(|_| "Chat not found")?;
+
+    // Query events with kind=30078 and check for system-event tag
+    let events = {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, kind, chat_id, user_id, content, tags, reference_id,
+                   created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+            FROM events
+            WHERE chat_id = ?1 AND kind = ?2
+            ORDER BY created_at ASC
+            "#
+        ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
+
+        let rows = stmt.query_map(
+            rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32],
+            |row| {
+                let tags_json: String = row.get(5)?;
+                let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+                Ok(StoredEvent {
+                    id: row.get(0)?,
+                    kind: row.get::<_, i32>(1)? as u16,
+                    chat_id: row.get(2)?,
+                    user_id: row.get(3)?,
+                    content: row.get(4)?,
+                    tags,
+                    reference_id: row.get(6)?,
+                    created_at: row.get::<_, i64>(7)? as u64,
+                    received_at: row.get::<_, i64>(8)? as u64,
+                    mine: row.get::<_, i32>(9)? != 0,
+                    pending: row.get::<_, i32>(10)? != 0,
+                    failed: row.get::<_, i32>(11)? != 0,
+                    wrapper_event_id: row.get(12)?,
+                    npub: row.get(13)?,
+                })
+            }
+        ).map_err(|e| format!("Failed to query events: {}", e))?;
+
+        // Filter for system events (d tag = "system-event")
+        let mut system_events = Vec::new();
+        for row in rows {
+            let event = row.map_err(|e| format!("Failed to read event: {}", e))?;
+            let is_system = event.tags.iter().any(|tag| {
+                tag.len() >= 2 && tag[0] == "d" && tag[1] == "system-event"
+            });
+            if is_system {
+                system_events.push(event);
+            }
+        }
+        system_events
+    }; // stmt dropped here, releasing borrow on conn
+
+    crate::account_manager::return_db_connection(conn);
+    Ok(events)
 }
 
 /// Save a reaction as a kind=7 event in the events table

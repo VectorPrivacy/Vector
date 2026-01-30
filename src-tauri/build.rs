@@ -67,6 +67,7 @@ fn main() {
             "get_chat_messages_paginated",
             "get_message_views",
             "get_messages_around_id",
+            "get_system_events",
             "get_chat_message_count",
             "get_file_hash_index",
             "evict_chat_messages",

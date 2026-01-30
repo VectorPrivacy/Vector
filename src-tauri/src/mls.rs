@@ -859,69 +859,98 @@ impl MlsService {
     /// Leave a group voluntarily
     ///
     /// This will:
-    /// 1. Create a leave proposal using MDK's leave_group()
+    /// 1. Create a leave proposal using MDK's leave_group() (best effort)
     /// 2. Publish the evolution event to the relay
-    /// 3. Remove the group from local metadata
+    /// 3. Clean up ALL local data for this group
     ///
-    /// Note: The leave creates a proposal that needs to be committed by an admin
+    /// Note: The leave creates a proposal that needs to be committed by an admin.
+    /// Even if the MLS operation fails, local data is cleaned up to prevent ghost states.
     pub async fn leave_group(&self, group_id: &str) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
         // Resolve client
         let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
 
-        // Find the group's MLS group ID
-        let groups = self.read_groups().await?;
+        // Find the group's MLS group ID (may not exist if already partially cleaned)
+        let groups = self.read_groups().await.unwrap_or_default();
         let group_meta = groups.iter()
             .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
-            .ok_or(MlsError::GroupNotFound)?;
-        
-        // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(
-            &hex::decode(&group_meta.engine_group_id)
-                .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
-        );
+            .cloned();
 
-        // Perform engine operation (leave group)
-        let evolution_event = {
-            let engine = self.engine()?;
-            
-            // Leave the group - returns LeaveGroupResult with evolution_event
-            let leave_result = engine
-                .leave_group(&mls_group_id)
-                .map_err(|e| {
-                    eprintln!("[MLS] Failed to leave group: {}", e);
-                    MlsError::NostrMlsError(format!("Failed to leave group: {}", e))
-                })?;
+        // Send a "leave request" application message so admins auto-remove us
+        // This is more reliable than the MLS proposal which needs explicit commit
+        if let Some(ref meta) = group_meta {
+            if let Ok(mls_group_id) = hex::decode(&meta.engine_group_id)
+                .map(|bytes| GroupId::from_slice(&bytes))
+            {
+                // Get our pubkey for building the rumor
+                if let Ok(signer) = client.signer().await {
+                    if let Ok(my_pubkey) = signer.get_public_key().await {
+                        // Build the leave request rumor (like typing indicator)
+                        let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
+                            .tag(Tag::custom(TagKind::d(), vec!["vector"]))
+                            .build(my_pubkey);
 
-            leave_result.evolution_event
-        };
-
-        // Publish the evolution event (leave proposal) to the relay
-        match client.send_event(&evolution_event).await {
-            Ok(_) => {
-                // Track our own published event so it's skipped when it comes back via sync
-                if let Some(handle) = TAURI_APP.get() {
-                    let _ = track_mls_event_processed(handle, &evolution_event.id.to_hex(), group_id, evolution_event.created_at.as_secs());
+                        // Create and send the MLS message
+                        match self.engine() {
+                            Ok(engine) => {
+                                match engine.create_message(&mls_group_id, leave_rumor) {
+                                    Ok(mls_event) => {
+                                        if let Err(e) = client.send_event(&mls_event).await {
+                                            eprintln!("[MLS] Failed to send leave request message: {}", e);
+                                        } else {
+                                            println!("[MLS] Leave request message sent for group: {}", group_id);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[MLS] Failed to create leave request message: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[MLS] Could not get MLS engine for leave request: {}", e);
+                            }
+                        }
+                    }
                 }
-            }
-            Err(e) => {
-                eprintln!("[MLS] Failed to publish leave proposal: {}", e);
             }
         }
 
-        // Remove the group from local metadata
-        let mut groups = self.read_groups().await?;
-        groups.retain(|g| g.group_id != group_id && g.engine_group_id != group_meta.engine_group_id);
-        self.write_groups(&groups).await?;
+        // Always clean up local data, even if MLS operation failed
+        // This prevents ghost/stuck states
 
-        // Emit event to refresh UI
+        // 1. Remove cursor for this group
+        let mut cursors = self.read_event_cursors().await.unwrap_or_default();
+        cursors.remove(group_id);
+        if let Some(ref meta) = group_meta {
+            cursors.remove(&meta.engine_group_id);
+        }
+        if let Err(e) = self.write_event_cursors(&cursors).await {
+            eprintln!("[MLS] Failed to remove cursor: {}", e);
+        }
+
+        // 2. Remove from mls_groups metadata
+        if let Some(ref meta) = group_meta {
+            let mut groups = self.read_groups().await.unwrap_or_default();
+            groups.retain(|g| g.group_id != group_id && g.engine_group_id != meta.engine_group_id);
+            if let Err(e) = self.write_groups(&groups).await {
+                eprintln!("[MLS] Failed to remove group metadata: {}", e);
+            }
+        }
+
+        // 3. Full cleanup (chat, messages, in-memory state)
+        if let Err(e) = self.cleanup_evicted_group(group_id).await {
+            eprintln!("[MLS] Cleanup failed (non-fatal): {}", e);
+        }
+
+        // 4. Emit event to refresh UI (cleanup_evicted_group also emits, but ensure it happens)
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("mls_group_left", serde_json::json!({
                 "group_id": group_id
             })).ok();
         }
 
+        println!("[MLS] Left group and cleaned up local data: {}", group_id);
         Ok(())
     }
 
@@ -1841,13 +1870,95 @@ impl MlsService {
                                         vec![]
                                     }
                                 };
-                                
+
                                 // Emit typing update event to frontend
                                 if let Some(handle) = TAURI_APP.get() {
                                     let _ = handle.emit("typing-update", serde_json::json!({
                                         "conversation_id": gid_for_fetch,
                                         "typers": active_typers,
                                     }));
+                                }
+                            }
+                            RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
+                                // Deduplicate by event ID
+                                if let Some(handle) = TAURI_APP.get() {
+                                    if crate::db::event_exists(handle, &event_id).unwrap_or(false) {
+                                        println!("[MLS] Sync: Skipping duplicate leave request: {}", event_id);
+                                        continue;
+                                    }
+                                }
+
+                                // A member is requesting to leave - if we're admin, auto-remove them
+                                println!("[MLS] Leave request received from {} in group {}", member_pubkey, gid_for_fetch);
+
+                                // Get member's display name for the system event
+                                let member_name = {
+                                    let state = STATE.lock().await;
+                                    state.get_profile(&member_pubkey)
+                                        .map(|p| {
+                                            if !p.nickname.is_empty() { p.nickname.clone() }
+                                            else if !p.name.is_empty() { p.name.clone() }
+                                            else { member_pubkey.chars().take(12).collect::<String>() + "..." }
+                                        })
+                                };
+
+                                // Check if we're an admin for this group
+                                let am_i_admin = if let Some(meta) = &group_metadata {
+                                    if let Some(client) = NOSTR_CLIENT.get() {
+                                        if let Ok(signer) = client.signer().await {
+                                            if let Ok(my_pk) = signer.get_public_key().await {
+                                                let my_npub = my_pk.to_bech32().unwrap_or_default();
+                                                let my_hex = my_pk.to_hex();
+                                                meta.creator_pubkey == my_npub || meta.creator_pubkey == my_hex
+                                            } else { false }
+                                        } else { false }
+                                    } else { false }
+                                } else { false };
+
+                                if am_i_admin {
+                                    println!("[MLS] I'm admin, auto-removing member: {}", member_pubkey);
+                                    if let Some(handle) = TAURI_APP.get() {
+                                        // Save system event using the leave request event_id
+                                        // Returns true if inserted, false if duplicate (INSERT OR IGNORE)
+                                        let was_inserted = crate::db::save_system_event_by_id(
+                                            handle,
+                                            &event_id,
+                                            &gid_for_fetch,
+                                            crate::db::SystemEventType::MemberLeft,
+                                            &member_pubkey,
+                                            member_name.as_deref(),
+                                        ).await.unwrap_or(false);
+
+                                        if was_inserted {
+                                            // Emit event to frontend only if we saved it (not a duplicate)
+                                            let _ = handle.emit("system_event", serde_json::json!({
+                                                "conversation_id": gid_for_fetch,
+                                                "event_id": event_id,
+                                                "event_type": crate::db::SystemEventType::MemberLeft.as_u8(),
+                                                "member_pubkey": member_pubkey,
+                                                "member_name": member_name,
+                                            }));
+
+                                            // Use a fresh MLS service for the removal
+                                            let mls_service = match MlsService::new_persistent(handle) {
+                                                Ok(s) => s,
+                                                Err(e) => {
+                                                    eprintln!("[MLS] Failed to create MLS service for auto-remove: {}", e);
+                                                    continue;
+                                                }
+                                            };
+                                            // Remove the member (device_id doesn't matter for removal)
+                                            if let Err(e) = mls_service.remove_member_device(&gid_for_fetch, &member_pubkey, "").await {
+                                                eprintln!("[MLS] Failed to auto-remove member {}: {}", member_pubkey, e);
+                                            } else {
+                                                println!("[MLS] Successfully removed member {} from group {}", member_pubkey, gid_for_fetch);
+                                            }
+                                        } else {
+                                            println!("[MLS] Sync: Skipping duplicate leave request event: {}", event_id);
+                                        }
+                                    }
+                                } else {
+                                    println!("[MLS] Not admin, ignoring leave request from {}", member_pubkey);
                                 }
                             }
                             RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
