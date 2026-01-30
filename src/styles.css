@@ -3726,6 +3726,10 @@ select:focus::-ms-value {
   mask-size: contain;
 }
 
+.icon-x-user {
+  mask-image: url("./icons/x-user.svg");
+}
+
 /* For downloaded models - make it more prominent */
 .btn-delete-model.downloaded {
   opacity: 0.8;

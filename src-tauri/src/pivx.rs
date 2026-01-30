@@ -558,7 +558,8 @@ pub async fn build_sweep_transaction(
         preimage.push(utxos.len() as u8); // Input count
 
         for (j, other_utxo) in utxos.iter().enumerate() {
-            let other_txid = hex::decode(&other_utxo.txid).unwrap();
+            let other_txid = hex::decode(&other_utxo.txid)
+                .map_err(|e| format!("Invalid txid hex '{}': {}", &other_utxo.txid, e))?;
             preimage.extend(other_txid.iter().rev());
             preimage.extend_from_slice(&other_utxo.vout.to_le_bytes());
 
@@ -601,7 +602,8 @@ pub async fn build_sweep_transaction(
         let script_sig_len = 1 + sig_bytes.len() + 1 + pubkey_bytes.len();
 
         // Write input to signed tx
-        let txid_bytes = hex::decode(&utxo.txid).unwrap();
+        let txid_bytes = hex::decode(&utxo.txid)
+            .map_err(|e| format!("Invalid txid hex '{}': {}", &utxo.txid, e))?;
         signed_tx.extend(txid_bytes.iter().rev());
         signed_tx.extend_from_slice(&utxo.vout.to_le_bytes());
 

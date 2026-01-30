@@ -23,6 +23,22 @@ const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff',
 const SUPPORTED_VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov'];
 
 /**
+ * Validate that a string is a safe image source (data URL or blob URL)
+ * Prevents XSS via malicious src injection (e.g., javascript: protocol)
+ * @param {string} src - The source string to validate
+ * @returns {string|null} The validated src or null if invalid
+ */
+function validateImageSrc(src) {
+    if (!src || typeof src !== 'string') return null;
+    // Allow data URLs for images and blob URLs only
+    if (src.startsWith('data:image/') || src.startsWith('blob:')) {
+        return src;
+    }
+    console.warn('[file-preview] Rejected invalid image src:', src.substring(0, 50));
+    return null;
+}
+
+/**
  * Format file size in human-readable format
  * @param {number} bytes - File size in bytes
  * @returns {string} Formatted file size
@@ -128,11 +144,12 @@ function isMiniAppExtension(ext) {
  * @param {string} fileName - Fallback file name if no Mini App info
  */
 function displayMiniAppPreview(contentArea, miniAppInfo, fileName) {
-    if (miniAppInfo && miniAppInfo.icon_data) {
+    const validatedIcon = miniAppInfo ? validateImageSrc(miniAppInfo.icon_data) : null;
+    if (validatedIcon) {
         // Show Mini App icon
         contentArea.innerHTML = `
             <div class="file-preview-image-container file-preview-miniapp">
-                <img src="${miniAppInfo.icon_data}" class="file-preview-image file-preview-miniapp-icon" alt="${miniAppInfo.name || 'Mini App'}">
+                <img src="${validatedIcon}" class="file-preview-image file-preview-miniapp-icon" alt="${escapeHtml(miniAppInfo.name || 'Mini App')}">
             </div>
         `;
     } else {
@@ -310,11 +327,12 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         // Show image preview
         const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
         
-        if (isAndroid && androidPreview) {
+        const validatedAndroidPreview = validateImageSrc(androidPreview);
+        if (isAndroid && validatedAndroidPreview) {
             // On Android, use the base64 preview we already got from cache_android_file
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
-                    <img src="${androidPreview}" class="file-preview-image" alt="Preview">
+                    <img src="${validatedAndroidPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
         } else if (isAndroid) {
@@ -729,10 +747,11 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         optionsArea.innerHTML = '';
     } else if (isImage) {
         // Use the preview from Rust (already a base64 data URL)
-        if (preview) {
+        const validatedPreview = validateImageSrc(preview);
+        if (validatedPreview) {
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
-                    <img src="${preview}" class="file-preview-image" alt="Preview">
+                    <img src="${validatedPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
         } else {
@@ -890,10 +909,11 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
         });
         
         // Display preview
-        if (result.preview) {
+        const validatedResultPreview = validateImageSrc(result.preview);
+        if (validatedResultPreview) {
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
-                    <img src="${result.preview}" class="file-preview-image" alt="Preview">
+                    <img src="${validatedResultPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
         } else {

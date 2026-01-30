@@ -459,6 +459,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             .unwrap();
     // Create persistent pending_id that will live for the entire function
     let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
+    // Grab our pubkey first (needed for npub in group chats)
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let signer = client.signer().await.unwrap();
+    let my_public_key = signer.get_public_key().await.unwrap();
+
     let msg = Message {
         id: pending_id.as_ref().clone(),
         content,
@@ -473,15 +478,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         pending: true,
         failed: false,
         mine: true,
-        npub: None, // Pending messages don't need npub (they're always mine)
+        npub: my_public_key.to_bech32().ok(), // Needed for group chats so replies show correct author
         wrapper_event_id: None, // Will be set when message is sent
         edited: false,
         edit_history: None,
     };
-    // Grab our pubkey first
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
 
     // Detect if this is a group chat or DM
     // First check if a chat already exists and use its type

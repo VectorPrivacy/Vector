@@ -5054,11 +5054,9 @@ async function setupRustListeners() {
                 }
             };
 
-            // Add to chat messages
-            if (chat) {
-                chat.messages.push(systemMsg);
-                eventCache.addEvent(conversation_id, systemMsg);
-            }
+            // Add to chat messages via cache (handles deduplication)
+            // Note: chat.messages and cache share the same array reference, so only use cache
+            eventCache.addEvent(conversation_id, systemMsg);
 
             // If this chat is currently open, render the system event
             if (strOpenChat === conversation_id && domChatMessages) {
@@ -9507,8 +9505,24 @@ async function renderGroupOverview(chat) {
     // Leave Group button
     domGroupLeaveBtn.style.display = 'flex';
     domGroupLeaveBtn.onclick = async () => {
-        // Confirm before leaving using popupConfirm
         const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+
+        // Check if user is the group creator
+        const isCreator = myProfile && myProfile.id === chat.metadata?.creator_pubkey;
+
+        // Creators cannot leave unless they are the only member
+        if (isCreator && memberCount > 1) {
+            await popupConfirm(
+                'Cannot Leave Group',
+                'You are the creator of this group. You must remove all other members before you can leave.<br><br>Please kick all members first, then you can leave the group.',
+                true, // Notice only, no cancel button
+                '', // No input
+                'vector_warning.svg'
+            );
+            return;
+        }
+
+        // Confirm before leaving using popupConfirm
         const confirmed = await popupConfirm(
             'Leave Group',
             `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,

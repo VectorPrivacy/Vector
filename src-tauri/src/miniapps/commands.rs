@@ -395,51 +395,62 @@ try {
 })();
 
 // Wrap Tauri's __TAURI__ API to restrict access to only allowed commands
-// We need to wait for Tauri to initialize first
-try {
-    const setupTauriRestrictions = () => {
-        if (!window.__TAURI__ || !window.__TAURI__.core) {
-            // Tauri not ready yet, try again
-            setTimeout(setupTauriRestrictions, 10);
-            return;
-        }
+// Uses property interception to ensure ZERO timing window for bypass
+(function() {
+    'use strict';
 
-        // Wrap the core invoke to reject all calls except our allowed ones
-        const originalInvoke = window.__TAURI__.core.invoke;
-        const originalChannel = window.__TAURI__.core.Channel;
+    const allowedCommands = [
+        'miniapp_get_updates',
+        'miniapp_send_update',
+        'miniapp_join_realtime_channel',
+        'miniapp_send_realtime_data',
+        'miniapp_leave_realtime_channel',
+        'miniapp_add_realtime_peer',
+        'miniapp_get_realtime_node_addr',
+        'miniapp_get_granted_permissions_for_window'
+    ];
 
-        window.__TAURI__.core.invoke = async (cmd, args) => {
-            // Allow our miniapp commands
-            const allowedCommands = [
-                'miniapp_get_updates',
-                'miniapp_send_update',
-                'miniapp_join_realtime_channel',
-                'miniapp_send_realtime_data',
-                'miniapp_leave_realtime_channel',
-                'miniapp_add_realtime_peer',
-                'miniapp_get_realtime_node_addr',
-                'miniapp_get_granted_permissions_for_window'
-            ];
+    function wrapTauriApi(tauriObj) {
+        if (!tauriObj || !tauriObj.core) return tauriObj;
+
+        const originalInvoke = tauriObj.core.invoke;
+        const originalChannel = tauriObj.core.Channel;
+
+        tauriObj.core.invoke = async (cmd, args) => {
             if (allowedCommands.includes(cmd)) {
-                return originalInvoke.call(window.__TAURI__.core, cmd, args);
+                return originalInvoke.call(tauriObj.core, cmd, args);
             }
             console.warn('Mini App tried to invoke blocked Tauri command:', cmd);
             throw new Error('Tauri command not available in Mini Apps: ' + cmd);
         };
 
-        // Ensure Channel class is still available (needed for realtime)
+        // Preserve Channel class (needed for realtime)
         if (originalChannel) {
-            window.__TAURI__.core.Channel = originalChannel;
+            tauriObj.core.Channel = originalChannel;
         }
 
         console.log("[MiniApp] Tauri restrictions applied");
-    };
+        return tauriObj;
+    }
 
-    // Start checking for Tauri
-    setupTauriRestrictions();
-} catch (e) {
-    console.warn("Failed to setup Tauri restrictions:", e);
-}
+    // If __TAURI__ already exists, wrap it immediately
+    if (window.__TAURI__) {
+        wrapTauriApi(window.__TAURI__);
+    }
+
+    // Intercept any future assignment to __TAURI__ (zero timing window)
+    let _tauriValue = window.__TAURI__;
+    Object.defineProperty(window, '__TAURI__', {
+        get() {
+            return _tauriValue;
+        },
+        set(newValue) {
+            _tauriValue = wrapTauriApi(newValue);
+        },
+        configurable: false,  // Prevent re-definition
+        enumerable: true
+    });
+})();
 "#;
 
 /// Get the base URL for Mini Apps based on platform

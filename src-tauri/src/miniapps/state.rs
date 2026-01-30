@@ -148,9 +148,14 @@ impl MiniAppPackage {
     pub fn get_file(&self, path: &str) -> Result<Vec<u8>, Error> {
         let file = std::fs::File::open(&self.path)?;
         let mut archive = zip::ZipArchive::new(file)?;
-        
-        // Normalize path (remove leading slash)
+
+        // Normalize path (remove leading slash) and prevent path traversal
         let normalized_path = path.trim_start_matches('/');
+
+        // Reject paths containing directory traversal sequences
+        if normalized_path.contains("..") || normalized_path.contains("\\..") {
+            return Err(Error::FileNotFound(format!("Invalid path: {}", path)));
+        }
         
         let mut zip_file = archive.by_name(normalized_path)
             .map_err(|_| Error::FileNotFound(path.to_string()))?;
