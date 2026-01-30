@@ -633,13 +633,12 @@ pub async fn build_sweep_transaction(
 
 /// Check if a promo code already exists in the database
 fn promo_code_exists<R: Runtime>(handle: &AppHandle<R>, code: &str) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pivx_promos WHERE gift_code = ?1",
         rusqlite::params![code],
         |row| row.get(0),
     ).unwrap_or(false);
-    crate::account_manager::return_db_connection(conn);
     Ok(exists)
 }
 
@@ -659,14 +658,13 @@ async fn save_promo<R: Runtime>(
         .unwrap()
         .as_secs();
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
     conn.execute(
         "INSERT INTO pivx_promos (gift_code, address, privkey_encrypted, created_at, status)
          VALUES (?1, ?2, ?3, ?4, 'active')",
         rusqlite::params![gift_code, address, privkey_encrypted, created_at],
     ).map_err(|e| format!("Failed to store promo: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
     Ok(())
 }
 
@@ -698,7 +696,7 @@ async fn get_active_promos_with_keys<R: Runtime>(
 ) -> Result<Vec<DecryptedPromo>, String> {
     // Query all active promos with balances
     let encrypted_promos: Vec<(String, String, String, f64)> = {
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
         let result = {
             let mut stmt = conn.prepare(
                 "SELECT gift_code, address, privkey_encrypted, COALESCE(amount_piv, 0)
@@ -712,9 +710,7 @@ async fn get_active_promos_with_keys<R: Runtime>(
 
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(|e| format!("Row error: {}", e))?
-        };
-        crate::account_manager::return_db_connection(conn);
-        result
+        };        result
     };
 
     // Decrypt all private keys
@@ -734,7 +730,7 @@ fn update_promo_status<R: Runtime>(
     gift_code: &str,
     status: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // For claimed/sent promos, delete them entirely (no need to track spent promos)
     if status == "claimed" || status == "sent" {
@@ -748,8 +744,6 @@ fn update_promo_status<R: Runtime>(
             rusqlite::params![status, gift_code],
         ).map_err(|e| format!("Failed to update promo status: {}", e))?;
     }
-
-    crate::account_manager::return_db_connection(conn);
     Ok(())
 }
 
@@ -757,7 +751,7 @@ fn update_promo_status<R: Runtime>(
 /// Returns (gift_code, address, created_at) if found, None otherwise
 /// This helps avoid accumulating unused addresses
 fn find_reusable_promo<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<(String, String, u64)>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // Find promos that:
     // 1. Are active status (not 'sent' or 'claimed')
@@ -773,8 +767,6 @@ fn find_reusable_promo<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<(Stri
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).ok();
-
-    crate::account_manager::return_db_connection(conn);
     Ok(result)
 }
 
@@ -794,13 +786,11 @@ async fn get_or_create_deposit_promo<R: Runtime>(handle: &AppHandle<R>) -> Resul
             });
         }
         // If it has balance, update the DB and continue to create new promo
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![balance, gift_code],
-        );
-        crate::account_manager::return_db_connection(conn);
-    }
+        );    }
 
     // No reusable promo found, create a new one
     let gift_code = loop {
@@ -863,7 +853,7 @@ pub async fn pivx_get_wallet_balance<R: Runtime>(
 ) -> Result<f64, String> {
     // Fetch addresses in a separate scope to release DB connection before await
     let addresses: Vec<String> = {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let mut stmt = conn.prepare(
             "SELECT address FROM pivx_promos WHERE status = 'active'"
         ).map_err(|e| format!("Query failed: {}", e))?;
@@ -873,9 +863,7 @@ pub async fn pivx_get_wallet_balance<R: Runtime>(
             .filter_map(|r| r.ok())
             .collect();
 
-        drop(stmt);
-        crate::account_manager::return_db_connection(conn);
-        result
+        drop(stmt);        result
     };
 
     // Fetch balances (sequentially to avoid rate limiting)
@@ -894,7 +882,7 @@ pub async fn pivx_get_wallet_balance<R: Runtime>(
 pub async fn pivx_list_promos<R: Runtime>(
     handle: AppHandle<R>,
 ) -> Result<Vec<PivxPromo>, String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(&handle)?;
 
     let mut stmt = conn.prepare(
         "SELECT gift_code, address, amount_piv, status, created_at
@@ -914,8 +902,6 @@ pub async fn pivx_list_promos<R: Runtime>(
     .collect();
 
     drop(stmt);
-    crate::account_manager::return_db_connection(conn);
-
     Ok(promos)
 }
 
@@ -1051,12 +1037,11 @@ pub async fn pivx_claim_from_message<R: Runtime>(
 
         // Update the new promo's amount in the database
         {
-            let conn = crate::account_manager::get_db_connection(&handle)?;
+            let conn = crate::account_manager::get_db_connection_guard(&handle)?;
             let _ = conn.execute(
                 "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
                 rusqlite::params![balance, new_code],
             );
-            crate::account_manager::return_db_connection(conn);
         }
 
         Ok(serde_json::json!({
@@ -1118,7 +1103,7 @@ pub async fn pivx_refresh_balances<R: Runtime>(
 
     // Fetch promos in a separate scope to release DB connection before await
     let promos: Vec<(String, String, String, u64)> = {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let mut stmt = conn.prepare(
             "SELECT gift_code, address, status, created_at FROM pivx_promos WHERE status = 'active'"
         ).map_err(|e| format!("Query failed: {}", e))?;
@@ -1134,9 +1119,7 @@ pub async fn pivx_refresh_balances<R: Runtime>(
         .filter_map(|r| r.ok())
         .collect();
 
-        drop(stmt);
-        crate::account_manager::return_db_connection(conn);
-        result
+        drop(stmt);        result
     };
 
     if promos.is_empty() {
@@ -1154,7 +1137,7 @@ pub async fn pivx_refresh_balances<R: Runtime>(
 
     // Batch update all balances in database
     {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         for (gift_code, address, status, created_at) in &promos {
             let balance = balances.get(address).copied().unwrap_or(0.0);
 
@@ -1170,9 +1153,7 @@ pub async fn pivx_refresh_balances<R: Runtime>(
                 status: status.clone(),
                 created_at: *created_at,
             });
-        }
-        crate::account_manager::return_db_connection(conn);
-    }
+        }    }
 
     Ok(results)
 }
@@ -1294,25 +1275,21 @@ pub async fn pivx_send_payment<R: Runtime>(
     // Save the send promo (it now has the exact amount)
     save_promo(&handle, &send_promo.0, &send_promo.1, &send_promo.2).await?;
     {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![amount_piv, send_promo.0],
-        );
-        crate::account_manager::return_db_connection(conn);
-    }
+        );    }
 
     // Save change promo if there's change
     let change_piv = change_sats as f64 / 100_000_000.0;
     if change_sats > 0 {
         save_promo(&handle, &change_promo.0, &change_promo.1, &change_promo.2).await?;
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![change_piv, change_promo.0],
-        );
-        crate::account_manager::return_db_connection(conn);
-    }
+        );    }
 
     // Now send the funded promo via Nostr
     let client = crate::NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
@@ -1364,13 +1341,11 @@ pub async fn pivx_send_payment<R: Runtime>(
 
     // Delete sent promo from our DB (funds are transferred to recipient)
     {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let _ = conn.execute(
             "DELETE FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![send_promo.0],
-        );
-        crate::account_manager::return_db_connection(conn);
-    }
+        );    }
 
     // Save payment event for persistence
     let stored_event = crate::stored_event::StoredEventBuilder::new()
@@ -1420,14 +1395,12 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
     // Verify the promo exists and get its balance
     let promo_data: (String, f64) = {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let result = conn.query_row(
             "SELECT address, COALESCE(amount_piv, 0) FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![gift_code],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
-        ).map_err(|_| "Promo code not found")?;
-        crate::account_manager::return_db_connection(conn);
-        result
+        ).map_err(|_| "Promo code not found")?;        result
     };
 
     let (address, amount_piv) = promo_data;
@@ -1498,13 +1471,11 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
     // Delete sent promo from DB (funds are gone, no need to track it)
     {
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let _ = conn.execute(
             "DELETE FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![gift_code],
-        );
-        crate::account_manager::return_db_connection(conn);
-    }
+        );    }
 
     // Save PIVX payment event to database for persistence
     let stored_event = crate::stored_event::StoredEventBuilder::new()
@@ -1927,13 +1898,11 @@ pub async fn pivx_withdraw<R: Runtime>(
     if change_sats > 0 {
         save_promo(&handle, &change_promo.0, &change_promo.1, &change_promo.2).await?;
         // Update the change promo's amount
-        let conn = crate::account_manager::get_db_connection(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![change_piv, change_promo.0],
-        );
-        crate::account_manager::return_db_connection(conn);
-    }
+        );    }
 
     // Emit progress
     let _ = handle.emit("pivx_withdraw_progress", serde_json::json!({

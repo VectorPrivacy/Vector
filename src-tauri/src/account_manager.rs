@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Mutex};
+use std::ops::{Deref, DerefMut};
 use lazy_static::lazy_static;
 use tauri::{AppHandle, Runtime, Manager};
 
@@ -12,8 +13,59 @@ lazy_static! {
 
     /// Persistent database connection pool (one per account)
     /// Keeps connection open to avoid repeated open/close overhead
-    static ref DB_CONNECTION_POOL: Arc<Mutex<Option<(String, rusqlite::Connection)>>> =
+    /// Note: Account switching is handled by set_current_account() which clears the pool,
+    /// so we don't need to track npub here - the pooled connection is always for the current account.
+    static ref DB_CONNECTION_POOL: Arc<Mutex<Option<rusqlite::Connection>>> =
         Arc::new(Mutex::new(None));
+}
+
+/// RAII guard for database connections that automatically returns the connection to the pool on drop.
+/// This prevents connection leaks on early returns, errors, or panics.
+///
+/// Usage:
+/// ```
+/// let conn = get_db_connection_guard(handle)?;
+/// conn.execute("SELECT 1", [])?;  // Use via Deref
+/// // Connection automatically returned when `conn` goes out of scope
+/// ```
+pub struct ConnectionGuard {
+    conn: Option<rusqlite::Connection>,
+}
+
+impl ConnectionGuard {
+    fn new(conn: rusqlite::Connection) -> Self {
+        Self { conn: Some(conn) }
+    }
+}
+
+impl Deref for ConnectionGuard {
+    type Target = rusqlite::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("Connection already taken")
+    }
+}
+
+impl DerefMut for ConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn.as_mut().expect("Connection already taken")
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            return_db_connection(conn);
+        }
+    }
+}
+
+/// Get a database connection wrapped in an RAII guard.
+/// The connection is automatically returned to the pool when the guard is dropped.
+/// This is the preferred way to get connections as it prevents leaks on all code paths.
+pub fn get_db_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<ConnectionGuard, String> {
+    let conn = get_db_connection(handle)?;
+    Ok(ConnectionGuard::new(conn))
 }
 
 /// SQL Schema for Vector database
@@ -107,6 +159,7 @@ CREATE TABLE IF NOT EXISTS mls_keypackages (
     owner_pubkey TEXT NOT NULL,
     device_id TEXT NOT NULL,
     keypackage_ref TEXT NOT NULL,
+    created_at INTEGER,
     fetched_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
 );
@@ -365,27 +418,23 @@ pub fn clear_pending_account() -> Result<(), String> {
     Ok(())
 }
 
-/// Get or reuse database connection for the current account
-/// This keeps the connection open to avoid repeated open/close overhead
+/// Get or reuse database connection for the current account.
+///
+/// This is a fast path - migrations are NOT run here.
+/// Migrations are handled once at login via `init_profile_database`.
+///
+/// Note: We don't need to verify the connection matches the current account because
+/// `set_current_account()` clears the pool when switching accounts.
 pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::Connection, String> {
-    let npub = get_current_account()?;
-
-    // Try to reuse existing connection
+    // Try to reuse existing connection from pool
     let mut pool = DB_CONNECTION_POOL.lock().unwrap();
 
-    if let Some((cached_npub, _)) = pool.as_ref() {
-        if cached_npub == &npub {
-            // Same account, take the connection out
-            if let Some((_, conn)) = pool.take() {
-                return Ok(conn);
-            }
-        } else {
-            // Different account, close old connection
-            *pool = None;
-        }
+    if let Some(conn) = pool.take() {
+        return Ok(conn);
     }
 
-    // Open new connection
+    // No pooled connection - open a new one for the current account
+    let npub = get_current_account()?;
     let db_path = get_database_path(handle, &npub)?;
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
@@ -394,19 +443,13 @@ pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::
     conn.execute_batch("PRAGMA journal_mode=WAL;")
         .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
 
-    // Run migrations to ensure schema is up to date
-    // This is important for existing databases that may not have new columns
-    run_migrations(&conn)?;
-
     Ok(conn)
 }
 
 /// Return connection to the pool for reuse
 pub fn return_db_connection(conn: rusqlite::Connection) {
-    if let Ok(npub) = get_current_account() {
-        let mut pool = DB_CONNECTION_POOL.lock().unwrap();
-        *pool = Some((npub, conn));
-    }
+    let mut pool = DB_CONNECTION_POOL.lock().unwrap();
+    *pool = Some(conn);
 }
 
 /// Close the current database connection (e.g., when switching accounts)
@@ -429,6 +472,7 @@ pub fn check_any_account_exists<R: Runtime>(handle: AppHandle<R>) -> bool {
 
 /// Initialize SQL database for a specific profile
 /// Creates all tables if they don't exist
+/// The connection is pooled after init so subsequent get_db_connection calls reuse it
 pub async fn init_profile_database<R: Runtime>(
     handle: &AppHandle<R>,
     npub: &str
@@ -443,25 +487,125 @@ pub async fn init_profile_database<R: Runtime>(
     }
 
     // Open connection and create schema
-    let conn = rusqlite::Connection::open(&db_path)
+    let mut conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
+
+    // Enable WAL mode for better concurrency
+    conn.execute_batch("PRAGMA journal_mode=WAL;")
+        .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
 
     // Execute the schema to create all tables
     conn.execute_batch(SQL_SCHEMA)
         .map_err(|e| format!("Failed to create database schema: {}", e))?;
 
-    // Run migrations for existing databases
-    run_migrations(&conn)?;
+    // Run migrations for existing databases (atomic - each migration is all-or-nothing)
+    run_migrations(&mut conn)?;
 
-    println!("[Account Manager] Database schema created successfully");
+    // Pool the connection so get_db_connection can reuse it immediately
+    {
+        let mut pool = DB_CONNECTION_POOL.lock().unwrap();
+        *pool = Some(conn);
+    }
+
+    println!("[Account Manager] Database initialized and connection pooled");
 
     Ok(())
 }
 
+/// Check if a specific migration has already been applied
+fn migration_applied(conn: &rusqlite::Connection, migration_id: u32) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM schema_migrations WHERE id = ?1",
+        rusqlite::params![migration_id],
+        |_| Ok(())
+    ).is_ok()
+}
+
+/// Mark a migration as applied (within a transaction)
+fn mark_migration_applied(tx: &rusqlite::Transaction, migration_id: u32) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (id, applied_at) VALUES (?1, ?2)",
+        rusqlite::params![migration_id, now],
+    ).map_err(|e| format!("[DB] Migration {}: Failed to record: {}", migration_id, e))?;
+
+    Ok(())
+}
+
+/// Run a single migration atomically within a transaction.
+///
+/// GUARANTEES:
+/// - If the migration succeeds: all changes are committed, migration is marked as applied
+/// - If the migration fails: ALL changes are rolled back, database is unchanged
+/// - No partial state is ever possible
+///
+/// This is the ONLY way migrations should be run.
+fn run_atomic_migration<F>(
+    conn: &mut rusqlite::Connection,
+    id: u32,
+    name: &str,
+    migrate: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&rusqlite::Transaction) -> Result<(), String>,
+{
+    // Check if already applied (outside transaction - read-only)
+    if migration_applied(conn, id) {
+        return Ok(());
+    }
+
+    println!("[DB] Migration {}: {}...", id, name);
+
+    // Start transaction - this is the atomicity boundary
+    let tx = conn.transaction()
+        .map_err(|e| format!("[DB] Migration {}: Failed to start transaction: {}", id, e))?;
+
+    // Run the migration within the transaction
+    match migrate(&tx) {
+        Ok(()) => {
+            // Mark as applied WITHIN the same transaction
+            mark_migration_applied(&tx, id)?;
+
+            // Commit - if this fails, everything rolls back
+            tx.commit()
+                .map_err(|e| format!("[DB] Migration {}: Failed to commit: {}", id, e))?;
+
+            println!("[DB] Migration {} complete", id);
+            Ok(())
+        }
+        Err(e) => {
+            // Transaction automatically rolls back on drop
+            eprintln!("[DB] Migration {} FAILED: {} - rolling back", id, e);
+            Err(e)
+        }
+    }
+}
+
 /// Run database migrations for schema updates
-/// This handles adding new columns to existing tables
-fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
-    // Check if messages table exists (it may have been dropped after full migration to events)
+///
+/// GUARANTEES:
+/// - Each migration runs in a transaction (atomic - all or nothing)
+/// - If any migration fails, changes are rolled back - no partial state
+/// - Migrations are tracked in schema_migrations table (idempotent - safe to re-run)
+/// - All errors are logged with [DB] prefix and propagated (no silent failures)
+fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
+    // Ensure schema_migrations table exists (bootstrap - must succeed before any migrations)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            id INTEGER PRIMARY KEY,
+            applied_at INTEGER NOT NULL
+        )",
+        [],
+    ).map_err(|e| format!("[DB] Failed to create schema_migrations table: {}", e))?;
+
+    // Bootstrap legacy migrations first (for existing databases)
+    bootstrap_legacy_migrations(conn)?;
+
+    // Check if messages table exists (needed by some migrations)
     let has_messages_table: bool = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
         [],
@@ -469,44 +613,30 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
     ).map(|count| count > 0)
     .unwrap_or(false);
 
-    // Migration 1: Add wrapper_event_id column to messages table (only if table exists)
-    // This column stores the public giftwrap event ID for fast duplicate detection
+    // =========================================================================
+    // Migration 1: Add wrapper_event_id column to messages table
+    // =========================================================================
     if has_messages_table {
-        let has_wrapper_column: bool = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'wrapper_event_id'",
-            [],
-            |row| row.get::<_, i32>(0)
-        ).map(|count| count > 0)
-        .unwrap_or(false);
-
-        if !has_wrapper_column {
-            println!("[Migration] Adding wrapper_event_id column to messages table...");
-            conn.execute(
+        run_atomic_migration(conn, 1, "Add wrapper_event_id to messages", |tx| {
+            tx.execute(
                 "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
                 []
-            ).map_err(|e| format!("Failed to add wrapper_event_id column: {}", e))?;
+            ).map_err(|e| format!("Failed to add column: {}", e))?;
 
-            // Create index for fast lookups
-            conn.execute(
+            tx.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id)",
                 []
-            ).map_err(|e| format!("Failed to create wrapper_event_id index: {}", e))?;
+            ).map_err(|e| format!("Failed to create index: {}", e))?;
 
-            println!("[Migration] wrapper_event_id column added successfully");
-        }
+            Ok(())
+        })?;
     }
 
-    // Migration 2: Create miniapps_history table if it doesn't exist
-    let has_miniapps_history: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapps_history'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).map(|count| count > 0)
-    .unwrap_or(false);
-
-    if !has_miniapps_history {
-        println!("[Migration] Creating miniapps_history table...");
-        conn.execute(
+    // =========================================================================
+    // Migration 2: Create miniapps_history table
+    // =========================================================================
+    run_atomic_migration(conn, 2, "Create miniapps_history table", |tx| {
+        tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS miniapps_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -521,63 +651,43 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
             )
             "#,
             []
-        ).map_err(|e| format!("Failed to create miniapps_history table: {}", e))?;
+        ).map_err(|e| format!("Failed to create table: {}", e))?;
+        Ok(())
+    })?;
 
-        println!("[Migration] miniapps_history table created successfully");
-    }
-
-    // Migration 3: Add installed_version column to miniapps_history if it doesn't exist
-    let has_installed_version: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('miniapps_history') WHERE name='installed_version'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).map(|count| count > 0)
-    .unwrap_or(false);
-
-    if !has_installed_version {
-        println!("[Migration] Adding installed_version column to miniapps_history table...");
-        conn.execute(
+    // =========================================================================
+    // Migration 3: Add installed_version column to miniapps_history
+    // =========================================================================
+    run_atomic_migration(conn, 3, "Add installed_version to miniapps_history", |tx| {
+        tx.execute(
             "ALTER TABLE miniapps_history ADD COLUMN installed_version TEXT DEFAULT NULL",
             []
-        ).map_err(|e| format!("Failed to add installed_version column: {}", e))?;
+        ).map_err(|e| format!("Failed to add column: {}", e))?;
+        Ok(())
+    })?;
 
-        println!("[Migration] installed_version column added successfully");
-    }
-
-    // Migration 4: Add cached image path columns to profiles table
-    let has_avatar_cached: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('profiles') WHERE name='avatar_cached'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).map(|count| count > 0)
-    .unwrap_or(false);
-
-    if !has_avatar_cached {
-        println!("[Migration] Adding cached image columns to profiles table...");
-        conn.execute(
+    // =========================================================================
+    // Migration 4: Add cached image columns to profiles table
+    // =========================================================================
+    run_atomic_migration(conn, 4, "Add avatar/banner cache columns to profiles", |tx| {
+        tx.execute(
             "ALTER TABLE profiles ADD COLUMN avatar_cached TEXT DEFAULT ''",
             []
-        ).map_err(|e| format!("Failed to add avatar_cached column: {}", e))?;
+        ).map_err(|e| format!("Failed to add avatar_cached: {}", e))?;
 
-        conn.execute(
+        tx.execute(
             "ALTER TABLE profiles ADD COLUMN banner_cached TEXT DEFAULT ''",
             []
-        ).map_err(|e| format!("Failed to add banner_cached column: {}", e))?;
+        ).map_err(|e| format!("Failed to add banner_cached: {}", e))?;
 
-        println!("[Migration] Cached image columns added successfully");
-    }
+        Ok(())
+    })?;
 
-    // Migration 5: Create miniapp_permissions table for storing granted permissions per-app
-    let has_permissions_table: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapp_permissions'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).map(|count| count > 0)
-    .unwrap_or(false);
-
-    if !has_permissions_table {
-        println!("[Migration] Creating miniapp_permissions table...");
-        conn.execute(
+    // =========================================================================
+    // Migration 5: Create miniapp_permissions table
+    // =========================================================================
+    run_atomic_migration(conn, 5, "Create miniapp_permissions table", |tx| {
+        tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS miniapp_permissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -589,71 +699,41 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
             )
             "#,
             []
-        ).map_err(|e| format!("Failed to create miniapp_permissions table: {}", e))?;
+        ).map_err(|e| format!("Failed to create table: {}", e))?;
 
-        // Create index for fast permission lookups
-        conn.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_miniapp_permissions_hash ON miniapp_permissions(file_hash)",
             []
-        ).map_err(|e| format!("Failed to create miniapp_permissions index: {}", e))?;
+        ).map_err(|e| format!("Failed to create index: {}", e))?;
 
-        println!("[Migration] miniapp_permissions table created successfully");
-    }
+        Ok(())
+    })?;
 
+    // =========================================================================
     // Migration 6: Create events table for flat event-based storage
-    // This is the new protocol-aligned storage format where all events (messages, reactions,
-    // attachments, etc.) are stored as flat rows rather than nested JSON.
-    let has_events_table: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).map(|count| count > 0)
-    .unwrap_or(false);
-
-    if !has_events_table {
-        println!("[Migration 6] Creating events table for flat event storage...");
-
+    // =========================================================================
+    run_atomic_migration(conn, 6, "Create events table and migrate messages", |tx| {
         // Create the events table
-        conn.execute_batch(r#"
-            -- Events table: flat, protocol-aligned storage for all Nostr events
-            -- Every event (message, reaction, attachment, etc.) is a separate row
+        tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS events (
-                -- Identity
-                id TEXT PRIMARY KEY,              -- Event ID (hex, 64 chars)
-                kind INTEGER NOT NULL,            -- Nostr kind (14=DM, 7=reaction, 15=file, etc.)
-
-                -- Context
-                chat_id INTEGER NOT NULL,         -- FK to chats table
-                user_id INTEGER,                  -- FK to profiles table (sender)
-
-                -- Content
-                content TEXT NOT NULL DEFAULT '', -- Event content (encrypted for messages)
-                tags TEXT NOT NULL DEFAULT '[]',  -- JSON array of Nostr tags
-
-                -- Parsed fields for efficient queries (Vector-optimized)
-                reference_id TEXT,                -- For reactions/attachments: parent message ID
-
-                -- Timestamps
-                created_at INTEGER NOT NULL,      -- Event creation (Unix seconds)
-                received_at INTEGER NOT NULL,     -- When we received it (Unix ms)
-
-                -- State flags
-                mine INTEGER NOT NULL DEFAULT 0,  -- Is this from current user
-                pending INTEGER NOT NULL DEFAULT 0, -- Awaiting send confirmation
-                failed INTEGER NOT NULL DEFAULT 0,  -- Send failed
-
-                -- Deduplication
-                wrapper_event_id TEXT,            -- Outer giftwrap ID for sync dedup
-
-                -- Sender info (for group chats)
-                npub TEXT,                        -- Sender's npub
-
-                -- Foreign keys
+                id TEXT PRIMARY KEY,
+                kind INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER,
+                content TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '[]',
+                reference_id TEXT,
+                created_at INTEGER NOT NULL,
+                received_at INTEGER NOT NULL,
+                mine INTEGER NOT NULL DEFAULT 0,
+                pending INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                wrapper_event_id TEXT,
+                npub TEXT,
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
                 FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
             );
 
-            -- Indexes for efficient queries
             CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
             CREATE INDEX IF NOT EXISTS idx_events_reference ON events(reference_id) WHERE reference_id IS NOT NULL;
@@ -661,60 +741,36 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id);
         "#).map_err(|e| format!("Failed to create events table: {}", e))?;
 
-        println!("[Migration 6] Events table created successfully");
+        // Migrate messages within the same transaction
+        migrate_messages_to_events_atomic(tx)?;
 
-        // Migrate existing messages to events table
-        migrate_messages_to_events(conn)?;
-    }
+        Ok(())
+    })?;
 
+    // =========================================================================
     // Migration 7: Backfill attachment metadata into event tags
-    // Migration 6 didn't copy attachment JSON into tags, so kind=15 events need updating
-    // NOTE: This migration requires the messages table to exist - skip if already dropped
-    let storage_version: String = conn.query_row(
-        "SELECT value FROM settings WHERE key = 'storage_version'",
-        [],
-        |row| row.get(0)
-    ).unwrap_or_else(|_| "0".to_string());
-
-    if storage_version == "2" && has_messages_table {
-        // Check if there are any kind=15 events without attachment tags
-        let needs_migration: i64 = conn.query_row(
-            r#"
-            SELECT COUNT(*) FROM events e
-            WHERE e.kind = 15
-            AND NOT EXISTS (
-                SELECT 1 FROM json_each(e.tags)
-                WHERE json_extract(value, '$[0]') = 'attachments'
-            )
-            "#,
-            [],
-            |row| row.get(0)
-        ).unwrap_or(0);
-
-        if needs_migration > 0 {
-            println!("[Migration 7] Backfilling {} attachment events with metadata from messages table...", needs_migration);
-            migrate_attachments_to_event_tags(conn)?;
-        }
-    } else if storage_version == "2" && !has_messages_table {
-        // Messages table already dropped, just update version
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
-            []
-        ).map_err(|e| format!("Failed to update storage version: {}", e))?;
-        println!("[Migration 7] Messages table already dropped, skipping attachment backfill. Storage version set to 3.");
+    // =========================================================================
+    if has_messages_table {
+        run_atomic_migration(conn, 7, "Backfill attachment metadata to event tags", |tx| {
+            migrate_attachments_to_event_tags_atomic(tx)?;
+            Ok(())
+        })?;
+    } else {
+        // If messages table is gone, just mark as complete
+        run_atomic_migration(conn, 7, "Mark attachment migration complete (no messages table)", |tx| {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
+                []
+            ).map_err(|e| format!("Failed to update storage version: {}", e))?;
+            Ok(())
+        })?;
     }
 
-    // Migration 8: Create pivx_promos table for addressless PIVX payments
-    let has_pivx_table: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pivx_promos'",
-        [],
-        |row| row.get::<_, i32>(0)
-    ).map(|count| count > 0)
-    .unwrap_or(false);
-
-    if !has_pivx_table {
-        println!("[Migration 8] Creating pivx_promos table...");
-        conn.execute_batch(r#"
+    // =========================================================================
+    // Migration 8: Create pivx_promos table
+    // =========================================================================
+    run_atomic_migration(conn, 8, "Create pivx_promos table", |tx| {
+        tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS pivx_promos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 gift_code TEXT NOT NULL UNIQUE,
@@ -728,66 +784,277 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_pivx_promos_code ON pivx_promos(gift_code);
             CREATE INDEX IF NOT EXISTS idx_pivx_promos_address ON pivx_promos(address);
             CREATE INDEX IF NOT EXISTS idx_pivx_promos_status ON pivx_promos(status);
-        "#).map_err(|e| format!("Failed to create pivx_promos table: {}", e))?;
+        "#).map_err(|e| format!("Failed to create table: {}", e))?;
+        Ok(())
+    })?;
 
-        println!("[Migration 8] pivx_promos table created successfully");
-    }
-
+    // =========================================================================
     // Migration 9: Fix DM chats with empty participants
-    // DM chats (chat_type = 0) should have the other party's npub in participants
-    // A bug in get_or_create_chat_id was creating DM chats with participants = '[]'
-    let empty_dm_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM chats WHERE chat_type = 0 AND participants = '[]'",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    if empty_dm_count > 0 {
-        println!("[Migration 9] Fixing {} DM chats with empty participants...", empty_dm_count);
-
-        // For DM chats, the chat_identifier IS the other party's npub
-        // So we set participants = '["<chat_identifier>"]'
-        conn.execute(
-            r#"UPDATE chats
-               SET participants = '["' || chat_identifier || '"]'
-               WHERE chat_type = 0 AND participants = '[]'"#,
+    // =========================================================================
+    run_atomic_migration(conn, 9, "Fix DM chats with empty participants", |tx| {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM chats WHERE chat_type = 0 AND participants = '[]'",
             [],
-        ).map_err(|e| format!("Failed to fix DM chat participants: {}", e))?;
+            |row| row.get(0)
+        ).unwrap_or(0);
 
-        println!("[Migration 9] Fixed {} DM chats with empty participants", empty_dm_count);
-    }
+        if count > 0 {
+            tx.execute(
+                r#"UPDATE chats
+                   SET participants = '["' || chat_identifier || '"]'
+                   WHERE chat_type = 0 AND participants = '[]'"#,
+                [],
+            ).map_err(|e| format!("Failed to fix participants: {}", e))?;
+            println!("[DB] Fixed {} DM chats", count);
+        }
+        Ok(())
+    })?;
 
-    // Migration 10: Backfill npub for events that have user_id but no npub
-    // Migration 6 incorrectly set npub = NULL for all migrated messages, but the user_id
-    // foreign key points to the profiles table which has the npub. This fixes old group
-    // chat messages so they display the correct sender avatar and username.
-    let events_missing_npub: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE npub IS NULL AND user_id IS NOT NULL",
-        [],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    if events_missing_npub > 0 {
-        println!("[Migration 10] Backfilling npub for {} events from user_id -> profiles...", events_missing_npub);
-
-        let updated = conn.execute(
-            r#"UPDATE events
-               SET npub = (SELECT p.npub FROM profiles p WHERE p.id = events.user_id)
-               WHERE npub IS NULL AND user_id IS NOT NULL"#,
+    // =========================================================================
+    // Migration 10: Backfill npub for events from user_id
+    // =========================================================================
+    run_atomic_migration(conn, 10, "Backfill event npub from user_id", |tx| {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM events WHERE npub IS NULL AND user_id IS NOT NULL",
             [],
-        ).map_err(|e| format!("Failed to backfill event npubs: {}", e))?;
+            |row| row.get(0)
+        ).unwrap_or(0);
 
-        println!("[Migration 10] Backfilled npub for {} events", updated);
-    }
+        if count > 0 {
+            tx.execute(
+                r#"UPDATE events
+                   SET npub = (SELECT p.npub FROM profiles p WHERE p.id = events.user_id)
+                   WHERE npub IS NULL AND user_id IS NOT NULL"#,
+                [],
+            ).map_err(|e| format!("Failed to backfill npubs: {}", e))?;
+            println!("[DB] Backfilled npub for {} events", count);
+        }
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 11: Create mls_processed_events table for EventTracker
+    // This tracks which MLS wrapper events have been processed to prevent
+    // re-processing and enable proper deduplication.
+    // =========================================================================
+    run_atomic_migration(conn, 11, "Create mls_processed_events table", |tx| {
+        tx.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS mls_processed_events (
+                event_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                processed_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mls_processed_events_group ON mls_processed_events(group_id);
+            CREATE INDEX IF NOT EXISTS idx_mls_processed_events_created ON mls_processed_events(created_at);
+        "#).map_err(|e| format!("Failed to create mls_processed_events table: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 12: v0.3.0 MLS engine upgrade — complete MLS reset
+    //
+    // The MDK upgrade (7c3157c) changed from a dual-connection OpenMLS
+    // architecture to a unified single-connection engine. Additionally,
+    // MIP-00/MIP-02 now require an ["encoding", "base64"] tag on all MLS
+    // events (keypackages, welcomes, etc.) for security.
+    //
+    // This migration:
+    // 1. Wipes all group chat data (DMs preserved)
+    // 2. Recreates mls_keypackages with created_at column for primary device detection
+    // 3. Flags keypackage regeneration to publish with new encoding tag
+    //
+    // Users will need to re-join their groups after upgrading.
+    // =========================================================================
+    run_atomic_migration(conn, 12, "v0.3.0 MLS reset: wipe data, add created_at, force keypackage regen", |tx| {
+        // Delete group chats (chat_type=1) — CASCADE deletes their events + messages
+        tx.execute("DELETE FROM chats WHERE chat_type = 1", [])
+            .map_err(|e| format!("Failed to delete group chats: {}", e))?;
+
+        // Clear all MLS metadata tables
+        tx.execute("DELETE FROM mls_groups", [])
+            .map_err(|e| format!("Failed to clear mls_groups: {}", e))?;
+        tx.execute("DELETE FROM mls_event_cursors", [])
+            .map_err(|e| format!("Failed to clear mls_event_cursors: {}", e))?;
+        tx.execute("DELETE FROM mls_processed_events", [])
+            .map_err(|e| format!("Failed to clear mls_processed_events: {}", e))?;
+
+        // Recreate mls_keypackages with created_at column
+        tx.execute("DROP TABLE IF EXISTS mls_keypackages", [])
+            .map_err(|e| format!("Failed to drop mls_keypackages: {}", e))?;
+        tx.execute(
+            "CREATE TABLE mls_keypackages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_pubkey TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                keypackage_ref TEXT NOT NULL,
+                created_at INTEGER,
+                fetched_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            )",
+            [],
+        ).map_err(|e| format!("Failed to recreate mls_keypackages: {}", e))?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey)",
+            [],
+        ).map_err(|e| format!("Failed to create keypackages index: {}", e))?;
+
+        // Flag keypackage regeneration (connect() will publish with new encoding tag)
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_force_keypackage_regen', '1')",
+            [],
+        ).map_err(|e| format!("Failed to set keypackage regen flag: {}", e))?;
+
+        println!("[DB] Migration 12: Complete MLS reset for v0.3.0 (encoding tag support).");
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Future migrations (13+) follow the same pattern:
+    //
+    // run_atomic_migration(conn, 13, "Description here", |tx| {
+    //     tx.execute("...", [])?;
+    //     Ok(())
+    // })?;
+    // =========================================================================
 
     Ok(())
 }
 
-/// Migration 7: Copy attachment metadata from messages table into event tags
-/// This completes the migration to fully self-contained events
-fn migrate_attachments_to_event_tags(conn: &rusqlite::Connection) -> Result<(), String> {
+/// Bootstrap legacy migrations into the new tracking system (ATOMIC)
+/// This checks schema state to determine which old migrations have already run,
+/// and marks them as applied in schema_migrations table.
+/// All tracking records are written in a single transaction.
+fn bootstrap_legacy_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
+    // Only bootstrap once - if migration 1 is tracked, we've already bootstrapped
+    if migration_applied(conn, 1) {
+        return Ok(());
+    }
+
+    println!("[DB] Bootstrapping legacy migration tracking...");
+
+    // Check which migrations have effectively been applied based on schema state
+    // (Read operations - don't need transaction)
+
+    // Migration 1: wrapper_event_id column (may not exist if messages table was dropped)
+    let messages_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    let m1_applied = !messages_exists || conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='wrapper_event_id'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    // Migration 2: miniapps_history table
+    let m2_applied: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapps_history'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    // Migration 3: installed_version column
+    let m3_applied = !m2_applied || conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('miniapps_history') WHERE name='installed_version'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    // Migration 4: avatar_cached column
+    let m4_applied: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('profiles') WHERE name='avatar_cached'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    // Migration 5: miniapp_permissions table
+    let m5_applied: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='miniapp_permissions'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    // Migration 6: events table
+    // IMPORTANT: Check not just that events table exists, but that data was migrated.
+    // This handles partial migration recovery: if events table exists but is empty
+    // while messages table has data, we need to re-run the migration.
+    let events_table_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    let m6_applied = if events_table_exists && messages_exists {
+        // Both tables exist - check if migration actually completed
+        let events_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap_or(0);
+        let messages_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages", [], |row| row.get(0)
+        ).unwrap_or(0);
+
+        // Migration is complete if:
+        // - events has data, OR
+        // - messages is empty (nothing to migrate)
+        events_count > 0 || messages_count == 0
+    } else {
+        // events table exists and messages doesn't = migration complete
+        // events table doesn't exist = migration not run
+        events_table_exists
+    };
+
+    // Migration 7: storage_version >= 3
+    let storage_version: i32 = conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'storage_version'",
+        [], |row| row.get(0)
+    ).unwrap_or(0);
+    let m7_applied = storage_version >= 3;
+
+    // Migration 8: pivx_promos table
+    let m8_applied: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pivx_promos'",
+        [], |row| row.get::<_, i32>(0)
+    ).map(|c| c > 0).unwrap_or(false);
+
+    // Migration 9 & 10: Data migrations - assume applied if events table exists
+    let m9_applied = m6_applied;
+    let m10_applied = m6_applied;
+
+    let migrations_to_record = [
+        (1, m1_applied), (2, m2_applied), (3, m3_applied), (4, m4_applied),
+        (5, m5_applied), (6, m6_applied), (7, m7_applied), (8, m8_applied),
+        (9, m9_applied), (10, m10_applied),
+    ];
+
+    let applied_count = migrations_to_record.iter().filter(|(_, a)| *a).count();
+
+    // Record all applied migrations in a single transaction (ATOMIC)
+    let tx = conn.transaction()
+        .map_err(|e| format!("[DB] Bootstrap: Failed to start transaction: {}", e))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    for (id, applied) in migrations_to_record {
+        if applied {
+            tx.execute(
+                "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![id, now],
+            ).map_err(|e| format!("[DB] Bootstrap: Failed to record migration {}: {}", id, e))?;
+        }
+    }
+
+    tx.commit()
+        .map_err(|e| format!("[DB] Bootstrap: Failed to commit: {}", e))?;
+
+    println!("[DB] Bootstrap complete. Tracked {} legacy migrations.", applied_count);
+
+    Ok(())
+}
+
+/// Migration 7: Copy attachment metadata from messages table into event tags (ATOMIC)
+/// Runs within a transaction - all changes succeed or all are rolled back.
+fn migrate_attachments_to_event_tags_atomic(tx: &rusqlite::Transaction) -> Result<(), String> {
     // Find all kind=15 events that don't have attachment tags yet
-    let mut stmt = conn.prepare(r#"
+    let mut stmt = tx.prepare(r#"
         SELECT e.id, e.tags, m.attachments
         FROM events e
         JOIN messages m ON e.id = m.id
@@ -798,7 +1065,7 @@ fn migrate_attachments_to_event_tags(conn: &rusqlite::Connection) -> Result<(), 
             SELECT 1 FROM json_each(e.tags)
             WHERE json_extract(value, '$[0]') = 'attachments'
         )
-    "#).map_err(|e| format!("Failed to prepare attachment query: {}", e))?;
+    "#).map_err(|e| format!("[DB] Failed to prepare attachment query: {}", e))?;
 
     let events_to_update: Vec<(String, String, String)> = stmt
         .query_map([], |row| {
@@ -808,7 +1075,7 @@ fn migrate_attachments_to_event_tags(conn: &rusqlite::Connection) -> Result<(), 
                 row.get::<_, String>(2)?,
             ))
         })
-        .map_err(|e| format!("Failed to query attachments: {}", e))?
+        .map_err(|e| format!("[DB] Failed to query attachments: {}", e))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -826,49 +1093,52 @@ fn migrate_attachments_to_event_tags(conn: &rusqlite::Connection) -> Result<(), 
         let new_tags = serde_json::to_string(&tags)
             .unwrap_or_else(|_| "[]".to_string());
 
-        conn.execute(
+        // Propagate errors - no silent failures
+        tx.execute(
             "UPDATE events SET tags = ?1 WHERE id = ?2",
             rusqlite::params![new_tags, event_id]
-        ).ok();
+        ).map_err(|e| format!("[DB] Failed to update event {}: {}", event_id, e))?;
 
         updated_count += 1;
     }
 
     // Update storage version to 3
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
         []
-    ).map_err(|e| format!("Failed to update storage version: {}", e))?;
+    ).map_err(|e| format!("[DB] Failed to update storage version: {}", e))?;
 
-    println!("[Migration 7] Backfilled {} events with attachment metadata. Storage version set to 3.", updated_count);
+    println!("[DB] Backfilled {} events with attachment metadata", updated_count);
 
     Ok(())
 }
 
-/// Migrate existing messages from the old nested format to the flat events table
-/// This extracts reactions and attachments as separate event rows
-fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String> {
-    println!("[Migration 6] Migrating messages to events table...");
-
+/// Migrate existing messages from the old nested format to the flat events table (ATOMIC)
+/// Runs within a transaction - all changes succeed or all are rolled back.
+fn migrate_messages_to_events_atomic(tx: &rusqlite::Transaction) -> Result<(), String> {
     // Count existing messages
-    let message_count: i64 = conn.query_row(
+    let message_count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM messages",
         [],
         |row| row.get(0)
     ).unwrap_or(0);
 
     if message_count == 0 {
-        println!("[Migration 6] No messages to migrate");
+        println!("[DB] No messages to migrate");
+        // Still set storage version
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '2')",
+            []
+        ).map_err(|e| format!("[DB] Failed to update storage version: {}", e))?;
         return Ok(());
     }
 
-    println!("[Migration 6] Migrating {} messages...", message_count);
+    println!("[DB] Migrating {} messages...", message_count);
 
     // Step 1: Migrate text messages (kind=14) and file attachments (kind=15)
-    // We need to determine kind based on whether the message has attachments
-    // JOIN with profiles to recover npub from user_id (fixes missing sender identity in group chats)
-    conn.execute(r#"
-        INSERT INTO events (
+    // Use INSERT OR IGNORE to safely handle partial migration recovery
+    tx.execute(r#"
+        INSERT OR IGNORE INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
             created_at, received_at, mine, pending, failed, wrapper_event_id, npub
         )
@@ -895,13 +1165,12 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
             p.npub
         FROM messages m
         LEFT JOIN profiles p ON p.id = m.user_id
-    "#, []).map_err(|e| format!("Failed to migrate messages: {}", e))?;
+    "#, []).map_err(|e| format!("[DB] Failed to migrate messages: {}", e))?;
 
     // Step 2: Extract and migrate reactions from the JSON arrays
-    // Get all messages with non-empty reactions
-    let mut reaction_stmt = conn.prepare(
+    let mut reaction_stmt = tx.prepare(
         "SELECT id, chat_id, reactions, at FROM messages WHERE reactions != '[]' AND reactions IS NOT NULL"
-    ).map_err(|e| format!("Failed to prepare reaction query: {}", e))?;
+    ).map_err(|e| format!("[DB] Failed to prepare reaction query: {}", e))?;
 
     let reaction_rows: Vec<(String, i64, String, i64)> = reaction_stmt
         .query_map([], |row| {
@@ -912,9 +1181,11 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
                 row.get::<_, i64>(3)?,
             ))
         })
-        .map_err(|e| format!("Failed to query reactions: {}", e))?
+        .map_err(|e| format!("[DB] Failed to query reactions: {}", e))?
         .filter_map(|r| r.ok())
         .collect();
+
+    drop(reaction_stmt);
 
     let mut reaction_count = 0;
     for (message_id, chat_id, reactions_json, at) in reaction_rows {
@@ -926,10 +1197,10 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
                     reaction.get("emoji").and_then(|v| v.as_str()),
                     reaction.get("author_id").and_then(|v| v.as_str()),
                 ) {
-                    // Insert reaction as separate event
                     let tags = serde_json::json!([["e", message_id]]).to_string();
 
-                    conn.execute(
+                    // Propagate errors - no silent failures
+                    tx.execute(
                         r#"
                         INSERT OR IGNORE INTO events (
                             id, kind, chat_id, user_id, content, tags, reference_id,
@@ -946,7 +1217,7 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
                             at,
                             author_id
                         ]
-                    ).ok(); // Ignore errors for individual reactions
+                    ).map_err(|e| format!("[DB] Failed to insert reaction {}: {}", reaction_id, e))?;
 
                     reaction_count += 1;
                 }
@@ -954,15 +1225,13 @@ fn migrate_messages_to_events(conn: &rusqlite::Connection) -> Result<(), String>
         }
     }
 
-    println!("[Migration 6] Migrated {} reactions", reaction_count);
+    println!("[DB] Migrated {} reactions", reaction_count);
 
-    // Step 3: Mark migration as complete by storing version in settings
-    conn.execute(
+    // Step 3: Mark migration as complete
+    tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '2')",
         []
-    ).map_err(|e| format!("Failed to update storage version: {}", e))?;
-
-    println!("[Migration 6] Migration complete. Storage version set to 2.");
+    ).map_err(|e| format!("[DB] Failed to update storage version: {}", e))?;
 
     Ok(())
 }

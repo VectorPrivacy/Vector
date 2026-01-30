@@ -680,7 +680,7 @@ async function selectFile() {
  * @param {string} mode - The theme mode, i.e: light, dark
  */
 function applyTheme(theme = 'vector', mode = 'dark') {
-  document.body.classList.remove('vector-theme', 'chatstr-theme');
+  document.body.classList.remove('vector-theme', 'chatstr-theme', 'gifverse-theme', 'pivx-theme');
   document.body.classList.add(`${theme}-theme`);
   
   domTheme.href = `/themes/${theme}/${mode}.css`;
@@ -723,19 +723,19 @@ async function checkPrimaryDeviceStatus() {
         } catch (error) {
             // Continue with local data if network fetch fails
         }
-        
+
         // Get all keypackages for the current account (now includes fresh network data)
         const keypackages = await invoke('load_mls_keypackages');
-        
+
         if (!keypackages || keypackages.length === 0) {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
         let userKeypackages = keypackages.filter(kp =>
             kp.owner_pubkey === strPubkey
         );
-        
+
         // Deduplicate entries with the same keypackage_ref (event ID)
         // Since device_id is purely local, we use keypackage_ref as the common identifier
         const deduped = new Map();
@@ -746,19 +746,13 @@ async function checkPrimaryDeviceStatus() {
             }
         }
         userKeypackages = Array.from(deduped.values());
-        
+
         if (userKeypackages.length === 0) {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
-        // Find the latest keypackage (highest fetched_at timestamp)
-        const latestKeypackage = userKeypackages.reduce((latest, current) => {
-            return (current.fetched_at > latest.fetched_at) ? current : latest;
-        });
-        
-        // Check if this device created the latest keypackage
-        // Get the local device_id to find keypackages created by this device
+
+        // Get the local device_id first
         let myDeviceId;
         try {
             myDeviceId = await invoke('load_mls_device_id');
@@ -766,25 +760,36 @@ async function checkPrimaryDeviceStatus() {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
+        // Find the latest keypackage (highest created_at timestamp - when it was actually created, not fetched)
+        // Falls back to fetched_at for legacy entries without created_at
+        const latestKeypackage = userKeypackages.reduce((latest, current) => {
+            const currentTime = current.created_at || current.fetched_at;
+            const latestTime = latest.created_at || latest.fetched_at;
+            return (currentTime > latestTime) ? current : latest;
+        });
+
         // Find keypackages that have our device_id (created locally)
         const myKeypackages = userKeypackages.filter(kp =>
             kp.device_id === myDeviceId
         );
-        
+
         // Get the most recent keypackage created by this device
+        // Uses created_at (when actually created) with fallback to fetched_at for legacy entries
         const myLatestKeypackage = myKeypackages.length > 0
-            ? myKeypackages.reduce((latest, current) =>
-                (current.fetched_at > latest.fetched_at) ? current : latest
-              )
+            ? myKeypackages.reduce((latest, current) => {
+                const currentTime = current.created_at || current.fetched_at;
+                const latestTime = latest.created_at || latest.fetched_at;
+                return (currentTime > latestTime) ? current : latest;
+              })
             : null;
-        
+
         const myLatestKeypackageRef = myLatestKeypackage?.keypackage_ref;
-        
+
         // This device is primary if its latest keypackage matches the overall latest
         const isPrimary = myLatestKeypackageRef && latestKeypackage.keypackage_ref === myLatestKeypackageRef;
         updatePrimaryDeviceDot(isPrimary);
-        
+
     } catch (error) {
         console.error('Error checking primary device status:', error);
         updatePrimaryDeviceDot(false);

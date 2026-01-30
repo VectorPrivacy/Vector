@@ -136,25 +136,27 @@
   </div>
   <!-- Mini Apps list view (hidden by default) -->
   <div class="attachment-panel-content" id="attachment-panel-miniapps-view" style="display: none;">
-    <button class="attachment-panel-item" id="attachment-panel-back">
-      <div class="attachment-panel-btn">
+    <!-- Fixed top bar with Back button and Search -->
+    <div class="miniapps-topbar">
+      <button class="miniapps-back-btn" id="attachment-panel-back">
         <span class="icon icon-chevron-double-left"></span>
+        <span>Back</span>
+      </button>
+      <div class="miniapps-search-container">
+        <span class="icon icon-search"></span>
+        <input type="text" class="miniapps-search-input" id="miniapps-search" placeholder="Search">
       </div>
-      <span class="attachment-panel-label">Back</span>
-    </button>
-    <button class="attachment-panel-item" id="attachment-panel-marketplace">
-      <div class="attachment-panel-btn attachment-panel-marketplace-btn">
-        <span class="icon icon-star"></span>
-      </div>
-      <span class="attachment-panel-label">Marketplace</span>
-    </button>
-    <button class="attachment-panel-item" id="attachment-panel-pivx">
-      <div class="attachment-panel-btn attachment-panel-pivx-btn">
-        <span class="icon icon-pivx"></span>
-      </div>
-      <span class="attachment-panel-label">PIVX</span>
-    </button>
-    <!-- Mini Apps will be dynamically inserted here -->
+    </div>
+    <!-- Mini Apps grid -->
+    <div class="miniapps-grid" id="miniapps-grid">
+      <button class="attachment-panel-item" id="attachment-panel-marketplace" draggable="false">
+        <div class="attachment-panel-btn attachment-panel-marketplace-btn">
+          <span class="icon icon-nexus"></span>
+        </div>
+        <span class="attachment-panel-label">Nexus</span>
+      </button>
+      <!-- PIVX and Mini Apps will be dynamically inserted here based on usage history -->
+    </div>
   </div>
   <!-- PIVX Wallet view (hidden by default) -->
   <div class="attachment-panel-content pivx-wallet-panel" id="attachment-panel-pivx-view" style="display: none;">
@@ -195,13 +197,13 @@
   </div>
 </div>
 
-<!-- Mini Apps Marketplace Panel -->
+<!-- Mini Apps Nexus Panel -->
 <div class="marketplace-panel" id="marketplace-panel" style="display: none;">
   <div class="marketplace-header">
     <div class="btn nav-back-btn marketplace-back-btn" id="marketplace-back-btn">
       <span class="icon icon-chevron-double-left nav-icon"></span>
     </div>
-    <h2 class="marketplace-title">Marketplace</h2>
+    <h2 class="marketplace-title">Nexus</h2>
   </div>
   <div class="marketplace-search-container">
     <span class="marketplace-search-icon icon icon-search"></span>
@@ -560,7 +562,7 @@
           </button>
         </div>
         <div class="emoji-search-container" style="padding: 10px 0px;">
-          <span class="emoji-search-icon icon icon-search" style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
+          <span class="emoji-search-icon icon icon-search" style="width: 25px !important; height: 25px !important;"></span>
           <input id="group-member-search-input" placeholder="Search members..." style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
         </div>
         <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
@@ -696,7 +698,10 @@
             <h2 class="chat-new-subtitle">Select Members</h2>
             <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
             <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input" style="width: 75%" />
+              <div class="emoji-search-container" style="padding: 0; background: transparent; width: 75%;">
+                <span class="emoji-search-icon icon icon-search"></span>
+                <input id="create-group-filter" placeholder="Search contacts..." style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
+              </div>
               <div id="create-group-list" class="create-group-list"></div>
             </div>
           </center>
@@ -713,6 +718,8 @@
         <select id="theme-select">
           <option value="vector">Vector</option>
           <option value="chatstr">Chatstr</option>
+          <option value="gifverse">Cosmic</option>
+          <option value="pivx">Keep it Purple</option>
         </select>
 
         <!-- Voice Settings Section -->
@@ -802,6 +809,10 @@
               <input type="checkbox" id="display-image-types-toggle">
               <span class="neon-toggle"></span>
             </label>
+          </div>
+
+          <div class="form-group" id="restore-pivx-group" style="display: none;">
+            <button id="restore-pivx-btn" class="btn cancel-btn">Restore PIVX Wallet</button>
           </div>
         </div>
 

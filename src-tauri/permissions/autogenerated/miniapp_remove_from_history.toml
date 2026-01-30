@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-remove-from-history"
+description = "Enables the miniapp_remove_from_history command without any pre-configured scope."
+commands.allow = ["miniapp_remove_from_history"]
+
+[[permission]]
+identifier = "deny-miniapp-remove-from-history"
+description = "Denies the miniapp_remove_from_history command without any pre-configured scope."
+commands.deny = ["miniapp_remove_from_history"]

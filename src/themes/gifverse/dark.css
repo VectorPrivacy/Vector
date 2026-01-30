@@ -1,36 +1,37 @@
 :root {
-  background-color: #030303;
-  --voice-highlight-bg: rgba(89, 252, 179, 0.3);
-  --voice-highlight-text: #59fcb3;
-  --voice-frequency-glow: rgba(89, 252, 179, 0.8);
-  --icon-color-primary: #59fcb3;
-  --reply-highlight-border: #33DB98;
+  background-color: #0A0A0A;
+  --voice-highlight-bg: rgba(177, 136, 226, 0.3);
+  --voice-highlight-text: #F7FFAE;
+  --voice-frequency-glow: rgba(177, 136, 226, 0.8);
+  --icon-color-primary: #F7FFAE;
+  --voice-progress-secondary: rgba(177, 136, 226, 0.4);
+  --reply-highlight-border: #FFAECE;
 }
 
 .sync-line {
-  background-color: #59fcb3;
+  background-color: #AEFFDF;
 }
 
 .popup {
   background-color: rgba(0, 0, 0, 1);
-  box-shadow: 0 0 15px rgba(90, 252, 180, 0.25);
-  border-color: rgba(90, 252, 180, 0.35);
+  box-shadow: 0 0 15px #F7FFAE50;
+  border-color: #F7FFAE;
 }
 
 .text-gradient {
-  background: linear-gradient(to right, #ffffff 13.87%, #808080 60%);
+  background: linear-gradient(to right, #f8f8f8 13.87%, #F7FFAE 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
 
 .text-gradient-green {
-  background: linear-gradient(to right, #59fcb3 13.87%, #2b976c 80%);
+  background: linear-gradient(to right, #F7FFAE 13.87%, #F7FFAE 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
 
 .back-btn {
-  color: rgb(191, 191, 191);
+  color: #F7FFAE;
 }
 
 .chatlist-contact {
@@ -38,11 +39,14 @@
 }
 
 .chat {
-  background-color: #161616;
+  background-color: inherit;
 }
 
 .chat-messages {
-  background-color: #0a0a0a;
+  background-color: #030303;
+  border-top-color: #FFAECE75;
+  border-top-style: solid;
+  border-top-width: 1px;
 }
 
 .msg-me p {
@@ -52,230 +56,181 @@
 }
 
 .msg-them p {
-  background: linear-gradient(90deg, #59fcb325 0%, #2b976c23 100%);
-  border-color: rgba(90, 252, 180, 0.43);
+  background: linear-gradient(90deg, #F7FFAE50, #F7FFAE00);
+  border-color: #F7FFAE;
 }
 
 .msg-reply {
   border-left: solid rgba(255, 255, 255, 0.45) 2px !important;
 }
 
-/* Green border when quoting the other person's message */
+/* Purple border when quoting the other person's message */
 .msg-reply-them {
-  border-left-color: #59fcb3 !important;
+  border-left-color: #F7FFAE !important;
 }
 
 @keyframes highlightMessage {
   0% {
-      box-shadow: 0 0 0 0 rgba(90, 252, 180, 0);
+      box-shadow: 0 0 0 0 rgba(66, 29, 95, 0);
   }
   20% {
-      box-shadow: 0 0 8px 2px rgba(90, 252, 180, 0.5);
+      box-shadow: 0 0 8px 3px rgba(161, 40, 253, 0.4);
   }
   80% {
-      box-shadow: 0 0 8px 2px rgba(90, 252, 180, 0.5);
+      box-shadow: 0 0 8px 3px rgba(161, 40, 253, 0.4);
   }
   100% {
-      box-shadow: 0 0 0 0 rgba(90, 252, 180, 0);
+      box-shadow: 0 0 0 0 rgba(66, 29, 95, 0);
   }
 }
 
 .emoji-picker {
-  background: rgba(11, 41, 28, 0.9);
-  border-width: 1px;
-  border-color: rgba(90, 252, 180, 0.36);
+  background: #251134e3;
+  border-color: #FFAECE;
 }
 
 .attachment-panel {
-  background: #0a0a0a;
-  border-width: 1px;
-  border-color: rgba(90, 252, 180, 0.36);
+  background: #161616;
+  border-color: #F7FFAE;
 }
 
 .input-box {
-  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
-  -webkit-box-shadow: 
-    0 10px 20px 5px #59fcb33c,
-    0 8px 12px 20px rgba(90, 252, 180, 0.36);
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
 }
 
 #chat-input {
-  background-color: #0a0a0a;
-}
-
-#chat-box {
-  -webkit-box-shadow: none;
+  background-color: #0A0A0A;
 }
 
 input,
 textarea,
 button {
-  background-color: rgba(152, 255, 214, 0.2);
-}
-
-button:hover {
-  background-color: rgba(152, 255, 214, 0.5);
+  background-color: #F7FFAE50;
 }
 
 .corner-float {
-  border-color: rgba(90, 252, 180, 0.55);
+  border-color: #F7FFAE;
 }
 
 .divider {
-  background-color: #59fcb3;
+  background-color: #F7FFAE;
 }
 
 .new-chat-btn .icon {
-  background-color: rgba(128, 255, 212, 0.75);
+  background-color: #F7FFAE;
 }
 
 .msg-preview-container {
-  border-color: rgba(90, 252, 180, 0.43) !important;
-  background-color: rgba(90, 252, 180, 0.12) !important;
+  border-color: #F7FFAE !important;
+  background-color: #F7FFAE50 !important;
 }
 
 .progress-bar {
-  background: linear-gradient(90deg, #33db98, #00ff9d);
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
 }
 
 select {
-  border: 1px solid #59fcb3;
+  border: 1px solid #FFAECE;
 }
 
 #whisper-model:focus {
-  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.3);
+  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.3);
 }
 
 #download-model {
-  background: linear-gradient(90deg, #33db98, #00ff9d);
+  background: linear-gradient(135deg, 
+    #F7FFAE 0%,
+    #AEFFDF 25%,
+    #B6AEFF 50%,
+    #1D003F 100%);
 }
 
 #download-model:hover {
-  box-shadow: 0 0 5px rgba(0, 255, 157, 0.5),
-              0 0 10px rgba(0, 212, 255, 0.3),
-              inset 0 1px 3px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 5px 15px #F7FFAE30;
 }
 
 .model-status {
-  color: #59fcb3;
-}
-
-.audio-transcribe-btn .icon {
-  background-color: #59fcb3;
-}
-
-/* Update Settings Section Styles */
-#current-version,
-#new-version {
-  color: #59fcb3;
-}
-
-.accept-btn {
-  background: rgba(89, 252, 179, 0.1);
-  border: 1px solid rgba(90, 252, 180, 0.65);
-  color: #ffffff;
-}
-
-.accept-btn:hover:not(:disabled) {
-  border-color: rgba(89, 252, 179, 0.5);
-}
-
-#update-status-text {
-  color: rgba(255, 255, 255, 0.8);
-}
-
-#update-progress-bar {
-  background: linear-gradient(90deg, #33db98, #00ff9d);
-  box-shadow: 0 0 10px rgba(0, 255, 157, 0.4);
-}
-
-#download-update-btn,
-#restart-update-btn {
-  color: #000;
-  border: none;
-  box-shadow: 0 4px 12px rgba(89, 252, 179, 0.3);
-}
-
-#changelog-content {
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(89, 252, 179, 0.2);
-  color: rgba(255, 255, 255, 0.8);
+  color: #F7FFAE;
 }
 
 .progress-bar-track {
   box-shadow: 
     inset 0 1px 3px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(89, 252, 179, 0.1);
+    0 0 0 1px #F7FFAE10;
 }
 
 .progress-bar-fill {
-  background: linear-gradient(90deg, #33db98, #00ff9d);
+  background: linear-gradient(90deg, 
+    #F7FFAE 0%,
+    #AEFFDF 25%,
+    #B6AEFF 50%,
+    #1D003F 100%);
 }
 
 .progress-text {
-  text-shadow: 0 0 5px rgba(89, 252, 179, 0.7);
+  text-shadow: 0 0 5px #6202D470;
 }
 
 .voice-progress-container {
-  border: 1px solid #59fcb3;
-  box-shadow: 0 0 15px rgba(89, 252, 179, 0.3);
+  border: 1px solid #6202D4;
+  box-shadow: 0 0 15px #6202D430;
 }
 
 .voice-progress-fill {
-  background: linear-gradient(90deg, #59fcb3, #00ff9d);
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
 }
 
 .voice-progress-text {
-  color: #59fcb3;
+  color: #F7FFAE;
 }
 
 input[type="checkbox"]:checked + .neon-toggle {
-  background: linear-gradient(90deg, #33db98, #00ff9d);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  box-shadow: 
+    inset 0 1px 10px rgba(0, 0, 0, 0.1);
 }
 
 .neon-toggle:hover {
   box-shadow: 
     inset 0 1px 3px rgba(0, 0, 0, 0.3),
-    0 0 8px #59FCB320;
+    0 0 8px #F7FFAE00;
 }
 
 input[type="checkbox"]:checked + .neon-toggle:hover {
   box-shadow: 
-    0 0 5px #59FCB350,
-    0 0 10px #59FCB330,
+    0 0 6px #F7FFAE90,
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 #theme-select:focus {
-  box-shadow: 0 0 0 2px #59FCB330;
+  box-shadow: 0 0 0 2px #FFAECE50;
 }
 
 .icon-trash {
-  background-color: #59fcb3;
+  background-color: #F7FFAE;
 }
 
 select:disabled {
-  border-color: rgba(89, 252, 179, 0.3);
+  border-color: #F7FFAE30;
 }
 
 .nav-icon {
-  background-color: #59fcb3;
+  background-color: #FFAECE;
 }
 
 /* Custom Audio Player Theme Overrides */
-/* Default style (for msg-them - green theme) */
+/* Default style */
 .custom-audio-player {
-  background: rgba(11, 41, 28, 0.4);
-  border-color: rgba(90, 252, 180, 0.43);
+  background: #F7FFAE40;
+  border-color: #F7FFAE;
 }
 
 .custom-audio-player:hover {
-  background: rgba(11, 41, 28, 0.6);
-  border-color: rgba(89, 252, 179, 0.5);
+  background: #F7FFAE60;
+  border-color: #F7FFAE50;
 }
 
-/* msg-me style (gray theme to match text bubbles) */
+/* msg-me style (purple gradient to match text bubbles) */
 .msg-me .custom-audio-player {
   background: #161616;
   border-color: #161616;
@@ -287,20 +242,32 @@ select:disabled {
   box-shadow: none;
 }
 
+/* msg-them style (dark gray to match text bubbles) */
+.msg-them .custom-audio-player {
+  background: #F7FFAE20;
+  border-color: #F7FFAE80;
+}
+
+.msg-them .custom-audio-player:hover {
+  background: #FFAECE40;
+  border-color: #FFAECE;
+  box-shadow: none;
+}
+
 .audio-play-btn {
-  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
+  background: linear-gradient(0deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%);
+  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
 }
 
 .audio-progress-handle {
-  background: #59fcb3;
+  background: #F7FFAE;
 }
 
 .waveform-bar {
-  background: linear-gradient(to top, #2b976c, #59fcb3);
+  background: linear-gradient(to top, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
 }
 
 .custom-audio-player.playing .waveform-bar {
@@ -308,30 +275,96 @@ select:disabled {
 }
 
 .audio-time-display .current-time {
-  color: #59fcb3;
+  color: #ffffff60;
+}
+
+.audio-transcribe-btn .icon {
+  background-color: #6202D4;
+}
+
+.transcribe-progress-fill {
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+}
+
+.transcribe-progress-text {
+  color: #FFAECE;
+}
+
+.transcription-section.current {
+  background-color: #F7FFAE30;
+  color: #F7FFAE;
+  box-shadow: 0 0 8px #F7FFAE20;
+}
+
+/* Update Settings Section Styles */
+#current-version,
+#new-version {
+  color: #F7FFAE;
+}
+
+.accept-btn {
+  background: #FFAECE10;
+  border-color: #FFAECE;
+  color: #ffffff;
+}
+
+.accept-btn:hover:not(:disabled) {
+  background: #F7FFAE10;
+  border: 1px solid #F7FFAE;
+  color: #ffffff;
+}
+
+#update-status-text {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+#update-progress-bar {
+  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+  box-shadow: 0 0 10px #F7FFAE40;
+}
+
+#download-update-btn,
+#restart-update-btn {
+  color: #000;
+  border: none;
+  box-shadow: 0 4px 12px #F7FFAE30;
+}
+
+#changelog-content {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid #F7FFAE20;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+#popupConfirm {
+  background-color: #F7FFAE;
+  color: #000000;
 }
 
 /* File Preview Overlay Theme */
 .file-preview-container {
-  border-color: rgba(89, 252, 179, 0.2);
+  border-color: #474747;
 }
 
 .file-preview-icon-container {
-  background: rgba(89, 252, 179, 0.1);
-  border: 1px solid rgba(89, 252, 179, 0.2);
+  background: rgba(177, 136, 226, 0.1);
+  border: 1px solid rgba(177, 136, 226, 0.2);
 }
 
 .file-preview-icon {
-  background-color: #59fcb3;
+  background-color: #F7FFAE;
 }
 
 .file-preview-option {
-  background: rgba(89, 252, 179, 0.05);
-  border: 1px solid rgba(89, 252, 179, 0.1);
+  background: rgba(177, 136, 226, 0.05);
+  border: 1px solid #474747;
 }
 
 .file-preview-btn-send {
-  background: linear-gradient(90deg, #33db98, #00ff9d);
+  background: #F7FFAE;
+  color: #000000;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .file-preview-btn-send:hover {
@@ -345,6 +378,15 @@ select:disabled {
 
 .marketplace-header {
   background-color: rgba(22, 22, 22, 0.85);
+}
+
+/* Marketplace button in attachment panel */
+.attachment-panel-marketplace-btn {
+  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%) !important;
+}
+
+.attachment-panel-marketplace-btn .icon {
+  background-color: #000 !important;
 }
 
 .marketplace-search-container input:focus {
@@ -485,7 +527,7 @@ select:disabled {
 }
 
 .file-preview-btn-publish:hover {
-  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+  box-shadow: 0 4px 16px #F7FFAE50;
 }
 
 /* App Details Panel Theme Overrides */
@@ -590,39 +632,47 @@ select:disabled {
 
 /* Relay Add Button */
 .relay-add-btn {
-  background: rgba(89, 252, 179, 0.2);
-  border: 1px solid rgba(89, 252, 179, 0.4);
-  color: #59fcb3;
+  background: #F7FFAE50;
+  border-color: #F7FFAE;
+  color: #F7FFAE;
 }
 
 .relay-add-btn:hover {
-  background: rgba(89, 252, 179, 0.3);
-  border-color: rgba(89, 252, 179, 0.6);
+  background: #AEFFDF50;
+  border-color: #AEFFDF;
+  color: #AEFFDF;
 }
 
 /* Relay Dialog */
 .relay-dialog {
-  border-color: #161616;
+  border-color: #171717;
 }
 
 .relay-dialog-header {
-  background: linear-gradient(90deg, #2b976c00 0%, #2b976c20 40%, #33DB9880 100%);
+  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
 }
 
 .relay-form-input:focus,
 .relay-form-select:focus {
-  border-color: #59fcb3;
+  border-color: #F7FFAE;
 }
 
 .relay-dialog-buttons .primary-btn {
-  background-color: #59fcb3;
-  color: #000;
+  background-color: #F7FFAE;
+  color: #000000;
 }
 
 .relay-dialog-buttons .primary-btn:hover {
-  box-shadow: 0 0 0px #2b976c00;
+  color: #000;
+  box-shadow: 0 0 4px #F7FFAE00;
 }
 
 .relay-metric-value {
-  color: #59fcb3;
+  color: #F7FFAE;
+}
+
+.relay-dialog-header h3 {
+  color: #000;
+  margin: 0;
+  line-height: 1;
 }

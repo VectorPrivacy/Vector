@@ -50,13 +50,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Install Vulkan SDK (Windows)
+      - name: Install Vulkan SDK and OpenSSL (Windows)
         if: matrix.platform == 'windows-latest'
         run: |
           Write-Host "Installing Vulkan components..."
 
           # Install Vulkan components via vcpkg
           vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
+
+          # Install OpenSSL for sqlcipher support
+          Write-Host "Installing OpenSSL..."
+          vcpkg install openssl:x64-windows-static
 
           # Download glslc from your server
           Write-Host "Downloading glslc.exe..."
@@ -71,6 +75,10 @@ jobs:
           echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
           echo "$vcpkgBin" >> $env:GITHUB_PATH
+
+          # Set OpenSSL environment for sqlcipher
+          echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows-static" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
 
           # Verify glslc works
           Write-Host "Verifying glslc..."
@@ -131,6 +139,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
 
+      - name: Build OpenSSL for Android
+        run: |
+          # Download and extract OpenSSL
+          OPENSSL_VERSION="3.0.16"
+          curl -LO https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz
+          tar xzf openssl-${OPENSSL_VERSION}.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+
+          # Set up Android NDK toolchain
+          export ANDROID_NDK_ROOT=$NDK_HOME
+          export PATH=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+
+          # Configure and build for aarch64-linux-android
+          ./Configure android-arm64 \
+            -D__ANDROID_API__=24 \
+            --prefix=/usr/local/openssl-android-arm64 \
+            no-shared \
+            no-tests
+          make -j$(nproc)
+          sudo make install_sw
+        env:
+          NDK_HOME: ${{ env.NDK_HOME }}
+
       - name: Install frontend dependencies
         run: npm install
 
@@ -150,6 +181,13 @@ jobs:
         run: npx tauri android build --apk true --target aarch64
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
+          # Point sqlcipher/libsqlite3-sys to the Android OpenSSL we built
+          OPENSSL_STATIC: 1
+          OPENSSL_DIR: /usr/local/openssl-android-arm64
+          OPENSSL_INCLUDE_DIR: /usr/local/openssl-android-arm64/include
+          OPENSSL_LIB_DIR: /usr/local/openssl-android-arm64/lib
+          AARCH64_LINUX_ANDROID_OPENSSL_DIR: /usr/local/openssl-android-arm64
+          AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
 
       - name: Get version from Cargo.toml
         id: get_version

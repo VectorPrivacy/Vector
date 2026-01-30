@@ -1,37 +1,37 @@
 :root {
-  background-color: #0e0e10;
+  background-color: #0A0A0A;
   --voice-highlight-bg: rgba(177, 136, 226, 0.3);
-  --voice-highlight-text: #b188e2;
+  --voice-highlight-text: #6202D4;
   --voice-frequency-glow: rgba(177, 136, 226, 0.8);
-  --icon-color-primary: #b188e2;
+  --icon-color-primary: #B359FC;
   --voice-progress-secondary: rgba(177, 136, 226, 0.4);
   --reply-highlight-border: #a128fd;
 }
 
 .sync-line {
-  background-color: #b188e2;
+  background-color: #6202D4;
 }
 
 .popup {
   background-color: rgba(0, 0, 0, 1);
-  box-shadow: 0 0 15px rgba(112, 0, 128, 0.20);
-  border-color: rgba(112, 0, 128, 0.5);
+  box-shadow: 0 0 15px #6202D420;
+  border-color: #6202D4;
 }
 
 .text-gradient {
-  background: linear-gradient(to right, #f8f8f8 13.87%, #b188e2 60%);
+  background: linear-gradient(to right, #f8f8f8 13.87%, #6202D4 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
 
 .text-gradient-green {
-  background: linear-gradient(to right, #59fcb3 13.87%, #2b976c 60%);
+  background: linear-gradient(to right, #6202D4 13.87%, #1D003F 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
 
 .back-btn {
-  color: rgba(167, 137, 204, 1);
+  color: #B359FC;
 }
 
 .chatlist-contact {
@@ -43,21 +43,21 @@
 }
 
 .chat-messages {
-  background-color: #040308;
-  border-top-color: rgba(167, 137, 204, 0.75);
+  background-color: #030303;
+  border-top-color: #6202D475;
   border-top-style: solid;
   border-top-width: 1px;
 }
 
 .msg-me p {
   color: #ffffff;
-  border-color: rgba(29,29,117,0.5);
-  background: linear-gradient(157deg, rgba(29,29,117,0.5) 45%, rgba(118,33,129,0.5) 100%);
+  background-color: #161616;
+  border-color: #161616;
 }
 
 .msg-them p {
-  background-color: #24252a;
-  border-color: #24252a;
+  background: linear-gradient(90deg, #6202D460, #1D003F22);
+  border-color: #6202D4;
 }
 
 .msg-reply {
@@ -66,7 +66,7 @@
 
 /* Purple border when quoting the other person's message */
 .msg-reply-them {
-  border-left-color: #9941dbb3 !important;
+  border-left-color: #6202D4 !important;
 }
 
 @keyframes highlightMessage {
@@ -86,20 +86,20 @@
 
 .emoji-picker {
   background: #251134e3;
-  border-color: #1e0d2aff;
+  border-color: #6202D4;
 }
 
 .attachment-panel {
-  background: #0a0a0a;
-  border-color: #1e0d2aff;
+  background: #1D003F;
+  border-color: #6202D4;
 }
 
 .input-box {
-  background-color: #251134ff;
+  background: linear-gradient(90deg, #6202D4, #1D003F);
 }
 
 #chat-input {
-  background-color: #0a0a0a;
+  background-color: #0A0A0A;
 }
 
 input,
@@ -109,28 +109,28 @@ button {
 }
 
 .corner-float {
-  border-color: rgba(161, 40, 253, 0.4);
+  border-color: #B359FC;
 }
 
 .divider {
-  background-color: rgba(128, 0, 128, 0.5);
+  background-color: #474747;
 }
 
 .new-chat-btn .icon {
-  background-color: rgba(177, 136, 226, 0.75);
+  background-color: #B359FC;
 }
 
 .msg-preview-container {
-  border-color: rgba(161, 40, 253, 0.43) !important;
-  background-color: rgba(161, 40, 253, 0.12) !important;
+  border-color: #B359FC !important;
+  background-color: #6202D450 !important;
 }
 
 .progress-bar {
-  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
+  background: linear-gradient(90deg, #6202D4 0%, #1D003F 100%);
 }
 
 select {
-  border: 1px solid #b188e2;
+  border: 1px solid #6202D4;
 }
 
 #whisper-model:focus {
@@ -138,73 +138,70 @@ select {
 }
 
 #download-model {
-  background: linear-gradient(135deg, #b188e2 0%, #9b59b6 100%);
+  background: linear-gradient(135deg, #6202D4 0%, #1D003F 100%);
 }
 
 #download-model:hover {
-  box-shadow: 0 5px 15px rgba(177, 136, 226, 0.3);
+  box-shadow: 0 5px 15px #6202D430;
 }
 
 .model-status {
-  color: #b188e2;
+  color: #6202D4;
 }
 
 .progress-bar-track {
   box-shadow: 
     inset 0 1px 3px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(177, 136, 226, 0.1);
+    0 0 0 1px #6202D410;
 }
 
 .progress-bar-fill {
   background: linear-gradient(90deg, 
-    #b188e2 0%, 
-    #9b59b6 100%);
+    #6202D4 0%, 
+    #1D003F 100%);
 }
 
 .progress-text {
-  text-shadow: 0 0 5px rgba(177, 136, 226, 0.7);
+  text-shadow: 0 0 5px #6202D470;
 }
 
 .voice-progress-container {
-  border: 1px solid #b188e2;
-  box-shadow: 0 0 15px rgba(177, 136, 226, 0.3);
+  border: 1px solid #6202D4;
+  box-shadow: 0 0 15px #6202D430;
 }
 
 .voice-progress-fill {
-  background: linear-gradient(90deg, #b188e2, #9b59b6);
+  background: linear-gradient(90deg, #6202D4, #1D003F);
 }
 
 .voice-progress-text {
-  color: #b188e2;
+  color: #6202D4;
 }
 
 input[type="checkbox"]:checked + .neon-toggle {
-  background: linear-gradient(135deg, #b188e2, #9b59b6);
-  box-shadow: 
-    0 0 5px rgba(177, 136, 226, 0.5),
-    0 0 10px rgba(155, 89, 182, 0.3),
+  background: linear-gradient(135deg, #6202D4, #1D003F);
+  box-shadow:
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .neon-toggle:hover {
   box-shadow: 
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
-    0 0 8px rgba(177, 136, 226, 0.4);
+    0 0 8px #6202D450,
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 input[type="checkbox"]:checked + .neon-toggle:hover {
   box-shadow: 
-    0 0 8px rgba(177, 136, 226, 0.8),
-    0 0 12px rgba(155, 89, 182, 0.5),
+    0 0 8px #6202D450,
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 #theme-select:focus {
-  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.3);
+  box-shadow: 0 0 0 2px #6202D430;
 }
 
 .icon-trash {
-  background-color: #b188e2;
+  background-color: #6202D4;
 }
 
 select:disabled {
@@ -212,7 +209,7 @@ select:disabled {
 }
 
 .nav-icon {
-  background-color: #b188e2;
+  background-color: #B359FC;
 }
 
 /* Custom Audio Player Theme Overrides */
@@ -229,41 +226,42 @@ select:disabled {
 
 /* msg-me style (purple gradient to match text bubbles) */
 .msg-me .custom-audio-player {
-  background: linear-gradient(157deg, rgba(29,29,117,0.5) 45%, rgba(118,33,129,0.5) 100%);
-  border-color: rgba(29,29,117,0.5);
+  background: #161616;
+  border-color: #161616;
 }
 
 .msg-me .custom-audio-player:hover {
-  background: linear-gradient(157deg, rgba(29,29,117,0.6) 45%, rgba(118,33,129,0.6) 100%);
-  border-color: rgba(177, 136, 226, 0.5);
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+  box-shadow: none;
 }
 
 /* msg-them style (dark gray to match text bubbles) */
 .msg-them .custom-audio-player {
-  background: #24252a;
-  border-color: #24252a;
+  background: #6202D420;
+  border-color: #6202D480;
 }
 
 .msg-them .custom-audio-player:hover {
-  background: #2a2b30;
-  border-color: #3a3b40;
+  background: #6202D440;
+  border-color: #6202D4;
   box-shadow: none;
 }
 
 .audio-play-btn {
-  background: linear-gradient(135deg, #b188e2 0%, #7d3c98 100%);
+  background: linear-gradient(135deg, #B359FC 0%, #6202D4 100%);
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #b188e2 0%, #9b59b6 100%);
+  background: linear-gradient(90deg, #6202D4 0%, #1D003F 100%);
 }
 
 .audio-progress-handle {
-  background: #b188e2;
+  background: #6202D4;
 }
 
 .waveform-bar {
-  background: linear-gradient(to top, #7d3c98, #b188e2);
+  background: linear-gradient(to top, #B359FC, #6202D4);
 }
 
 .custom-audio-player.playing .waveform-bar {
@@ -271,42 +269,43 @@ select:disabled {
 }
 
 .audio-time-display .current-time {
-  color: #b188e2;
+  color: #ffffff60;
 }
 
 .audio-transcribe-btn .icon {
-  background-color: #b188e2;
+  background-color: #6202D4;
 }
 
 .transcribe-progress-fill {
-  background: linear-gradient(90deg, #b188e2, #9b59b6);
+  background: linear-gradient(90deg, #6202D4, #1D003F);
 }
 
 .transcribe-progress-text {
-  color: #b188e2;
+  color: #6202D4;
 }
 
 .transcription-section.current {
   background-color: rgba(177, 136, 226, 0.3);
-  color: #b188e2;
+  color: #6202D4;
   box-shadow: 0 0 8px rgba(177, 136, 226, 0.2);
 }
 
 /* Update Settings Section Styles */
 #current-version,
 #new-version {
-  color: #b188e2;
+  color: #B359FC;
 }
 
 .accept-btn {
-  background: rgba(177, 136, 226, 0.1);
-  border: 1px solid rgba(177, 136, 226, 0.3);
-  color: #b188e2;
+  background: #1D003F10;
+  border: 1px solid #6202D4;
+  color: #ffffff;
 }
 
 .accept-btn:hover:not(:disabled) {
-  background: rgba(177, 136, 226, 0.2);
-  border-color: rgba(177, 136, 226, 0.5);
+  background: #1D003F50;
+  border-color: #B359FC;
+  color: #ffffff;
 }
 
 #update-status-text {
@@ -314,26 +313,26 @@ select:disabled {
 }
 
 #update-progress-bar {
-  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
-  box-shadow: 0 0 10px rgba(177, 136, 226, 0.4);
+  background: linear-gradient(90deg, #6202D4 0%, #1D003F 100%);
+  box-shadow: 0 0 10px #6202D440;
 }
 
 #download-update-btn,
 #restart-update-btn {
   color: #000;
   border: none;
-  box-shadow: 0 4px 12px rgba(177, 136, 226, 0.3);
+  box-shadow: 0 4px 12px #6202D430;
 }
 
 #changelog-content {
   background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(177, 136, 226, 0.2);
+  border: 1px solid #6202D420;
   color: rgba(255, 255, 255, 0.8);
 }
 
 #popupConfirm {
-  background-color: #b188e2;
-  color: black;
+  background-color: #6202D4;
+  color: #ffffff;
 }
 
 /* File Preview Overlay Theme */
@@ -347,7 +346,7 @@ select:disabled {
 }
 
 .file-preview-icon {
-  background-color: #b188e2;
+  background-color: #6202D4;
 }
 
 .file-preview-option {
@@ -356,7 +355,8 @@ select:disabled {
 }
 
 .file-preview-btn-send {
-  background: linear-gradient(90deg, #9b6dd3, #b188e2);
+  background: #6202D4;
+  color: #ffffff;
 }
 
 .file-preview-btn-send:hover {
@@ -365,157 +365,166 @@ select:disabled {
 
 /* Marketplace Theme Overrides */
 .marketplace-panel {
-  background-color: #0e0e10;
+  background-color: #0a0a0a;
 }
 
 .marketplace-header {
   background-color: rgba(22, 22, 22, 0.85);
 }
 
+/* Marketplace button in attachment panel */
+.attachment-panel-marketplace-btn {
+  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%) !important;
+}
+
+.attachment-panel-marketplace-btn .icon {
+  background-color: #000 !important;
+}
+
 .marketplace-search-container input:focus {
-  border-color: rgba(177, 136, 226, 0.5);
+  border-color: rgba(89, 252, 179, 0.5);
 }
 
 .marketplace-filter-tag {
-  background-color: rgba(177, 136, 226, 0.15);
-  color: #b188e2;
+  background-color: rgba(89, 252, 179, 0.15);
+  color: #59fcb3;
 }
 
 .marketplace-filter-tag:hover {
-  background-color: rgba(177, 136, 226, 0.25);
+  background-color: rgba(89, 252, 179, 0.25);
 }
 
 .marketplace-filter-tag .icon {
-  background-color: #b188e2;
+  background-color: #59fcb3;
 }
 
 .marketplace-app-card {
-  background-color: #1a1a1d;
-  border-color: rgba(177, 136, 226, 0.15);
+  background-color: #161616;
+  border-color: rgba(90, 252, 180, 0.15);
 }
 
 .marketplace-app-card:hover {
-  border-color: rgba(177, 136, 226, 0.35);
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.15);
+  border-color: rgba(90, 252, 180, 0.35);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.15);
 }
 
 .marketplace-app-icon-container {
-  background-color: rgba(177, 136, 226, 0.1);
-  border: 1px solid rgba(177, 136, 226, 0.2);
+  background-color: rgba(89, 252, 179, 0.1);
+  border: 1px solid rgba(89, 252, 179, 0.2);
 }
 
 .marketplace-app-icon-placeholder {
-  background-color: #b188e2;
+  background-color: #59fcb3;
 }
 
 .marketplace-app-category {
-  background-color: rgba(177, 136, 226, 0.15);
-  color: #b188e2;
+  background-color: rgba(89, 252, 179, 0.15);
+  color: #59fcb3;
 }
 
 .marketplace-app-category:hover {
-  background-color: rgba(177, 136, 226, 0.3);
+  background-color: rgba(89, 252, 179, 0.3);
 }
 
 .marketplace-install-btn {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   color: #000;
 }
 
 .marketplace-install-btn:hover {
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 .marketplace-install-btn.installed {
-  background-color: #b188e2;
+  background-color: #58fcb3;
 }
 
 .marketplace-install-btn.installing {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   opacity: 0.7;
 }
 
 .marketplace-install-btn.update-available {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   color: #000;
 }
 
 .marketplace-install-btn.updating {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   opacity: 0.7;
 }
 
 .marketplace-app-version.update-available {
-  color: #b188e2;
+  color: #59fcb3;
 }
 
 .marketplace-loading-icon {
-  background-color: #b188e2;
+  background-color: #59fcb3;
 }
 
 .marketplace-empty-icon {
-  background-color: rgba(177, 136, 226, 0.4);
+  background-color: rgba(89, 252, 179, 0.4);
 }
 
 .marketplace-retry-btn {
-  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
-  color: #fff;
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  color: #000;
 }
 
 .marketplace-retry-btn:hover {
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 /* Publish Dialog Theme */
 .publish-app-container {
-  background-color: #0e0e10;
-  border-color: rgba(177, 136, 226, 0.25);
+  background-color: #0a0a0a;
+  border-color: rgba(90, 252, 180, 0.25);
 }
 
 .publish-app-header {
-  border-bottom-color: rgba(177, 136, 226, 0.2);
+  border-bottom-color: rgba(90, 252, 180, 0.2);
 }
 
 .publish-app-icon-placeholder {
-  background: linear-gradient(135deg, #b188e2 0%, #7d3c98 100%);
+  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
 }
 
 .publish-app-icon-placeholder .icon {
-  background-color: #fff;
+  background-color: #000;
 }
 
 .publish-app-field input:focus,
 .publish-app-field textarea:focus {
-  border-color: rgba(177, 136, 226, 0.5);
-  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.15);
+  border-color: rgba(89, 252, 179, 0.5);
+  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.15);
 }
 
 .publish-app-btn-publish {
-  background: linear-gradient(90deg, #9b6dd3, #b188e2);
-  color: #fff;
+  background: linear-gradient(90deg, #33db98, #00ff9d);
+  color: #000;
 }
 
 .publish-app-btn-publish:hover {
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 /* File Preview Publish Button */
 .file-preview-btn-publish {
-  background: linear-gradient(90deg, #b188e2 0%, #7d3c98 100%);
-  color: #fff;
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  color: #000;
 }
 
 .file-preview-btn-publish .icon {
-  background-color: #fff;
+  background-color: #000;
 }
 
 .file-preview-btn-publish:hover {
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 /* App Details Panel Theme Overrides */
 .app-details-panel {
-  background-color: #0e0e10;
+  background-color: #0a0a0a;
 }
 
 .app-details-header {
@@ -523,37 +532,37 @@ select:disabled {
 }
 
 .app-details-icon-container {
-  background-color: rgba(177, 136, 226, 0.1);
+  background-color: rgba(89, 252, 179, 0.1);
 }
 
 .app-details-icon-placeholder {
-  background-color: #b188e2;
+  background-color: #59fcb3;
 }
 
 .app-details-category {
-  background-color: rgba(177, 136, 226, 0.15);
-  color: #b188e2;
+  background-color: rgba(89, 252, 179, 0.15);
+  color: #59fcb3;
 }
 
 .app-details-category:hover {
-  background-color: rgba(177, 136, 226, 0.3);
+  background-color: rgba(89, 252, 179, 0.3);
 }
 
 .app-details-action-btn {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   color: #000;
 }
 
 .app-details-action-btn:hover {
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 .app-details-action-btn.installed {
-  background-color: #b188e2;
+  background-color: #58fcb3;
 }
 
 .app-details-action-btn.installing {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   opacity: 0.7;
 }
 
@@ -571,92 +580,84 @@ select:disabled {
 
 /* App Details Update Button */
 .app-details-update-btn {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   color: #000;
 }
 
 .app-details-update-btn:hover {
-  box-shadow: 0 4px 16px rgba(177, 136, 226, 0.4);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 .app-details-update-btn.updating {
-  background-color: #b188e2;
+  background-color: #58fcb3;
   opacity: 0.7;
 }
 
-/* App Details Version Update Display */
-.app-details-version-arrow {
-  color: #b188e2;
-}
-
-.app-details-version-new {
-  color: #b188e2;
-}
-
 .app-details-publisher {
-  background-color: rgba(177, 136, 226, 0.05);
+  background-color: rgba(89, 252, 179, 0.05);
 }
 
 .app-details-publisher:hover {
-  background-color: rgba(177, 136, 226, 0.1);
+  background-color: rgba(89, 252, 179, 0.1);
 }
 
 /* Marketplace category overflow indicator */
 .marketplace-app-category-overflow {
-  background-color: rgba(177, 136, 226, 0.2);
-  color: rgba(177, 136, 226, 0.9);
+  background-color: rgba(89, 252, 179, 0.2);
+  color: rgba(89, 252, 179, 0.9);
 }
 
 /* Featured category card */
 .marketplace-featured-category.highlighted {
-  background: linear-gradient(135deg, rgba(177, 136, 226, 0.15) 0%, rgba(112, 0, 128, 0.08) 100%);
-  border-color: rgba(177, 136, 226, 0.3);
+  background: linear-gradient(135deg, rgba(89, 252, 179, 0.15) 0%, rgba(43, 151, 108, 0.08) 100%);
+  border-color: rgba(89, 252, 179, 0.3);
 }
 
 .marketplace-featured-category.highlighted:hover {
-  box-shadow: 0 8px 24px rgba(177, 136, 226, 0.2);
+  box-shadow: 0 8px 24px rgba(89, 252, 179, 0.2);
 }
 
 .marketplace-popular-category:hover {
-  background-color: rgba(177, 136, 226, 0.2);
-  color: #b188e2;
+  background-color: rgba(89, 252, 179, 0.2);
+  color: #59fcb3;
 }
 
 /* Relay Add Button */
 .relay-add-btn {
-  background: rgba(177, 136, 226, 0.2);
-  border: 1px solid rgba(177, 136, 226, 0.4);
-  color: #b188e2;
+  background: #6202D425;
+  border: 1px solid #6202D4;
+  color: #B359FC;
 }
 
 .relay-add-btn:hover {
-  background: rgba(177, 136, 226, 0.3);
-  border-color: rgba(177, 136, 226, 0.6);
+  background: #B359FC50;
+  border-color: #B359FC;
+  color: #B359FC;
 }
 
 /* Relay Dialog */
 .relay-dialog {
-  border-color: rgba(177, 136, 226, 0.25);
+  border-color: #171717;
 }
 
 .relay-dialog-header {
-  background: linear-gradient(90deg, rgba(177, 136, 226, 0.15) 0%, rgba(125, 60, 152, 0.1) 100%);
+  background: linear-gradient(90deg, #1D003F50, #6202D4);
 }
 
 .relay-form-input:focus,
 .relay-form-select:focus {
-  border-color: rgba(177, 136, 226, 0.5);
+  border-color: #6202D4;
 }
 
 .relay-dialog-buttons .primary-btn {
-  background-color: #b188e2;
-  color: #000;
+  background-color: #6202D4;
+  color: #ffffff;
 }
 
 .relay-dialog-buttons .primary-btn:hover {
-  box-shadow: 0 4px 12px rgba(177, 136, 226, 0.3);
+  color: #fff;
 }
 
 .relay-metric-value {
-  color: #b188e2;
+  color: #6202D4;
 }
