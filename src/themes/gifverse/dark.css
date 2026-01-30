@@ -380,15 +380,6 @@ select:disabled {
   background-color: rgba(22, 22, 22, 0.85);
 }
 
-/* Marketplace button in attachment panel */
-.attachment-panel-marketplace-btn {
-  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%) !important;
-}
-
-.attachment-panel-marketplace-btn .icon {
-  background-color: #000 !important;
-}
-
 .marketplace-search-container input:focus {
   border-color: rgba(89, 252, 179, 0.5);
 }
