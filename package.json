@@ -12,7 +12,9 @@
     "dev": "npm run tauri:dev",
     "build": "npm run tauri:build",
     "dev:bare": "npm run tauri:dev:bare",
-    "build:bare": "npm run tauri:build:bare"
+    "build:bare": "npm run tauri:build:bare",
+    "android:dev": "./scripts/android-dev.sh",
+    "android:build": "tauri android build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.6"

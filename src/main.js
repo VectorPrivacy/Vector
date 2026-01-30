@@ -1874,6 +1874,9 @@ function activateMiniAppsEditMode() {
             e.stopPropagation();
             e.preventDefault();
 
+            // Hide tooltip before showing confirm dialog
+            hideGlobalTooltip();
+
             const displayName = isPivx ? 'PIVX Wallet' : item.querySelector('.attachment-panel-label')?.textContent || appName;
 
             const confirmed = await popupConfirm(
@@ -1939,6 +1942,16 @@ function deactivateMiniAppsEditMode() {
  * Handles clicks outside of delete badges to exit edit mode
  */
 function handleEditModeClickOutside(e) {
+    // If clicking on a delete badge, let it handle itself (check FIRST, before other guards)
+    if (e.target.closest('.miniapp-delete-badge')) {
+        // Reset the just-activated flag since user is interacting with edit mode
+        miniAppsEditModeJustActivated = false;
+        return;
+    }
+
+    // If clicking on a popup, let it handle itself (don't exit edit mode)
+    if (e.target.closest('#popup-container')) return;
+
     // If we just activated edit mode, ignore this click (it's from the hold release)
     if (miniAppsEditModeJustActivated) {
         miniAppsEditModeJustActivated = false;
@@ -1946,12 +1959,6 @@ function handleEditModeClickOutside(e) {
         e.stopPropagation();
         return;
     }
-
-    // If clicking on a delete badge, let it handle itself
-    if (e.target.closest('.miniapp-delete-badge')) return;
-
-    // If clicking on a popup, let it handle itself (don't exit edit mode)
-    if (e.target.closest('#popup-container')) return;
 
     // Otherwise, deactivate edit mode
     e.preventDefault();
