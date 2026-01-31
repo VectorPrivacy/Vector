@@ -44,6 +44,24 @@ async function saveTheme(theme) {
 }
 
 /**
+ * Load the user's Chat Background Wallpaper setting
+ * @returns {Promise<boolean>} - true if enabled (default), false if disabled
+ */
+async function loadChatBgEnabled() {
+    const value = await invoke('get_sql_setting', { key: 'chat_bg_enabled' });
+    if (value === null || value === undefined) return true; // Default: enabled
+    return value === 'true' || value === '1';
+}
+
+/**
+ * Save the user's Chat Background Wallpaper setting
+ * @param {boolean} enabled - true to enable, false to disable
+ */
+async function saveChatBgEnabled(enabled) {
+    return await invoke('set_sql_setting', { key: 'chat_bg_enabled', value: enabled ? 'true' : 'false' });
+}
+
+/**
  * Load the user's Whisper Auto Translate setting
  * @returns {Promise<boolean>}
  */

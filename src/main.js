@@ -150,6 +150,7 @@ const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-p
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
 const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
+const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
@@ -10907,6 +10908,11 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.', true);
     };
+    domSettingsChatBgInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
+    };
     domSettingsNotifMuteInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -10949,7 +10955,7 @@ domChatMessageInput.oninput = async () => {
     domSettingsDonorsInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        popupConfirm('Donors & Contributors', 'The organisations listed below have contributed either <b>financially or resourcefully</b> (developers, infrastructure, etc) to Vector\'s development.<br><br>We extend our sincere thanks to these supporters for helping make Vector possible.', true);
+        popupConfirm('Donors & Contributors', 'Your support keeps Vector Privacy independent, open-source, and free. If you would be interested in donating, please visit our GitBook to learn more.<br><br>We extend our sincere gratitude to these supporters for helping make Vector possible.', true);
     };
 
     // PIVX donor logo click - opens pivx.org

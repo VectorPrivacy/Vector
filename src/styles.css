@@ -207,8 +207,11 @@
 }
 
 .icon-nexus {
-  -webkit-mask-image: url("./icons/nexus.svg");
-  mask-image: url("./icons/nexus.svg");
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  background-color: transparent !important;
+  background-image: url("./icons/nexus.svg");
+  background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
 }
@@ -1180,6 +1183,11 @@ html, body {
 .chat-messages > div:last-child {
   /* The last message should have extra margin from the bottom */
   margin-bottom: 10px;
+}
+
+/* Chat background toggle */
+body.chat-bg-disabled .chat-messages::before {
+  display: none;
 }
 
 .msg-inline-timestamp {
@@ -3846,7 +3854,8 @@ select:disabled:hover {
 .chat-new-title {
   margin-top: 25px;
   margin-bottom: 5px;
-  text-align: left;
+  text-align: center;
+  align-items: center;
   font-weight: 500;
   letter-spacing: 1px;
 }
@@ -3881,14 +3890,17 @@ select:disabled:hover {
 }
 
 .chat-new-subtitle {
-  margin-bottom: 10px;
+  margin-bottom: 0px;
   letter-spacing: 1px;
+  text-align: center;
+  align-items: center;
 }
 
 .chat-new-subtitle-divider {
   margin-top: 8px;
   margin-bottom: 10px;
   width: 325px;
+  margin: 0.5rem auto;
 }
 
 .chat-new-description {
@@ -6272,7 +6284,6 @@ hr {
 .attachment-panel-marketplace-btn .icon-nexus {
   width: 70% !important;
   height: 70% !important;
-  background-color: #59fcb3 !important;
 }
 
 #attachment-panel-marketplace .attachment-panel-label {
