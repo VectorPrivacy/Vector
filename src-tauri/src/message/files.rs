@@ -6,7 +6,6 @@
 //! - Image preview generation
 //! - Android file handling
 
-use ::image::ImageEncoder;
 use nostr_sdk::prelude::*;
 use tokio::sync::Mutex as TokioMutex;
 use once_cell::sync::Lazy;
@@ -108,49 +107,14 @@ pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
         new_height,
     );
     
-    // Check if image has alpha transparency
-    let has_alpha = crate::util::has_alpha_transparency(&resized_pixels);
-    
+    // Encode preview (PNG for alpha, JPEG otherwise)
+    use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+    let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+
     use base64::Engine;
-    
-    if has_alpha {
-        // Encode to PNG to preserve transparency with best compression
-        let mut png_bytes = Vec::new();
-        let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-            &mut png_bytes,
-            ::image::codecs::png::CompressionType::Best,
-            ::image::codecs::png::FilterType::Adaptive,
-        );
-        encoder.write_image(
-            &resized_pixels,
-            new_width,
-            new_height,
-            ::image::ExtendedColorType::Rgba8,
-        ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-        
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-        Ok(format!("data:image/png;base64,{}", base64_str))
-    } else {
-        // Convert RGBA to RGB for JPEG encoding (no alpha needed)
-        let rgb_pixels: Vec<u8> = resized_pixels
-            .chunks_exact(4)
-            .flat_map(|rgba| [rgba[0], rgba[1], rgba[2]])
-            .collect();
-        
-        // Encode to JPEG
-        let mut jpeg_bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-        let encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 70);
-        encoder.write_image(
-            &rgb_pixels,
-            new_width,
-            new_height,
-            ::image::ExtendedColorType::Rgb8,
-        ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-        
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-        Ok(format!("data:image/jpeg;base64,{}", base64_str))
-    }
+    let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
+    let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
+    Ok(format!("data:{};base64,{}", mime, base64_str))
 }
 
 /// Start compression of cached bytes
@@ -168,9 +132,9 @@ pub async fn start_cached_bytes_compression() -> Result<(), String> {
         *comp_cache = None;
     }
     
-    // Spawn compression task
+    // Spawn compression task (no min_savings - checked later by caller)
     tokio::spawn(async move {
-        let result = compress_bytes_internal(&bytes, &extension);
+        let result = compress_bytes_internal(bytes, &extension, None);
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
         *comp_cache = result.ok();
     });
@@ -204,32 +168,29 @@ pub async fn get_cached_bytes_compression_status() -> Result<Option<CompressionE
 /// Send cached file (with optional compression)
 #[tauri::command]
 pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool) -> Result<bool, String> {
-    const MIN_SAVINGS_PERCENT: u64 = 10;
-    
+    use super::compression::MIN_SAVINGS_PERCENT;
+
     if use_compression {
-        // Check if compression is complete
-        let comp_cache = JS_COMPRESSION_CACHE.lock().await;
-        if let Some(compressed) = &*comp_cache {
+        // Check if compression is complete - take ownership to avoid clone
+        let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
+        if let Some(compressed) = comp_cache.take() {
             // Check if compression provides significant savings
             let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
                 ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
             } else {
                 0
             };
-            
+
             if savings_percent >= MIN_SAVINGS_PERCENT {
-                // Use compressed version
-                let attachment_file = AttachmentFile {
-                    bytes: compressed.bytes.clone(),
-                    extension: compressed.extension.clone(),
-                    img_meta: compressed.img_meta.clone(),
-                };
+                // Use compressed version - no clone needed, we own it
                 drop(comp_cache);
-                
-                // Clear caches
                 *JS_FILE_CACHE.lock().unwrap() = None;
-                *JS_COMPRESSION_CACHE.lock().await = None;
-                
+
+                let attachment_file = AttachmentFile {
+                    bytes: compressed.bytes,
+                    extension: compressed.extension,
+                    img_meta: compressed.img_meta,
+                };
                 return message(receiver, String::new(), replied_to, Some(attachment_file)).await;
             }
         }
@@ -261,42 +222,10 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
             
             if use_compression {
                 // Compress on-the-fly since pre-compression wasn't ready
-                let has_alpha = crate::util::has_alpha_transparency(rgba_img.as_raw());
-                
-                if has_alpha {
-                    // Keep as PNG with best compression
-                    let mut png_bytes = Vec::new();
-                    let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-                        &mut png_bytes,
-                        ::image::codecs::png::CompressionType::Best,
-                        ::image::codecs::png::FilterType::Adaptive,
-                    );
-                    if encoder.write_image(
-                        rgba_img.as_raw(),
-                        img.width(),
-                        img.height(),
-                        ::image::ExtendedColorType::Rgba8,
-                    ).is_ok() {
-                        (png_bytes, "png".to_string(), blurhash_meta)
-                    } else {
-                        (original_bytes, original_extension, blurhash_meta)
-                    }
-                } else {
-                    // Convert to JPEG for better compression
-                    let rgb_img = img.to_rgb8();
-                    let mut jpeg_bytes = Vec::new();
-                    let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-                    let encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
-                    if encoder.write_image(
-                        rgb_img.as_raw(),
-                        img.width(),
-                        img.height(),
-                        ::image::ExtendedColorType::Rgb8,
-                    ).is_ok() {
-                        (jpeg_bytes, "jpg".to_string(), blurhash_meta)
-                    } else {
-                        (original_bytes, original_extension, blurhash_meta)
-                    }
+                use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
+                match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
+                    Ok(encoded) => (encoded.bytes, encoded.extension.to_string(), blurhash_meta),
+                    Err(_) => (original_bytes, original_extension, blurhash_meta),
                 }
             } else {
                 // No compression - just use original bytes with metadata
@@ -371,73 +300,45 @@ pub async fn send_file_bytes(
     file_name: String,
     use_compression: bool
 ) -> Result<bool, String> {
-    const MIN_SAVINGS_PERCENT: u64 = 10;
-    
+    use super::compression::MIN_SAVINGS_PERCENT;
+
     // Extract extension from filename
     let extension = file_name
         .rsplit('.')
         .next()
         .unwrap_or("")
         .to_lowercase();
-    
+
     let is_image = matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
-    
-    // Try compression if requested and it's an image (not GIF)
-    if use_compression && is_image && extension != "gif" {
-        match compress_bytes_internal(&file_bytes, &extension) {
-            Ok(compressed) => {
-                // Check if compression provides significant savings
-                let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
-                    ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
-                } else {
-                    0
-                };
-                
-                if savings_percent >= MIN_SAVINGS_PERCENT {
-                    // Use compressed version
-                    let attachment_file = AttachmentFile {
-                        bytes: compressed.bytes,
-                        extension: compressed.extension,
-                        img_meta: compressed.img_meta,
-                    };
-                    
-                    return message(receiver, String::new(), replied_to, Some(attachment_file)).await;
-                }
-            }
-            Err(e) => {
-                // Log compression error but continue with original
-                eprintln!("Compression failed, using original: {}", e);
-            }
-        }
-    }
-    
-    // Use original bytes
-    // Generate image metadata if applicable
-    let img_meta = if is_image {
-        if let Ok(img) = ::image::load_from_memory(&file_bytes) {
-            let rgba_img = img.to_rgba8();
-            crate::util::generate_blurhash_from_rgba(
-                rgba_img.as_raw(),
-                img.width(),
-                img.height()
-            ).map(|blurhash| ImageMetadata {
-                blurhash,
-                width: img.width(),
-                height: img.height(),
-            })
+
+    // For images: compress if requested, otherwise just generate metadata
+    let attachment_file = if is_image {
+        let min_savings = if use_compression && extension != "gif" {
+            Some(MIN_SAVINGS_PERCENT)
         } else {
-            None
+            None // GIFs or no compression - just get metadata
+        };
+
+        match compress_bytes_internal(file_bytes, &extension, min_savings) {
+            Ok(result) => AttachmentFile {
+                bytes: result.bytes,
+                extension: result.extension,
+                img_meta: result.img_meta,
+            },
+            Err(e) => {
+                eprintln!("Image processing failed: {}", e);
+                return Err(e);
+            }
         }
     } else {
-        None
+        // Non-image file - send as-is
+        AttachmentFile {
+            bytes: file_bytes,
+            extension,
+            img_meta: None,
+        }
     };
-    
-    let attachment_file = AttachmentFile {
-        bytes: file_bytes,
-        extension,
-        img_meta,
-    };
-    
+
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
@@ -479,15 +380,10 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         #[cfg(target_os = "android")]
         {
             // First check if we have cached bytes for this URI
-            let cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((cached_bytes, ext, _, _)) = cache.get(&file_path) {
-                let bytes = cached_bytes.clone();
-                let extension = ext.clone();
+            // Take ownership from cache to avoid clone
+            let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
+            if let Some((bytes, extension, _, _)) = cache.remove(&file_path) {
                 drop(cache);
-
-                // Clear the cache after use
-                ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
-
                 AttachmentFile {
                     bytes,
                     img_meta: None,
@@ -698,47 +594,13 @@ fn generate_image_preview_from_bytes(bytes: &[u8], quality: u32) -> Result<Strin
         new_height,
     );
     
-    // Check if image has alpha transparency
-    let has_alpha = crate::util::has_alpha_transparency(&resized_pixels);
-    
-    if has_alpha {
-        // Encode to PNG to preserve transparency with best compression
-        let mut png_bytes = Vec::new();
-        let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-            &mut png_bytes,
-            ::image::codecs::png::CompressionType::Best,
-            ::image::codecs::png::FilterType::Adaptive,
-        );
-        encoder.write_image(
-            &resized_pixels,
-            new_width,
-            new_height,
-            ::image::ExtendedColorType::Rgba8,
-        ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-        
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-        Ok(format!("data:image/png;base64,{}", base64_str))
-    } else {
-        // Convert RGBA to RGB for JPEG encoding (no alpha needed)
-        let rgb_pixels: Vec<u8> = resized_pixels
-            .chunks_exact(4)
-            .flat_map(|rgba| [rgba[0], rgba[1], rgba[2]])
-            .collect();
-        
-        // Encode to JPEG
-        let mut jpeg_bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-        let encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 70);
-        encoder.write_image(
-            &rgb_pixels,
-            new_width,
-            new_height,
-            ::image::ExtendedColorType::Rgb8,
-        ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-        
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-        Ok(format!("data:image/jpeg;base64,{}", base64_str))
-    }
+    // Encode preview (PNG for alpha/small images, JPEG otherwise)
+    use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+    let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+
+    let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
+    let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
+    Ok(format!("data:{};base64,{}", mime, base64_str))
 }
 
 /// Get file information (size, name, extension)
@@ -821,51 +683,16 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             new_height,
         );
         
-        // Check if image has alpha transparency
-        let has_alpha = crate::util::has_alpha_transparency(&resized_pixels);
-        
+        // Encode preview (PNG for alpha/small images, JPEG otherwise)
+        use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+        let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+
         use base64::Engine;
-        
-        if has_alpha {
-            // Encode to PNG to preserve transparency with best compression
-            let mut png_bytes = Vec::new();
-            let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-                &mut png_bytes,
-                ::image::codecs::png::CompressionType::Best,
-                ::image::codecs::png::FilterType::Adaptive,
-            );
-            encoder.write_image(
-                &resized_pixels,
-                new_width,
-                new_height,
-                ::image::ExtendedColorType::Rgba8,
-            ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-            
-            let base64_str = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-            Ok(format!("data:image/png;base64,{}", base64_str))
-        } else {
-            // Convert RGBA to RGB for JPEG encoding (no alpha needed)
-            let rgb_pixels: Vec<u8> = resized_pixels
-                .chunks_exact(4)
-                .flat_map(|rgba| [rgba[0], rgba[1], rgba[2]])
-                .collect();
-            
-            // Encode to JPEG
-            let mut jpeg_bytes = Vec::new();
-            let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-            let encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 70);
-            encoder.write_image(
-                &rgb_pixels,
-                new_width,
-                new_height,
-                ::image::ExtendedColorType::Rgb8,
-            ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-            
-            let base64_str = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-            Ok(format!("data:image/jpeg;base64,{}", base64_str))
-        }
+        let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
+        let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
+        Ok(format!("data:{};base64,{}", mime, base64_str))
     }
-    
+
     #[cfg(target_os = "android")]
     {
         // First check if we have cached bytes for this URI
@@ -879,18 +706,18 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
                 filesystem::read_android_uri_bytes(file_path)?.0
             }
         };
-        
+
         let img = ::image::load_from_memory(&bytes)
             .map_err(|e| format!("Failed to decode image: {}", e))?;
-        
+
         let (width, height) = (img.width(), img.height());
         let new_width = ((width * quality) / 100).max(1);
         let new_height = ((height * quality) / 100).max(1);
-        
+
         // Convert to RGBA8 for fast nearest-neighbor downsampling
         let rgba = img.to_rgba8();
         let pixels = rgba.as_raw();
-        
+
         // Use ultra-fast nearest-neighbor downsampling
         let resized_pixels = crate::util::nearest_neighbor_downsample(
             pixels,
@@ -900,49 +727,14 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             new_height,
         );
         
-        // Check if image has alpha transparency
-        let has_alpha = crate::util::has_alpha_transparency(&resized_pixels);
-        
+        // Encode preview (PNG for alpha/small images, JPEG otherwise)
+        use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+        let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+
         use base64::Engine;
-        
-        if has_alpha {
-            // Encode to PNG to preserve transparency with best compression
-            let mut png_bytes = Vec::new();
-            let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-                &mut png_bytes,
-                ::image::codecs::png::CompressionType::Best,
-                ::image::codecs::png::FilterType::Adaptive,
-            );
-            encoder.write_image(
-                &resized_pixels,
-                new_width,
-                new_height,
-                ::image::ExtendedColorType::Rgba8,
-            ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-            
-            let base64_str = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-            Ok(format!("data:image/png;base64,{}", base64_str))
-        } else {
-            // Convert RGBA to RGB for JPEG encoding (no alpha needed)
-            let rgb_pixels: Vec<u8> = resized_pixels
-                .chunks_exact(4)
-                .flat_map(|rgba| [rgba[0], rgba[1], rgba[2]])
-                .collect();
-            
-            // Encode to JPEG
-            let mut jpeg_bytes = Vec::new();
-            let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-            let encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 70);
-            encoder.write_image(
-                &rgb_pixels,
-                new_width,
-                new_height,
-                ::image::ExtendedColorType::Rgb8,
-            ).map_err(|e| format!("Failed to encode preview: {}", e))?;
-            
-            let base64_str = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-            Ok(format!("data:image/jpeg;base64,{}", base64_str))
-        }
+        let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
+        let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
+        Ok(format!("data:{};base64,{}", mime, base64_str))
     }
 }
 
@@ -985,15 +777,10 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
         #[cfg(target_os = "android")]
         {
             // First check if we have cached bytes for this URI
-            let cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((cached_bytes, ext, _, _)) = cache.get(&file_path) {
-                let bytes = cached_bytes.clone();
-                let extension = ext.clone();
+            // Take ownership from cache to avoid clone
+            let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
+            if let Some((bytes, extension, _, _)) = cache.remove(&file_path) {
                 drop(cache);
-
-                // Clear the cache after use
-                ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
-
                 AttachmentFile {
                     bytes,
                     img_meta: None,
@@ -1066,13 +853,10 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
             let rgba_img = resized_img.to_rgba8();
             let actual_width = rgba_img.width();
             let actual_height = rgba_img.height();
-            
-            // Check if image has alpha transparency
-            let has_alpha = crate::util::has_alpha_transparency(rgba_img.as_raw());
-            
+
             let mut compressed_bytes = Vec::new();
-            
-            // Use JPEG for lossy compression (except for GIFs which should stay as GIF, and images with alpha)
+
+            // Encode based on format (GIF stays GIF, others use smart PNG/JPEG selection)
             if attachment_file.extension == "gif" {
                 // For GIFs, just resize but keep format
                 let mut cursor = std::io::Cursor::new(&mut compressed_bytes);
@@ -1083,36 +867,12 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                     actual_height,
                     ::image::ExtendedColorType::Rgba8.into()
                 ).map_err(|e| format!("Failed to encode GIF: {}", e))?;
-            } else if has_alpha {
-                // Encode to PNG to preserve transparency with best compression
-                let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-                    &mut compressed_bytes,
-                    ::image::codecs::png::CompressionType::Best,
-                    ::image::codecs::png::FilterType::Adaptive,
-                );
-                encoder.write_image(
-                    rgba_img.as_raw(),
-                    actual_width,
-                    actual_height,
-                    ::image::ExtendedColorType::Rgba8,
-                ).map_err(|e| format!("Failed to encode PNG: {}", e))?;
-                
-                // Update extension to png since we're preserving alpha
-                attachment_file.extension = "png".to_string();
             } else {
-                // Convert to RGB for JPEG (no alpha needed)
-                let mut cursor = std::io::Cursor::new(&mut compressed_bytes);
-                let rgb_img = resized_img.to_rgb8();
-                let mut encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
-                encoder.encode(
-                    rgb_img.as_raw(),
-                    actual_width,
-                    actual_height,
-                    ::image::ExtendedColorType::Rgb8.into()
-                ).map_err(|e| format!("Failed to encode JPEG: {}", e))?;
-                
-                // Update extension to jpg since we converted
-                attachment_file.extension = "jpg".to_string();
+                // Encode as PNG (alpha/small) or JPEG (standard)
+                use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
+                let encoded = encode_rgba_auto(rgba_img.as_raw(), actual_width, actual_height, JPEG_QUALITY_STANDARD)?;
+                compressed_bytes = encoded.bytes;
+                attachment_file.extension = encoded.extension.to_string();
             }
             
             attachment_file.bytes = compressed_bytes;
@@ -1216,8 +976,7 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
 /// Send a file using the cached compressed version if available
 #[tauri::command]
 pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String) -> Result<bool, String> {
-    // Minimum savings threshold (1%) - if compression doesn't save at least this much, send original
-    const MIN_SAVINGS_PERCENT: u64 = 1;
+    use super::compression::MIN_SAVINGS_PERCENT;
     
     // First check if compression is complete or still in progress
     let status = {

@@ -7,7 +7,6 @@
 //! - MLS media encryption and upload
 
 use std::sync::Arc;
-use ::image::ImageEncoder;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -1015,42 +1014,9 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
         std::borrow::Cow::Borrowed(original_pixels)
     };
 
-    // Check if image has alpha transparency
-    let has_alpha = crate::util::has_alpha_transparency(&pixels);
-    
-    let (encoded_bytes, extension) = if has_alpha {
-        // Encode to PNG to preserve transparency with best compression
-        let mut png_data = Vec::new();
-        let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
-            &mut png_data,
-            ::image::codecs::png::CompressionType::Best,
-            ::image::codecs::png::FilterType::Adaptive,
-        );
-        encoder.write_image(
-            &pixels,
-            img.width(),
-            img.height(),
-            ::image::ExtendedColorType::Rgba8
-        ).map_err(|e| e.to_string())?;
-        (png_data, String::from("png"))
-    } else {
-        // Convert to JPEG for better compression (no alpha needed)
-        let rgb_img = ::image::DynamicImage::ImageRgba8(
-            ::image::RgbaImage::from_raw(img.width(), img.height(), pixels.to_vec())
-                .ok_or_else(|| "Failed to create RGBA image".to_string())?
-        ).to_rgb8();
-        
-        let mut jpeg_data = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut jpeg_data);
-        let encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
-        encoder.write_image(
-            rgb_img.as_raw(),
-            img.width(),
-            img.height(),
-            ::image::ExtendedColorType::Rgb8
-        ).map_err(|e| e.to_string())?;
-        (jpeg_data, String::from("jpg"))
-    };
+    // Encode image, choosing PNG (with alpha) or JPEG (without)
+    let encoded = crate::shared::image::encode_rgba_auto(&pixels, img.width(), img.height(), 85)?;
+    let (encoded_bytes, extension) = (encoded.bytes, encoded.extension);
 
     // Generate image metadata with Blurhash and dimensions
     let img_meta: Option<ImageMetadata> = util::generate_blurhash_from_rgba(
@@ -1067,7 +1033,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     let attachment_file = AttachmentFile {
         bytes: encoded_bytes,
         img_meta,
-        extension,
+        extension: extension.to_string(),
     };
 
     // Message the file to the intended user

@@ -3,7 +3,7 @@
 //! This module consolidates the 16+ duplicate image encoding blocks found throughout
 //! the codebase (primarily in message.rs) into reusable functions.
 
-use image::{DynamicImage, RgbaImage, ExtendedColorType};
+use image::{DynamicImage, ExtendedColorType};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType};
 use image::codecs::jpeg::JpegEncoder;
 use image::ImageEncoder;
@@ -13,14 +13,21 @@ use std::io::Cursor;
 pub const JPEG_QUALITY_STANDARD: u8 = 85;
 /// JPEG quality for higher compression (smaller files)
 pub const JPEG_QUALITY_COMPRESSED: u8 = 70;
+/// JPEG quality for UI previews (fast encoding, small size)
+pub const JPEG_QUALITY_PREVIEW: u8 = 50;
 
 /// Result of image encoding with format metadata
 pub struct EncodedImage {
     /// The encoded image bytes
     pub bytes: Vec<u8>,
     /// File extension (e.g., "png" or "jpg")
-    pub extension: String,
+    pub extension: &'static str,
 }
+
+/// Minimum dimension threshold for JPEG encoding.
+/// Images smaller than this (in both width AND height) use PNG to avoid artifacts.
+/// This preserves quality for pixel art and small icons.
+pub const SMALL_IMAGE_THRESHOLD: u32 = 200;
 
 /// Encode RGBA pixel data as PNG with best compression.
 ///
@@ -35,7 +42,9 @@ pub struct EncodedImage {
 /// # Returns
 /// Encoded PNG bytes or an error string
 pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let mut png_data = Vec::new();
+    // Pre-allocate: PNG with best compression is typically 20-40% of raw RGBA size
+    let estimated_size = pixels.len() / 3;
+    let mut png_data = Vec::with_capacity(estimated_size);
     let encoder = PngEncoder::new_with_quality(
         &mut png_data,
         CompressionType::Best,
@@ -50,6 +59,20 @@ pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
     Ok(png_data)
 }
 
+/// Convert RGBA pixel data to RGB by dropping the alpha channel.
+///
+/// This is more efficient than going through DynamicImage when you already
+/// have raw RGBA bytes - avoids an extra buffer clone.
+#[inline]
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let pixel_count = rgba.len() / 4;
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    for chunk in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&chunk[..3]);
+    }
+    rgb
+}
+
 /// Encode RGB pixel data as JPEG with specified quality.
 ///
 /// # Arguments
@@ -61,7 +84,10 @@ pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
 /// # Returns
 /// Encoded JPEG bytes or an error string
 pub fn encode_jpeg(pixels: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, String> {
-    let mut jpeg_data = Vec::new();
+    // Pre-allocate: JPEG is typically 5-15% of raw RGB size depending on quality
+    // Use ~10% as a reasonable estimate
+    let estimated_size = pixels.len() / 10;
+    let mut jpeg_data = Vec::with_capacity(estimated_size.max(1024));
     let mut cursor = Cursor::new(&mut jpeg_data);
     let encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
     encoder.write_image(
@@ -85,27 +111,45 @@ pub fn encode_jpeg(pixels: &[u8], width: u32, height: u32, quality: u8) -> Resul
 /// # Returns
 /// EncodedImage with bytes and format extension, or an error string
 pub fn encode_image_auto(img: &DynamicImage, jpeg_quality: u8) -> Result<EncodedImage, String> {
-    let rgba = img.to_rgba8();
-    let pixels = rgba.as_raw();
     let width = img.width();
     let height = img.height();
 
-    // Check if image has alpha transparency
-    let has_alpha = crate::util::has_alpha_transparency(pixels);
+    // Fast path: if source format has no alpha channel, go straight to JPEG
+    // This avoids allocating an RGBA buffer just to check for alpha
+    match img {
+        DynamicImage::ImageRgb8(_) |
+        DynamicImage::ImageRgb16(_) |
+        DynamicImage::ImageRgb32F(_) |
+        DynamicImage::ImageLuma8(_) |
+        DynamicImage::ImageLuma16(_) => {
+            // No alpha channel possible - encode as JPEG directly
+            let rgb = img.to_rgb8();
+            let bytes = encode_jpeg(rgb.as_raw(), width, height, jpeg_quality)?;
+            return Ok(EncodedImage {
+                bytes,
+                extension: "jpg",
+            });
+        }
+        _ => {}
+    }
 
-    if has_alpha {
+    // Source has alpha channel - need to check if it's actually used
+    let rgba = img.to_rgba8();
+    let pixels = rgba.as_raw();
+
+    if crate::util::has_alpha_transparency(pixels) {
         let bytes = encode_png(pixels, width, height)?;
         Ok(EncodedImage {
             bytes,
-            extension: "png".to_string(),
+            extension: "png",
         })
     } else {
-        // Convert to RGB for JPEG
-        let rgb = img.to_rgb8();
-        let bytes = encode_jpeg(rgb.as_raw(), width, height, jpeg_quality)?;
+        // Has alpha channel but not used - convert to RGB for JPEG
+        let rgb_data = rgba_to_rgb(pixels);
+        let bytes = encode_jpeg(&rgb_data, width, height, jpeg_quality)?;
         Ok(EncodedImage {
             bytes,
-            extension: "jpg".to_string(),
+            extension: "jpg",
         })
     }
 }
@@ -124,19 +168,22 @@ pub fn encode_image_auto(img: &DynamicImage, jpeg_quality: u8) -> Result<Encoded
 /// EncodedImage with compressed bytes and format extension, or an error string
 pub fn compress_image(img: &DynamicImage, max_dimension: u32, jpeg_quality: u8) -> Result<EncodedImage, String> {
     // Resize if needed, maintaining aspect ratio
-    let resized = if img.width() > max_dimension || img.height() > max_dimension {
-        img.resize(max_dimension, max_dimension, image::imageops::FilterType::Lanczos3)
+    if img.width() > max_dimension || img.height() > max_dimension {
+        let resized = img.resize(max_dimension, max_dimension, image::imageops::FilterType::Lanczos3);
+        encode_image_auto(&resized, jpeg_quality)
     } else {
-        img.clone()
-    };
-
-    encode_image_auto(&resized, jpeg_quality)
+        // No resize needed - encode directly without cloning
+        encode_image_auto(img, jpeg_quality)
+    }
 }
 
-/// Encode RGBA image data from raw components, choosing format based on alpha.
+/// Encode RGBA image data from raw components, choosing format based on alpha and size.
 ///
-/// This is a convenience function for the common pattern of having separate
-/// width, height, and pixel data.
+/// Uses PNG for:
+/// - Images with alpha transparency
+/// - Small images (both dimensions < 200px) to preserve pixel art quality
+///
+/// Uses JPEG for everything else (better compression for photos).
 ///
 /// # Arguments
 /// * `pixels` - RGBA pixel data (4 bytes per pixel)
@@ -148,22 +195,22 @@ pub fn compress_image(img: &DynamicImage, max_dimension: u32, jpeg_quality: u8) 
 /// EncodedImage with bytes and format extension, or an error string
 pub fn encode_rgba_auto(pixels: &[u8], width: u32, height: u32, jpeg_quality: u8) -> Result<EncodedImage, String> {
     let has_alpha = crate::util::has_alpha_transparency(pixels);
+    let is_small = width < SMALL_IMAGE_THRESHOLD && height < SMALL_IMAGE_THRESHOLD;
 
-    if has_alpha {
+    // Use PNG for alpha transparency OR small images (preserves pixel art)
+    if has_alpha || is_small {
         let bytes = encode_png(pixels, width, height)?;
         Ok(EncodedImage {
             bytes,
-            extension: "png".to_string(),
+            extension: "png",
         })
     } else {
-        // Convert RGBA to RGB for JPEG
-        let rgba_img = RgbaImage::from_raw(width, height, pixels.to_vec())
-            .ok_or_else(|| "Failed to create RGBA image from pixels".to_string())?;
-        let rgb_img = DynamicImage::ImageRgba8(rgba_img).to_rgb8();
-        let bytes = encode_jpeg(rgb_img.as_raw(), width, height, jpeg_quality)?;
+        // Convert RGBA to RGB inline (avoids full buffer clone)
+        let rgb_data = rgba_to_rgb(pixels);
+        let bytes = encode_jpeg(&rgb_data, width, height, jpeg_quality)?;
         Ok(EncodedImage {
             bytes,
-            extension: "jpg".to_string(),
+            extension: "jpg",
         })
     }
 }

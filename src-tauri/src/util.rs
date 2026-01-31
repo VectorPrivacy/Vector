@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use blurhash::decode;
 use base64::{Engine as _, engine::general_purpose};
-use image::ImageEncoder;
 
 /// Extract all HTTPS URLs from a string
 pub fn extract_https_urls(text: &str) -> Vec<String> {
@@ -503,44 +502,23 @@ pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch:
 #[inline]
 fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> String {
     const EMPTY_DATA_URL: &str = "data:image/png;base64,";
-    
-    // Create image without additional allocation
-    let img = match image::RgbaImage::from_raw(width, height, rgba_data.to_vec()) {
-        Some(img) => img,
-        None => {
-            eprintln!("Failed to create image from RGBA data");
+
+    // Use shared encode_png - no need to clone data into RgbaImage
+    let png_data = match crate::shared::image::encode_png(rgba_data, width, height) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("Failed to encode PNG: {}", e);
             return EMPTY_DATA_URL.to_string();
         }
     };
-    
-    // Pre-allocate PNG buffer with estimated size
-    // PNG is typically smaller than raw RGBA, estimate 50% of original size
-    let estimated_size = (rgba_data.len() / 2).max(1024);
-    let mut png_data = Vec::with_capacity(estimated_size);
-    
-    // Use best compression for smaller output
-    let encoder = image::codecs::png::PngEncoder::new_with_quality(
-        &mut png_data,
-        image::codecs::png::CompressionType::Best,
-        image::codecs::png::FilterType::Adaptive,
-    );
-    if let Err(e) = encoder.write_image(
-        img.as_raw(),
-        width,
-        height,
-        image::ExtendedColorType::Rgba8
-    ) {
-        eprintln!("Failed to encode PNG: {}", e);
-        return EMPTY_DATA_URL.to_string();
-    }
-    
+
     // Encode as base64 with pre-allocated string
     // Base64 is 4/3 the size of input + padding
     let base64_capacity = ((png_data.len() * 4 / 3) + 4) + 22; // +22 for "data:image/png;base64,"
     let mut result = String::with_capacity(base64_capacity);
     result.push_str("data:image/png;base64,");
     general_purpose::STANDARD.encode_string(&png_data, &mut result);
-    
+
     result
 }
 
