@@ -10909,9 +10909,9 @@ domChatMessageInput.oninput = async () => {
         popupConfirm('Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.', true);
     };
     domSettingsChatBgInfo.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
     };
     domSettingsNotifMuteInfo.onclick = (e) => {
         e.preventDefault();

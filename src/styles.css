@@ -207,8 +207,11 @@
 }
 
 .icon-nexus {
-  -webkit-mask-image: url("./icons/nexus.svg");
-  mask-image: url("./icons/nexus.svg");
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  background-color: transparent !important;
+  background-image: url("./icons/nexus.svg");
+  background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
 }
@@ -6281,7 +6284,6 @@ hr {
 .attachment-panel-marketplace-btn .icon-nexus {
   width: 70% !important;
   height: 70% !important;
-  background-color: #59fcb3 !important;
 }
 
 #attachment-panel-marketplace .attachment-panel-label {

@@ -1468,19 +1468,19 @@ async function initSettings() {
     // Background Wallpaper toggle (Chat Background)
     const chatBgToggle = document.getElementById('chat-bg-toggle');
     if (chatBgToggle) {
-        // Load saved preference (default: enabled)
-        const chatBgEnabled = localStorage.getItem('chatBgEnabled') !== 'false';
+        // Load saved preference from database (default: enabled)
+        const chatBgEnabled = await loadChatBgEnabled();
         chatBgToggle.checked = chatBgEnabled;
         if (!chatBgEnabled) document.body.classList.add('chat-bg-disabled');
 
         // Handle toggle changes
-        chatBgToggle.addEventListener('change', () => {
+        chatBgToggle.addEventListener('change', async () => {
             if (chatBgToggle.checked) {
                 document.body.classList.remove('chat-bg-disabled');
-                localStorage.setItem('chatBgEnabled', 'true');
+                await saveChatBgEnabled(true);
             } else {
                 document.body.classList.add('chat-bg-disabled');
-                localStorage.setItem('chatBgEnabled', 'false');
+                await saveChatBgEnabled(false);
             }
         });
     }
