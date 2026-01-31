@@ -4,8 +4,8 @@
 //! called by the Kotlin code (MiniAppManager, MiniAppIpc, MiniAppWebViewClient)
 //! and routed to the appropriate Rust handlers.
 
-use jni::objects::{JByteArray, JClass, JObject, JString};
-use jni::sys::{jbyteArray, jint, jstring, jobject};
+use jni::objects::{JByteArray, JClass, JString};
+use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
 use log::{debug, error, info, warn};
 use std::io::Read;
@@ -23,6 +23,7 @@ const CSP_HEADER: &str = r#"default-src 'self' http://webxdc.localhost; style-sr
 
 /// Maximum size for realtime channel data (128 KB).
 /// This matches the WebXDC specification limit.
+#[allow(dead_code)]
 pub const REALTIME_DATA_MAX_SIZE: usize = 128_000;
 
 // ============================================================================
@@ -298,9 +299,10 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
 /// Get the user's npub.
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getSelfAddrNative(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    let env = env;
     // Get npub from Nostr client
     let npub = get_user_npub();
 
@@ -313,9 +315,10 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getSelfAddrNative(
 /// Get the user's display name.
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getSelfNameNative(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    let env = env;
     // Get display name from profile
     let name = get_user_display_name();
 
@@ -330,7 +333,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getSelfNameNative(
 pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getGrantedPermissionsNative(
     mut env: JNIEnv,
     _class: JClass,
-    miniapp_id: JString,
+    _miniapp_id: JString,
     package_path: JString,
 ) -> jstring {
     let package_path: String = match env.get_string(&package_path) {
@@ -401,9 +404,10 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
 /// Get the user's npub (also used by WebViewClient).
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_getSelfAddrNative(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    let env = env;
     let npub = get_user_npub();
     match env.new_string(&npub) {
         Ok(s) => s.into_raw(),
@@ -414,9 +418,10 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_getSelfAddrNati
 /// Get the user's display name (also used by WebViewClient).
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_getSelfNameNative(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    let env = env;
     let name = get_user_display_name();
     match env.new_string(&name) {
         Ok(s) => s.into_raw(),
@@ -488,9 +493,9 @@ fn get_granted_permissions_for_package(package_path: &str) -> Result<String, Str
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let file_hash = hex::encode(hasher.finalize());
+    let _file_hash = hex::encode(hasher.finalize());
 
-    // TODO: Look up permissions from database
+    // TODO: Look up permissions from database using _file_hash
     // For now, return empty (no permissions granted)
     Ok(String::new())
 }
@@ -500,8 +505,6 @@ fn serve_file_from_package(
     package_path: &str,
     path: &str,
 ) -> Result<jobject, String> {
-    use std::io::Cursor;
-
     let package_file = Path::new(package_path);
     if !package_file.exists() {
         return Err("Package file not found".to_string());

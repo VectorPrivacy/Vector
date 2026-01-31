@@ -300,7 +300,7 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
     // Update the unread counter and save to DB if the marking was successful
     if result {
         // Update the badge count
-        crate::update_unread_counter(handle.clone()).await;
+        crate::commands::messaging::update_unread_counter(handle.clone()).await;
 
         // Save the updated chat to the DB
         if let Some(chat_id) = chat_id_for_save {

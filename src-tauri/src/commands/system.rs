@@ -1,0 +1,279 @@
+//! System and platform Tauri commands.
+//!
+//! This module handles system-level operations:
+//! - Platform feature detection
+//! - Storage management (info and cleanup)
+//! - Periodic maintenance tasks
+
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+use crate::{STATE, TAURI_APP};
+use crate::{db, image_cache, util::format_bytes};
+
+#[cfg(desktop)]
+use crate::audio;
+
+#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+use crate::whisper;
+
+// ============================================================================
+// Types
+// ============================================================================
+
+/// Platform feature list structure
+#[derive(serde::Serialize, Clone)]
+pub struct PlatformFeatures {
+    pub transcription: bool,
+    pub notification_sounds: bool,
+    pub os: String,
+    pub is_mobile: bool,
+    pub debug_mode: bool,
+}
+
+// ============================================================================
+// Tauri Commands
+// ============================================================================
+
+/// Returns a list of platform-specific features available
+#[tauri::command]
+pub async fn get_platform_features() -> PlatformFeatures {
+    let os = if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    };
+
+    let is_mobile = cfg!(target_os = "android") || cfg!(target_os = "ios");
+
+    PlatformFeatures {
+        transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
+        notification_sounds: cfg!(desktop),
+        os: os.to_string(),
+        is_mobile,
+        debug_mode: cfg!(debug_assertions),
+    }
+}
+
+/// Run periodic maintenance tasks to keep memory usage low
+/// Called every ~45s from the JS profile sync loop
+///
+/// Current tasks:
+/// - Purge expired notification sound cache (10 min TTL, desktop only)
+/// - Cleanup stale in-progress download tracking entries
+///
+/// Future tasks could include:
+/// - Image cache cleanup
+/// - Temporary file cleanup
+/// - Memory pressure responses
+#[tauri::command]
+pub async fn run_maintenance() {
+    // Audio: purge expired notification sound cache (desktop only)
+    #[cfg(desktop)]
+    audio::check_cache_ttl();
+
+    // Cleanup stale download tracking entries
+    image_cache::cleanup_stale_downloads().await;
+}
+
+/// Get storage information for the Vector directory
+#[tauri::command]
+pub async fn get_storage_info() -> Result<serde_json::Value, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
+
+    // Determine the base directory (Downloads on most platforms, Documents on iOS)
+    let base_directory = if cfg!(target_os = "ios") {
+        tauri::path::BaseDirectory::Document
+    } else {
+        tauri::path::BaseDirectory::Download
+    };
+
+    // Resolve the vector directory path
+    let vector_dir = handle.path().resolve("vector", base_directory)
+        .map_err(|e| format!("Failed to resolve vector directory: {}", e))?;
+
+    // Check if directory exists
+    if !vector_dir.exists() {
+        return Ok(serde_json::json!({
+            "path": vector_dir.to_string_lossy().to_string(),
+            "total_bytes": 0,
+            "file_count": 0,
+            "type_distribution": {}
+        }));
+    }
+
+    // Calculate total size and file count
+    let mut total_bytes = 0;
+    let mut file_count = 0;
+
+    // Track file type distribution by size
+    let mut type_distribution = std::collections::HashMap::new();
+
+    // Walk through all files in the directory
+    if let Ok(entries) = std::fs::read_dir(&vector_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_file() {
+                    let file_size = metadata.len();
+                    total_bytes += file_size;
+                    file_count += 1;
+
+                    // Get file extension
+                    if let Some(extension) = entry.file_name().to_string_lossy().split('.').last() {
+                        let extension = extension.to_lowercase();
+                        *type_distribution.entry(extension).or_insert(0) += file_size;
+                    }
+                }
+            }
+        }
+    }
+
+    // Calculate Whisper models size if whisper feature is enabled
+    #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+    {
+        // Calculate total size of downloaded Whisper models
+        let mut ai_models_size = 0;
+        for model in whisper::MODELS {
+            if whisper::is_model_downloaded(&handle, model.name) {
+                // Convert MB to bytes (model sizes are in MB)
+                ai_models_size += (model.size as u64) * 1024 * 1024;
+            }
+        }
+
+        if ai_models_size > 0 {
+            // Add AI models to type distribution
+            *type_distribution.entry("ai_models".to_string()).or_insert(0) += ai_models_size;
+            total_bytes += ai_models_size;
+        }
+    }
+
+    // Calculate image cache size (avatars, banners, miniapp icons)
+    // Cache is global (not per-account) for deduplication across accounts
+    if let Ok(cache_size) = image_cache::get_cache_size(handle) {
+        if cache_size > 0 {
+            *type_distribution.entry("cache".to_string()).or_insert(0) += cache_size;
+            total_bytes += cache_size;
+        }
+    }
+
+    // Return storage information with type distribution
+    Ok(serde_json::json!({
+        "path": vector_dir.to_string_lossy().to_string(),
+        "total_bytes": total_bytes,
+        "file_count": file_count,
+        "total_formatted": format_bytes(total_bytes),
+        "type_distribution": type_distribution
+    }))
+}
+
+/// Clear all downloaded attachments from messages and return freed storage space
+#[tauri::command]
+pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
+    // First, get the total storage size before clearing
+    let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
+    let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
+
+    // Lock the state to access all chats and messages
+    let mut state = STATE.lock().await;
+
+    // Track which chats have been updated to avoid duplicate saves
+    let mut updated_chats = std::collections::HashSet::new();
+
+    // Process each chat to clear attachment metadata in messages
+    for chat in &mut state.chats {
+        let mut messages_to_update = Vec::new();
+
+        // Iterate through all messages in this chat
+        for message in &mut chat.messages {
+            let mut attachment_updated = false;
+
+            // Iterate through all attachments and reset their properties
+            for attachment in &mut message.attachments {
+                if attachment.downloaded || !attachment.path.is_empty() {
+                    // Delete the file, if it exists
+                    if std::fs::exists(&attachment.path).unwrap_or(false) {
+                        let _ = std::fs::remove_file(&attachment.path);
+                    }
+                    // Reset attachment properties
+                    attachment.downloaded = false;
+                    attachment.downloading = false;
+                    attachment.path = String::new();
+                    attachment_updated = true;
+                }
+            }
+
+            // If any attachment was updated, add to messages to update
+            if attachment_updated {
+                messages_to_update.push(message.clone());
+            }
+        }
+
+        // If we have messages to update, save them to the database
+        if !messages_to_update.is_empty() {
+            // Save updated messages to database
+            db::save_chat_messages(handle.clone(), chat.id(), &messages_to_update).await
+                .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat.id(), e))?;
+
+            // Emit message_update events for each updated message
+            for message in &messages_to_update {
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &message.id,
+                    "message": message,
+                    "chat_id": chat.id()
+                })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat.id(), e))?;
+            }
+
+            updated_chats.insert(chat.id().to_string());
+        }
+    }
+
+    // Clear all disk caches (images, sounds, etc.) by nuking the cache directory
+    let cache_dir = handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("cache");
+    if cache_dir.exists() {
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    // Clear in-memory notification sound cache (desktop only)
+    #[cfg(desktop)]
+    audio::purge_sound_cache();
+
+    // Clear cached paths from all profiles in state and database
+    for profile in &mut state.profiles {
+        if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
+            profile.avatar_cached = String::new();
+            profile.banner_cached = String::new();
+            db::set_profile(handle.clone(), profile.clone()).await.ok();
+        }
+    }
+
+    // Get storage info after clearing to calculate freed space
+    // Need to drop the state lock first since get_storage_info needs it
+    drop(state);
+    let storage_info_after = get_storage_info().await.map_err(|e| format!("Failed to get storage info after clearing: {}", e))?;
+    let total_bytes_after = storage_info_after["total_bytes"].as_u64().unwrap_or(0);
+
+    // Calculate freed space
+    let freed_bytes = total_bytes_before.saturating_sub(total_bytes_after);
+
+    // Return the freed storage information
+    Ok(serde_json::json!({
+        "freed_bytes": freed_bytes,
+        "freed_formatted": format_bytes(freed_bytes),
+        "updated_chats": updated_chats.len()
+    }))
+}
+
+// Handler list for this module (for reference):
+// - get_platform_features
+// - run_maintenance
+// - get_storage_info
+// - clear_storage

@@ -5,7 +5,7 @@
 
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::JNIEnv;
-use log::{error, info, debug};
+use log::{info, debug};
 
 use super::utils::with_android_context;
 
@@ -164,6 +164,7 @@ pub fn send_to_miniapp(event: &str, data: &str) -> Result<(), String> {
 }
 
 /// Send realtime data to the Mini App.
+#[allow(dead_code)]
 pub fn send_realtime_data_to_miniapp(data: &[u8]) -> Result<(), String> {
     debug!("Sending {} bytes realtime data to Mini App", data.len());
 
@@ -205,6 +206,7 @@ pub fn is_miniapp_open() -> Result<bool, String> {
 }
 
 /// Get the current Mini App ID, if one is open.
+#[allow(dead_code)]
 pub fn get_current_miniapp_id() -> Result<Option<String>, String> {
     with_android_context(|env, activity| {
         let manager_class = load_class_from_activity(env, activity, "io/vectorapp/miniapp/MiniAppManager")

@@ -300,6 +300,7 @@ fn get_resampling_params() -> SincInterpolationParameters {
 /// Resample mono f32 audio samples to a target sample rate
 ///
 /// Used by: notification sounds, general audio processing
+#[allow(dead_code)]
 pub fn resample_mono_f32(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Result<Vec<f32>, String> {
     if from_rate == to_rate {
         return Ok(samples);
@@ -364,6 +365,7 @@ pub fn resample_mono_i16(samples: &[i16], from_rate: u32, to_rate: u32) -> Resul
 /// Used by: whisper transcription (preserves channel layout)
 /// Input: Vec of channels, each channel is Vec<f32>
 /// Output: Vec of resampled channels
+#[allow(dead_code)]
 pub fn resample_multichannel_f32(
     channels_data: Vec<Vec<f32>>,
     from_rate: u32,
@@ -399,6 +401,7 @@ pub fn resample_multichannel_f32(
 ///
 /// Used by: whisper transcription
 /// Returns interleaved samples (for multi-channel) at the target sample rate
+#[allow(dead_code)]
 pub fn decode_and_resample(path: &Path, target_rate: u32) -> Result<Vec<f32>, String> {
     // Decode the file (get raw samples and metadata)
     let (samples, sample_rate, channels) = decode_audio_file_raw(path)?;
@@ -434,6 +437,7 @@ pub fn decode_and_resample(path: &Path, target_rate: u32) -> Result<Vec<f32>, St
 /// - `to_mono`: If true, multi-channel audio is mixed down to mono
 /// - Returns: (samples, sample_rate, channel_count)
 ///   - When `to_mono` is true, channel_count is always 1
+#[allow(dead_code)]
 fn decode_audio_internal(path: &Path, to_mono: bool) -> Result<(Vec<f32>, u32, usize), String> {
     let file = File::open(path).map_err(|e| format!("Failed to open audio file: {}", e))?;
     let media_source = MediaSourceStream::new(Box::new(file), Default::default());
@@ -528,6 +532,7 @@ fn decode_audio_internal(path: &Path, to_mono: bool) -> Result<(Vec<f32>, u32, u
 /// Decode audio file returning raw interleaved samples with metadata (preserves channels)
 ///
 /// Used by: whisper transcription
+#[allow(dead_code)]
 fn decode_audio_file_raw(path: &Path) -> Result<(Vec<f32>, u32, usize), String> {
     decode_audio_internal(path, false)
 }

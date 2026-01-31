@@ -1,21 +1,25 @@
 //! Tauri commands for Mini Apps
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri::ipc::Channel;
 use futures_util::future::join_all;
-use log::{info, warn, error, trace};
+use log::{info, warn, trace};
+
+#[cfg(not(target_os = "android"))]
+use std::sync::Arc;
+#[cfg(not(target_os = "android"))]
+use log::error;
+#[cfg(not(target_os = "android"))]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 use serde::{Deserialize, Serialize};
 
 use super::error::Error;
 use super::state::{MiniAppInstance, MiniAppsState, MiniAppPackage, RealtimeChannelState};
 use super::realtime::{RealtimeEvent, encode_topic_id, encode_node_addr};
 
-// Network isolation proxy is only used on non-macOS platforms
-#[cfg(not(target_os = "macos"))]
-// Network isolation proxy - only used on Linux (not macOS due to version requirements, not Windows due to WebView2 freeze)
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+// Network isolation proxy - only used on Linux (not macOS due to version requirements, not Windows due to WebView2 freeze, not Android)
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
 use super::network_isolation::DUMMY_LOCALHOST_PROXY_URL;
 
 /// Information about a Mini App for the frontend
@@ -70,6 +74,7 @@ impl MiniAppInfo {
 
 /// Initialization script - runs in all frames
 /// Based on DeltaChat's implementation
+#[allow(dead_code)] // Used on desktop only
 const INIT_SCRIPT: &str = r#"
 // Mini App initialization script
 // This runs in all frames to ensure security
@@ -454,6 +459,7 @@ try {
 "#;
 
 /// Get the base URL for Mini Apps based on platform
+#[allow(dead_code)] // Used on desktop only
 fn get_miniapp_base_url() -> Result<tauri::Url, Error> {
     // URI format:
     // mac/linux:         webxdc://dummy.host/<path>
@@ -1110,7 +1116,7 @@ pub async fn miniapp_join_realtime_channel(
     let addr_clone = node_addr_for_advert.clone();
     tokio::spawn(async move {
         println!("[WEBXDC] In spawn: sending initial peer advertisement");
-        if crate::send_webxdc_peer_advertisement(chat_id_clone, topic_clone, addr_clone).await {
+        if crate::commands::realtime::send_webxdc_peer_advertisement(chat_id_clone, topic_clone, addr_clone).await {
             println!("[WEBXDC] Sent initial peer advertisement successfully");
         } else {
             println!("[WEBXDC] ERROR: Failed to send initial peer advertisement");
@@ -1124,7 +1130,7 @@ pub async fn miniapp_join_realtime_channel(
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         println!("[WEBXDC] In spawn: sending delayed peer advertisement");
-        if crate::send_webxdc_peer_advertisement(chat_id_clone2, topic_clone2, addr_clone2).await {
+        if crate::commands::realtime::send_webxdc_peer_advertisement(chat_id_clone2, topic_clone2, addr_clone2).await {
             println!("[WEBXDC] Sent delayed peer advertisement successfully");
         } else {
             println!("[WEBXDC] ERROR: Failed to send delayed peer advertisement");

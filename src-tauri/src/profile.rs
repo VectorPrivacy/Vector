@@ -1,11 +1,14 @@
 use nostr_sdk::prelude::*;
 use tauri::Emitter;
+
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
 
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP};
 use crate::db;
-use crate::message::AttachmentFile;
 use crate::image_cache::{self, CacheResult};
+#[cfg(not(target_os = "android"))]
+use crate::message::AttachmentFile;
 
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
@@ -723,7 +726,7 @@ pub async fn toggle_muted(npub: String) -> bool {
     };
 
     // Refresh unread badge count to reflect mute changes immediately
-    let _ = crate::update_unread_counter(handle.clone()).await;
+    let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
     muted
 }
 

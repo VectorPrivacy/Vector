@@ -1,0 +1,60 @@
+//! Database maintenance operations.
+//!
+//! This module handles:
+//! - Database vacuuming to reclaim space and optimize performance
+//! - Automatic scheduled maintenance checks
+
+use tauri::{AppHandle, Runtime};
+
+/// Vacuum the database to reclaim space and optimize performance
+pub fn vacuum_database<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    conn.execute_batch("VACUUM;")
+        .map_err(|e| format!("Failed to vacuum database: {}", e))?;
+
+    crate::account_manager::return_db_connection(conn);
+    println!("[DB] Database vacuumed successfully");
+    Ok(())
+}
+
+/// Check if vacuum is needed and perform it if so
+/// Vacuums if it hasn't been done in the last 7 days
+pub async fn check_and_vacuum_if_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
+    let conn = crate::account_manager::get_db_connection(handle)?;
+
+    // Check when last vacuum was performed
+    let last_vacuum: Option<i64> = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'last_vacuum'",
+        [],
+        |row| row.get(0)
+    ).ok().and_then(|s: String| s.parse().ok());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let seven_days_secs = 7 * 24 * 60 * 60;
+
+    let should_vacuum = match last_vacuum {
+        Some(last) => now - last > seven_days_secs,
+        None => true, // Never vacuumed
+    };
+
+    crate::account_manager::return_db_connection(conn);
+
+    if should_vacuum {
+        vacuum_database(handle)?;
+
+        // Update last vacuum timestamp
+        let conn = crate::account_manager::get_db_connection(handle)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_vacuum', ?1)",
+            rusqlite::params![now.to_string()],
+        ).map_err(|e| format!("Failed to update last_vacuum: {}", e))?;
+        crate::account_manager::return_db_connection(conn);
+    }
+
+    Ok(())
+}
