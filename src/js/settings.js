@@ -680,7 +680,7 @@ async function selectFile() {
  * @param {string} mode - The theme mode, i.e: light, dark
  */
 function applyTheme(theme = 'vector', mode = 'dark') {
-  document.body.classList.remove('vector-theme', 'chatstr-theme', 'gifverse-theme', 'pivx-theme');
+  document.body.classList.remove('vector-theme', 'satoshi-theme', 'chatstr-theme', 'gifverse-theme', 'pivx-theme');
   document.body.classList.add(`${theme}-theme`);
   
   domTheme.href = `/themes/${theme}/${mode}.css`;
@@ -1464,6 +1464,26 @@ async function initSettings() {
         fDisplayImageTypes = e.target.checked;
         await saveDisplayImageTypes(e.target.checked);
     });
+
+    // Background Wallpaper toggle (Chat Background)
+    const chatBgToggle = document.getElementById('chat-bg-toggle');
+    if (chatBgToggle) {
+        // Load saved preference (default: enabled)
+        const chatBgEnabled = localStorage.getItem('chatBgEnabled') !== 'false';
+        chatBgToggle.checked = chatBgEnabled;
+        if (!chatBgEnabled) document.body.classList.add('chat-bg-disabled');
+
+        // Handle toggle changes
+        chatBgToggle.addEventListener('change', () => {
+            if (chatBgToggle.checked) {
+                document.body.classList.remove('chat-bg-disabled');
+                localStorage.setItem('chatBgEnabled', 'true');
+            } else {
+                document.body.classList.add('chat-bg-disabled');
+                localStorage.setItem('chatBgEnabled', 'false');
+            }
+        });
+    }
 
     // Initialize notification sound settings (desktop only)
     if (platformFeatures.notification_sounds) {

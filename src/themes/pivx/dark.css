@@ -1,5 +1,5 @@
 :root {
-  background-color: #0A0A0A;
+  background-color: #030303;
   --voice-highlight-bg: rgba(177, 136, 226, 0.3);
   --voice-highlight-text: #6202D4;
   --voice-frequency-glow: rgba(177, 136, 226, 0.8);
@@ -47,6 +47,28 @@
   border-top-color: #6202D475;
   border-top-style: solid;
   border-top-width: 1px;
+  position: relative;
+}
+
+.chat-messages::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: url('./chat-bg.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0.04;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.chat-messages > * {
+  position: relative;
+  z-index: 1;
 }
 
 .msg-me p {
@@ -179,20 +201,19 @@ select {
 }
 
 input[type="checkbox"]:checked + .neon-toggle {
-  background: linear-gradient(135deg, #6202D4, #1D003F);
+  background: linear-gradient(90deg, #6202D4, #1D003F);
   box-shadow:
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .neon-toggle:hover {
   box-shadow: 
-    0 0 8px #6202D450,
+    0 0 4px #b2b2b2,
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 input[type="checkbox"]:checked + .neon-toggle:hover {
   box-shadow: 
-    0 0 8px #6202D450,
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 

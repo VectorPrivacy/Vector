@@ -1,37 +1,37 @@
 :root {
   background-color: #030303;
-  --voice-highlight-bg: #F7FFAE30;
-  --voice-highlight-text: #F7FFAE;
-  --voice-frequency-glow: #F7FFAE80;
-  --icon-color-primary: #F7FFAE;
-  --voice-progress-secondary: #F7FFAE40;
-  --reply-highlight-border: #FFAECE;
+  --voice-highlight-bg: #F7931A30;
+  --voice-highlight-text: #F9AA4B;
+  --voice-frequency-glow: #F7931A80;
+  --icon-color-primary: #F7931A;
+  --voice-progress-secondary: #F7931A40;
+  --reply-highlight-border: #F9AA4B;
 }
 
 .sync-line {
-  background-color: #AEFFDF;
+  background-color: #F9AA4B;
 }
 
 .popup {
   background-color: rgba(0, 0, 0, 1);
-  box-shadow: 0 0 15px #F7FFAE50;
-  border-color: #F7FFAE;
+  box-shadow: 0 0 15px #F7931A20;
+  border-color: #F7931A;
 }
 
 .text-gradient {
-  background: linear-gradient(to right, #f8f8f8 13.87%, #f8f8f8 60%);
+  background: linear-gradient(to right, #f8f8f8 13.87%, #F7931A 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
 
 .text-gradient-green {
-  background: linear-gradient(to right, #F7FFAE 13.87%, #F7FFAE 60%);
+  background: linear-gradient(to right, #F7931A 13.87%, #B56C12 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
 
 .back-btn {
-  color: #F7FFAE;
+  color: #F9AA4B;
 }
 
 .chatlist-contact {
@@ -44,7 +44,7 @@
 
 .chat-messages {
   background-color: #030303;
-  border-top-color: #FFAECE75;
+  border-top-color: #F7931A75;
   border-top-style: solid;
   border-top-width: 1px;
 }
@@ -56,8 +56,8 @@
 }
 
 .msg-them p {
-  background: linear-gradient(90deg, #F7FFAE50, #F7FFAE00);
-  border-color: #F7FFAE;
+  background: linear-gradient(90deg, #F7931A60, #B56C1222);
+  border-color: #F7931A;
 }
 
 .msg-reply {
@@ -66,7 +66,7 @@
 
 /* Purple border when quoting the other person's message */
 .msg-reply-them {
-  border-left-color: #F7FFAE !important;
+  border-left-color: #F7931A !important;
 }
 
 @keyframes highlightMessage {
@@ -86,16 +86,16 @@
 
 .emoji-picker {
   background: #251134e3;
-  border-color: #FFAECE;
+  border-color: #F7931A;
 }
 
 .attachment-panel {
-  background: #161616;
-  border-color: #F7FFAE;
+  background: #0a0a0a;
+  border-color: #F7931A;
 }
 
 .input-box {
-  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  background: linear-gradient(90deg, #F7931A, #B56C12);
 }
 
 #chat-input {
@@ -105,129 +105,122 @@
 input,
 textarea,
 button {
-  background-color: #F7FFAE50;
+  background-color: #F9AA4B99;
 }
 
 .corner-float {
-  border-color: #F7FFAE;
+  border-color: #F9AA4B;
 }
 
 .divider {
-  background-color: #F7FFAE;
+  background-color: #474747;
 }
 
 .new-chat-btn .icon {
-  background-color: #F7FFAE;
+  background-color: #F9AA4B;
 }
 
 .msg-preview-container {
-  border-color: #F7FFAE !important;
-  background-color: #F7FFAE50 !important;
+  border-color: #F9AA4B !important;
+  background-color: #F7931A50 !important;
 }
 
 .progress-bar {
-  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  background: linear-gradient(90deg, #F7931A 0%, #B56C12 100%);
 }
 
 select {
-  border: 1px solid #FFAECE;
+  border: 1px solid #F7931A;
 }
 
 #whisper-model:focus {
-  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.3);
+  box-shadow: 0 0 0 2px #F9AA4B30;
 }
 
 #download-model {
-  background: linear-gradient(135deg, 
-    #F7FFAE 0%,
-    #AEFFDF 25%,
-    #B6AEFF 50%,
-    #FFAECE 100%);
+  background: linear-gradient(135deg, #F7931A 0%, #B56C12 100%);
 }
 
 #download-model:hover {
-  box-shadow: 0 5px 15px #F7FFAE30;
+  box-shadow: 0 5px 15px #F7931A30;
 }
 
 .model-status {
-  color: #F7FFAE;
+  color: #F7931A;
 }
 
 .progress-bar-track {
   box-shadow: 
     inset 0 1px 3px rgba(0, 0, 0, 0.4),
-    0 0 0 1px #F7FFAE10;
+    0 0 0 1px #F7931A10;
 }
 
 .progress-bar-fill {
   background: linear-gradient(90deg, 
-    #F7FFAE 0%,
-    #AEFFDF 25%,
-    #B6AEFF 50%,
-    #1D003F 100%);
+    #F7931A 0%, 
+    #B56C12 100%);
 }
 
 .progress-text {
-  text-shadow: 0 0 5px #F7FFAE70;
+  text-shadow: 0 0 5px #F7931A70;
 }
 
 .voice-progress-container {
-  border: 1px solid #F7FFAE;
-  box-shadow: 0 0 15px #F7FFAE30;
+  border: 1px solid #F7931A;
+  box-shadow: 0 0 15px #F7931A30;
 }
 
 .voice-progress-fill {
-  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  background: linear-gradient(90deg, #F9AA4B, #F7931A, #B56C12);
 }
 
 .voice-progress-text {
-  color: #F7FFAE;
+  color: #F7931A;
 }
 
 input[type="checkbox"]:checked + .neon-toggle {
-  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
-  box-shadow: 
-    inset 0 1px 10px rgba(0, 0, 0, 0.1);
+  background: linear-gradient(90deg, #F9AA4B, #F7931A, #B56C12);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .neon-toggle:hover {
   box-shadow: 
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
-    0 0 8px #F7FFAE00;
+    0 0 4px #b2b2b2,
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 input[type="checkbox"]:checked + .neon-toggle:hover {
   box-shadow: 
-    0 0 6px #F7FFAE90,
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 #theme-select:focus {
-  box-shadow: 0 0 0 2px #FFAECE50;
+  box-shadow: 0 0 0 2px #F7931A30;
 }
 
 .icon-trash {
-  background-color: #F7FFAE;
+  background-color: #F7931A;
 }
 
 select:disabled {
-  border-color: #F7FFAE30;
+  border-color: rgba(177, 136, 226, 0.3);
 }
 
 .nav-icon {
-  background-color: #FFAECE;
+  background-color: #F9AA4B;
 }
 
 /* Custom Audio Player Theme Overrides */
 /* Default style */
 .custom-audio-player {
-  background: #F7FFAE40;
-  border-color: #F7FFAE;
+  background: rgba(37, 17, 52, 0.4);
+  border-color: rgba(177, 136, 226, 0.25);
 }
 
 .custom-audio-player:hover {
-  background: #F7FFAE60;
-  border-color: #F7FFAE50;
+  background: rgba(37, 17, 52, 0.6);
+  border-color: rgba(177, 136, 226, 0.5);
 }
 
 /* msg-me style (purple gradient to match text bubbles) */
@@ -244,30 +237,30 @@ select:disabled {
 
 /* msg-them style (dark gray to match text bubbles) */
 .msg-them .custom-audio-player {
-  background: #F7FFAE20;
-  border-color: #F7FFAE80;
+  background: #F7931A20;
+  border-color: #F7931A80;
 }
 
 .msg-them .custom-audio-player:hover {
-  background: #FFAECE40;
-  border-color: #FFAECE;
+  background: #F7931A40;
+  border-color: #F7931A;
   box-shadow: none;
 }
 
 .audio-play-btn {
-  background: linear-gradient(0deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+  background: linear-gradient(135deg, #F9AA4B 0%, #F7931A 100%);
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+  background: linear-gradient(90deg, #F7931A 0%, #B56C12 100%);
 }
 
 .audio-progress-handle {
-  background: #F7FFAE;
+  background: #F7931A;
 }
 
 .waveform-bar {
-  background: linear-gradient(to top, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  background: linear-gradient(to top, #F9AA4B, #F7931A);
 }
 
 .custom-audio-player.playing .waveform-bar {
@@ -279,38 +272,38 @@ select:disabled {
 }
 
 .audio-transcribe-btn .icon {
-  background-color: #F7FFAE;
+  background-color: #F7931A;
 }
 
 .transcribe-progress-fill {
-  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  background: linear-gradient(90deg, #F7931A, #B56C12);
 }
 
 .transcribe-progress-text {
-  color: #FFAECE;
+  color: #F7931A;
 }
 
 .transcription-section.current {
-  background-color: #F7FFAE30;
-  color: #F7FFAE;
-  box-shadow: 0 0 8px #F7FFAE20;
+  background-color: rgba(177, 136, 226, 0.3);
+  color: #F7931A;
+  box-shadow: 0 0 8px rgba(177, 136, 226, 0.2);
 }
 
 /* Update Settings Section Styles */
 #current-version,
 #new-version {
-  color: #F7FFAE;
+  color: #F9AA4B;
 }
 
 .accept-btn {
-  background: #FFAECE10;
-  border-color: #FFAECE;
+  background: #B56C1210;
+  border: 1px solid #F7931A;
   color: #ffffff;
 }
 
 .accept-btn:hover:not(:disabled) {
-  background: #F7FFAE10;
-  border: 1px solid #F7FFAE;
+  background: #B56C1250;
+  border-color: #F9AA4B;
   color: #ffffff;
 }
 
@@ -319,31 +312,31 @@ select:disabled {
 }
 
 #update-progress-bar {
-  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
-  box-shadow: 0 0 10px #F7FFAE40;
+  background: linear-gradient(90deg, #F7931A 0%, #B56C12 100%);
+  box-shadow: 0 0 10px #F7931A40;
 }
 
 #download-update-btn,
 #restart-update-btn {
   color: #000;
   border: none;
-  box-shadow: 0 4px 12px #F7FFAE30;
+  box-shadow: 0 4px 12px #F7931A30;
 }
 
 #changelog-content {
   background: rgba(0, 0, 0, 0.3);
-  border: 1px solid #F7FFAE20;
+  border: 1px solid #F7931A20;
   color: rgba(255, 255, 255, 0.8);
 }
 
 #popupConfirm {
-  background-color: #F7FFAE;
-  color: #000000;
+  background-color: #F7931A;
+  color: #ffffff;
 }
 
 /* File Preview Overlay Theme */
 .file-preview-container {
-  border-color: #474747;
+  border-color: rgba(177, 136, 226, 0.2);
 }
 
 .file-preview-icon-container {
@@ -352,19 +345,17 @@ select:disabled {
 }
 
 .file-preview-icon {
-  background-color: #F7FFAE;
+  background-color: #F7931A;
 }
 
 .file-preview-option {
   background: rgba(177, 136, 226, 0.05);
-  border: 1px solid #474747;
+  border: 1px solid rgba(177, 136, 226, 0.1);
 }
 
 .file-preview-btn-send {
-  background: #F7FFAE;
-  color: #000000;
-  font-size: 14px;
-  font-weight: 600;
+  background: #F7931A;
+  color: #ffffff;
 }
 
 .file-preview-btn-send:hover {
@@ -518,7 +509,7 @@ select:disabled {
 }
 
 .file-preview-btn-publish:hover {
-  box-shadow: 0 4px 16px #F7FFAE50;
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
 }
 
 /* App Details Panel Theme Overrides */
@@ -623,15 +614,15 @@ select:disabled {
 
 /* Relay Add Button */
 .relay-add-btn {
-  background: #F7FFAE50;
-  border-color: #F7FFAE;
-  color: #F7FFAE;
+  background: #F7931A25;
+  border: 1px solid #F7931A;
+  color: #F9AA4B;
 }
 
 .relay-add-btn:hover {
-  background: #AEFFDF50;
-  border-color: #AEFFDF;
-  color: #AEFFDF;
+  background: #F9AA4B50;
+  border-color: #F9AA4B;
+  color: #F9AA4B;
 }
 
 /* Relay Dialog */
@@ -640,30 +631,23 @@ select:disabled {
 }
 
 .relay-dialog-header {
-  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+  background: linear-gradient(90deg, #B56C1220, #F7931A);
 }
 
 .relay-form-input:focus,
 .relay-form-select:focus {
-  border-color: #F7FFAE;
+  border-color: #F7931A;
 }
 
 .relay-dialog-buttons .primary-btn {
-  background-color: #F7FFAE;
-  color: #000000;
+  background-color: #F7931A;
+  color: #ffffff;
 }
 
 .relay-dialog-buttons .primary-btn:hover {
-  color: #000;
-  box-shadow: 0 0 4px #F7FFAE00;
+  color: #fff;
 }
 
 .relay-metric-value {
-  color: #F7FFAE;
-}
-
-.relay-dialog-header h3 {
-  color: #000;
-  margin: 0;
-  line-height: 1;
+  color: #F7931A;
 }

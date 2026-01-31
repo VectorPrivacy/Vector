@@ -1,11 +1,11 @@
 :root {
-  background-color: #0e0e10;
+  background-color: #030303;
   --voice-highlight-bg: rgba(177, 136, 226, 0.3);
   --voice-highlight-text: #b188e2;
   --voice-frequency-glow: rgba(177, 136, 226, 0.8);
   --icon-color-primary: #b188e2;
   --voice-progress-secondary: rgba(177, 136, 226, 0.4);
-  --reply-highlight-border: #a128fd;
+  --reply-highlight-border: #CD3DD3;
 }
 
 .sync-line {
@@ -14,12 +14,12 @@
 
 .popup {
   background-color: rgba(0, 0, 0, 1);
-  box-shadow: 0 0 15px rgba(112, 0, 128, 0.20);
-  border-color: rgba(112, 0, 128, 0.5);
+  box-shadow: 0 0 15px #b188e220;
+  border-color: #b188e2;
 }
 
 .text-gradient {
-  background: linear-gradient(to right, #f8f8f8 13.87%, #b188e2 60%);
+  background: linear-gradient(to right, #f8f8f8 13.87%, #f8f8f8 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
@@ -51,13 +51,13 @@
 
 .msg-me p {
   color: #ffffff;
-  border-color: rgba(29,29,117,0.5);
-  background: linear-gradient(157deg, rgba(29,29,117,0.5) 45%, rgba(118,33,129,0.5) 100%);
+  background-color: #161616;
+  border-color: #161616;
 }
 
 .msg-them p {
-  background-color: #24252a;
-  border-color: #24252a;
+  background: linear-gradient(90deg, #b188e260, #b188e200);
+  border-color: #b188e2;
 }
 
 .msg-reply {
@@ -66,7 +66,7 @@
 
 /* Purple border when quoting the other person's message */
 .msg-reply-them {
-  border-left-color: #9941dbb3 !important;
+  border-left-color: #b188e2 !important;
 }
 
 @keyframes highlightMessage {
@@ -95,7 +95,7 @@
 }
 
 .input-box {
-  background-color: #251134ff;
+  background: linear-gradient(90deg, #CD3DD3, #b188e2, #5749E4);
 }
 
 #chat-input {
@@ -109,15 +109,15 @@ button {
 }
 
 .corner-float {
-  border-color: rgba(161, 40, 253, 0.4);
+  border-color: 5749E440;
 }
 
 .divider {
-  background-color: rgba(128, 0, 128, 0.5);
+  background-color: #b188e250;
 }
 
 .new-chat-btn .icon {
-  background-color: rgba(177, 136, 226, 0.75);
+  background-color: #b188e2;
 }
 
 .msg-preview-container {
@@ -181,21 +181,18 @@ select {
 input[type="checkbox"]:checked + .neon-toggle {
   background: linear-gradient(135deg, #b188e2, #9b59b6);
   box-shadow: 
-    0 0 5px rgba(177, 136, 226, 0.5),
-    0 0 10px rgba(155, 89, 182, 0.3),
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .neon-toggle:hover {
   box-shadow: 
-    inset 0 1px 3px rgba(0, 0, 0, 0.3),
-    0 0 8px rgba(177, 136, 226, 0.4);
+    0 0 4px #b2b2b2,
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 input[type="checkbox"]:checked + .neon-toggle:hover {
   box-shadow: 
-    0 0 8px rgba(177, 136, 226, 0.8),
-    0 0 12px rgba(155, 89, 182, 0.5),
+    0 0 8px rgba(177, 136, 226, 0.5),
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
@@ -229,33 +226,34 @@ select:disabled {
 
 /* msg-me style (purple gradient to match text bubbles) */
 .msg-me .custom-audio-player {
-  background: linear-gradient(157deg, rgba(29,29,117,0.5) 45%, rgba(118,33,129,0.5) 100%);
-  border-color: rgba(29,29,117,0.5);
+  background: #161616;
+  border-color: #161616;
 }
 
 .msg-me .custom-audio-player:hover {
-  background: linear-gradient(157deg, rgba(29,29,117,0.6) 45%, rgba(118,33,129,0.6) 100%);
-  border-color: rgba(177, 136, 226, 0.5);
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+  box-shadow: none;
 }
 
 /* msg-them style (dark gray to match text bubbles) */
 .msg-them .custom-audio-player {
-  background: #24252a;
-  border-color: #24252a;
+  background: linear-gradient(90deg, #b188e240, #5749E440);
+  border-color: #b188e275;
 }
 
 .msg-them .custom-audio-player:hover {
-  background: #2a2b30;
-  border-color: #3a3b40;
+  background: linear-gradient(90deg, #b188e260, #5749E460);
+  border-color: #b188e2;
   box-shadow: none;
 }
 
 .audio-play-btn {
-  background: linear-gradient(135deg, #b188e2 0%, #7d3c98 100%);
+  background: #b188e2;
 }
 
 .audio-progress-fill {
-  background: linear-gradient(90deg, #b188e2 0%, #9b59b6 100%);
+  background: linear-gradient(90deg, #b188e2 0%, #CD3DD3 100%);
 }
 
 .audio-progress-handle {
@@ -263,7 +261,7 @@ select:disabled {
 }
 
 .waveform-bar {
-  background: linear-gradient(to top, #7d3c98, #b188e2);
+  background: linear-gradient(to top, #5749E4, #b188e2);
 }
 
 .custom-audio-player.playing .waveform-bar {
@@ -271,7 +269,7 @@ select:disabled {
 }
 
 .audio-time-display .current-time {
-  color: #b188e2;
+  color: #ffffff60;
 }
 
 .audio-transcribe-btn .icon {
@@ -279,7 +277,7 @@ select:disabled {
 }
 
 .transcribe-progress-fill {
-  background: linear-gradient(90deg, #b188e2, #9b59b6);
+  background: linear-gradient(90deg, #5749E4, #b188e2);
 }
 
 .transcribe-progress-text {
@@ -299,14 +297,15 @@ select:disabled {
 }
 
 .accept-btn {
-  background: rgba(177, 136, 226, 0.1);
-  border: 1px solid rgba(177, 136, 226, 0.3);
+  background: #b188e220;
+  border: 1px solid #b188e2;
   color: #b188e2;
 }
 
 .accept-btn:hover:not(:disabled) {
-  background: rgba(177, 136, 226, 0.2);
-  border-color: rgba(177, 136, 226, 0.5);
+  background: #b188e210;
+  border-color: #CD3DD3;
+  color: #fff;
 }
 
 #update-status-text {
@@ -624,8 +623,7 @@ select:disabled {
 
 /* Relay Add Button */
 .relay-add-btn {
-  background: rgba(177, 136, 226, 0.2);
-  border: 1px solid rgba(177, 136, 226, 0.4);
+  background: #b188e220;
   color: #b188e2;
 }
 
@@ -640,12 +638,12 @@ select:disabled {
 }
 
 .relay-dialog-header {
-  background: linear-gradient(90deg, rgba(177, 136, 226, 0.15) 0%, rgba(125, 60, 152, 0.1) 100%);
+  background: linear-gradient(90deg, #b188e210 0%,#b188e2 75%, #5749E4 100%);
 }
 
 .relay-form-input:focus,
 .relay-form-select:focus {
-  border-color: rgba(177, 136, 226, 0.5);
+  border-color: #b188e2;
 }
 
 .relay-dialog-buttons .primary-btn {
@@ -654,7 +652,8 @@ select:disabled {
 }
 
 .relay-dialog-buttons .primary-btn:hover {
-  box-shadow: 0 4px 12px rgba(177, 136, 226, 0.3);
+  color: #fff;
+  background-color: #5749E4;
 }
 
 .relay-metric-value {
