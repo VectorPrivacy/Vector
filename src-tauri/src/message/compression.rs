@@ -350,10 +350,10 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         });
         
         let compressed_size = compressed_bytes.len() as u64;
-        
+
         Ok(CachedCompressedImage {
             bytes: compressed_bytes,
-            extension,
+            extension: extension.to_string(),
             img_meta,
             original_size,
             compressed_size,
