@@ -136,7 +136,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     };
 
     // Encrypt the file using MDK's media_manager
-    let upload = media_manager
+    let mut upload = media_manager
         .encrypt_for_upload_with_options(&file.bytes, &mdk_mime_type, filename, &options)
         .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
 
@@ -149,7 +149,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     let url = crate::blossom::upload_blob_with_progress_and_failover(
         signer,
         servers,
-        upload.encrypted_data.clone(),
+        Arc::new(std::mem::take(&mut upload.encrypted_data)),
         Some(&mime_type),
         progress_callback,
         Some(3),
@@ -305,7 +305,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         let attached_file = file.unwrap();
 
         // Calculate the file hash first (before encryption)
-        let file_hash = calculate_file_hash(&attached_file.bytes);
+        let file_hash = calculate_file_hash(&*attached_file.bytes);
 
         // The SHA-256 hash of an empty file - we should never reuse this
         const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -339,7 +339,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let dir = handle.path().resolve("vector", base_directory).unwrap();
             std::fs::create_dir_all(&dir).unwrap();
             let hash_file_path = dir.join(&filename);
-            std::fs::write(&hash_file_path, &attached_file.bytes).unwrap();
+            std::fs::write(&hash_file_path, &*attached_file.bytes).unwrap();
 
             // Create progress callback for MLS upload
             let pending_id_for_callback = Arc::clone(&pending_id);
@@ -567,7 +567,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         } else {
             // Encrypt the attachment - either it's new or the existing URL is dead
             let params = crypto::generate_encryption_params();
-            let enc_file = crypto::encrypt_data(attached_file.bytes.as_slice(), &params).unwrap();
+            let enc_file = crypto::encrypt_data(&*attached_file.bytes, &params).unwrap();
             (params, enc_file)
         };
 
@@ -613,7 +613,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             std::fs::create_dir_all(&dir).unwrap();
 
             // Save the hash-named file
-            std::fs::write(&hash_file_path, &attached_file.bytes).unwrap();
+            std::fs::write(&hash_file_path, &*attached_file.bytes).unwrap();
 
             // Determine encryption params and file size based on whether we found an existing attachment
             let (attachment_key, attachment_nonce, file_size) = if let Some((_, ref existing)) = existing_attachment {
@@ -757,7 +757,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
 
             // Upload the file with progress, retries, and automatic server failover
-            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, enc_file, Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -996,21 +996,19 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     // Get original pixels
     let original_pixels = img.as_raw();
 
-    // Windows: check that every image has a non-zero-ish Alpha channel
+    // Windows: check if clipboard corrupted alpha channel (all values near zero)
     let mut _transparency_bug_search = false;
     #[cfg(target_os = "windows")]
     {
-        _transparency_bug_search = original_pixels.iter().skip(3).step_by(4).all(|&a| a <= 2);
+        _transparency_bug_search = util::has_all_alpha_near_zero(original_pixels);
     }
 
-    // For non-transparent images: manually account for the zero'ing out of the Alpha channel
+    // For non-transparent images: set alpha to opaque
     let pixels = if !transparent || _transparency_bug_search {
-        // Only clone if we need to modify
         let mut modified = original_pixels.to_vec();
-        modified.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
+        util::set_all_alpha_opaque(&mut modified);
         std::borrow::Cow::Owned(modified)
     } else {
-        // No modification needed, use the original data
         std::borrow::Cow::Borrowed(original_pixels)
     };
 
@@ -1031,7 +1029,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: encoded_bytes,
+        bytes: Arc::new(encoded_bytes),
         img_meta,
         extension: extension.to_string(),
     };
@@ -1044,7 +1042,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<bool, String> {
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes,
+        bytes: Arc::new(bytes),
         img_meta: None,
         extension: String::from("wav")
     };

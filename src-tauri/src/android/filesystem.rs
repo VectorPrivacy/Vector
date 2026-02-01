@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use jni::objects::{JObject, JValue, JString};
 
 use crate::message::{AttachmentFile, FileInfo};
@@ -418,7 +419,7 @@ fn read_from_android_uri_internal(
     let _ = env.call_method(&input_stream, "close", "()V", &[]);
 
     Ok(AttachmentFile {
-        bytes,
+        bytes: Arc::new(bytes),
         img_meta: None,
         extension,
     })

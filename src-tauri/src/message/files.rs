@@ -6,6 +6,7 @@
 //! - Image preview generation
 //! - Android file handling
 
+use std::sync::Arc;
 use nostr_sdk::prelude::*;
 use tokio::sync::Mutex as TokioMutex;
 use once_cell::sync::Lazy;
@@ -20,7 +21,7 @@ use super::message;
 use crate::android::filesystem;
 
 /// Cache for bytes received from JavaScript (for Android file handling)
-static JS_FILE_CACHE: Lazy<std::sync::Mutex<Option<(Vec<u8>, String, String)>>> =
+static JS_FILE_CACHE: Lazy<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
 
 /// Cache for compressed bytes from JavaScript file
@@ -43,17 +44,19 @@ pub struct CacheFileBytesResult {
 #[tauri::command]
 pub fn cache_file_bytes(bytes: Vec<u8>, file_name: String, extension: String) -> Result<CacheFileBytesResult, String> {
     let size = bytes.len() as u64;
-    
+
     // Generate preview for supported image types
     let preview = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
         generate_image_preview_from_bytes(&bytes, 15).ok()
     } else {
         None
     };
-    
+
+    let bytes = Arc::new(bytes);
+
     let mut cache = JS_FILE_CACHE.lock().unwrap();
     *cache = Some((bytes, file_name.clone(), extension.clone()));
-    
+
     Ok(CacheFileBytesResult {
         size,
         name: file_name,
@@ -77,39 +80,24 @@ pub fn get_cached_file_info() -> Result<Option<FileInfo>, String> {
 }
 
 /// Get base64 preview of cached image bytes
-/// Uses ultra-fast nearest-neighbor downsampling for performance
 #[tauri::command]
 pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
-    let quality = quality.clamp(1, 100);
-    
+    use crate::shared::image::{calculate_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+
     let cache = JS_FILE_CACHE.lock().unwrap();
     let (bytes, _, _) = cache.as_ref().ok_or("No cached file")?;
     let bytes = bytes.clone();
     drop(cache);
-    
+
     let img = ::image::load_from_memory(&bytes)
         .map_err(|e| format!("Failed to decode image: {}", e))?;
-    
+
     let (width, height) = (img.width(), img.height());
-    let new_width = ((width * quality) / 100).max(1);
-    let new_height = ((height * quality) / 100).max(1);
-    
-    // Convert to RGBA8 for fast nearest-neighbor downsampling
-    let rgba = img.to_rgba8();
-    let pixels = rgba.as_raw();
-    
-    // Use ultra-fast nearest-neighbor downsampling
-    let resized_pixels = crate::util::nearest_neighbor_downsample(
-        pixels,
-        width,
-        height,
-        new_width,
-        new_height,
-    );
-    
-    // Encode preview (PNG for alpha, JPEG otherwise)
-    use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-    let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+    let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
+
+    let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
+    let rgba = resized.to_rgba8();
+    let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
     use base64::Engine;
     let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
@@ -120,25 +108,25 @@ pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
 /// Start compression of cached bytes
 #[tauri::command]
 pub async fn start_cached_bytes_compression() -> Result<(), String> {
-    // Get bytes from cache
     let (bytes, _, extension) = {
         let cache = JS_FILE_CACHE.lock().unwrap();
-        cache.clone().ok_or("No cached file")?
+        let (b, _, e) = cache.as_ref().ok_or("No cached file")?;
+        (b.clone(), String::new(), e.clone())
     };
-    
+
     // Clear any previous compression result
     {
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
         *comp_cache = None;
     }
-    
+
     // Spawn compression task (no min_savings - checked later by caller)
     tokio::spawn(async move {
         let result = compress_bytes_internal(bytes, &extension, None);
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
         *comp_cache = result.ok();
     });
-    
+
     Ok(())
 }
 
@@ -202,65 +190,51 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
         let mut cache = JS_FILE_CACHE.lock().unwrap();
         cache.take().ok_or("No cached file")?
     };
-    
+
     // Clear compression cache
     *JS_COMPRESSION_CACHE.lock().await = None;
-    
-    // Process images: compress if use_compression is true, otherwise just generate metadata
-    let (bytes, extension, img_meta) = if matches!(original_extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "tiff" | "tif" | "ico") {
+
+    // Check if this is an image type
+    let is_image = matches!(original_extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
+
+    // Process images: generate metadata and optionally compress
+    let (bytes, extension, img_meta) = if is_image {
         if let Ok(img) = ::image::load_from_memory(&original_bytes) {
-            let rgba_img = img.to_rgba8();
-            let blurhash_meta = crate::util::generate_blurhash_from_rgba(
-                rgba_img.as_raw(),
-                img.width(),
-                img.height()
-            ).map(|blurhash| ImageMetadata {
-                blurhash,
-                width: img.width(),
-                height: img.height(),
-            });
-            
-            if use_compression {
-                // Compress on-the-fly since pre-compression wasn't ready
-                use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
-                match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
-                    Ok(encoded) => (encoded.bytes, encoded.extension.to_string(), blurhash_meta),
-                    Err(_) => (original_bytes, original_extension, blurhash_meta),
-                }
-            } else {
+            let blurhash_meta = crate::util::generate_blurhash_from_image(&img)
+                .map(|blurhash| ImageMetadata {
+                    blurhash,
+                    width: img.width(),
+                    height: img.height(),
+                });
+
+            // GIFs: never compress, preserve animation
+            // Other images: compress if requested
+            if original_extension == "gif" || !use_compression {
                 // No compression - just use original bytes with metadata
                 (original_bytes, original_extension, blurhash_meta)
+            } else {
+                // Compress on-the-fly since pre-compression wasn't ready
+                use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
+                let rgba_img = img.to_rgba8();
+                match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
+                    Ok(encoded) => (Arc::new(encoded.bytes), encoded.extension.to_string(), blurhash_meta),
+                    Err(_) => (original_bytes, original_extension, blurhash_meta),
+                }
             }
         } else {
             (original_bytes, original_extension, None)
         }
-    } else if original_extension == "gif" {
-        // For GIFs, just generate metadata but keep original bytes
-        let img_meta = if let Ok(img) = ::image::load_from_memory(&original_bytes) {
-            let rgba_img = img.to_rgba8();
-            crate::util::generate_blurhash_from_rgba(
-                rgba_img.as_raw(),
-                img.width(),
-                img.height()
-            ).map(|blurhash| ImageMetadata {
-                blurhash,
-                width: img.width(),
-                height: img.height(),
-            })
-        } else {
-            None
-        };
-        (original_bytes, original_extension, img_meta)
     } else {
+        // Non-image file
         (original_bytes, original_extension, None)
     };
-    
+
     let attachment_file = AttachmentFile {
         bytes,
         extension,
         img_meta,
     };
-    
+
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
@@ -319,7 +293,7 @@ pub async fn send_file_bytes(
             None // GIFs or no compression - just get metadata
         };
 
-        match compress_bytes_internal(file_bytes, &extension, min_savings) {
+        match compress_bytes_internal(Arc::new(file_bytes), &extension, min_savings) {
             Ok(result) => AttachmentFile {
                 bytes: result.bytes,
                 extension: result.extension,
@@ -333,7 +307,7 @@ pub async fn send_file_bytes(
     } else {
         // Non-image file - send as-is
         AttachmentFile {
-            bytes: file_bytes,
+            bytes: Arc::new(file_bytes),
             extension,
             img_meta: None,
         }
@@ -372,7 +346,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 .to_lowercase();
 
             AttachmentFile {
-                bytes,
+                bytes: Arc::new(bytes),
                 img_meta: None,
                 extension,
             }
@@ -380,7 +354,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         #[cfg(target_os = "android")]
         {
             // First check if we have cached bytes for this URI
-            // Take ownership from cache to avoid clone
+            // Take ownership from cache to avoid clone - bytes already Arc
             let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
             if let Some((bytes, extension, _, _)) = cache.remove(&file_path) {
                 drop(cache);
@@ -417,7 +391,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                         .to_lowercase();
 
                     AttachmentFile {
-                        bytes,
+                        bytes: Arc::new(bytes),
                         img_meta: None,
                         extension,
                     }
@@ -428,18 +402,13 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
 
     // Generate image metadata if the file is an image
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        // Try to load and decode the image
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
-            let rgba_img = img.to_rgba8();
-            attachment_file.img_meta = util::generate_blurhash_from_rgba(
-                rgba_img.as_raw(),
-                img.width(),
-                img.height()
-            ).map(|blurhash| ImageMetadata {
-                blurhash,
-                width: img.width(),
-                height: img.height(),
-            });
+            attachment_file.img_meta = util::generate_blurhash_from_image(&img)
+                .map(|blurhash| ImageMetadata {
+                    blurhash,
+                    width: img.width(),
+                    height: img.height(),
+                });
         }
     }
 
@@ -519,8 +488,8 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
         } else {
             None
         };
-        
-        // Cache the bytes
+
+        // Cache the bytes - already Arc from read_android_uri
         let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
         cache.insert(file_path, (bytes, extension.clone(), name.clone(), size));
         
@@ -535,20 +504,20 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
 
 /// Generate a compressed base64 preview from image bytes
 /// Quality is a percentage (1-100) that determines the preview size
-/// Uses ultra-fast nearest-neighbor downsampling for performance
-/// For files smaller than 5MB or GIFs, returns the original image as base64 (no resizing)
+/// For files smaller than 5MB or GIFs, returns the original image as base64
 fn generate_image_preview_from_bytes(bytes: &[u8], quality: u32) -> Result<String, String> {
     use base64::Engine;
-    
+    use crate::shared::image::{calculate_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+
     const SKIP_RESIZE_THRESHOLD: usize = 5 * 1024 * 1024; // 5MB
-    
+
     // Detect if this is a GIF (we never resize GIFs to preserve animation)
     let is_gif = bytes.starts_with(b"GIF");
-    
+
     // For small files or GIFs, just return the original as base64 (skip resizing)
     if bytes.len() < SKIP_RESIZE_THRESHOLD || is_gif {
         let base64_str = base64::engine::general_purpose::STANDARD.encode(bytes);
-        
+
         // Detect image type from magic bytes for correct MIME type
         let mime_type = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
             "image/jpeg"
@@ -568,35 +537,19 @@ fn generate_image_preview_from_bytes(bytes: &[u8], quality: u32) -> Result<Strin
         } else {
             "image/jpeg" // Default fallback
         };
-        
+
         return Ok(format!("data:{};base64,{}", mime_type, base64_str));
     }
-    
-    let quality = quality.clamp(1, 100);
-    
+
     let img = ::image::load_from_memory(bytes)
         .map_err(|e| format!("Failed to decode image: {}", e))?;
-    
+
     let (width, height) = (img.width(), img.height());
-    let new_width = ((width * quality) / 100).max(1);
-    let new_height = ((height * quality) / 100).max(1);
-    
-    // Convert to RGBA8 for fast nearest-neighbor downsampling
-    let rgba = img.to_rgba8();
-    let pixels = rgba.as_raw();
-    
-    // Use ultra-fast nearest-neighbor downsampling
-    let resized_pixels = crate::util::nearest_neighbor_downsample(
-        pixels,
-        width,
-        height,
-        new_width,
-        new_height,
-    );
-    
-    // Encode preview (PNG for alpha/small images, JPEG otherwise)
-    use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-    let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+    let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
+
+    let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
+    let rgba = resized.to_rgba8();
+    let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
     let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
     let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
@@ -653,39 +606,24 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
 
 /// Get a base64 preview of an image (for Android where convertFileSrc doesn't work)
 /// The quality parameter (1-100) determines the resize percentage
-/// Uses ultra-fast nearest-neighbor downsampling for performance
 #[tauri::command]
 pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<String, String> {
-    let quality = quality.clamp(1, 100);
-    
+    use crate::shared::image::{calculate_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+
     #[cfg(not(target_os = "android"))]
     {
         let bytes = std::fs::read(&file_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
-        
+
         let img = ::image::load_from_memory(&bytes)
             .map_err(|e| format!("Failed to decode image: {}", e))?;
-        
+
         let (width, height) = (img.width(), img.height());
-        let new_width = ((width * quality) / 100).max(1);
-        let new_height = ((height * quality) / 100).max(1);
-        
-        // Convert to RGBA8 for fast nearest-neighbor downsampling
-        let rgba = img.to_rgba8();
-        let pixels = rgba.as_raw();
-        
-        // Use ultra-fast nearest-neighbor downsampling
-        let resized_pixels = crate::util::nearest_neighbor_downsample(
-            pixels,
-            width,
-            height,
-            new_width,
-            new_height,
-        );
-        
-        // Encode preview (PNG for alpha/small images, JPEG otherwise)
-        use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-        let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+        let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
+
+        let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
+        let rgba = resized.to_rgba8();
+        let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
         use base64::Engine;
         let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
@@ -703,7 +641,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             } else {
                 drop(cache);
                 // Fall back to reading directly (may fail if permission expired)
-                filesystem::read_android_uri_bytes(file_path)?.0
+                Arc::new(filesystem::read_android_uri_bytes(file_path)?.0)
             }
         };
 
@@ -711,25 +649,11 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             .map_err(|e| format!("Failed to decode image: {}", e))?;
 
         let (width, height) = (img.width(), img.height());
-        let new_width = ((width * quality) / 100).max(1);
-        let new_height = ((height * quality) / 100).max(1);
+        let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
 
-        // Convert to RGBA8 for fast nearest-neighbor downsampling
-        let rgba = img.to_rgba8();
-        let pixels = rgba.as_raw();
-
-        // Use ultra-fast nearest-neighbor downsampling
-        let resized_pixels = crate::util::nearest_neighbor_downsample(
-            pixels,
-            width,
-            height,
-            new_width,
-            new_height,
-        );
-        
-        // Encode preview (PNG for alpha/small images, JPEG otherwise)
-        use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-        let encoded = encode_rgba_auto(&resized_pixels, new_width, new_height, JPEG_QUALITY_PREVIEW)?;
+        let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
+        let rgba = resized.to_rgba8();
+        let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
         use base64::Engine;
         let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
@@ -769,7 +693,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 .to_lowercase();
 
             AttachmentFile {
-                bytes,
+                bytes: Arc::new(bytes),
                 img_meta: None,
                 extension,
             }
@@ -777,7 +701,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
         #[cfg(target_os = "android")]
         {
             // First check if we have cached bytes for this URI
-            // Take ownership from cache to avoid clone
+            // Take ownership from cache to avoid clone - bytes already Arc
             let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
             if let Some((bytes, extension, _, _)) = cache.remove(&file_path) {
                 drop(cache);
@@ -814,7 +738,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                         .to_lowercase();
 
                     AttachmentFile {
-                        bytes,
+                        bytes: Arc::new(bytes),
                         img_meta: None,
                         extension,
                     }
@@ -827,32 +751,25 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
             // Determine target dimensions (max 1920px on longest side)
+            use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, encode_rgba_auto, JPEG_QUALITY_STANDARD};
             let (width, height) = (img.width(), img.height());
-            let max_dimension = 1920u32;
-            
-            let (new_width, new_height) = if width > max_dimension || height > max_dimension {
-                if width > height {
-                    let ratio = max_dimension as f32 / width as f32;
-                    (max_dimension, (height as f32 * ratio) as u32)
-                } else {
-                    let ratio = max_dimension as f32 / height as f32;
-                    ((width as f32 * ratio) as u32, max_dimension)
-                }
-            } else {
-                (width, height)
-            };
-            
+            let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
+
             // Resize if needed
             let resized_img = if new_width != width || new_height != height {
                 img.resize(new_width, new_height, ::image::imageops::FilterType::Lanczos3)
             } else {
                 img
             };
-            
-            // Get RGBA image for alpha check and blurhash
+
+            attachment_file.img_meta = crate::util::generate_blurhash_from_image(&resized_img)
+                .map(|blurhash| ImageMetadata {
+                    blurhash,
+                    width: resized_img.width(),
+                    height: resized_img.height(),
+                });
+
             let rgba_img = resized_img.to_rgba8();
-            let actual_width = rgba_img.width();
-            let actual_height = rgba_img.height();
 
             let mut compressed_bytes = Vec::new();
 
@@ -863,30 +780,17 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 let mut encoder = ::image::codecs::gif::GifEncoder::new(&mut cursor);
                 encoder.encode(
                     rgba_img.as_raw(),
-                    actual_width,
-                    actual_height,
+                    rgba_img.width(),
+                    rgba_img.height(),
                     ::image::ExtendedColorType::Rgba8.into()
                 ).map_err(|e| format!("Failed to encode GIF: {}", e))?;
             } else {
-                // Encode as PNG (alpha/small) or JPEG (standard)
-                use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
-                let encoded = encode_rgba_auto(rgba_img.as_raw(), actual_width, actual_height, JPEG_QUALITY_STANDARD)?;
+                let encoded = encode_rgba_auto(rgba_img.as_raw(), rgba_img.width(), rgba_img.height(), JPEG_QUALITY_STANDARD)?;
                 compressed_bytes = encoded.bytes;
                 attachment_file.extension = encoded.extension.to_string();
             }
-            
-            attachment_file.bytes = compressed_bytes;
-            
-            // Generate blurhash from the resized image
-            attachment_file.img_meta = crate::util::generate_blurhash_from_rgba(
-                rgba_img.as_raw(),
-                actual_width,
-                actual_height
-            ).map(|blurhash| ImageMetadata {
-                blurhash,
-                width: actual_width,
-                height: actual_height,
-            });
+
+            attachment_file.bytes = Arc::new(compressed_bytes);
         }
     }
 

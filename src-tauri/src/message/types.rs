@@ -5,6 +5,7 @@
 //! - Image metadata and compression cache types
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::Mutex as TokioMutex;
 use once_cell::sync::Lazy;
@@ -15,7 +16,7 @@ use crate::TAURI_APP;
 /// Cached compressed image data
 #[derive(Clone)]
 pub struct CachedCompressedImage {
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
     pub extension: String,
     pub img_meta: Option<ImageMetadata>,
     pub original_size: u64,
@@ -29,7 +30,7 @@ pub static COMPRESSION_CACHE: Lazy<TokioMutex<HashMap<String, Option<CachedCompr
 /// Cache for Android file bytes: uri -> (bytes, extension, name, size)
 /// This is used to cache file bytes immediately after file selection on Android,
 /// before the temporary content URI permission expires.
-pub static ANDROID_FILE_CACHE: Lazy<std::sync::Mutex<HashMap<String, (Vec<u8>, String, String, u64)>>> =
+pub static ANDROID_FILE_CACHE: Lazy<std::sync::Mutex<HashMap<String, (Arc<Vec<u8>>, String, String, u64)>>> =
     Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -238,12 +239,19 @@ impl Default for Attachment {
 }
 
 /// A simple pre-upload format to associate a byte stream with a file extension
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+/// Note: This type is used internally - the bytes field is not serialized.
+/// For Tauri commands, AttachmentFile is constructed in Rust, not deserialized from JS.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AttachmentFile {
-    pub bytes: Vec<u8>,
+    #[serde(skip, default = "default_arc_bytes")]
+    pub bytes: Arc<Vec<u8>>,
     /// Image metadata (for images only)
     pub img_meta: Option<ImageMetadata>,
     pub extension: String,
+}
+
+fn default_arc_bytes() -> Arc<Vec<u8>> {
+    Arc::new(Vec::new())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]

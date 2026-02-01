@@ -909,7 +909,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         match blossom::upload_blob_with_failover(
             signer.clone(),
             blossom_servers.clone(),
-            icon_data,
+            Arc::new(icon_data),
             Some(mime_type),
         )
         .await
@@ -935,7 +935,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     let download_url = blossom::upload_blob_with_failover(
         signer.clone(),
         blossom_servers,
-        file_data,
+        Arc::new(file_data),
         Some("application/octet-stream"),
     )
     .await?;

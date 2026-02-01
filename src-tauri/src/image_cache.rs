@@ -195,10 +195,17 @@ fn validate_image(bytes: &[u8]) -> Option<&'static str> {
         }
     }
 
-    // Also accept SVG (text-based)
+    // Also accept SVG (text-based) - search bytes directly to avoid allocation
     if bytes.len() > 5 {
-        let start = String::from_utf8_lossy(&bytes[..std::cmp::min(256, bytes.len())]);
-        if start.contains("<svg") || (start.contains("<?xml") && start.contains("<svg")) {
+        let check_len = std::cmp::min(512, bytes.len());
+        let header = &bytes[..check_len];
+
+        // Helper to find a pattern in bytes
+        fn contains_pattern(haystack: &[u8], needle: &[u8]) -> bool {
+            haystack.windows(needle.len()).any(|w| w == needle)
+        }
+
+        if contains_pattern(header, b"<svg") {
             return Some("svg");
         }
     }
@@ -222,9 +229,10 @@ pub fn get_cached_path<R: Runtime>(
     // Check for any file with this cache key (any extension)
     if let Ok(entries) = std::fs::read_dir(&cache_dir) {
         for entry in entries.flatten() {
-            let filename = entry.file_name().to_string_lossy().to_string();
-            if filename.starts_with(&cache_key) {
-                return Some(entry.path().to_string_lossy().to_string());
+            let filename = entry.file_name();
+            let filename_str = filename.to_string_lossy();
+            if filename_str.starts_with(&cache_key) {
+                return Some(entry.path().to_string_lossy().into_owned());
             }
         }
     }

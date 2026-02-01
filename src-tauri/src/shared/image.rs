@@ -9,6 +9,9 @@ use image::codecs::jpeg::JpegEncoder;
 use image::ImageEncoder;
 use std::io::Cursor;
 
+/// Maximum dimension for image compression (1920px on longest side)
+pub const MAX_DIMENSION: u32 = 1920;
+
 /// Default JPEG quality for standard compression (0-100)
 pub const JPEG_QUALITY_STANDARD: u8 = 85;
 /// JPEG quality for higher compression (smaller files)
@@ -213,4 +216,47 @@ pub fn encode_rgba_auto(pixels: &[u8], width: u32, height: u32, jpeg_quality: u8
             extension: "jpg",
         })
     }
+}
+
+/// Calculate target dimensions to fit within max_dimension while preserving aspect ratio.
+///
+/// Returns the original dimensions if both are already within the limit.
+/// Otherwise, scales down proportionally so the longest side equals max_dimension.
+///
+/// # Arguments
+/// * `width` - Original image width
+/// * `height` - Original image height
+/// * `max_dimension` - Maximum allowed size for either dimension
+///
+/// # Returns
+/// Tuple of (new_width, new_height)
+#[inline]
+pub fn calculate_resize_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
+    if width <= max_dimension && height <= max_dimension {
+        (width, height)
+    } else if width > height {
+        let ratio = max_dimension as f32 / width as f32;
+        (max_dimension, (height as f32 * ratio) as u32)
+    } else {
+        let ratio = max_dimension as f32 / height as f32;
+        ((width as f32 * ratio) as u32, max_dimension)
+    }
+}
+
+/// Calculate preview dimensions based on a quality percentage.
+///
+/// # Arguments
+/// * `width` - Original image width
+/// * `height` - Original image height
+/// * `quality` - Percentage (1-100) of original size
+///
+/// # Returns
+/// Tuple of (new_width, new_height), both at least 1
+#[inline]
+pub fn calculate_preview_dimensions(width: u32, height: u32, quality: u32) -> (u32, u32) {
+    let quality = quality.clamp(1, 100);
+    (
+        ((width * quality) / 100).max(1),
+        ((height * quality) / 100).max(1),
+    )
 }

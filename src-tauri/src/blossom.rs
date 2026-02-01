@@ -21,27 +21,27 @@ struct ProgressTrackingStream {
 }
 
 impl ProgressTrackingStream {
-    fn new(data: Vec<u8>, bytes_sent: Arc<Mutex<u64>>) -> Self {
+    fn new(data: Arc<Vec<u8>>, bytes_sent: Arc<Mutex<u64>>) -> Self {
         let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
-        
+
         // Spawn a background task to feed the stream
         tokio::spawn(async move {
-            let chunk_size = 64 * 1024; // 64 KB chunks
+            let chunk_size = 64 * 1024; // 64 KB chunks - only unavoidable copy
             let mut position = 0;
-            
+
             while position < data.len() {
                 let end = std::cmp::min(position + chunk_size, data.len());
                 let chunk = data[position..end].to_vec();
-                
+
                 // Send chunk through channel
                 if tx.send(Ok(chunk)).await.is_err() {
                     break; // Receiver was dropped
                 }
-                
+
                 position = end;
             }
         });
-        
+
         Self {
             bytes_sent,
             inner: rx,
@@ -113,7 +113,7 @@ where
 pub async fn upload_blob_with_progress<T>(
     signer: T,
     server_url: &Url,
-    file_data: Vec<u8>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
@@ -124,16 +124,16 @@ where
 {
     let retry_count = retry_count.unwrap_or(0);
     let retry_spacing = retry_spacing.unwrap_or(std::time::Duration::from_secs(1));
-    
+
     let mut last_error = None;
-    
+
     for attempt in 0..=retry_count {
         // Log retry attempt if not the first attempt
         if attempt > 0 {
             // Sleep before retry
             tokio::time::sleep(retry_spacing).await;
         }
-        
+
         match upload_attempt(
             signer.clone(),
             server_url,
@@ -148,7 +148,7 @@ where
             }
         }
     }
-    
+
     // All attempts failed, return the last error
     Err(last_error.unwrap_or_else(|| "No upload attempts were made".to_string()))
 }
@@ -157,7 +157,7 @@ where
 async fn upload_attempt<T>(
     signer: T,
     server_url: &Url,
-    file_data: Vec<u8>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
 ) -> Result<String, String>
@@ -166,7 +166,7 @@ where
 {
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
-    
+
     let total_size = file_data.len() as u64;
     let hash = Sha256Hash::hash(&file_data);
     
@@ -262,7 +262,7 @@ where
 pub async fn upload_blob<T>(
     signer: T,
     server_url: &Url,
-    file_data: Vec<u8>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
 ) -> Result<String, String>
 where
@@ -270,7 +270,7 @@ where
 {
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
-    
+
     let hash = Sha256Hash::hash(&file_data);
     
     // Build authorization header
@@ -292,11 +292,12 @@ where
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
-    // Perform the upload
+    // Perform the upload - convert Arc to owned Vec for body
+    let body_data = Arc::try_unwrap(file_data).unwrap_or_else(|arc| (*arc).clone());
     let response = client
         .put(upload_url)
         .headers(headers)
-        .body(file_data)
+        .body(body_data)
         .send()
         .await
         .map_err(|e| format!("Upload request failed: {}", e))?;
@@ -320,14 +321,14 @@ where
 pub async fn upload_blob_with_failover<T>(
     signer: T,
     server_urls: Vec<String>,
-    file_data: Vec<u8>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
 ) -> Result<String, String>
 where
     T: NostrSigner + Clone,
 {
     let mut last_error = String::from("No servers available");
-    
+
     for (index, server_url_str) in server_urls.iter().enumerate() {
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
@@ -337,10 +338,10 @@ where
                 continue;
             }
         };
-        
+
         eprintln!("[Blossom] Attempting upload to server {} of {}: {}",
             index + 1, server_urls.len(), server_url_str);
-        
+
         match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type).await {
             Ok(url) => {
                 eprintln!("[Blossom] Upload successful to: {}", server_url_str);
@@ -353,7 +354,7 @@ where
             }
         }
     }
-    
+
     // All servers failed
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
 }
@@ -363,7 +364,7 @@ where
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
     server_urls: Vec<String>,
-    file_data: Vec<u8>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
@@ -373,7 +374,7 @@ where
     T: NostrSigner + Clone,
 {
     let mut last_error = String::from("No servers available");
-    
+
     for (index, server_url_str) in server_urls.iter().enumerate() {
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
@@ -383,10 +384,10 @@ where
                 continue;
             }
         };
-        
+
         eprintln!("[Blossom] Attempting upload to server {} of {}: {}",
             index + 1, server_urls.len(), server_url_str);
-        
+
         // Try uploading to this server with progress tracking and retries
         match upload_blob_with_progress(
             signer.clone(),
@@ -410,7 +411,7 @@ where
             }
         }
     }
-    
+
     // All servers failed
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
 }
