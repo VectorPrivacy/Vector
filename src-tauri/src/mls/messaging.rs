@@ -7,6 +7,7 @@
 use mdk_core::prelude::GroupId;
 use tauri::Emitter;
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS};
+use crate::util::hex_string_to_bytes;
 use super::{MlsService, MlsGroupMetadata};
 
 /// Send an MLS message (rumor) to a group
@@ -49,10 +50,7 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
             let engine_group_id = if group_meta.engine_group_id.is_empty() {
                 return Err("Group has no engine_group_id".to_string());
             } else {
-                GroupId::from_slice(
-                    &hex::decode(&group_meta.engine_group_id)
-                        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?
-                )
+                GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id))
             };
             
             // Now get the MLS engine and create message (no await while engine is in scope)

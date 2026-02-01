@@ -9,6 +9,7 @@ use tauri::{AppHandle, Runtime, Emitter};
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
 use crate::db::{save_chat, save_chat_messages};
+use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // Submodules
 mod types;
@@ -305,7 +306,7 @@ impl MlsService {
 
             // GroupId is already a GroupId type in MDK (no conversion needed)
             let gid_bytes = create_out.group.mls_group_id.as_slice();
-            let engine_gid_hex = hex::encode(gid_bytes);
+            let engine_gid_hex = bytes_to_hex_string(gid_bytes);
 
             // Attempt to derive wire id (wrapper 'h' tag, 64-hex) using a non-published dummy wrapper.
             // If unavailable, fall back to engine id.
@@ -547,10 +548,7 @@ impl MlsService {
             .ok_or(MlsError::GroupNotFound)?;
         
         // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(
-            &hex::decode(&group_meta.engine_group_id)
-                .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
-        );
+        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
         // Perform engine operations: add member and merge commit BEFORE publishing
         // This ensures our local state is correct before announcing to the network
@@ -647,8 +645,7 @@ impl MlsService {
         // Send a "leave request" application message so admins auto-remove us
         // This is more reliable than the MLS proposal which needs explicit commit
         if let Some(ref meta) = group_meta {
-            if let Ok(mls_group_id) = hex::decode(&meta.engine_group_id)
-                .map(|bytes| GroupId::from_slice(&bytes))
+            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&meta.engine_group_id));
             {
                 // Get our pubkey for building the rumor
                 if let Ok(signer) = client.signer().await {
@@ -750,10 +747,7 @@ impl MlsService {
             .ok_or(MlsError::GroupNotFound)?;
         
         // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(
-            &hex::decode(&group_meta.engine_group_id)
-                .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
-        );
+        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
         // Perform engine operation: remove member and merge commit BEFORE publishing
         // This ensures our local state is correct before announcing to the network
@@ -1075,14 +1069,8 @@ impl MlsService {
             if let Some(ref check_id) = group_check_id {
                 // Try to verify if the engine knows about this group
                 // We'll attempt to create a dummy message to see if the group exists
-                let check_gid_bytes = match hex::decode(&check_id) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        eprintln!("[MLS] Invalid group_id hex for engine check: {}", check_id);
-                        vec![]
-                    }
-                };
-                
+                let check_gid_bytes = hex_string_to_bytes(check_id);
+
                 if !check_gid_bytes.is_empty() {
                     use nostr_sdk::prelude::*;
                     let check_gid = GroupId::from_slice(&check_gid_bytes);
@@ -1166,7 +1154,7 @@ impl MlsService {
                                 // Check if we're still a member of this group
                                 // Use group_check_id (engine's group_id) instead of gid_for_fetch (wrapper id)
                                 if let Some(ref check_id) = group_check_id {
-                                    let check_gid_bytes = hex::decode(check_id).unwrap_or_default();
+                                    let check_gid_bytes = hex_string_to_bytes(check_id);
                                     if !check_gid_bytes.is_empty() {
                                         let check_gid = GroupId::from_slice(&check_gid_bytes);
                                         let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
@@ -1251,7 +1239,7 @@ impl MlsService {
                                 // Log details to help diagnose. Note: ev.pubkey is ephemeral, not real sender.
                                 println!("[MLS] Unprocessable event: group={}, mls_gid={}, id={}, created_at={}",
                                          gid_for_fetch,
-                                         hex::encode(mls_group_id.as_slice()),
+                                         bytes_to_hex_string(mls_group_id.as_slice()),
                                          ev.id.to_hex(),
                                          ev.created_at.as_secs());
 
@@ -1366,7 +1354,7 @@ impl MlsService {
                                 MessageProcessingResult::Commit { mls_group_id: _ } => {
                                     // Check membership after commit
                                     if let Some(ref check_id) = group_check_id {
-                                        let check_gid_bytes = hex::decode(check_id).unwrap_or_default();
+                                        let check_gid_bytes = hex_string_to_bytes(check_id);
                                         if !check_gid_bytes.is_empty() {
                                             let check_gid = GroupId::from_slice(&check_gid_bytes);
                                             let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
@@ -1445,7 +1433,7 @@ impl MlsService {
                                 MessageProcessingResult::Unprocessable { mls_group_id } => {
                                     // Still can't process - keep for next retry round
                                     println!("[MLS] ✗ Retry still unprocessable: id={}, mls_gid={}",
-                                             ev.id.to_hex(), hex::encode(mls_group_id.as_slice()));
+                                             ev.id.to_hex(), bytes_to_hex_string(mls_group_id.as_slice()));
                                     still_pending.push(ev.clone());
                                 }
                             }

@@ -48,7 +48,7 @@ pub(crate) use chats::{get_or_create_chat_id, get_or_create_user_id};
 pub use messages::{save_message, save_chat_messages};
 // Attachment database functions
 pub use attachments::{
-    AttachmentRef, build_file_hash_index,
+    lookup_attachment_cached, warm_file_hash_cache,
     get_chat_messages_paginated, get_chat_message_count,
     get_messages_around_id, message_exists_in_db, wrapper_event_exists,
     update_wrapper_event_id, load_recent_wrapper_ids, update_attachment_downloaded_status,

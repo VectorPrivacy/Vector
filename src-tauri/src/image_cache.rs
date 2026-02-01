@@ -25,6 +25,7 @@ use log::{info, warn, debug};
 use serde_json::json;
 
 use crate::net::{ProgressReporter, download_with_reporter};
+use crate::util::bytes_to_hex_string;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
@@ -172,7 +173,7 @@ fn url_to_cache_key(url: &str) -> String {
     hasher.update(url.as_bytes());
     let result = hasher.finalize();
     // Use first 16 bytes for a shorter but still unique filename
-    hex::encode(&result[..16])
+    bytes_to_hex_string(&result[..16])
 }
 
 /// Validate image bytes and detect format

@@ -4,6 +4,16 @@ use sha2::{Sha256, Digest};
 use blurhash::decode;
 use base64::{Engine as _, engine::general_purpose};
 
+// Re-export SIMD-accelerated functions for backwards compatibility
+pub use crate::simd::{
+    bytes_to_hex_16, bytes_to_hex_32, bytes_to_hex_string,
+    hex_string_to_bytes, hex_to_bytes_16, hex_to_bytes_32,
+    has_alpha_transparency, set_all_alpha_opaque,
+};
+
+#[cfg(target_os = "windows")]
+pub use crate::simd::has_all_alpha_near_zero;
+
 /// Extract all HTTPS URLs from a string
 pub fn extract_https_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
@@ -327,61 +337,11 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Convert a byte slice to a hex string
-pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
-    // Pre-allocate the exact size needed (2 hex chars per byte)
-    let mut result = String::with_capacity(bytes.len() * 2);
-    
-    // Use a lookup table for hex conversion
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    
-    for &b in bytes {
-        // Extract high and low nibbles
-        let high = b >> 4;
-        let low = b & 0xF;
-        result.push(HEX_CHARS[high as usize] as char);
-        result.push(HEX_CHARS[low as usize] as char);
-    }
-    
-    result
-}
-
-/// Convert hex string back to bytes for decryption
-pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
-    // Pre-allocate the result vector to avoid resize operations
-    let mut result = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    
-    // Process bytes directly to avoid UTF-8 decoding overhead
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        // Convert two hex characters to a single byte
-        let high = match bytes[i] {
-            b'0'..=b'9' => bytes[i] - b'0',
-            b'a'..=b'f' => bytes[i] - b'a' + 10,
-            b'A'..=b'F' => bytes[i] - b'A' + 10,
-            _ => 0,
-        };
-        
-        let low = match bytes[i + 1] {
-            b'0'..=b'9' => bytes[i + 1] - b'0',
-            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
-            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
-            _ => 0,
-        };
-        
-        result.push((high << 4) | low);
-        i += 2;
-    }
-    
-    result
-}
-
 /// Calculate SHA-256 hash of file data
 pub fn calculate_file_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    hex::encode(hasher.finalize())
+    bytes_to_hex_string(hasher.finalize().as_slice())
 }
 
 /// Ultra-fast nearest-neighbor downsampling for RGBA8 pixel data
@@ -400,6 +360,10 @@ pub fn calculate_file_hash(data: &[u8]) -> String {
 ///
 /// # Returns
 /// Downsampled RGBA8 pixel data
+/// Fast nearest-neighbor downsampling for RGBA images.
+///
+/// Delegates to SIMD-optimized implementation in `crate::simd::image`.
+#[inline]
 pub fn nearest_neighbor_downsample(
     pixels: &[u8],
     src_width: u32,
@@ -407,21 +371,7 @@ pub fn nearest_neighbor_downsample(
     dst_width: u32,
     dst_height: u32,
 ) -> Vec<u8> {
-    let mut result = Vec::with_capacity((dst_width * dst_height * 4) as usize);
-    
-    let x_ratio = src_width as f32 / dst_width as f32;
-    let y_ratio = src_height as f32 / dst_height as f32;
-    
-    for ty in 0..dst_height {
-        let sy = (ty as f32 * y_ratio) as u32;
-        for tx in 0..dst_width {
-            let sx = (tx as f32 * x_ratio) as u32;
-            let src_idx = ((sy * src_width + sx) * 4) as usize;
-            result.extend_from_slice(&pixels[src_idx..src_idx + 4]);
-        }
-    }
-    
-    result
+    crate::simd::image::nearest_neighbor_downsample(pixels, src_width, src_height, dst_width, dst_height)
 }
 
 /// Generate a blurhash from RGBA8 image data with adaptive downscaling for optimal performance
@@ -505,17 +455,10 @@ pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch:
     // Fast path for RGBA data
     if bytes_per_pixel == 4 {
         encode_rgba_to_png_base64(&decoded_data, width, height)
-    } 
-    // Convert RGB to RGBA
+    }
+    // Convert RGB to RGBA using SIMD-optimized function
     else if bytes_per_pixel == 3 {
-        // Pre-allocate exact size needed
-        let mut rgba_data = Vec::with_capacity(pixel_count * 4);
-        
-        // Use chunks_exact for safe and efficient iteration
-        for rgb_chunk in decoded_data.chunks_exact(3) {
-            rgba_data.extend_from_slice(&[rgb_chunk[0], rgb_chunk[1], rgb_chunk[2], 255]);
-        }
-        
+        let rgba_data = crate::simd::image::rgb_to_rgba(&decoded_data);
         encode_rgba_to_png_base64(&rgba_data, width, height)
     } else {
         eprintln!("Unexpected decoded data length: {} bytes for {} pixels", 
@@ -547,61 +490,6 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
 
     result
 }
-
-/// Check if RGBA pixel data contains any meaningful transparency (alpha < 255)
-/// Uses u64 bitmask to check 2 pixels per iteration (~2.2x faster than byte-by-byte)
-#[inline]
-pub fn has_alpha_transparency(rgba_pixels: &[u8]) -> bool {
-    let mut chunks = rgba_pixels.chunks_exact(8);
-    const ALPHA_MASK: u64 = 0xFF000000_FF000000;
-
-    for chunk in chunks.by_ref() {
-        let val = u64::from_ne_bytes(chunk.try_into().unwrap());
-        if (val & ALPHA_MASK) != ALPHA_MASK {
-            return true;
-        }
-    }
-
-    chunks.remainder().chunks_exact(4).any(|px| px[3] < 255)
-}
-
-/// Check if all alpha values are nearly zero (Windows clipboard bug detection)
-/// Returns true if ALL pixels have alpha <= 2
-#[inline]
-#[cfg(target_os = "windows")]
-pub fn has_all_alpha_near_zero(rgba_pixels: &[u8]) -> bool {
-    let mut chunks = rgba_pixels.chunks_exact(8);
-    // Mask to check if alpha bytes are > 2: if (alpha & 0xFC) != 0, then alpha > 3
-    const ALPHA_HIGH_BITS: u64 = 0xFC000000_FC000000;
-
-    for chunk in chunks.by_ref() {
-        let val = u64::from_ne_bytes(chunk.try_into().unwrap());
-        if (val & ALPHA_HIGH_BITS) != 0 {
-            return false; // Found alpha > 2
-        }
-    }
-
-    chunks.remainder().chunks_exact(4).all(|px| px[3] <= 2)
-}
-
-/// Set all alpha values to 255 (opaque) in-place
-/// Uses u64 OR mask to set 2 pixels per iteration
-#[inline]
-pub fn set_all_alpha_opaque(rgba_pixels: &mut [u8]) {
-    let mut chunks = rgba_pixels.chunks_exact_mut(8);
-    const ALPHA_MASK: u64 = 0xFF000000_FF000000;
-
-    for chunk in chunks.by_ref() {
-        let val = u64::from_ne_bytes(chunk.try_into().unwrap());
-        let new_val = val | ALPHA_MASK;
-        chunk.copy_from_slice(&new_val.to_ne_bytes());
-    }
-
-    for px in chunks.into_remainder().chunks_exact_mut(4) {
-        px[3] = 255;
-    }
-}
-
 
 // ===== MIME & Extension Conversion Utilities =====
 static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {

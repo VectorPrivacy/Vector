@@ -92,7 +92,7 @@ pub async fn login(import_key: String) -> Result<LoginKeyPair, String> {
         if prev_npub == new_npub {
             // Simply return the same KeyPair and allow the frontend to continue login as usual
             return Ok(LoginKeyPair {
-                public: signer.get_public_key().await.unwrap().to_bech32().unwrap(),
+                public: prev_npub,
                 private: new_keys.secret_key().to_bech32().unwrap(),
             });
         } else {

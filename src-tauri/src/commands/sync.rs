@@ -30,7 +30,7 @@ pub async fn queue_profile_sync(npub: String, priority: String, force_refresh: b
         _ => return Err(format!("Invalid priority: {}", priority)),
     };
 
-    profile_sync::queue_profile_sync(npub, sync_priority, force_refresh).await;
+    profile_sync::queue_profile_sync(npub, sync_priority, force_refresh);
     Ok(())
 }
 
@@ -44,7 +44,7 @@ pub async fn queue_chat_profiles_sync(chat_id: String, is_opening: bool) -> Resu
 /// Immediately refresh a specific profile.
 #[tauri::command]
 pub async fn refresh_profile_now(npub: String) -> Result<(), String> {
-    profile_sync::refresh_profile_now(npub).await;
+    profile_sync::refresh_profile_now(npub);
     Ok(())
 }
 
@@ -492,6 +492,13 @@ pub async fn fetch_messages<R: Runtime>(
             // Each entry: 64-char hex String (~88 bytes) + HashSet overhead (~48 bytes) ≈ 136 bytes
             println!("[Startup] Sync Complete - Dumped NIP-59 Decryption Cache (~{} KB Memory freed)", (cache_size * 136) / 1024);
         }
+
+        // Warm the file hash cache in the background (for attachment deduplication)
+        // Only builds if there are attachments and cache wasn't already built during sync
+        let handle_for_cache = handle.clone();
+        tokio::task::spawn(async move {
+            db::warm_file_hash_cache(&handle_for_cache).await;
+        });
 
         if relay_url.is_none() {
             handle.emit("sync_finished", ()).unwrap();

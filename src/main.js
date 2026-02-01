@@ -6212,10 +6212,6 @@ async function login() {
 
             await hydrateMLSGroupMetadata();
 
-            // Load the file hash index for attachment deduplication
-            // This is done asynchronously and doesn't block the UI
-            eventCache.loadFileHashIndex().catch(() => {});
-
             // Fadeout the login and encryption UI
             domLogin.classList.add('fadeout-anim');
             domLogin.addEventListener('animationend', async () => {

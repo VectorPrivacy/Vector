@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment, Message};
 use crate::{util, crypto, net, db, mls};
+use crate::util::hex_string_to_bytes;
 use crate::db::save_chat_messages;
 
 // ============================================================================
@@ -89,8 +90,7 @@ async fn decrypt_mls_attachment<R: Runtime>(
     }
 
     // Parse the engine group ID
-    let engine_gid_bytes = hex::decode(&group_meta.engine_group_id)
-        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?;
+    let engine_gid_bytes = hex_string_to_bytes(&group_meta.engine_group_id);
     let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
 
     // Get MDK engine and media manager
@@ -101,14 +101,12 @@ async fn decrypt_mls_attachment<R: Runtime>(
     // Parse the original_hash from the attachment
     let original_hash_hex = attachment.original_hash.as_ref()
         .ok_or("MLS attachment missing original_hash")?;
-    let original_hash_bytes = hex::decode(original_hash_hex)
-        .map_err(|e| format!("Invalid original_hash hex: {}", e))?;
+    let original_hash_bytes = hex_string_to_bytes(original_hash_hex);
     let original_hash: [u8; 32] = original_hash_bytes.try_into()
         .map_err(|_| "Invalid original_hash length (expected 32 bytes)")?;
 
     // Parse the nonce from the attachment
-    let nonce_bytes = hex::decode(&attachment.nonce)
-        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
+    let nonce_bytes = hex_string_to_bytes(&attachment.nonce);
     let nonce: [u8; 12] = nonce_bytes.try_into()
         .map_err(|_| "Invalid nonce length (expected 12 bytes)")?;
 

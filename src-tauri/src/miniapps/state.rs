@@ -11,6 +11,7 @@ use tauri::ipc::Channel;
 
 use super::error::Error;
 use super::realtime::{RealtimeEvent, RealtimeManager};
+use crate::util::bytes_to_hex_string;
 
 /// Metadata from manifest.toml in the Mini App package
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -54,7 +55,7 @@ impl MiniAppPackage {
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
         hasher.update(&file_data);
-        let file_hash = hex::encode(hasher.finalize());
+        let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
 
         // Open archive from the data we already read
         use std::io::Cursor;

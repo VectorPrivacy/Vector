@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
+use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use tauri::{AppHandle, Runtime, Emitter};
 use once_cell::sync::Lazy;
@@ -513,8 +514,7 @@ pub async fn build_sweep_transaction(
     // Build inputs (initially unsigned)
     for utxo in utxos {
         // Previous txid (32 bytes, reversed)
-        let txid_bytes = hex::decode(&utxo.txid)
-            .map_err(|_| format!("Invalid txid: {}", utxo.txid))?;
+        let txid_bytes = hex_string_to_bytes(&utxo.txid);
         tx_bytes.extend(txid_bytes.iter().rev());
 
         // Previous output index (4 bytes, little-endian)
@@ -558,8 +558,7 @@ pub async fn build_sweep_transaction(
         preimage.push(utxos.len() as u8); // Input count
 
         for (j, other_utxo) in utxos.iter().enumerate() {
-            let other_txid = hex::decode(&other_utxo.txid)
-                .map_err(|e| format!("Invalid txid hex '{}': {}", &other_utxo.txid, e))?;
+            let other_txid = hex_string_to_bytes(&other_utxo.txid);
             preimage.extend(other_txid.iter().rev());
             preimage.extend_from_slice(&other_utxo.vout.to_le_bytes());
 
@@ -602,8 +601,7 @@ pub async fn build_sweep_transaction(
         let script_sig_len = 1 + sig_bytes.len() + 1 + pubkey_bytes.len();
 
         // Write input to signed tx
-        let txid_bytes = hex::decode(&utxo.txid)
-            .map_err(|e| format!("Invalid txid hex '{}': {}", &utxo.txid, e))?;
+        let txid_bytes = hex_string_to_bytes(&utxo.txid);
         signed_tx.extend(txid_bytes.iter().rev());
         signed_tx.extend_from_slice(&utxo.vout.to_le_bytes());
 
@@ -626,7 +624,7 @@ pub async fn build_sweep_transaction(
     // Locktime
     signed_tx.extend_from_slice(&0u32.to_le_bytes());
 
-    Ok(hex::encode(&signed_tx))
+    Ok(bytes_to_hex_string(&signed_tx))
 }
 
 // ============================================================================
@@ -652,7 +650,7 @@ async fn save_promo<R: Runtime>(
     privkey: &[u8; 32],
 ) -> Result<(), String> {
     // Encrypt private key
-    let privkey_hex = hex::encode(privkey);
+    let privkey_hex = bytes_to_hex_string(privkey);
     let privkey_encrypted = crate::crypto::internal_encrypt(privkey_hex, None).await;
 
     let created_at = std::time::SystemTime::now()
@@ -677,10 +675,9 @@ async fn decrypt_privkey_bytes(privkey_encrypted: String) -> Result<[u8; 32], St
         .await
         .map_err(|_| "Failed to decrypt private key".to_string())?;
 
-    hex::decode(&privkey_hex)
-        .map_err(|_| "Invalid private key format".to_string())?
+    hex_string_to_bytes(&privkey_hex)
         .try_into()
-        .map_err(|_| "Invalid private key length".to_string())
+        .map_err(|_| "Invalid private key format/length".to_string())
 }
 
 /// Promo with decrypted private key ready for signing
@@ -1678,8 +1675,7 @@ async fn build_withdrawal_transaction(
         preimage.push(all_inputs.len() as u8); // Input count
 
         for (j, (other_utxo, _, other_script)) in all_inputs.iter().enumerate() {
-            let other_txid = hex::decode(&other_utxo.txid)
-                .map_err(|_| format!("Invalid txid: {}", other_utxo.txid))?;
+            let other_txid = hex_string_to_bytes(&other_utxo.txid);
             preimage.extend(other_txid.iter().rev());
             preimage.extend_from_slice(&other_utxo.vout.to_le_bytes());
 
@@ -1733,8 +1729,7 @@ async fn build_withdrawal_transaction(
         let script_sig_len = 1 + sig_bytes.len() + 1 + pubkey_bytes.len();
 
         // Write input to signed tx
-        let txid_bytes = hex::decode(&utxo.txid)
-            .map_err(|_| format!("Invalid txid: {}", utxo.txid))?;
+        let txid_bytes = hex_string_to_bytes(&utxo.txid);
         signed_tx.extend(txid_bytes.iter().rev());
         signed_tx.extend_from_slice(&utxo.vout.to_le_bytes());
 
@@ -1768,7 +1763,7 @@ async fn build_withdrawal_transaction(
     // Locktime
     signed_tx.extend_from_slice(&0u32.to_le_bytes());
 
-    Ok((hex::encode(signed_tx), change_amount))
+    Ok((bytes_to_hex_string(&signed_tx), change_amount))
 }
 
 /// Withdraw PIVX to an external address using coin control

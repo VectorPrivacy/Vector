@@ -166,15 +166,6 @@ pub async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(
     Ok(())
 }
 
-/// Build and return the file hash index for deduplication
-/// Returns a map of file_hash -> attachment reference data
-#[tauri::command]
-pub async fn get_file_hash_index<R: Runtime>(
-    handle: AppHandle<R>,
-) -> Result<std::collections::HashMap<String, db::AttachmentRef>, String> {
-    db::build_file_hash_index(&handle).await
-}
-
 // ============================================================================
 // Unread Count Commands
 // ============================================================================
@@ -232,5 +223,4 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
 // - get_messages_around_id
 // - get_system_events
 // - evict_chat_messages
-// - get_file_hash_index
 // - update_unread_counter

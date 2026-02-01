@@ -18,6 +18,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use crate::crypto;
 use crate::db::{self, save_chat};
 use crate::mls::MlsService;
+use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use crate::util::calculate_file_hash;
 use crate::net;
 use crate::STATE;
@@ -105,8 +106,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     }
 
     // Parse the engine group ID (this is what MDK uses internally)
-    let engine_gid_bytes = hex::decode(&group_meta.engine_group_id)
-        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?;
+    let engine_gid_bytes = hex_string_to_bytes(&group_meta.engine_group_id);
     let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
 
     // Get MDK engine and media manager
@@ -199,8 +199,8 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
         imeta_tag: sdk_imeta_tag,
         url,
         encrypted_size: upload.encrypted_size,
-        original_hash: hex::encode(upload.original_hash),
-        nonce: hex::encode(upload.nonce),
+        original_hash: bytes_to_hex_string(&upload.original_hash),
+        nonce: bytes_to_hex_string(&upload.nonce),
         scheme_version,
     })
 }
@@ -514,29 +514,26 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 }
             }
             
-            // Fallback: check database index if not found in memory (covers all stored attachments)
+            // Fallback: check database if not found in memory (covers all stored attachments)
             if found_attachment.is_none() {
-                if let Ok(index) = db::build_file_hash_index(handle).await {
-                    if let Some(attachment_ref) = index.get(&file_hash) {
-                        // Found in database index - convert AttachmentRef to Attachment
-                        found_attachment = Some((attachment_ref.chat_id.clone(), Attachment {
-                            id: attachment_ref.hash.clone(),
-                            url: attachment_ref.url.clone(),
-                            key: attachment_ref.key.clone(),
-                            nonce: attachment_ref.nonce.clone(),
-                            extension: attachment_ref.extension.clone(),
-                            size: attachment_ref.size,
-                            path: String::new(),
-                            img_meta: None,
-                            downloading: false,
-                            downloaded: false,
-                            webxdc_topic: None,   // Not stored in attachment index
-                            group_id: None,       // DM attachments don't use MLS encryption
-                            original_hash: None,  // Not stored in attachment index
-                            scheme_version: None, // DM attachments don't use MIP-04
-                            mls_filename: None,   // DM attachments don't use MIP-04
-                        }));
-                    }
+                if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(handle, &file_hash).await {
+                    found_attachment = Some((attachment_ref.chat_id.clone(), Attachment {
+                        id: attachment_ref.hash,
+                        url: attachment_ref.url,
+                        key: attachment_ref.key,
+                        nonce: attachment_ref.nonce,
+                        extension: attachment_ref.extension,
+                        size: attachment_ref.size,
+                        path: String::new(),
+                        img_meta: None,
+                        downloading: false,
+                        downloaded: false,
+                        webxdc_topic: None,
+                        group_id: None,
+                        original_hash: None,
+                        scheme_version: None,
+                        mls_filename: None,
+                    }));
                 }
             }
             

@@ -30,6 +30,7 @@ use nostr_sdk::prelude::*;
 use tauri::Manager;
 use crate::{Message, Attachment, Reaction, TAURI_APP, StoredEvent, StoredEventBuilder};
 use crate::message::ImageMetadata;
+use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use crate::mls::MlsService;
 
 /// Protocol-agnostic rumor event representation
@@ -349,13 +350,7 @@ async fn parse_mls_imeta_attachments(
     }
 
     // Parse the engine group ID
-    let engine_gid_bytes = match hex::decode(&group_meta.engine_group_id) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("[MIP-04] Invalid engine_group_id hex: {}", e);
-            return Vec::new();
-        }
-    };
+    let engine_gid_bytes = hex_string_to_bytes(&group_meta.engine_group_id);
     let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
 
     // Get MDK engine and media manager
@@ -399,7 +394,7 @@ async fn parse_mls_imeta_attachments(
 
         // Extract hash from URL (Blossom URLs typically have hash as the path)
         let encrypted_hash = extract_hash_from_blossom_url(&media_ref.url)
-            .unwrap_or_else(|| hex::encode(media_ref.original_hash));
+            .unwrap_or_else(|| bytes_to_hex_string(&media_ref.original_hash));
 
         // Build image metadata from dimensions if available
         let img_meta = media_ref.dimensions.and_then(|(width, height)| {
@@ -451,7 +446,7 @@ async fn parse_mls_imeta_attachments(
         attachments.push(Attachment {
             id: encrypted_hash,
             key: String::new(),  // MLS uses derived keys
-            nonce: hex::encode(media_ref.nonce),
+            nonce: bytes_to_hex_string(&media_ref.nonce),
             extension,
             url: media_ref.url.clone(),
             path: file_path,
@@ -461,7 +456,7 @@ async fn parse_mls_imeta_attachments(
             downloaded,
             webxdc_topic: None,  // Set by caller if present
             group_id: Some(context.conversation_id.clone()),
-            original_hash: Some(hex::encode(media_ref.original_hash)),
+            original_hash: Some(bytes_to_hex_string(&media_ref.original_hash)),
             scheme_version: Some(media_ref.scheme_version.clone()),
             mls_filename: Some(media_ref.filename.clone()),
         });

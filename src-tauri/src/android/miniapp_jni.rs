@@ -10,6 +10,7 @@ use jni::JNIEnv;
 use log::{debug, error, info, warn};
 use std::io::Read;
 use std::path::Path;
+use crate::util::bytes_to_hex_string;
 
 // ============================================================================
 // Constants
@@ -493,7 +494,7 @@ fn get_granted_permissions_for_package(package_path: &str) -> Result<String, Str
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let _file_hash = hex::encode(hasher.finalize());
+    let _file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
 
     // TODO: Look up permissions from database using _file_hash
     // For now, return empty (no permissions granted)
