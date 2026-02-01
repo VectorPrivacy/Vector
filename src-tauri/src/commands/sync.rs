@@ -9,7 +9,7 @@ use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
-    db, mls, profile, profile_sync,
+    db, profile, profile_sync,
     ChatState, ChatType, Profile, SyncMode,
     NOSTR_CLIENT, STATE, WRAPPER_ID_CACHE,
 };
@@ -123,8 +123,6 @@ pub async fn fetch_messages<R: Runtime>(
         if init {
             // Set current account for SQL mode if profile database exists
             // This must be done BEFORE loading chats/messages so SQL mode is active
-            let signer = client.signer().await.unwrap();
-            let my_public_key = signer.get_public_key().await.unwrap();
             let npub = my_public_key.to_bech32().unwrap();
 
             let app_data = handle.path().app_data_dir().ok();
@@ -139,121 +137,118 @@ pub async fn fetch_messages<R: Runtime>(
             // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
             let mut needs_integrity_check = false;
             if state.profiles.len() == 1 {
-                let profiles = db::get_all_profiles(&handle).await.unwrap();
-                // Load our Profile Cache into the state
-                state.merge_db_profiles(profiles).await;
+                // Load profiles, chats, MLS groups, and last messages in parallel (all are independent reads)
+                let (profiles_result, slim_chats_result, mls_groups_result, last_messages_result) = tokio::join!(
+                    db::get_all_profiles(&handle),
+                    db::get_all_chats(&handle),
+                    db::load_mls_groups(&handle),
+                    db::get_all_chats_last_messages(&handle)
+                );
+
+                // Process profiles
+                if let Ok(profiles) = profiles_result {
+                    state.merge_db_profiles(profiles).await;
+                }
 
                 // Spawn background task to cache profile images for offline support
                 tokio::spawn(async {
                     profile::cache_all_profile_images().await;
                 });
 
-                // Load chats and their messages from database
-                let slim_chats_result = db::get_all_chats(&handle).await;
-                if let Ok(slim_chats) = slim_chats_result {
-                    // Load MLS groups to check for evicted status
-                    let mls_groups: Option<Vec<mls::MlsGroupMetadata>> =
-                        db::load_mls_groups(&handle).await.ok();
+                // Get the last messages map (single batch query result)
+                let mut last_messages_map = last_messages_result.unwrap_or_default();
 
-                    // Convert slim chats to full chats and load their messages
+                // Check if any messages have downloaded attachments (for integrity check)
+                for messages in last_messages_map.values() {
+                    if needs_integrity_check { break; }
+                    for msg in messages {
+                        if msg.attachments.iter().any(|att| att.downloaded) {
+                            needs_integrity_check = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Process chats
+                if let Ok(slim_chats) = slim_chats_result {
+                    // Build HashSet of evicted MLS group IDs for O(1) lookup
+                    let evicted_groups: std::collections::HashSet<&str> = mls_groups_result
+                        .as_ref()
+                        .map(|groups| groups.iter()
+                            .filter(|g| g.evicted)
+                            .map(|g| g.group_id.as_str())
+                            .collect())
+                        .unwrap_or_default();
+
+                    // Build HashSet of existing profile IDs for O(1) lookup
+                    let mut known_profiles: std::collections::HashSet<String> =
+                        state.profiles.iter().map(|p| p.id.clone()).collect();
+
+                    // Pre-allocate capacity for chats (avoids reallocations during push)
+                    state.chats.reserve(slim_chats.len());
+
+                    // Convert slim chats to full chats and merge last messages
                     for slim_chat in slim_chats {
+                        // Skip evicted MLS groups (O(1) lookup)
+                        if slim_chat.chat_type == ChatType::MlsGroup && evicted_groups.contains(slim_chat.id.as_str()) {
+                            continue;
+                        }
+
                         let mut chat = slim_chat.to_chat();
 
-                        // Skip MLS group chats that are marked as evicted
-                        // MLS group chat IDs are just the group_id (no prefix)
-                        if chat.chat_type == ChatType::MlsGroup {
-                            if let Some(ref groups) = mls_groups {
-                                if let Some(group) = groups.iter().find(|g| g.group_id.as_str() == chat.id()) {
-                                    if group.evicted {
-                                        println!("[Startup] Skipping evicted MLS group chat: {}", chat.id());
-                                        continue; // Skip this chat
-                                    }
-                                }
-                            }
-                        }
-
-                        // Load only the last message for preview (optimization: full messages loaded on-demand by frontend)
-                        let last_messages_result = db::get_chat_last_messages(&handle, &chat.id(), 1).await;
-                        if let Ok(last_messages) = last_messages_result {
-                            for message in last_messages {
-                                // Check if this message has downloaded attachments (for integrity check)
-                                if !needs_integrity_check && message.attachments.iter().any(|att| att.downloaded) {
-                                    needs_integrity_check = true;
-                                }
+                        // Add last messages from our parallel fetch
+                        if let Some(messages) = last_messages_map.remove(chat.id()) {
+                            for message in messages {
                                 chat.internal_add_message(message);
                             }
-                        } else {
-                            eprintln!("Failed to load last message for chat {}: {:?}", chat.id(), last_messages_result);
                         }
 
-                        // Ensure profiles exist for all chat participants
+                        // Ensure profiles exist for all chat participants (O(1) lookup)
                         for participant in chat.participants() {
-                            if state.get_profile(participant).is_none() {
-                                // Create a basic profile for the participant
+                            if !known_profiles.contains(participant) {
                                 let mut profile = Profile::new();
                                 profile.id = participant.clone();
-                                profile.mine = false; // It's not our profile
+                                profile.mine = false;
                                 state.profiles.push(profile);
+                                known_profiles.insert(participant.clone());
                             }
                         }
 
-                        // Add chat to state
                         state.chats.push(chat);
-
-                        // Sort the chats by their last received message
-                        state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
                     }
+
+                    // Sort chats by last message time (do once at the end, not per-chat)
+                    state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
                 } else {
                     eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
                 }
             }
 
+            // Check filesystem integrity if needed
             if needs_integrity_check {
-                // Clean up empty file attachments first
-                cleanup_empty_file_attachments(&handle, &mut state).await;
-
-                // Check integrity without dropping state
                 check_attachment_filesystem_integrity(&handle, &mut state).await;
-
-                // Preload ID caches for maximum performance
-                if let Err(e) = db::preload_id_caches(&handle).await {
-                    eprintln!("[Cache] Failed to preload ID caches: {}", e);
-                }
-
-                // Preload wrapper_event_ids for fast duplicate detection during sync
-                // Load last 30 days of wrapper_ids to cover typical sync window
-                if let Ok(wrapper_ids) = db::load_recent_wrapper_ids(&handle, 30).await {
-                    let mut cache = WRAPPER_ID_CACHE.lock().await;
-                    *cache = wrapper_ids;
-                }
-
-                // Send the state to our frontend to signal finalised init with a full state
-                handle.emit("init_finished", serde_json::json!({
-                    "profiles": &state.profiles,
-                    "chats": &state.chats
-                })).unwrap();
-            } else {
-                // Even if no integrity check needed, still clean up empty files
-                cleanup_empty_file_attachments(&handle, &mut state).await;
-
-                // Preload ID caches for maximum performance
-                if let Err(e) = db::preload_id_caches(&handle).await {
-                    eprintln!("[Cache] Failed to preload ID caches: {}", e);
-                }
-
-                // Preload wrapper_event_ids for fast duplicate detection during sync
-                // Load last 30 days of wrapper_ids to cover typical sync window
-                if let Ok(wrapper_ids) = db::load_recent_wrapper_ids(&handle, 30).await {
-                    let mut cache = WRAPPER_ID_CACHE.lock().await;
-                    *cache = wrapper_ids;
-                }
-
-                // No integrity check needed, send init immediately
-                handle.emit("init_finished", serde_json::json!({
-                    "profiles": &state.profiles,
-                    "chats": &state.chats
-                })).unwrap();
             }
+
+            // Preload caches in parallel
+            let (id_cache_result, wrapper_ids_result) = tokio::join!(
+                db::preload_id_caches(&handle),
+                db::load_recent_wrapper_ids(&handle, 30)
+            );
+
+            if let Err(e) = id_cache_result {
+                eprintln!("[Cache] Failed to preload ID caches: {}", e);
+            }
+
+            if let Ok(wrapper_ids) = wrapper_ids_result {
+                let mut cache = WRAPPER_ID_CACHE.lock().await;
+                *cache = wrapper_ids;
+            }
+
+            // Send the state to frontend
+            handle.emit("init_finished", serde_json::json!({
+                "profiles": &state.profiles,
+                "chats": &state.chats
+            })).unwrap();
 
             // ALWAYS begin with an initial sync of at least the last 2 days
             let now = Timestamp::now();
@@ -559,64 +554,6 @@ pub async fn deep_rescan<R: Runtime>(handle: AppHandle<R>) -> Result<bool, Strin
 // ============================================================================
 // Helper Functions (internal)
 // ============================================================================
-
-/// Removes attachments with empty file hash from all messages
-/// Also removes messages that have ONLY corrupted attachments (no content)
-/// This cleans up corrupted uploads that resulted in 0-byte files
-async fn cleanup_empty_file_attachments<R: Runtime>(
-    handle: &AppHandle<R>,
-    state: &mut ChatState,
-) {
-    const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let mut cleaned_count = 0;
-    let mut chats_to_update = Vec::new();
-
-    for chat in &mut state.chats {
-        let mut chat_had_changes = false;
-
-        // First pass: remove attachments with empty file hash
-        for message in &mut chat.messages {
-            let original_count = message.attachments.len();
-
-            // Remove attachments with empty file hash in their URL
-            message.attachments.retain(|attachment| {
-                !attachment.url.contains(EMPTY_FILE_HASH)
-            });
-
-            let removed = original_count - message.attachments.len();
-            if removed > 0 {
-                cleaned_count += removed;
-                chat_had_changes = true;
-            }
-        }
-
-        // Second pass: remove messages that are now empty (no content, no attachments)
-        let messages_before = chat.messages.len();
-        chat.messages.retain(|message| {
-            !message.content.is_empty() || !message.attachments.is_empty()
-        });
-
-        if chat.messages.len() < messages_before {
-            chat_had_changes = true;
-        }
-
-        // If this chat had changes, save all its messages
-        if chat_had_changes {
-            chats_to_update.push((chat.id(), chat.messages.clone()));
-        }
-    }
-
-    // Save updated chats to database
-    for (chat_id, messages) in chats_to_update {
-        if let Err(e) = save_chat_messages(handle.clone(), &chat_id, &messages).await {
-            eprintln!("Failed to save chat after cleaning empty attachments: {}", e);
-        }
-    }
-
-    if cleaned_count > 0 {
-        eprintln!("Cleaned up {} empty file attachments", cleaned_count);
-    }
-}
 
 /// Checks if downloaded attachments still exist on the filesystem
 /// Sets downloaded=false for any missing files and updates the database

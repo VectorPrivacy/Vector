@@ -754,55 +754,80 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // If we're already connected to some relays - skip and tell the frontend our client is already online
-    if client.relays().await.len() > 0 {
+    if !client.relays().await.is_empty() {
         return false;
     }
 
-    // Get disabled default relays
-    let disabled_defaults = get_disabled_default_relays(&handle).await.unwrap_or_default();
+    // Get disabled default relays and custom relays concurrently
+    let (disabled_defaults, custom_relays_result) = tokio::join!(
+        get_disabled_default_relays(&handle),
+        get_custom_relays(handle.clone())
+    );
+    let disabled_defaults = disabled_defaults.unwrap_or_default();
+
+    // Collect all relays to add (URL, options, is_default, mode_info)
+    let mut relays_to_add: Vec<(String, RelayOptions, bool, String)> = Vec::new();
 
     // Add default relays (unless disabled)
     for default_url in DEFAULT_RELAYS {
         let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(default_url));
         if !is_disabled {
-            match client.pool().add_relay(*default_url, RelayOptions::new().reconnect(false)).await {
-                Ok(_) => {
-                    println!("[Relay] Added default relay: {}", default_url);
-                    add_relay_log(default_url, "info", "Added to relay pool");
-                }
-                Err(e) => {
-                    eprintln!("[Relay] Failed to add default relay {}: {}", default_url, e);
-                    add_relay_log(default_url, "error", &format!("Failed to add: {}", e));
-                }
-            }
+            relays_to_add.push((
+                default_url.to_string(),
+                RelayOptions::new().reconnect(false),
+                true,
+                "both".to_string(),
+            ));
         } else {
             println!("[Relay] Skipping disabled default relay: {}", default_url);
             add_relay_log(default_url, "info", "Skipped (disabled by user)");
         }
     }
 
-    // Add user's custom relays (if any)
-    match get_custom_relays(handle.clone()).await {
-        Ok(custom_relays) => {
-            for relay in custom_relays {
-                if relay.enabled {
-                    match client.pool().add_relay(&relay.url, relay_options_for_mode(&relay.mode)).await {
-                        Ok(_) => {
-                            println!("[Relay] Added custom relay: {} (mode: {})", relay.url, relay.mode);
-                            add_relay_log(&relay.url, "info", &format!("Added to relay pool (mode: {})", relay.mode));
-                        }
-                        Err(e) => {
-                            eprintln!("[Relay] Failed to add custom relay {}: {}", relay.url, e);
-                            add_relay_log(&relay.url, "error", &format!("Failed to add: {}", e));
-                        }
+    // Add custom relays
+    if let Ok(custom_relays) = custom_relays_result {
+        for relay in custom_relays {
+            if relay.enabled {
+                relays_to_add.push((
+                    relay.url,
+                    relay_options_for_mode(&relay.mode),
+                    false,
+                    relay.mode,
+                ));
+            }
+        }
+    }
+
+    // Add all relays in parallel
+    let pool = client.pool();
+    let add_futures: Vec<_> = relays_to_add.into_iter().map(|(url, opts, is_default, mode)| {
+        let pool = pool.clone();
+        async move {
+            match pool.add_relay(&url, opts).await {
+                Ok(_) => {
+                    if is_default {
+                        println!("[Relay] Added default relay: {}", url);
+                        add_relay_log(&url, "info", "Added to relay pool");
+                    } else {
+                        println!("[Relay] Added custom relay: {} (mode: {})", url, mode);
+                        add_relay_log(&url, "info", &format!("Added to relay pool (mode: {})", mode));
                     }
+                }
+                Err(e) => {
+                    if is_default {
+                        eprintln!("[Relay] Failed to add default relay {}: {}", url, e);
+                    } else {
+                        eprintln!("[Relay] Failed to add custom relay {}: {}", url, e);
+                    }
+                    add_relay_log(&url, "error", &format!("Failed to add: {}", e));
                 }
             }
         }
-        Err(e) => eprintln!("[Relay] Failed to load custom relays: {}", e),
-    }
+    }).collect();
 
-    // Connect!
+    futures_util::future::join_all(add_futures).await;
+
+    // Connect to all added relays
     client.connect().await;
 
     // Post-connect: force-regenerate device KeyPackage if flagged by migration 13

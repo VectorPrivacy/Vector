@@ -38,31 +38,31 @@ impl ChatState {
         }
     }
 
-    /// Load a Vector Profile into the state from our SlimProfile database format
-    pub async fn from_db_profile(&mut self, slim: SlimProfile) {
-        // Check if profile already exists
-        if let Some(position) = self.profiles.iter().position(|profile| profile.id == slim.id) {
-            // Replace existing profile
-            let mut full_profile = slim.to_profile();
-
-            // Check if this is our profile: we need to mark it as such
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
-            let my_public_key = signer.get_public_key().await.unwrap();
-            let profile_pubkey = PublicKey::from_bech32(&full_profile.id).unwrap();
-            full_profile.mine = my_public_key == profile_pubkey;
-
-            self.profiles[position] = full_profile;
-        } else {
-            // Add new profile
-            self.profiles.push(slim.to_profile());
-        }
-    }
-
     /// Merge multiple Vector Profiles from SlimProfile format into the state at once
     pub async fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>) {
+        // Get our public key ONCE, not per-profile
+        let my_public_key = {
+            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+            let signer = client.signer().await.unwrap();
+            signer.get_public_key().await.unwrap()
+        };
+
         for slim in slim_profiles {
-            self.from_db_profile(slim).await;
+            // Check if profile already exists
+            if let Some(position) = self.profiles.iter().position(|profile| profile.id == slim.id) {
+                // Replace existing profile
+                let mut full_profile = slim.to_profile();
+
+                // Check if this is our profile
+                if let Ok(profile_pubkey) = PublicKey::from_bech32(&full_profile.id) {
+                    full_profile.mine = my_public_key == profile_pubkey;
+                }
+
+                self.profiles[position] = full_profile;
+            } else {
+                // Add new profile (mine defaults to false from to_profile)
+                self.profiles.push(slim.to_profile());
+            }
         }
     }
 

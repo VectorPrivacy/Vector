@@ -162,19 +162,6 @@ pub async fn get_chat_message_count<R: Runtime>(
     Ok(count as usize)
 }
 
-/// Get the last N messages for a chat (for preview purposes)
-/// This is optimized for getting just the most recent messages without loading the full history
-pub async fn get_chat_last_messages<R: Runtime>(
-    handle: &AppHandle<R>,
-    chat_id: &str,
-    count: usize,
-) -> Result<Vec<Message>, String> {
-    // Get integer chat ID
-    let chat_int_id = get_chat_id_by_identifier(handle, chat_id)?;
-    // Use the events-based message views
-    get_message_views(handle, chat_int_id, count, 0).await
-}
-
 /// Get messages around a specific message ID
 /// Returns messages from (target - context_before) to the most recent
 /// This is used for scrolling to old replied-to messages

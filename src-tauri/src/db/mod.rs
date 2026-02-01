@@ -49,7 +49,7 @@ pub use messages::{save_message, save_chat_messages};
 // Attachment database functions
 pub use attachments::{
     AttachmentRef, build_file_hash_index,
-    get_chat_messages_paginated, get_chat_message_count, get_chat_last_messages,
+    get_chat_messages_paginated, get_chat_message_count,
     get_messages_around_id, message_exists_in_db, wrapper_event_exists,
     update_wrapper_event_id, load_recent_wrapper_ids, update_attachment_downloaded_status,
 };
@@ -58,7 +58,7 @@ pub use events::{
     save_event, save_pivx_payment_event, save_system_event_by_id,
     get_pivx_payments_for_chat, get_system_events_for_chat,
     save_reaction_event, save_edit_event, event_exists,
-    populate_reply_context, get_message_views,
+    populate_reply_context, get_message_views, get_all_chats_last_messages,
 };
 
 /// In-memory cache for chat_identifier → integer ID mappings
