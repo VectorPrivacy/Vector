@@ -27,6 +27,32 @@ pub struct EncodedImage {
     pub extension: &'static str,
 }
 
+impl EncodedImage {
+    /// Convert to a base64 data URI (e.g., "data:image/png;base64,...")
+    ///
+    /// Pre-allocates exact capacity and encodes directly into the result string,
+    /// avoiding an intermediate base64 string allocation.
+    #[inline]
+    pub fn to_data_uri(&self) -> String {
+        use base64::Engine;
+
+        let prefix = if self.extension == "png" {
+            "data:image/png;base64,"
+        } else {
+            "data:image/jpeg;base64,"
+        };
+
+        // Base64 output is 4/3 input size, rounded up to nearest 4 (padding)
+        let base64_len = (self.bytes.len() + 2) / 3 * 4;
+        let mut result = String::with_capacity(prefix.len() + base64_len);
+
+        result.push_str(prefix);
+        base64::engine::general_purpose::STANDARD.encode_string(&self.bytes, &mut result);
+
+        result
+    }
+}
+
 /// Minimum dimension threshold for JPEG encoding.
 /// Images smaller than this (in both width AND height) use PNG to avoid artifacts.
 /// This preserves quality for pixel art and small icons.
@@ -259,4 +285,26 @@ pub fn calculate_preview_dimensions(width: u32, height: u32, quality: u32) -> (u
         ((width * quality) / 100).max(1),
         ((height * quality) / 100).max(1),
     )
+}
+
+/// Read a file, checking if it's empty via metadata first to avoid reading 0 bytes.
+///
+/// This is more efficient than reading then checking length, especially for
+/// large files that would waste I/O bandwidth on empty file detection.
+///
+/// # Arguments
+/// * `path` - Path to the file
+///
+/// # Returns
+/// File bytes or an error string
+pub fn read_file_checked(path: &str) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to read file metadata: {}", e))?;
+
+    if metadata.len() == 0 {
+        return Err(format!("File is empty (0 bytes): {}", path));
+    }
+
+    std::fs::read(path)
+        .map_err(|e| format!("Failed to read file: {}", e))
 }

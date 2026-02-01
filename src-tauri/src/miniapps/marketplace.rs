@@ -224,7 +224,7 @@ impl MarketplaceState {
     /// Check if a publisher is trusted
     #[allow(dead_code)]
     pub fn is_trusted_publisher(&self, npub: &str) -> bool {
-        self.trusted_publishers.contains(&npub.to_string())
+        self.trusted_publishers.iter().any(|p| p == npub)
     }
 
     /// Add a trusted publisher

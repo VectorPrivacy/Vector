@@ -132,7 +132,7 @@ impl Chat {
 
     /// Check if this is a DM with a specific user
     pub fn is_dm_with(&self, npub: &str) -> bool {
-        matches!(self.chat_type, ChatType::DirectMessage) && self.participants.contains(&npub.to_string())
+        matches!(self.chat_type, ChatType::DirectMessage) && self.participants.iter().any(|p| p == npub)
     }
 
     /// Check if this is an MLS group
@@ -142,7 +142,7 @@ impl Chat {
 
     /// Check if user is a participant in this chat
     pub fn has_participant(&self, npub: &str) -> bool {
-        self.participants.contains(&npub.to_string())
+        self.participants.iter().any(|p| p == npub)
     }
 
     /// Get active typers (non-expired) for group chats

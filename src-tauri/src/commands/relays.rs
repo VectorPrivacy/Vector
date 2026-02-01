@@ -104,8 +104,8 @@ static RELAY_LOGS: Lazy<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
 
 /// Check if a URL is a default relay
 pub fn is_default_relay(url: &str) -> bool {
-    let normalized = url.trim().trim_end_matches('/').to_lowercase();
-    DEFAULT_RELAYS.iter().any(|r| r.to_lowercase() == normalized)
+    let normalized = url.trim().trim_end_matches('/');
+    DEFAULT_RELAYS.iter().any(|r| r.eq_ignore_ascii_case(normalized))
 }
 
 /// Validate a relay URL format (must be wss://)
@@ -303,10 +303,10 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
 
     // Add all default relays
     for default_url in DEFAULT_RELAYS {
-        let url_str = default_url.to_string();
-        let is_disabled = disabled_defaults.iter().any(|d| d.to_lowercase() == url_str.to_lowercase());
+        let url_str = *default_url;
+        let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(url_str));
 
-        let (status, mode) = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.to_string().to_lowercase() == url_str.to_lowercase()) {
+        let (status, mode) = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(url_str)) {
             let status = match relay.status() {
                 RelayStatus::Initialized => "initialized",
                 RelayStatus::Pending => "pending",
@@ -323,7 +323,7 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
         };
 
         relay_infos.push(RelayInfo {
-            url: url_str,
+            url: url_str.to_string(),
             status,
             is_default: true,
             is_custom: false,
@@ -334,7 +334,7 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
 
     // Add custom relays
     for custom in &custom_relays {
-        let status = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.to_string().to_lowercase() == custom.url.to_lowercase()) {
+        let status = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(&custom.url)) {
             match relay.status() {
                 RelayStatus::Initialized => "initialized",
                 RelayStatus::Pending => "pending",
@@ -385,9 +385,9 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
     let mut disabled = get_disabled_default_relays(&handle).await?;
 
     if enabled {
-        disabled.retain(|d| d.to_lowercase() != normalized_url.to_lowercase());
+        disabled.retain(|d| !d.eq_ignore_ascii_case(&normalized_url));
     } else {
-        if !disabled.iter().any(|d| d.to_lowercase() == normalized_url.to_lowercase()) {
+        if !disabled.iter().any(|d| d.eq_ignore_ascii_case(&normalized_url)) {
             disabled.push(normalized_url.clone());
         }
     }
@@ -427,8 +427,7 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
 
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = normalized_url.to_lowercase();
-    if relays.iter().any(|r| r.url.to_lowercase() == url_lower) {
+    if relays.iter().any(|r| r.url.eq_ignore_ascii_case(&normalized_url)) {
         return Err("Relay already exists".to_string());
     }
 
@@ -467,9 +466,8 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
 pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) -> Result<bool, String> {
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = url.to_lowercase();
     let original_len = relays.len();
-    relays.retain(|r| r.url.to_lowercase() != url_lower);
+    relays.retain(|r| !r.url.eq_ignore_ascii_case(&url));
 
     if relays.len() == original_len {
         return Ok(false);
@@ -493,12 +491,11 @@ pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) 
 pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, enabled: bool) -> Result<bool, String> {
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = url.to_lowercase();
     let mut found = false;
     let mut relay_mode = "both".to_string();
 
     for relay in relays.iter_mut() {
-        if relay.url.to_lowercase() == url_lower {
+        if relay.url.eq_ignore_ascii_case(&url) {
             relay.enabled = enabled;
             relay_mode = relay.mode.clone();
             found = true;
@@ -542,12 +539,11 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
 
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = url.to_lowercase();
     let mut found = false;
     let mut is_enabled = false;
 
     for relay in relays.iter_mut() {
-        if relay.url.to_lowercase() == url_lower {
+        if relay.url.eq_ignore_ascii_case(&url) {
             relay.mode = mode.clone();
             is_enabled = relay.enabled;
             found = true;
@@ -767,7 +763,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
 
     // Add default relays (unless disabled)
     for default_url in DEFAULT_RELAYS {
-        let is_disabled = disabled_defaults.iter().any(|d| d.to_lowercase() == default_url.to_lowercase());
+        let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(default_url));
         if !is_disabled {
             match client.pool().add_relay(*default_url, RelayOptions::new().reconnect(false)).await {
                 Ok(_) => {

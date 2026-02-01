@@ -164,11 +164,12 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
             }
 
             // Convert rumor to RumorEvent for protocol-agnostic processing
+            // Move content and tags instead of cloning (rumor is owned and not used after this)
             let rumor_event = RumorEvent {
                 id: rumor.id.unwrap(),
                 kind: rumor.kind,
-                content: rumor.content.clone(),
-                tags: rumor.tags.clone(),
+                content: rumor.content,
+                tags: rumor.tags,
                 created_at: rumor.created_at,
                 pubkey: rumor.pubkey,
             };

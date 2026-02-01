@@ -12,6 +12,7 @@ use tokio::sync::Mutex as TokioMutex;
 use once_cell::sync::Lazy;
 
 use crate::util;
+use crate::shared::image::read_file_checked;
 
 use super::types::{CachedCompressedImage, AttachmentFile, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
 use super::compression::{compress_bytes_internal, compress_image_internal};
@@ -99,10 +100,7 @@ pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
     let rgba = resized.to_rgba8();
     let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
-    use base64::Engine;
-    let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
-    let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
-    Ok(format!("data:{};base64,{}", mime, base64_str))
+    Ok(encoded.to_data_uri())
 }
 
 /// Start compression of cached bytes
@@ -322,23 +320,8 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
-            let path = std::path::Path::new(&file_path);
+            let bytes = read_file_checked(&file_path)?;
 
-            // Check if file exists first
-            if !path.exists() {
-                return Err(format!("File does not exist: {}", file_path));
-            }
-
-            // Read file bytes
-            let bytes = std::fs::read(&file_path)
-                .map_err(|e| format!("Failed to read file: {}", e))?;
-
-            // Check if file is empty
-            if bytes.is_empty() {
-                return Err(format!("File is empty (0 bytes): {}", file_path));
-            }
-
-            // Extract extension from filepath
             let extension = file_path
                 .rsplit('.')
                 .next()
@@ -371,18 +354,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                     filesystem::read_android_uri(file_path)?
                 } else {
                     // Regular file path (e.g., marketplace apps) - use standard file I/O
-                    let path = std::path::Path::new(&file_path);
-
-                    if !path.exists() {
-                        return Err(format!("File does not exist: {}", file_path));
-                    }
-
-                    let bytes = std::fs::read(&file_path)
-                        .map_err(|e| format!("Failed to read file: {}", e))?;
-
-                    if bytes.is_empty() {
-                        return Err(format!("File is empty (0 bytes): {}", file_path));
-                    }
+                    let bytes = read_file_checked(&file_path)?;
 
                     let extension = file_path
                         .rsplit('.')
@@ -551,9 +523,7 @@ fn generate_image_preview_from_bytes(bytes: &[u8], quality: u32) -> Result<Strin
     let rgba = resized.to_rgba8();
     let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
-    let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
-    let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
-    Ok(format!("data:{};base64,{}", mime, base64_str))
+    Ok(encoded.to_data_uri())
 }
 
 /// Get file information (size, name, extension)
@@ -625,10 +595,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
         let rgba = resized.to_rgba8();
         let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
-        use base64::Engine;
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
-        let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
-        Ok(format!("data:{};base64,{}", mime, base64_str))
+        Ok(encoded.to_data_uri())
     }
 
     #[cfg(target_os = "android")]
@@ -655,10 +622,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
         let rgba = resized.to_rgba8();
         let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
 
-        use base64::Engine;
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(&encoded.bytes);
-        let mime = if encoded.extension == "png" { "image/png" } else { "image/jpeg" };
-        Ok(format!("data:{};base64,{}", mime, base64_str))
+        Ok(encoded.to_data_uri())
     }
 }
 
@@ -669,23 +633,8 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
-            let path = std::path::Path::new(&file_path);
+            let bytes = read_file_checked(&file_path)?;
 
-            // Check if file exists first
-            if !path.exists() {
-                return Err(format!("File does not exist: {}", file_path));
-            }
-
-            // Read file bytes
-            let bytes = std::fs::read(&file_path)
-                .map_err(|e| format!("Failed to read file: {}", e))?;
-
-            // Check if file is empty
-            if bytes.is_empty() {
-                return Err(format!("File is empty (0 bytes): {}", file_path));
-            }
-
-            // Extract extension from filepath
             let extension = file_path
                 .rsplit('.')
                 .next()
@@ -718,18 +667,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                     filesystem::read_android_uri(file_path)?
                 } else {
                     // Regular file path (e.g., marketplace apps) - use standard file I/O
-                    let path = std::path::Path::new(&file_path);
-
-                    if !path.exists() {
-                        return Err(format!("File does not exist: {}", file_path));
-                    }
-
-                    let bytes = std::fs::read(&file_path)
-                        .map_err(|e| format!("Failed to read file: {}", e))?;
-
-                    if bytes.is_empty() {
-                        return Err(format!("File is empty (0 bytes): {}", file_path));
-                    }
+                    let bytes = read_file_checked(&file_path)?;
 
                     let extension = file_path
                         .rsplit('.')
