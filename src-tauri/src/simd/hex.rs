@@ -282,6 +282,40 @@ pub fn bytes_to_hex_32(bytes: &[u8; 32]) -> String {
     }
 }
 
+/// Internal: SSE2 implementation for 16-byte hex encoding.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn hex_encode_16_sse2(bytes: &[u8; 16], buf: *mut u8) {
+    let mask_lo = _mm_set1_epi8(0x0f);
+    let nine = _mm_set1_epi8(9);
+    let ascii_zero = _mm_set1_epi8(b'0' as i8);
+    let letter_offset = _mm_set1_epi8(0x27);
+
+    let input = _mm_loadu_si128(bytes.as_ptr() as *const __m128i);
+
+    let hi_nibbles = _mm_and_si128(_mm_srli_epi16(input, 4), mask_lo);
+    let lo_nibbles = _mm_and_si128(input, mask_lo);
+
+    let hi_gt9 = _mm_cmpgt_epi8(hi_nibbles, nine);
+    let lo_gt9 = _mm_cmpgt_epi8(lo_nibbles, nine);
+
+    let hi_hex = _mm_add_epi8(
+        _mm_add_epi8(hi_nibbles, ascii_zero),
+        _mm_and_si128(hi_gt9, letter_offset),
+    );
+    let lo_hex = _mm_add_epi8(
+        _mm_add_epi8(lo_nibbles, ascii_zero),
+        _mm_and_si128(lo_gt9, letter_offset),
+    );
+
+    let result_lo = _mm_unpacklo_epi8(hi_hex, lo_hex);
+    let result_hi = _mm_unpackhi_epi8(hi_hex, lo_hex);
+
+    _mm_storeu_si128(buf as *mut __m128i, result_lo);
+    _mm_storeu_si128(buf.add(16) as *mut __m128i, result_hi);
+}
+
 /// Convert 16-byte array to hex string using SSE2 SIMD (x86_64).
 #[cfg(target_arch = "x86_64")]
 #[inline]
@@ -289,35 +323,7 @@ pub fn bytes_to_hex_16(bytes: &[u8; 16]) -> String {
     unsafe {
         let mut s = String::with_capacity(32);
         let buf = s.as_mut_vec().as_mut_ptr();
-
-        let mask_lo = _mm_set1_epi8(0x0f);
-        let nine = _mm_set1_epi8(9);
-        let ascii_zero = _mm_set1_epi8(b'0' as i8);
-        let letter_offset = _mm_set1_epi8(0x27);
-
-        let input = _mm_loadu_si128(bytes.as_ptr() as *const __m128i);
-
-        let hi_nibbles = _mm_and_si128(_mm_srli_epi16(input, 4), mask_lo);
-        let lo_nibbles = _mm_and_si128(input, mask_lo);
-
-        let hi_gt9 = _mm_cmpgt_epi8(hi_nibbles, nine);
-        let lo_gt9 = _mm_cmpgt_epi8(lo_nibbles, nine);
-
-        let hi_hex = _mm_add_epi8(
-            _mm_add_epi8(hi_nibbles, ascii_zero),
-            _mm_and_si128(hi_gt9, letter_offset),
-        );
-        let lo_hex = _mm_add_epi8(
-            _mm_add_epi8(lo_nibbles, ascii_zero),
-            _mm_and_si128(lo_gt9, letter_offset),
-        );
-
-        let result_lo = _mm_unpacklo_epi8(hi_hex, lo_hex);
-        let result_hi = _mm_unpackhi_epi8(hi_hex, lo_hex);
-
-        _mm_storeu_si128(buf as *mut __m128i, result_lo);
-        _mm_storeu_si128(buf.add(16) as *mut __m128i, result_hi);
-
+        hex_encode_16_sse2(bytes, buf);
         s.as_mut_vec().set_len(32);
         s
     }
@@ -572,66 +578,108 @@ pub fn hex_to_bytes_32(hex: &str) -> [u8; 32] {
     let h = hex.as_bytes();
 
     if h.len() >= 64 {
-        return unsafe { hex_decode_32_sse2(h) };
+        // SAFETY: We verified length >= 64, and hex_decode_32_sse2 only reads first 64 bytes
+        let arr: &[u8; 64] = h[..64].try_into().unwrap();
+        return unsafe { hex_decode_32_sse2(arr) };
     }
 
     hex_to_bytes_32_scalar_padded(h)
 }
 
 /// SSE2 implementation: decode 64 hex chars to 32 bytes
+///
+/// Uses the same algorithm as NEON: `(char & 0x0F) + 9*(char has bit 0x40 set)`
+/// This correctly handles '0'-'9', 'A'-'F', and 'a'-'f'.
+///
+/// # Safety
+/// Caller must ensure input contains only valid hex characters.
+/// Invalid input produces garbage output (no validation performed).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 #[inline]
-unsafe fn hex_decode_32_sse2(h: &[u8]) -> [u8; 32] {
+unsafe fn hex_decode_32_sse2(h: &[u8; 64]) -> [u8; 32] {
     let mut result = [0u8; 32];
 
-    let char_0 = _mm_set1_epi8(b'0' as i8);
-    let char_a = _mm_set1_epi8(b'a' as i8);
+    // Same algorithm as NEON: (char & 0x0F) + 9 if letter
+    let mask_0f = _mm_set1_epi8(0x0F);
+    let mask_40 = _mm_set1_epi8(0x40);
     let nine = _mm_set1_epi8(9);
-    let ten = _mm_set1_epi8(10);
-    let lower_mask = _mm_set1_epi8(0x20);
+    let hi_mask = _mm_set1_epi16(0x00F0u16 as i16);
+    let lo_mask = _mm_set1_epi16(0x000Fu16 as i16);
+    let zero = _mm_setzero_si128();
 
     // Process 16 hex chars -> 8 bytes at a time (4 iterations)
     for chunk in 0..4 {
         let in_offset = chunk * 16;
         let out_offset = chunk * 8;
 
-        // Load 16 hex characters
         let hex_chars = _mm_loadu_si128(h.as_ptr().add(in_offset) as *const __m128i);
 
-        // Convert ASCII to nibbles
-        // For digits: char - '0'
-        let digit_val = _mm_sub_epi8(hex_chars, char_0);
-        let is_digit = _mm_cmplt_epi8(digit_val, ten); // digit_val < 10
-
-        // For letters: (char | 0x20) - 'a' + 10
-        let lowered = _mm_or_si128(hex_chars, lower_mask);
-        let letter_val = _mm_add_epi8(_mm_sub_epi8(lowered, char_a), ten);
-
-        // Select: digit ? digit_val : letter_val
-        let nibbles = _mm_or_si128(
-            _mm_and_si128(is_digit, digit_val),
-            _mm_andnot_si128(is_digit, letter_val)
-        );
+        // Convert ASCII to nibbles using NEON-style algorithm:
+        // nibble = (char & 0x0F) + ((char & 0x40) == 0x40 ? 9 : 0)
+        let lo = _mm_and_si128(hex_chars, mask_0f);
+        let masked = _mm_and_si128(hex_chars, mask_40);
+        let is_letter = _mm_cmpeq_epi8(masked, mask_40);
+        let nine_if_letter = _mm_and_si128(is_letter, nine);
+        let nibbles = _mm_add_epi8(lo, nine_if_letter);
 
         // Pack pairs of nibbles into bytes
-        // nibbles: [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15]
-        // We need: [(n0<<4)|n1, (n2<<4)|n3, ...]
-
-        // Shift even positions left by 4
         let hi_nibbles = _mm_slli_epi16(nibbles, 4);
-        // Mask to get only high nibbles in even positions
-        let hi_mask = _mm_set1_epi16(0x00F0u16 as i16);
-        let lo_mask = _mm_set1_epi16(0x000Fu16 as i16);
-
         let hi = _mm_and_si128(hi_nibbles, hi_mask);
-        let lo = _mm_and_si128(_mm_srli_epi16(nibbles, 8), lo_mask);
-        let combined = _mm_or_si128(hi, lo);
+        let lo_shifted = _mm_and_si128(_mm_srli_epi16(nibbles, 8), lo_mask);
+        let combined = _mm_or_si128(hi, lo_shifted);
 
-        // Pack 16-bit values to 8-bit (take low byte of each 16-bit element)
-        let packed = _mm_packus_epi16(combined, _mm_setzero_si128());
+        let packed = _mm_packus_epi16(combined, zero);
+        _mm_storel_epi64(result.as_mut_ptr().add(out_offset) as *mut __m128i, packed);
+    }
 
-        // Store 8 bytes
+    result
+}
+
+/// SSE2 implementation: decode 32 hex chars to 16 bytes
+///
+/// Uses the same algorithm as NEON: `(char & 0x0F) + 9*(char has bit 0x40 set)`
+/// This correctly handles '0'-'9', 'A'-'F', and 'a'-'f'.
+///
+/// # Safety
+/// Caller must ensure input contains only valid hex characters.
+/// Invalid input produces garbage output (no validation performed).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn hex_decode_16_sse2(h: &[u8; 32]) -> [u8; 16] {
+    let mut result = [0u8; 16];
+
+    // Same algorithm as NEON: (char & 0x0F) + 9 if letter
+    let mask_0f = _mm_set1_epi8(0x0F);
+    let mask_40 = _mm_set1_epi8(0x40);
+    let nine = _mm_set1_epi8(9);
+    let hi_mask = _mm_set1_epi16(0x00F0u16 as i16);
+    let lo_mask = _mm_set1_epi16(0x000Fu16 as i16);
+    let zero = _mm_setzero_si128();
+
+    // Process 16 hex chars -> 8 bytes at a time (2 iterations for 16 bytes)
+    for chunk in 0..2 {
+        let in_offset = chunk * 16;
+        let out_offset = chunk * 8;
+
+        let hex_chars = _mm_loadu_si128(h.as_ptr().add(in_offset) as *const __m128i);
+
+        // Convert ASCII to nibbles using NEON-style algorithm:
+        // nibble = (char & 0x0F) + ((char & 0x40) == 0x40 ? 9 : 0)
+        let lo = _mm_and_si128(hex_chars, mask_0f);
+        let masked = _mm_and_si128(hex_chars, mask_40);
+        let is_letter = _mm_cmpeq_epi8(masked, mask_40);
+        let nine_if_letter = _mm_and_si128(is_letter, nine);
+        let nibbles = _mm_add_epi8(lo, nine_if_letter);
+
+        // Pack pairs of nibbles into bytes
+        let hi_nibbles = _mm_slli_epi16(nibbles, 4);
+        let hi = _mm_and_si128(hi_nibbles, hi_mask);
+        let lo_shifted = _mm_and_si128(_mm_srli_epi16(nibbles, 8), lo_mask);
+        let combined = _mm_or_si128(hi, lo_shifted);
+
+        let packed = _mm_packus_epi16(combined, zero);
         _mm_storel_epi64(result.as_mut_ptr().add(out_offset) as *mut __m128i, packed);
     }
 
@@ -738,11 +786,9 @@ pub fn hex_to_bytes_16(hex: &str) -> [u8; 16] {
     let h = hex.as_bytes();
 
     if h.len() >= 32 {
-        let mut result = [0u8; 16];
-        // Use first 16 bytes of the 32-byte decode
-        let full = unsafe { hex_decode_32_sse2(&[h, &[b'0'; 32]].concat()) };
-        result.copy_from_slice(&full[..16]);
-        return result;
+        // SAFETY: We verified length >= 32, and hex_decode_16_sse2 only reads first 32 bytes
+        let arr: &[u8; 32] = h[..32].try_into().unwrap();
+        return unsafe { hex_decode_16_sse2(arr) };
     }
 
     hex_to_bytes_16_scalar_padded(h)
