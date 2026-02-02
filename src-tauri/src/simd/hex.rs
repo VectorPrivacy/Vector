@@ -219,6 +219,7 @@ unsafe fn hex_encode_32_avx2(bytes: &[u8; 32], buf: *mut u8) {
 /// Internal: SSE2 implementation for 32-byte hex encoding.
 /// Processes 16 bytes at a time using 128-bit registers.
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn hex_encode_32_sse2(bytes: &[u8; 32], buf: *mut u8) {
     let mask_lo = _mm_set1_epi8(0x0f);
@@ -381,7 +382,7 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
         return bytes_to_hex_16(bytes.try_into().unwrap());
     }
 
-    let out_len = bytes.len() * 2;
+    let out_len = bytes.len().checked_mul(2).expect("hex string length overflow");
 
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -579,6 +580,7 @@ pub fn hex_to_bytes_32(hex: &str) -> [u8; 32] {
 
 /// SSE2 implementation: decode 64 hex chars to 32 bytes
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn hex_decode_32_sse2(h: &[u8]) -> [u8; 32] {
     let mut result = [0u8; 32];

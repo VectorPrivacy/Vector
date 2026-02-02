@@ -150,6 +150,7 @@ unsafe fn has_alpha_avx2(rgba_pixels: &[u8]) -> bool {
 
 /// SSE2-optimized alpha check - processes 64 bytes (16 pixels) per iteration
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn has_alpha_sse2(rgba_pixels: &[u8]) -> bool {
     let len = rgba_pixels.len();
@@ -185,6 +186,7 @@ unsafe fn has_alpha_sse2(rgba_pixels: &[u8]) -> bool {
 
 /// SSE2 remainder handler (also used by AVX2)
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn has_alpha_sse2_remainder(rgba_pixels: &[u8]) -> bool {
     let len = rgba_pixels.len();
@@ -232,16 +234,33 @@ fn has_alpha_simd(rgba_pixels: &[u8]) -> bool {
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 fn has_alpha_simd(rgba_pixels: &[u8]) -> bool {
-    let mut chunks = rgba_pixels.chunks_exact(8);
-    const ALPHA_MASK: u64 = 0xFF000000_FF000000;
+    // Fast path for little-endian (WASM, RISC-V, most platforms)
+    #[cfg(target_endian = "little")]
+    {
+        let mut chunks = rgba_pixels.chunks_exact(8);
+        // On little-endian, alpha bytes are at positions 3 and 7 within each 8-byte chunk
+        // which correspond to bits 24-31 and 56-63 in the u64
+        const ALPHA_MASK: u64 = 0xFF000000_FF000000;
 
-    for chunk in chunks.by_ref() {
-        let val = u64::from_ne_bytes(chunk.try_into().unwrap());
-        if (val & ALPHA_MASK) != ALPHA_MASK {
-            return true;
+        for chunk in chunks.by_ref() {
+            let val = u64::from_ne_bytes(chunk.try_into().unwrap());
+            if (val & ALPHA_MASK) != ALPHA_MASK {
+                return true;
+            }
         }
+        chunks.remainder().chunks_exact(4).any(|px| px[3] < 255)
     }
-    chunks.remainder().chunks_exact(4).any(|px| px[3] < 255)
+
+    // Byte-by-byte fallback for big-endian (rare)
+    #[cfg(target_endian = "big")]
+    {
+        for pixel in rgba_pixels.chunks_exact(4) {
+            if pixel[3] < 255 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Check if RGBA pixel data contains any meaningful transparency (alpha < 255)
@@ -399,6 +418,7 @@ unsafe fn set_alpha_avx2(rgba_pixels: &mut [u8]) {
 
 /// SSE2-optimized alpha set - processes 64 bytes (16 pixels) per iteration
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn set_alpha_sse2(rgba_pixels: &mut [u8]) {
     let len = rgba_pixels.len();
@@ -429,6 +449,7 @@ unsafe fn set_alpha_sse2(rgba_pixels: &mut [u8]) {
 
 /// SSE2 remainder handler (also used by AVX2)
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn set_alpha_sse2_remainder(rgba_pixels: &mut [u8]) {
     let len = rgba_pixels.len();
@@ -468,15 +489,27 @@ fn set_alpha_simd(rgba_pixels: &mut [u8]) {
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 fn set_alpha_simd(rgba_pixels: &mut [u8]) {
-    let mut chunks = rgba_pixels.chunks_exact_mut(8);
-    const ALPHA_MASK: u64 = 0xFF000000_FF000000;
+    // Fast path for little-endian (WASM, RISC-V, most platforms)
+    #[cfg(target_endian = "little")]
+    {
+        let mut chunks = rgba_pixels.chunks_exact_mut(8);
+        const ALPHA_MASK: u64 = 0xFF000000_FF000000;
 
-    for chunk in chunks.by_ref() {
-        let val = u64::from_ne_bytes(chunk.try_into().unwrap());
-        chunk.copy_from_slice(&(val | ALPHA_MASK).to_ne_bytes());
+        for chunk in chunks.by_ref() {
+            let val = u64::from_ne_bytes(chunk.try_into().unwrap());
+            chunk.copy_from_slice(&(val | ALPHA_MASK).to_ne_bytes());
+        }
+        for px in chunks.into_remainder().chunks_exact_mut(4) {
+            px[3] = 255;
+        }
     }
-    for px in chunks.into_remainder().chunks_exact_mut(4) {
-        px[3] = 255;
+
+    // Byte-by-byte fallback for big-endian (rare)
+    #[cfg(target_endian = "big")]
+    {
+        for pixel in rgba_pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
     }
 }
 
@@ -539,6 +572,10 @@ pub fn set_all_alpha_opaque(rgba_pixels: &mut [u8]) {
 ///
 /// # Returns
 /// Downsampled RGBA pixel data
+///
+/// # Panics
+/// - If `pixels` is smaller than `src_width * src_height * 4`
+/// - If output size would overflow
 pub fn nearest_neighbor_downsample(
     pixels: &[u8],
     src_width: u32,
@@ -546,7 +583,19 @@ pub fn nearest_neighbor_downsample(
     dst_width: u32,
     dst_height: u32,
 ) -> Vec<u8> {
-    let dst_size = (dst_width * dst_height * 4) as usize;
+    // Validate input dimensions
+    let src_size = (src_width as usize)
+        .checked_mul(src_height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .expect("source dimensions overflow");
+    assert!(pixels.len() >= src_size, "pixels buffer too small for source dimensions");
+
+    // Calculate output size with overflow protection
+    let dst_size = (dst_width as usize)
+        .checked_mul(dst_height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .expect("destination dimensions overflow");
+
     let mut result: Vec<u8> = Vec::with_capacity(dst_size);
     let src_stride = src_width as usize * 4;
 
