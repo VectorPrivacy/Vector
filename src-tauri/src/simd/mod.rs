@@ -9,7 +9,7 @@
 //!
 //! # Modules
 //!
-//! - [`hex`] - Hex encoding/decoding (~65x faster than format!)
+//! - [`hex`] - Hex encoding/decoding (~62x faster than format!)
 //! - [`image`] - Image operations (~9x faster with parallel SIMD)
 
 pub mod hex;

@@ -393,7 +393,7 @@ mod tests {
     fn test_unknown_kind() {
         let event = StoredEvent::new(
             "abc123".to_string(),
-            99999, // Unknown kind
+            65535, // Unknown kind (max u16 value)
             1,
             "Unknown content".to_string(),
             1234567890,
