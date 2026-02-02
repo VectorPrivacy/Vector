@@ -11,16 +11,20 @@
 //!
 //! # Platform Support
 //!
-//! - **ARM64**: NEON with TBL lookup
-//! - **x86_64**: AVX2 (if available) or SSE2 fallback
+//! - **ARM64**: NEON (vld3/vst4 for RGB↔RGBA, TBL for lookups)
+//! - **x86_64**: AVX2/SSSE3 (pshufb for byte rearrangement) or SSE2 fallback
 //!
-//! # Algorithm
+//! # Algorithms
 //!
-//! Processes 128 bytes (32 RGBA pixels) per iteration:
+//! **Alpha check/set** - Processes 128 bytes (32 RGBA pixels) per iteration:
 //! 1. Load 8 x 16-byte chunks into SIMD registers
 //! 2. AND/OR all chunks to combine alpha checks/sets
 //! 3. Check alpha bytes at positions 3, 7, 11, 15 (every 4th byte)
 //! 4. For large images (>4MB), parallelize across CPU cores with rayon
+//!
+//! **RGB→RGBA conversion** - Uses architecture-specific deinterleaving:
+//! - NEON: vld3q loads RGB planes directly, vst4q stores RGBA
+//! - SSSE3: pshufb rearranges 12 RGB bytes → 16 RGBA bytes per iteration
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
@@ -576,7 +580,11 @@ pub fn nearest_neighbor_downsample(
 
 /// Convert RGB pixel data to RGBA, setting alpha to 255.
 ///
-/// Uses SIMD acceleration where available for ~4x speedup on large images.
+/// Uses SIMD acceleration where available:
+/// - **ARM64**: NEON with vld3/vst4 deinterleave
+/// - **x86_64**: SSSE3 pshufb (with scalar fallback)
+///
+/// ~4x speedup on large images compared to naive scalar.
 #[inline]
 pub fn rgb_to_rgba(rgb_data: &[u8]) -> Vec<u8> {
     let pixel_count = rgb_data.len() / 3;
@@ -589,7 +597,12 @@ pub fn rgb_to_rgba(rgb_data: &[u8]) -> Vec<u8> {
 
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        rgb_to_rgba_sse2(rgb_data, &mut rgba_data);
+        // SSSE3 is available on all x86_64 CPUs since 2006, but check anyway
+        if is_x86_feature_detected!("ssse3") {
+            rgb_to_rgba_ssse3(rgb_data, &mut rgba_data);
+        } else {
+            rgb_to_rgba_scalar_x86(rgb_data, &mut rgba_data);
+        }
     }
 
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -601,15 +614,20 @@ pub fn rgb_to_rgba(rgb_data: &[u8]) -> Vec<u8> {
 }
 
 /// NEON-optimized RGB to RGBA conversion
+///
+/// Uses vld3q to load RGB data deinterleaved, then vst4q to store as RGBA.
+/// Unlike SSE/SSSE3, NEON's vld3q loads exactly 48 bytes, so no OOB risk.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn rgb_to_rgba_neon(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     let pixel_count = rgb_data.len() / 3;
-    let rgba_size = pixel_count * 4;
-    rgba_data.reserve(rgba_size);
+    let rgba_size = pixel_count.checked_mul(4).expect("RGB to RGBA size overflow");
+
+    rgba_data.clear();
+    rgba_data.reserve_exact(rgba_size);
+    rgba_data.set_len(rgba_size);
 
     let src = rgb_data.as_ptr();
-    rgba_data.set_len(rgba_size);
     let dst = rgba_data.as_mut_ptr();
 
     let mut i = 0usize;
@@ -643,32 +661,111 @@ unsafe fn rgb_to_rgba_neon(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     }
 }
 
-/// SSE2-optimized RGB to RGBA conversion
+/// SSSE3-optimized RGB to RGBA conversion using pshufb for byte rearrangement
+///
+/// Processes 16 pixels (48 RGB bytes → 64 RGBA bytes) per iteration.
+/// Uses pshufb to rearrange RGB bytes and insert alpha in one operation.
+///
+/// # Safety
+/// - Caller must ensure SSSE3 is available (use `is_x86_feature_detected!`)
+/// - Input length should be a multiple of 3 (trailing 1-2 bytes are ignored)
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
 #[inline]
-unsafe fn rgb_to_rgba_sse2(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
+unsafe fn rgb_to_rgba_ssse3(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     let pixel_count = rgb_data.len() / 3;
-    let rgba_size = pixel_count * 4;
-    rgba_data.reserve(rgba_size);
+    // Use checked_mul to prevent overflow on very large inputs
+    let rgba_size = pixel_count.checked_mul(4).expect("RGB to RGBA size overflow");
+
+    // Clear and reserve exact capacity to avoid over-allocation on reuse
+    rgba_data.clear();
+    rgba_data.reserve_exact(rgba_size);
+    rgba_data.set_len(rgba_size);
 
     let src = rgb_data.as_ptr();
-    rgba_data.set_len(rgba_size);
     let dst = rgba_data.as_mut_ptr();
 
     let mut i = 0usize;
     let mut o = 0usize;
 
+    // Shuffle mask: rearranges 12 RGB bytes to 16 RGBA bytes
+    // Input positions 0-11 map to output, -1 (0x80) produces zero for alpha slots
+    let shuffle = _mm_setr_epi8(
+        0, 1, 2, -1,    // pixel 0: R G B 0
+        3, 4, 5, -1,    // pixel 1: R G B 0
+        6, 7, 8, -1,    // pixel 2: R G B 0
+        9, 10, 11, -1   // pixel 3: R G B 0
+    );
+    // Alpha mask: 0xFF at alpha positions (bytes 3, 7, 11, 15)
+    let alpha = _mm_set_epi8(-1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0);
+
+    // Process 16 pixels at a time (48 RGB bytes -> 64 RGBA bytes)
+    // Loop bound: last load is at i+36, reads 16 bytes -> needs i+52 <= len
+    while i + 52 <= rgb_data.len() {
+        let rgb0 = _mm_loadu_si128(src.add(i) as *const __m128i);
+        let rgb1 = _mm_loadu_si128(src.add(i + 12) as *const __m128i);
+        let rgb2 = _mm_loadu_si128(src.add(i + 24) as *const __m128i);
+        let rgb3 = _mm_loadu_si128(src.add(i + 36) as *const __m128i);
+
+        let rgba0 = _mm_or_si128(_mm_shuffle_epi8(rgb0, shuffle), alpha);
+        let rgba1 = _mm_or_si128(_mm_shuffle_epi8(rgb1, shuffle), alpha);
+        let rgba2 = _mm_or_si128(_mm_shuffle_epi8(rgb2, shuffle), alpha);
+        let rgba3 = _mm_or_si128(_mm_shuffle_epi8(rgb3, shuffle), alpha);
+
+        _mm_storeu_si128(dst.add(o) as *mut __m128i, rgba0);
+        _mm_storeu_si128(dst.add(o + 16) as *mut __m128i, rgba1);
+        _mm_storeu_si128(dst.add(o + 32) as *mut __m128i, rgba2);
+        _mm_storeu_si128(dst.add(o + 48) as *mut __m128i, rgba3);
+
+        i += 48;
+        o += 64;
+    }
+
     // Process 4 pixels at a time (12 RGB bytes -> 16 RGBA bytes)
-    // SSE2 doesn't have deinterleave like NEON, so we do it manually
+    // Loop bound: load at i reads 16 bytes -> needs i+16 <= len
+    while i + 16 <= rgb_data.len() {
+        let rgb = _mm_loadu_si128(src.add(i) as *const __m128i);
+        let rgba = _mm_or_si128(_mm_shuffle_epi8(rgb, shuffle), alpha);
+        _mm_storeu_si128(dst.add(o) as *mut __m128i, rgba);
+        i += 12;
+        o += 16;
+    }
+
+    // Scalar remainder (handles final pixels where SIMD would read OOB)
+    while i + 3 <= rgb_data.len() {
+        *dst.add(o) = *src.add(i);
+        *dst.add(o + 1) = *src.add(i + 1);
+        *dst.add(o + 2) = *src.add(i + 2);
+        *dst.add(o + 3) = 255;
+        i += 3;
+        o += 4;
+    }
+}
+
+/// Scalar fallback for RGB to RGBA (used when SSSE3 not available)
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn rgb_to_rgba_scalar_x86(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
+    let pixel_count = rgb_data.len() / 3;
+    let rgba_size = pixel_count.checked_mul(4).expect("RGB to RGBA size overflow");
+
+    rgba_data.clear();
+    rgba_data.reserve_exact(rgba_size);
+    rgba_data.set_len(rgba_size);
+
+    let src = rgb_data.as_ptr();
+    let dst = rgba_data.as_mut_ptr();
+
+    let mut i = 0usize;
+    let mut o = 0usize;
+
+    // Process 4 pixels at a time using u32 operations
     while i + 12 <= rgb_data.len() {
-        // Load 12 bytes (4 RGB pixels)
-        // Pixel layout: R0 G0 B0 R1 G1 B1 R2 G2 B2 R3 G3 B3
         let p0 = *src.add(i) as u32 | (*src.add(i+1) as u32) << 8 | (*src.add(i+2) as u32) << 16 | 0xFF000000;
         let p1 = *src.add(i+3) as u32 | (*src.add(i+4) as u32) << 8 | (*src.add(i+5) as u32) << 16 | 0xFF000000;
         let p2 = *src.add(i+6) as u32 | (*src.add(i+7) as u32) << 8 | (*src.add(i+8) as u32) << 16 | 0xFF000000;
         let p3 = *src.add(i+9) as u32 | (*src.add(i+10) as u32) << 8 | (*src.add(i+11) as u32) << 16 | 0xFF000000;
 
-        // Store as 4 RGBA pixels
         *(dst.add(o) as *mut u32) = p0;
         *(dst.add(o+4) as *mut u32) = p1;
         *(dst.add(o+8) as *mut u32) = p2;
@@ -689,12 +786,15 @@ unsafe fn rgb_to_rgba_sse2(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     }
 }
 
-/// Scalar RGB to RGBA conversion (fallback)
+/// Scalar RGB to RGBA conversion (fallback for non-SIMD platforms)
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 fn rgb_to_rgba_scalar(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     let pixel_count = rgb_data.len() / 3;
-    rgba_data.reserve(pixel_count * 4);
+    let rgba_size = pixel_count.checked_mul(4).expect("RGB to RGBA size overflow");
+
+    rgba_data.clear();
+    rgba_data.reserve_exact(rgba_size);
 
     for chunk in rgb_data.chunks_exact(3) {
         rgba_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
@@ -735,5 +835,53 @@ mod tests {
         assert_eq!(pixels[0], 0);
         assert_eq!(pixels[1], 0);
         assert_eq!(pixels[2], 0);
+    }
+
+    #[test]
+    fn test_rgb_to_rgba_basic() {
+        // 4 RGB pixels: red, green, blue, white
+        let rgb = vec![
+            255, 0, 0,      // red
+            0, 255, 0,      // green
+            0, 0, 255,      // blue
+            255, 255, 255,  // white
+        ];
+        let rgba = rgb_to_rgba(&rgb);
+
+        assert_eq!(rgba.len(), 16);
+        // Red pixel
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+        // Green pixel
+        assert_eq!(&rgba[4..8], &[0, 255, 0, 255]);
+        // Blue pixel
+        assert_eq!(&rgba[8..12], &[0, 0, 255, 255]);
+        // White pixel
+        assert_eq!(&rgba[12..16], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn test_rgb_to_rgba_large() {
+        // Test with enough pixels to trigger SIMD path (48+ bytes = 16+ pixels)
+        let pixel_count = 64;
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for i in 0..pixel_count {
+            rgb.push((i * 4) as u8);       // R
+            rgb.push((i * 4 + 1) as u8);   // G
+            rgb.push((i * 4 + 2) as u8);   // B
+        }
+
+        let rgba = rgb_to_rgba(&rgb);
+        assert_eq!(rgba.len(), pixel_count * 4);
+
+        // Verify each pixel
+        for i in 0..pixel_count {
+            let r = (i * 4) as u8;
+            let g = (i * 4 + 1) as u8;
+            let b = (i * 4 + 2) as u8;
+            assert_eq!(rgba[i * 4], r, "pixel {} R mismatch", i);
+            assert_eq!(rgba[i * 4 + 1], g, "pixel {} G mismatch", i);
+            assert_eq!(rgba[i * 4 + 2], b, "pixel {} B mismatch", i);
+            assert_eq!(rgba[i * 4 + 3], 255, "pixel {} A mismatch", i);
+        }
     }
 }
