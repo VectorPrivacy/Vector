@@ -11,6 +11,7 @@ use log::{debug, error, info, warn};
 use std::io::Read;
 use std::path::Path;
 use crate::util::bytes_to_hex_string;
+use crate::state::globals::TAURI_APP;
 
 // ============================================================================
 // Constants
@@ -483,22 +484,17 @@ fn get_user_display_name() -> String {
 }
 
 fn get_granted_permissions_for_package(package_path: &str) -> Result<String, String> {
-    // Compute file hash for permission lookup
-    let path = Path::new(package_path);
-    if !path.exists() {
-        return Err("Package file not found".to_string());
-    }
-
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read package: {}", e))?;
+    // Compute file hash for permission lookup - fs::read fails with NotFound if missing
+    let bytes = std::fs::read(package_path).map_err(|e| format!("Failed to read package: {}", e))?;
 
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let _file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
+    let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
 
-    // TODO: Look up permissions from database using _file_hash
-    // For now, return empty (no permissions granted)
-    Ok(String::new())
+    // Look up permissions from database using file_hash
+    let handle = TAURI_APP.get().ok_or("Tauri app not initialized")?;
+    crate::db::miniapps::get_miniapp_granted_permissions(handle, &file_hash)
 }
 
 fn serve_file_from_package(
@@ -506,12 +502,7 @@ fn serve_file_from_package(
     package_path: &str,
     path: &str,
 ) -> Result<jobject, String> {
-    let package_file = Path::new(package_path);
-    if !package_file.exists() {
-        return Err("Package file not found".to_string());
-    }
-
-    let file = std::fs::File::open(package_file).map_err(|e| format!("Failed to open package: {}", e))?;
+    let file = std::fs::File::open(package_path).map_err(|e| format!("Failed to open package: {}", e))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {}", e))?;
 

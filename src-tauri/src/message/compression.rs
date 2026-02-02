@@ -125,12 +125,6 @@ pub(super) fn compress_bytes_internal(
 pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompressedImage, String> {
     #[cfg(not(target_os = "android"))]
     {
-        let path = std::path::Path::new(file_path);
-        
-        if !path.exists() {
-            return Err(format!("File does not exist: {}", file_path));
-        }
-        
         // Get extension early to check if it's a GIF
         let extension = file_path
             .rsplit('.')

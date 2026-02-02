@@ -416,24 +416,20 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
     {
         // On non-Android platforms, just return file info without caching
         let path = std::path::Path::new(&file_path);
-        
-        if !path.exists() {
-            return Err(format!("File does not exist: {}", file_path));
-        }
-        
+
         let metadata = std::fs::metadata(&file_path)
             .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-        
+
         let name = path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        
+
         let extension = path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        
+
         Ok(AndroidFileCacheResult {
             size: metadata.len(),
             name,
@@ -532,24 +528,20 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
     #[cfg(not(target_os = "android"))]
     {
         let path = std::path::Path::new(&file_path);
-        
-        if !path.exists() {
-            return Err(format!("File does not exist: {}", file_path));
-        }
-        
+
         let metadata = std::fs::metadata(&file_path)
             .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-        
+
         let name = path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        
+
         let extension = path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        
+
         Ok(FileInfo {
             size: metadata.len(),
             name,

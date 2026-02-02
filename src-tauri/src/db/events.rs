@@ -48,8 +48,8 @@ pub async fn save_event<R: Runtime>(
         r#"
         INSERT OR REPLACE INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
-            created_at, received_at, mine, pending, failed, wrapper_event_id, npub
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         "#,
         rusqlite::params![
             event.id,
@@ -66,6 +66,7 @@ pub async fn save_event<R: Runtime>(
             event.failed as i32,
             event.wrapper_event_id,
             event.npub,
+            event.preview_metadata,
         ],
     ).map_err(|e| format!("Failed to save event: {}", e))?;
 
@@ -209,6 +210,7 @@ pub async fn get_pivx_payments_for_chat<R: Runtime>(
                     failed: row.get::<_, i32>(11)? != 0,
                     wrapper_event_id: row.get(12)?,
                     npub: row.get(13)?,
+                    preview_metadata: None, // PIVX events don't have preview metadata
                 })
             }
         ).map_err(|e| format!("Failed to query events: {}", e))?;
@@ -281,6 +283,7 @@ pub async fn get_system_events_for_chat<R: Runtime>(
                     failed: row.get::<_, i32>(11)? != 0,
                     wrapper_event_id: row.get(12)?,
                     npub: row.get(13)?,
+                    preview_metadata: None, // System events don't have preview metadata
                 })
             }
         ).map_err(|e| format!("Failed to query events: {}", e))?;
@@ -337,6 +340,7 @@ pub async fn save_reaction_event<R: Runtime>(
         failed: false,
         wrapper_event_id: None,
         npub: Some(reaction.author_id.clone()),
+        preview_metadata: None,
     };
 
     save_event(handle, &event).await
@@ -382,6 +386,7 @@ pub async fn save_edit_event<R: Runtime>(
         failed: false,
         wrapper_event_id: None,
         npub: Some(npub.to_string()),
+        preview_metadata: None,
     };
 
     save_event(handle, &event).await
@@ -434,7 +439,7 @@ pub async fn get_events<R: Runtime>(
             let sql = format!(
                 r#"
                 SELECT id, kind, chat_id, user_id, content, tags, reference_id,
-                       created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+                       created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
                 FROM events
                 WHERE chat_id = ?1 AND kind IN ({})
                 ORDER BY created_at DESC
@@ -474,7 +479,7 @@ pub async fn get_events<R: Runtime>(
         } else {
             let sql = r#"
                 SELECT id, kind, chat_id, user_id, content, tags, reference_id,
-                       created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+                       created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
                 FROM events
                 WHERE chat_id = ?1
                 ORDER BY created_at DESC
@@ -526,6 +531,7 @@ fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
         failed: row.get::<_, i32>(11)? != 0,
         wrapper_event_id: row.get(12)?,
         npub: row.get(13)?,
+        preview_metadata: row.get(14)?,
     })
 }
 
@@ -547,7 +553,7 @@ pub async fn get_related_events<R: Runtime>(
     let sql = format!(
         r#"
         SELECT id, kind, chat_id, user_id, content, tags, reference_id,
-               created_at, received_at, mine, pending, failed, wrapper_event_id, npub
+               created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
         FROM events
         WHERE reference_id IN ({})
         ORDER BY created_at ASC
@@ -581,6 +587,7 @@ pub async fn get_related_events<R: Runtime>(
             failed: row.get::<_, i32>(11)? != 0,
             wrapper_event_id: row.get(12)?,
             npub: row.get(13)?,
+            preview_metadata: row.get(14)?,
         })
     })
     .map_err(|e| format!("Failed to query related events: {}", e))?
@@ -892,6 +899,10 @@ pub async fn get_message_views<R: Runtime>(
             (original_content, false, None)
         };
 
+        // Deserialize preview_metadata if present
+        let preview_metadata = event.preview_metadata
+            .and_then(|json| serde_json::from_str(&json).ok());
+
         let message = Message {
             id: event.id,
             content,
@@ -899,7 +910,7 @@ pub async fn get_message_views<R: Runtime>(
             replied_to_content: None, // Populated below
             replied_to_npub: None,    // Populated below
             replied_to_has_attachment: None, // Populated below
-            preview_metadata: None, // TODO: Parse from tags if needed
+            preview_metadata,
             attachments,
             reactions,
             at,
@@ -960,7 +971,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
         let sql = r#"
             SELECT c.chat_identifier,
                    e.id, e.kind, e.chat_id, e.user_id, e.content, e.tags, e.reference_id,
-                   e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub
+                   e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, e.preview_metadata
             FROM (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY created_at DESC) as rn
                 FROM events
@@ -999,6 +1010,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
                     failed: row.get::<_, i32>(12)? != 0,
                     wrapper_event_id: row.get(13)?,
                     npub: row.get(14)?,
+                    preview_metadata: row.get(15)?,
                 };
                 Ok((chat_identifier, event))
             }
@@ -1104,6 +1116,10 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
 
         let at = event.created_at * 1000; // Convert to ms
 
+        // Deserialize preview_metadata if present
+        let preview_metadata = event.preview_metadata
+            .and_then(|json| serde_json::from_str(&json).ok());
+
         let message = Message {
             id: event.id,
             content,
@@ -1111,7 +1127,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
             replied_to_content: None,
             replied_to_npub: None,
             replied_to_has_attachment: None,
-            preview_metadata: None,
+            preview_metadata,
             attachments,
             reactions,
             at,

@@ -241,11 +241,6 @@ pub async fn forward_attachment(
         found_path.ok_or_else(|| "Attachment not found or not downloaded".to_string())?
     };
     
-    // Verify the file exists
-    if !std::path::Path::new(&attachment_path).exists() {
-        return Err("Attachment file not found on disk".to_string());
-    }
-    
     // Send the file to the target chat using the existing file_message function
     // The hash-based reuse will automatically avoid re-uploading
     file_message(target_chat_id, String::new(), attachment_path).await?;

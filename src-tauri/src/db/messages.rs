@@ -87,6 +87,10 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         }
     }
 
+    // Serialize preview_metadata if present
+    let preview_metadata = message.preview_metadata.as_ref()
+        .and_then(|m| serde_json::to_string(m).ok());
+
     StoredEvent {
         id: message.id.clone(),
         kind,
@@ -105,6 +109,7 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         failed: message.failed,
         wrapper_event_id: message.wrapper_event_id.clone(),
         npub: message.npub.clone(),
+        preview_metadata,
     }
 }
 

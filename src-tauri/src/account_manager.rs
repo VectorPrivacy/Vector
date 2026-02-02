@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS events (
     failed INTEGER NOT NULL DEFAULT 0,
     wrapper_event_id TEXT,
     npub TEXT,
+    preview_metadata TEXT,
     FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
 );
@@ -909,10 +910,19 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 13: Add preview_metadata column to events table for link preview caching
+    run_atomic_migration(conn, 13, "Add preview_metadata to events table", |tx| {
+        tx.execute(
+            "ALTER TABLE events ADD COLUMN preview_metadata TEXT",
+            []
+        ).map_err(|e| format!("Failed to add preview_metadata column: {}", e))?;
+        Ok(())
+    })?;
+
     // =========================================================================
-    // Future migrations (13+) follow the same pattern:
+    // Future migrations (14+) follow the same pattern:
     //
-    // run_atomic_migration(conn, 13, "Description here", |tx| {
+    // run_atomic_migration(conn, 14, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;
