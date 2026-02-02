@@ -241,7 +241,7 @@ pub async fn fetch_messages<R: Runtime>(
 
             if let Ok(wrapper_ids) = wrapper_ids_result {
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
-                *cache = wrapper_ids;
+                cache.load(wrapper_ids);
             }
 
             // Send the state to frontend
@@ -488,9 +488,8 @@ pub async fn fetch_messages<R: Runtime>(
             let mut cache = WRAPPER_ID_CACHE.lock().await;
             let cache_size = cache.len();
             cache.clear();
-            cache.shrink_to_fit();
-            // Each entry: 64-char hex String (~88 bytes) + HashSet overhead (~48 bytes) ≈ 136 bytes
-            println!("[Startup] Sync Complete - Dumped NIP-59 Decryption Cache (~{} KB Memory freed)", (cache_size * 136) / 1024);
+            // Each entry: [u8; 32] in Vec (32 bytes) or HashSet (~48 bytes) ≈ 35 bytes average
+            println!("[Startup] Sync Complete - Dumped NIP-59 Decryption Cache (~{} KB Memory freed)", (cache_size * 35) / 1024);
         }
 
         // Warm the file hash cache in the background (for attachment deduplication)

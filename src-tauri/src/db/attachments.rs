@@ -743,18 +743,18 @@ pub async fn update_wrapper_event_id<R: Runtime>(
     Ok(rows_updated > 0)
 }
 
-/// Load recent wrapper_event_ids into a HashSet for fast duplicate detection
+/// Load recent wrapper_event_ids as raw bytes for the hybrid cache
 /// This preloads wrapper_ids from the last N days to avoid SQL queries during sync
+///
+/// Returns Vec<[u8; 32]> for memory-efficient storage (76% less than HashSet<String>)
 pub async fn load_recent_wrapper_ids<R: Runtime>(
     handle: &AppHandle<R>,
     days: u64,
-) -> Result<std::collections::HashSet<String>, String> {
-    let mut wrapper_ids = std::collections::HashSet::new();
-
+) -> Result<Vec<[u8; 32]>, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
     let conn = match crate::account_manager::get_db_connection(handle) {
         Ok(c) => c,
-        Err(_) => return Ok(wrapper_ids), // No DB, return empty set
+        Err(_) => return Ok(Vec::new()), // No DB, return empty vec
     };
 
     // Calculate timestamp for N days ago (in seconds, matching events.created_at)
@@ -784,14 +784,19 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
     crate::account_manager::return_db_connection(conn);
 
     match result {
-        Ok(ids) => {
-            for id in ids {
-                wrapper_ids.insert(id);
+        Ok(hex_ids) => {
+            // Convert hex strings to [u8; 32] using SIMD-accelerated decode
+            let mut wrapper_ids = Vec::with_capacity(hex_ids.len());
+            for hex in hex_ids {
+                if hex.len() == 64 {
+                    let bytes = crate::simd::hex::hex_to_bytes_32(&hex);
+                    wrapper_ids.push(bytes);
+                }
             }
             Ok(wrapper_ids)
         }
         Err(_) => {
-            Ok(wrapper_ids) // Return empty set on error, will fall back to DB queries
+            Ok(Vec::new()) // Return empty vec on error, will fall back to DB queries
         }
     }
 }

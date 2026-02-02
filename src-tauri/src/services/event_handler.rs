@@ -23,8 +23,10 @@ use crate::{
 // Not exposed as a Tauri command to frontend
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
     // Get the wrapper (giftwrap) event ID for duplicate detection
+    // Use bytes for cache (memory efficient), hex string for DB operations
+    let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
     let wrapper_event_id = event.id.to_hex();
-    
+
     // For historical sync events (is_new = false), use the wrapper_id cache for fast duplicate detection
     // For real-time new events (is_new = true), skip cache checks - they're guaranteed to be new
     if !is_new {
@@ -32,7 +34,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
         // This cache is only populated during init and cleared after sync finishes
         {
             let cache = WRAPPER_ID_CACHE.lock().await;
-            if cache.contains(&wrapper_event_id) {
+            if cache.contains(&wrapper_event_id_bytes) {
                 // Already processed this giftwrap, skip (cache hit)
                 return false;
             }
@@ -95,7 +97,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                 // Dedup: the same welcome can arrive from multiple relays simultaneously
                 {
                     let cache = WRAPPER_ID_CACHE.lock().await;
-                    if cache.contains(&wrapper_event_id) {
+                    if cache.contains(&wrapper_event_id_bytes) {
                         return false;
                     }
                 }
@@ -137,7 +139,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         // Mark this wrapper as processed to prevent duplicates from other relays
                         {
                             let mut cache = WRAPPER_ID_CACHE.lock().await;
-                            cache.insert(wrapper_event_id.clone());
+                            cache.insert(wrapper_event_id_bytes);
                         }
                         // Only notify UI after initial sync is complete
                         // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
@@ -188,12 +190,12 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         RumorProcessingResult::TextMessage(mut msg) => {
                             // Set the wrapper event ID for database storage
                             msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id).await
+                            handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::FileAttachment(mut msg) => {
                             // Set the wrapper event ID for database storage
                             msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id).await
+                            handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::Reaction(reaction) => {
                             handle_reaction(reaction, &contact).await
@@ -301,7 +303,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
 }
 
 /// Handle a processed text message
-async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -314,7 +316,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                     if !updated {
                         // Message has a different wrapper_id - add this duplicate wrapper to cache
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id.to_string());
+                        cache.insert(wrapper_event_id_bytes);
                     }
                 }
                 return false;
@@ -388,7 +390,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
 }
 
 /// Handle a processed file attachment
-async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -401,7 +403,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
                     if !updated {
                         // Message has a different wrapper_id - add this duplicate wrapper to cache
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id.to_string());
+                        cache.insert(wrapper_event_id_bytes);
                     }
                 }
                 return false;

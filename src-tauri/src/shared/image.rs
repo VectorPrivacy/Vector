@@ -17,6 +17,10 @@ pub const JPEG_QUALITY_STANDARD: u8 = 85;
 /// JPEG quality for higher compression (smaller files)
 pub const JPEG_QUALITY_COMPRESSED: u8 = 70;
 /// JPEG quality for UI previews (fast encoding, small size)
+/// Mobile uses lower quality (25) since screens are smaller - faster encode + smaller base64
+#[cfg(target_os = "android")]
+pub const JPEG_QUALITY_PREVIEW: u8 = 25;
+#[cfg(not(target_os = "android"))]
 pub const JPEG_QUALITY_PREVIEW: u8 = 50;
 
 /// Result of image encoding with format metadata
@@ -90,16 +94,11 @@ pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
 
 /// Convert RGBA pixel data to RGB by dropping the alpha channel.
 ///
-/// This is more efficient than going through DynamicImage when you already
-/// have raw RGBA bytes - avoids an extra buffer clone.
+/// Convert RGBA to RGB, stripping the alpha channel.
+/// Uses SIMD acceleration on ARM64 (NEON vld4/vst3).
 #[inline]
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    let pixel_count = rgba.len() / 4;
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-    for chunk in rgba.chunks_exact(4) {
-        rgb.extend_from_slice(&chunk[..3]);
-    }
-    rgb
+    crate::simd::image::rgba_to_rgb(rgba)
 }
 
 /// Encode RGB pixel data as JPEG with specified quality.
@@ -284,6 +283,45 @@ pub fn calculate_preview_dimensions(width: u32, height: u32, quality: u32) -> (u
     (
         ((width * quality) / 100).max(1),
         ((height * quality) / 100).max(1),
+    )
+}
+
+/// Maximum preview dimensions for UI display
+/// Mobile: 300x400 (chat bubbles are small)
+/// Desktop: 512x512 (larger display area)
+#[cfg(target_os = "android")]
+pub const PREVIEW_MAX_WIDTH: u32 = 300;
+#[cfg(target_os = "android")]
+pub const PREVIEW_MAX_HEIGHT: u32 = 400;
+
+#[cfg(not(target_os = "android"))]
+pub const PREVIEW_MAX_WIDTH: u32 = 800;
+#[cfg(not(target_os = "android"))]
+pub const PREVIEW_MAX_HEIGHT: u32 = 800;
+
+/// Calculate preview dimensions capped to UI display size.
+///
+/// Only downscales, never upscales:
+/// - Large photos are scaled to fit within max bounds
+/// - Small photos keep original dimensions
+///
+/// Maintains aspect ratio.
+#[inline]
+pub fn calculate_capped_preview_dimensions(width: u32, height: u32) -> (u32, u32) {
+    // If already smaller than max, keep original (never upscale)
+    if width <= PREVIEW_MAX_WIDTH && height <= PREVIEW_MAX_HEIGHT {
+        return (width, height);
+    }
+
+    // Scale down to fit within bounds while maintaining aspect ratio
+    let width_ratio = PREVIEW_MAX_WIDTH as f32 / width as f32;
+    let height_ratio = PREVIEW_MAX_HEIGHT as f32 / height as f32;
+    // Use smaller ratio to fit within both bounds, cap at 1.0 to never upscale
+    let ratio = width_ratio.min(height_ratio).min(1.0);
+
+    (
+        ((width as f32 * ratio) as u32).max(1),
+        ((height as f32 * ratio) as u32).max(1),
     )
 }
 

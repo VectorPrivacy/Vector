@@ -48,7 +48,7 @@ pub fn cache_file_bytes(bytes: Vec<u8>, file_name: String, extension: String) ->
 
     // Generate preview for supported image types
     let preview = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        generate_image_preview_from_bytes(&bytes, 15).ok()
+        generate_image_preview_from_bytes(&bytes).ok()
     } else {
         None
     };
@@ -96,9 +96,9 @@ pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
     let (width, height) = (img.width(), img.height());
     let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
 
-    let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
-    let rgba = resized.to_rgba8();
-    let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
+    // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
+    let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
+    let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
 
     Ok(encoded.to_data_uri())
 }
@@ -456,7 +456,7 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
         
         // Generate preview for supported image types
         let preview = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-            generate_image_preview_from_bytes(&bytes, 15).ok()
+            generate_image_preview_from_bytes(&bytes).ok()
         } else {
             None
         };
@@ -475,11 +475,11 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
 }
 
 /// Generate a compressed base64 preview from image bytes
-/// Quality is a percentage (1-100) that determines the preview size
+/// Preview is capped to UI display size (300x400 mobile, 512x512 desktop)
 /// For files smaller than 5MB or GIFs, returns the original image as base64
-fn generate_image_preview_from_bytes(bytes: &[u8], quality: u32) -> Result<String, String> {
+fn generate_image_preview_from_bytes(bytes: &[u8]) -> Result<String, String> {
     use base64::Engine;
-    use crate::shared::image::{calculate_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
+    use crate::shared::image::{calculate_capped_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
 
     const SKIP_RESIZE_THRESHOLD: usize = 5 * 1024 * 1024; // 5MB
 
@@ -517,11 +517,11 @@ fn generate_image_preview_from_bytes(bytes: &[u8], quality: u32) -> Result<Strin
         .map_err(|e| format!("Failed to decode image: {}", e))?;
 
     let (width, height) = (img.width(), img.height());
-    let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
+    let (new_width, new_height) = calculate_capped_preview_dimensions(width, height);
 
-    let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
-    let rgba = resized.to_rgba8();
-    let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
+    // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
+    let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
+    let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
 
     Ok(encoded.to_data_uri())
 }
@@ -591,9 +591,9 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
         let (width, height) = (img.width(), img.height());
         let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
 
-        let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
-        let rgba = resized.to_rgba8();
-        let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
+        // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
+        let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
+        let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
 
         Ok(encoded.to_data_uri())
     }
@@ -618,9 +618,9 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
         let (width, height) = (img.width(), img.height());
         let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
 
-        let resized = img.resize(new_width, new_height, ::image::imageops::FilterType::Nearest);
-        let rgba = resized.to_rgba8();
-        let encoded = encode_rgba_auto(rgba.as_raw(), resized.width(), resized.height(), JPEG_QUALITY_PREVIEW)?;
+        // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
+        let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
+        let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
 
         Ok(encoded.to_data_uri())
     }
