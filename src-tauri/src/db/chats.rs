@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
 
 use crate::{Chat, ChatType};
+use crate::message::compact::{encode_message_id, decode_message_id};
 use super::{CHAT_ID_CACHE, USER_ID_CACHE};
 
 /// Slim version of Chat for database storage
@@ -240,7 +241,11 @@ impl From<&Chat> for SlimChatDB {
             id: chat.id().clone(),
             chat_type: chat.chat_type().clone(),
             participants: chat.participants().clone(),
-            last_read: chat.last_read().clone(),
+            last_read: if *chat.last_read() == [0u8; 32] {
+                String::new()
+            } else {
+                decode_message_id(chat.last_read())
+            },
             created_at: chat.created_at(),
             metadata: chat.metadata().clone(),
             muted: chat.muted(),
@@ -252,7 +257,11 @@ impl SlimChatDB {
     // Convert back to full Chat (messages will be loaded separately)
     pub fn to_chat(&self) -> Chat {
         let mut chat = Chat::new(self.id.clone(), self.chat_type.clone(), self.participants.clone());
-        chat.last_read = self.last_read.clone();
+        chat.last_read = if self.last_read.is_empty() {
+            [0u8; 32]
+        } else {
+            encode_message_id(&self.last_read)
+        };
         chat.created_at = self.created_at;
         chat.metadata = self.metadata.clone();
         chat.muted = self.muted;

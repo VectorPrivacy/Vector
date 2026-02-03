@@ -458,14 +458,12 @@ impl ChatState {
                 }
             }
 
-            let last_read_id = &chat.last_read;
-
             let mut unread_count = 0;
             for msg in chat.iter_compact().rev() {
                 if msg.flags.is_mine() {
                     break;
                 }
-                if !last_read_id.is_empty() && msg.id_hex() == *last_read_id {
+                if chat.last_read != [0u8; 32] && msg.id == chat.last_read {
                     break;
                 }
                 unread_count += 1;

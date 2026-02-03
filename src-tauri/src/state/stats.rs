@@ -228,7 +228,7 @@ impl DeepSize for Chat {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Chat>()
             + self.id.capacity()
-            + self.last_read.capacity()
+            + 32  // [u8; 32] is inline, no heap
             + self.participants.iter().map(|s| s.capacity()).sum::<usize>()
             + self.messages.deep_size()
             // metadata.custom_fields HashMap

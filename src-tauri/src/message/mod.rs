@@ -29,6 +29,7 @@ pub use types::{
 pub use compact::{
     CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment,
     AttachmentFlags, MessageFlags, NpubInterner, NO_NPUB,
+    encode_message_id, decode_message_id,
 };
 
 /// Protocol-agnostic reaction function that works for both DMs and Group Chats

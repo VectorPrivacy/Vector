@@ -24,7 +24,7 @@ const PENDING_ID_MARKER: u8 = 0x01;
 /// - Pending IDs ("pending-{nanoseconds}") are encoded with marker byte + timestamp
 /// - Regular hex IDs are decoded normally
 #[inline]
-fn encode_message_id(id: &str) -> [u8; 32] {
+pub fn encode_message_id(id: &str) -> [u8; 32] {
     if let Some(timestamp_str) = id.strip_prefix("pending-") {
         // Encode pending ID: marker byte + timestamp as u128 (16 bytes)
         let mut bytes = [0u8; 32];
@@ -40,7 +40,7 @@ fn encode_message_id(id: &str) -> [u8; 32] {
 
 /// Decode 32 bytes back to an ID string, handling pending IDs specially.
 #[inline]
-fn decode_message_id(bytes: &[u8; 32]) -> String {
+pub fn decode_message_id(bytes: &[u8; 32]) -> String {
     if bytes[0] == PENDING_ID_MARKER {
         // Decode pending ID: extract timestamp from bytes 1-16
         let mut timestamp_bytes = [0u8; 16];

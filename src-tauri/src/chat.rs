@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::message::compact::{CompactMessage, CompactMessageVec, NpubInterner};
+use crate::message::compact::{CompactMessage, CompactMessageVec, NpubInterner, encode_message_id, decode_message_id};
 use crate::Message;
 
 // ============================================================================
@@ -26,7 +26,7 @@ pub struct Chat {
     pub participants: Vec<String>,
     /// Compact message storage - O(log n) lookup by ID
     pub messages: CompactMessageVec,
-    pub last_read: String,
+    pub last_read: [u8; 32],
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
@@ -41,7 +41,7 @@ impl Chat {
             chat_type,
             participants,
             messages: CompactMessageVec::new(),
-            last_read: String::new(),
+            last_read: [0u8; 32],
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -151,7 +151,7 @@ impl Chat {
     pub fn set_as_read(&mut self) -> bool {
         for msg in self.messages.iter().rev() {
             if !msg.flags.is_mine() {
-                self.last_read = msg.id_hex();
+                self.last_read = msg.id;
                 return true;
             }
         }
@@ -185,7 +185,11 @@ impl Chat {
             chat_type: self.chat_type.clone(),
             participants: self.participants.clone(),
             messages: self.get_all_messages(interner),
-            last_read: self.last_read.clone(),
+            last_read: if self.last_read == [0u8; 32] {
+                String::new()
+            } else {
+                decode_message_id(&self.last_read)
+            },
             created_at: self.created_at,
             metadata: self.metadata.clone(),
             muted: self.muted,
@@ -199,7 +203,11 @@ impl Chat {
             chat_type: self.chat_type.clone(),
             participants: self.participants.clone(),
             messages: self.get_last_messages(n, interner),
-            last_read: self.last_read.clone(),
+            last_read: if self.last_read == [0u8; 32] {
+                String::new()
+            } else {
+                decode_message_id(&self.last_read)
+            },
             created_at: self.created_at,
             metadata: self.metadata.clone(),
             muted: self.muted,
@@ -260,7 +268,7 @@ impl Chat {
     pub fn id(&self) -> &String { &self.id }
     pub fn chat_type(&self) -> &ChatType { &self.chat_type }
     pub fn participants(&self) -> &Vec<String> { &self.participants }
-    pub fn last_read(&self) -> &String { &self.last_read }
+    pub fn last_read(&self) -> &[u8; 32] { &self.last_read }
     pub fn created_at(&self) -> u64 { self.created_at }
     pub fn metadata(&self) -> &ChatMetadata { &self.metadata }
     pub fn muted(&self) -> bool { self.muted }
@@ -290,7 +298,11 @@ impl SerializableChat {
     #[allow(clippy::wrong_self_convention)]
     pub fn to_chat(self, interner: &mut NpubInterner) -> Chat {
         let mut chat = Chat::new(self.id, self.chat_type, self.participants);
-        chat.last_read = self.last_read;
+        chat.last_read = if self.last_read.is_empty() {
+            [0u8; 32]
+        } else {
+            encode_message_id(&self.last_read)
+        };
         chat.created_at = self.created_at;
         chat.metadata = self.metadata;
         chat.muted = self.muted;
@@ -372,7 +384,7 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
 
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
             if let Some(msg_id) = &message_id {
-                chat.last_read = msg_id.clone();
+                chat.last_read = encode_message_id(msg_id);
                 result = true;
                 chat_id_for_save = Some(chat.id.clone());
             } else {
