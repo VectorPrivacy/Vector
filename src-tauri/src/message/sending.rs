@@ -29,34 +29,33 @@ use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
 use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
 
+/// Result of sending a message, returned to frontend for state update
+#[derive(serde::Serialize)]
+pub struct MessageSendResult {
+    /// The pending ID that was used while sending
+    pub pending_id: String,
+    /// The real event ID after successful send (None if failed)
+    pub event_id: Option<String>,
+}
+
 /// Helper function to mark message as failed and update frontend
-async fn mark_message_failed(pending_id: Arc<String>, receiver: &str) {
-    // Find the message in chats and mark it as failed
-    let mut state = STATE.lock().await;
+async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
+    let result = {
+        let mut state = STATE.lock().await;
+        state.update_message(&pending_id, |msg| {
+            msg.set_failed(true);
+            msg.set_pending(false);
+        })
+    };
 
-    // Search through all chats to find the message with this pending ID
-    for chat in &mut state.chats {
-        if chat.has_participant(receiver) {
-            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == *pending_id) {
-                // Mark the message as failed
-                message.failed = true;
-                message.pending = false;
-
-                // Update the frontend
-                let handle = TAURI_APP.get().unwrap();
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": pending_id.as_ref(),
-                    "message": message,
-                    "chat_id": receiver
-                })).unwrap();
-
-                // Save the failed message to our DB
-                let message_to_save = message.clone();
-                drop(state); // Release lock before async DB operation
-                let _ = crate::db::save_message(handle.clone(), receiver, &message_to_save).await;
-                break;
-            }
-        }
+    if let Some((chat_id, msg)) = result {
+        let handle = TAURI_APP.get().unwrap();
+        handle.emit("message_update", serde_json::json!({
+            "old_id": pending_id.as_ref(),
+            "message": &msg,
+            "chat_id": &chat_id
+        })).unwrap();
+        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
     }
 }
 
@@ -206,7 +205,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<bool, String> {
+pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<MessageSendResult, String> {
     // Immediately add the message to our state as "Pending" with an ID derived from the current nanosecond, we'll update it as either Sent (non-pending) or Failed in the future
     let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -280,29 +279,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
     // Prepare the rumor
     let handle = TAURI_APP.get().unwrap();
-    let mut rumor = if file.is_none() {
-        // Send the text message to our frontend with appropriate event
-        if is_group_chat {
-            handle.emit("mls_message_new", serde_json::json!({
-                "group_id": &receiver,
-                "message": &msg
-            })).unwrap();
-        } else {
-            handle.emit("message_new", serde_json::json!({
-                "message": &msg,
-                "chat_id": &receiver
-            })).unwrap();
-        }
-
-        // Text Message
-        if !is_group_chat {
-            EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
-        } else {
-            // For MLS groups, use Kind 9 (White Noise compatible)
-            EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), msg.content)
-        }
-    } else {
-        let attached_file = file.unwrap();
+    let mut rumor = if let Some(attached_file) = file {
 
         // Calculate the file hash first (before encryption)
         let file_hash = calculate_file_hash(&*attached_file.bytes);
@@ -372,15 +349,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
             // Update the pending message with the uploaded attachment
             {
-                let pending_id_for_update = Arc::clone(&pending_id);
-                let mut state = STATE.lock().await;
-                let message = state.chats.iter_mut()
-                    .find(|chat| chat.id() == &receiver)
-                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_update))
-                    .unwrap();
-
-                // Add the Attachment in-state
-                message.attachments.push(Attachment {
+                let attachment = Attachment {
                     id: file_hash.clone(),
                     key: String::new(),  // MLS uses derived keys, not explicit
                     nonce: mls_upload_result.nonce.clone(),
@@ -396,13 +365,19 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     original_hash: Some(mls_upload_result.original_hash.clone()),
                     scheme_version: Some(mls_upload_result.scheme_version.clone()),
                     mls_filename: Some(filename.clone()),
-                });
+                };
+                let compact_att = crate::message::CompactAttachment::from_attachment_owned(attachment);
+
+                let mut state = STATE.lock().await;
+                state.add_attachment_to_message(&receiver, &pending_id, compact_att);
 
                 // Emit update to frontend
-                handle.emit("mls_message_new", serde_json::json!({
-                    "group_id": &receiver,
-                    "message": &message
-                })).unwrap();
+                if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id, |_| {}) {
+                    handle.emit("mls_message_new", serde_json::json!({
+                        "group_id": &receiver,
+                        "message": msg
+                    })).unwrap();
+                }
             }
 
             // Build Kind 9 event with text content and imeta tag
@@ -446,32 +421,24 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 .map_err(|e| format!("Failed to send MLS message: {}", e))?;
 
             // Update message state to non-pending (send_mls_message handles failures)
-            {
+            let msg_for_save = {
                 let mut state = STATE.lock().await;
-                if let Some(message) = state.chats.iter_mut()
-                    .find(|chat| chat.id() == &receiver)
-                    .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id))
-                {
-                    // Update with actual event ID
-                    let old_id = message.id.clone();
-                    message.id = event_id.clone();
-                    message.pending = false;
+                state.finalize_pending_message(&receiver, &pending_id, &event_id)
+            };
 
-                    // Emit update to frontend
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": old_id,
-                        "message": message,
-                        "chat_id": &receiver
-                    })).unwrap();
-
-                    // Save to database
-                    let message_to_save = message.clone();
-                    drop(state);
-                    let _ = crate::db::save_message(handle.clone(), &receiver, &message_to_save).await;
-                }
+            if let Some((old_id, msg)) = msg_for_save {
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": old_id,
+                    "message": &msg,
+                    "chat_id": &receiver
+                })).unwrap();
+                let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
             }
 
-            return Ok(true);
+            return Ok(MessageSendResult {
+                pending_id: pending_id.to_string(),
+                event_id: Some(event_id),
+            });
         }
 
         // ============================================================
@@ -480,44 +447,30 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         // Check for existing attachment with same hash across all profiles BEFORE encrypting
         // BUT: Never reuse empty file hashes - always force a new upload
-        let existing_attachment = if file_hash == EMPTY_FILE_HASH {
+        let existing_attachment: Option<Attachment> = if file_hash == EMPTY_FILE_HASH {
             None
         } else {
-            let mut found_attachment: Option<(String, Attachment)> = None;
-            
+            let mut found_attachment: Option<Attachment> = None;
+
             // First, search through in-memory state (fastest check)
             {
                 let state = STATE.lock().await;
-                for chat in &state.chats {
-                    for message in &chat.messages {
+                'outer: for chat in &state.chats {
+                    for message in chat.messages.iter() {
                         for attachment in &message.attachments {
-                            if attachment.id == file_hash && !attachment.url.is_empty() {
-                                // Found a matching attachment with a valid URL
-                                // For DMs, use first participant; for groups, use chat ID
-                                let chat_identifier = if let Some(participant_id) = chat.participants.first() {
-                                    participant_id.clone()
-                                } else {
-                                    // Group chat - use the chat ID itself
-                                    chat.id.clone()
-                                };
-                                found_attachment = Some((chat_identifier, attachment.clone()));
-                                break;
+                            if attachment.id_eq(&file_hash) && !attachment.url.is_empty() {
+                                found_attachment = Some(attachment.to_attachment());
+                                break 'outer;
                             }
                         }
-                        if found_attachment.is_some() {
-                            break;
-                        }
-                    }
-                    if found_attachment.is_some() {
-                        break;
                     }
                 }
             }
-            
+
             // Fallback: check database if not found in memory (covers all stored attachments)
             if found_attachment.is_none() {
                 if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(handle, &file_hash).await {
-                    found_attachment = Some((attachment_ref.chat_id.clone(), Attachment {
+                    found_attachment = Some(Attachment {
                         id: attachment_ref.hash,
                         url: attachment_ref.url,
                         key: attachment_ref.key,
@@ -533,25 +486,22 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         original_hash: None,
                         scheme_version: None,
                         mls_filename: None,
-                    }));
+                    });
                 }
             }
-            
+
             found_attachment
         };
 
         // Determine if we need to encrypt based on whether we'll reuse an existing attachment
-        let will_reuse_existing = if let Some((_, ref existing)) = existing_attachment {
+        let will_reuse_existing = if let Some(ref existing) = existing_attachment {
             // Check if URL contains empty hash - never reuse those
             const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
             if existing.url.contains(EMPTY_FILE_HASH) {
                 false
             } else {
                 // Check if URL is live
-                match net::check_url_live(&existing.url).await {
-                    Ok(is_live) => is_live,
-                    Err(_) => false
-                }
+                net::check_url_live(&existing.url).await.unwrap_or_default()
             }
         } else {
             false
@@ -581,17 +531,6 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         {
             // Use a clone of the Arc for this block
             let pending_id_clone = Arc::clone(&pending_id);
-            
-            // Retrieve the Pending Message
-            let mut state = STATE.lock().await;
-            let message = state.chats.iter_mut()
-                .find(|chat| {
-                    // For DMs, check if receiver is a participant
-                    // For MLS groups, check if receiver matches the chat ID
-                    chat.id() == &receiver || chat.has_participant(&receiver)
-                })
-                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_clone))
-                .unwrap();
 
             // Choose the appropriate base directory based on platform
             let base_directory = if cfg!(target_os = "ios") {
@@ -613,7 +552,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             std::fs::write(&hash_file_path, &*attached_file.bytes).unwrap();
 
             // Determine encryption params and file size based on whether we found an existing attachment
-            let (attachment_key, attachment_nonce, file_size) = if let Some((_, ref existing)) = existing_attachment {
+            let (attachment_key, attachment_nonce, file_size) = if let Some(ref existing) = existing_attachment {
                 // Reuse existing encryption params
                 (existing.key.clone(), existing.nonce.clone(), existing.size)
             } else {
@@ -621,9 +560,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 (params.key.clone(), params.nonce.clone(), enc_file.len() as u64)
             };
 
-            // Add the Attachment in-state (with our local path, to prevent re-downloading it accidentally from server)
-            message.attachments.push(Attachment {
-                // Use SHA256 hash as the ID
+            // Add the attachment to the pending message
+            let attachment = Attachment {
                 id: file_hash.clone(),
                 key: attachment_key,
                 nonce: attachment_nonce,
@@ -637,22 +575,27 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 webxdc_topic: webxdc_topic.clone(),
                 group_id: if is_group_chat { Some(receiver.clone()) } else { None },
                 original_hash: Some(file_hash.clone()),
-                scheme_version: None, // DM attachments use explicit key/nonce, not MIP-04
-                mls_filename: None,   // DM attachments use explicit key/nonce, not MIP-04
-            });
+                scheme_version: None,
+                mls_filename: None,
+            };
+            let compact_att = crate::message::CompactAttachment::from_attachment_owned(attachment);
 
-            // Send the pending file upload to our frontend with appropriate event
-            // This provides immediate UI feedback for the sender
-            if is_group_chat {
-                handle.emit("mls_message_new", serde_json::json!({
-                    "group_id": &receiver,
-                    "message": &message
-                })).unwrap();
-            } else {
-                handle.emit("message_new", serde_json::json!({
-                    "message": &message,
-                    "chat_id": &receiver
-                })).unwrap();
+            let mut state = STATE.lock().await;
+            state.add_attachment_to_message(&receiver, &pending_id_clone, compact_att);
+
+            // Emit update to frontend
+            if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id_clone, |_| {}) {
+                if is_group_chat {
+                    handle.emit("mls_message_new", serde_json::json!({
+                        "group_id": &receiver,
+                        "message": msg
+                    })).unwrap();
+                } else {
+                    handle.emit("message_new", serde_json::json!({
+                        "message": msg,
+                        "chat_id": &receiver
+                    })).unwrap();
+                }
             }
         }
 
@@ -661,52 +604,56 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         // Check if we found an existing attachment with the same hash
         let mut should_upload = true;
-        let attachment_rumor = if let Some((_found_profile_id, existing_attachment)) = existing_attachment {
+        let attachment_rumor = if let Some(existing) = existing_attachment {
             // Never reuse URLs with the empty file hash
             const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-            let is_empty_hash = existing_attachment.url.contains(EMPTY_FILE_HASH);
+            let is_empty_hash = existing.url.contains(EMPTY_FILE_HASH);
             
             // Verify the URL is still live before reusing (but skip if it's an empty hash)
             let url_is_live = if is_empty_hash {
                 false
             } else {
-                match net::check_url_live(&existing_attachment.url).await {
-                    Ok(is_live) => is_live,
-                    Err(_) => false // Treat errors as dead URL
-                }
+                net::check_url_live(&existing.url).await.unwrap_or_default()
             };
-            
+
             if url_is_live {
                 should_upload = false;
-                
+
                 // Update our pending message with the existing URL
+                let reused_url = existing.url.clone();
                 {
-                    let pending_id_for_update = Arc::clone(&pending_id);
+                    let url = reused_url.clone();
                     let mut state = STATE.lock().await;
-                    let message = state.chats.iter_mut()
-                        .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
-                        .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_update))
-                        .unwrap();
-                    if let Some(attachment) = message.attachments.last_mut() {
-                        attachment.url = existing_attachment.url.clone();
-                    }
+                    state.update_message(&pending_id, |msg| {
+                        if let Some(att) = msg.attachments.last_mut() {
+                            att.url = url.into_boxed_str();
+                        }
+                    });
                 }
-                
+
+                // Emit attachment_update so frontend can update the URL immediately
+                handle.emit("attachment_update", serde_json::json!({
+                    "chat_id": &receiver,
+                    "message_id": pending_id.as_ref(),
+                    "attachment_id": &file_hash,
+                    "url": &reused_url,
+                })).ok();
+
                 // Create the attachment rumor with the existing URL
-                let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing_attachment.url);
-                
+                let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), existing.url);
+
                 // Only add p-tag for DMs, not for MLS groups
                 if !is_group_chat {
                     attachment_rumor = attachment_rumor.tag(Tag::public_key(receiver_pubkey));
                 }
-                
+
                 // Append decryption keys and file metadata (using existing attachment's params)
                 attachment_rumor = attachment_rumor
                     .tag(Tag::custom(TagKind::custom("file-type"), [mime_type.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("size"), [existing_attachment.size.to_string()]))
+                    .tag(Tag::custom(TagKind::custom("size"), [existing.size.to_string()]))
                     .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-                    .tag(Tag::custom(TagKind::custom("decryption-key"), [existing_attachment.key.as_str()]))
-                    .tag(Tag::custom(TagKind::custom("decryption-nonce"), [existing_attachment.nonce.as_str()]))
+                    .tag(Tag::custom(TagKind::custom("decryption-key"), [existing.key.as_str()]))
+                    .tag(Tag::custom(TagKind::custom("decryption-nonce"), [existing.nonce.as_str()]))
                     .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
                 
                 // Append image metadata if available
@@ -758,17 +705,23 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
-                        let pending_id_for_url_update = Arc::clone(&pending_id);
+                        let url_clone = url.clone();
                         let mut state = STATE.lock().await;
-                        let message = state.chats.iter_mut()
-                            .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
-                            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_url_update))
-                            .unwrap();
-                        if let Some(attachment) = message.attachments.last_mut() {
-                            attachment.url = url.clone();
-                        }
+                        state.update_message(&pending_id, |msg| {
+                            if let Some(att) = msg.attachments.last_mut() {
+                                att.url = url_clone.into_boxed_str();
+                            }
+                        });
                     }
-                    
+
+                    // Emit attachment_update so frontend can update the URL immediately
+                    handle.emit("attachment_update", serde_json::json!({
+                        "chat_id": &receiver,
+                        "message_id": pending_id.as_ref(),
+                        "attachment_id": &file_hash,
+                        "url": &url,
+                    })).ok();
+
                     // Create the attachment rumor
                     let mut attachment_rumor = EventBuilder::new(Kind::from_u16(15), url);
                     
@@ -816,6 +769,26 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         
         // Return the final attachment rumor as the main rumor
         final_attachment_rumor
+    } else {
+        // Text message (no attachment)
+        // Send the text message to our frontend with appropriate event
+        if is_group_chat {
+            handle.emit("mls_message_new", serde_json::json!({
+                "group_id": &receiver,
+                "message": &msg
+            })).unwrap();
+        } else {
+            handle.emit("message_new", serde_json::json!({
+                "message": &msg,
+                "chat_id": &receiver
+            })).unwrap();
+        }
+
+        if !is_group_chat {
+            EventBuilder::private_msg_rumor(receiver_pubkey, msg.content)
+        } else {
+            EventBuilder::new(Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE), msg.content)
+        }
     };
 
     // If a reply reference is included, add the tag
@@ -850,13 +823,19 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // - Updates message ID when processed
         // - Marks as success/failure after network confirmation
         // - Saves to database
-        match crate::mls::send_mls_message(&receiver, built_rumor.clone(), Some(pending_id.to_string())).await {
-            Ok(_) => return Ok(true),
+        return match crate::mls::send_mls_message(&receiver, built_rumor.clone(), Some(pending_id.to_string())).await {
+            Ok(_) => Ok(MessageSendResult {
+                pending_id: pending_id.to_string(),
+                event_id: Some(rumor_id.to_hex()),
+            }),
             Err(e) => {
                 eprintln!("Failed to send MLS message: {:?}", e);
-                return Ok(false);
+                Ok(MessageSendResult {
+                    pending_id: pending_id.to_string(),
+                    event_id: None,
+                })
             }
-        }
+        };
     } else {
         // DM - use NIP-17 giftwrap
         // Send message to the real receiver with retry logic
@@ -868,7 +847,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         while send_attempts < MAX_ATTEMPTS {
             send_attempts += 1;
-            
+
             match client
                 .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
                 .await
@@ -883,36 +862,40 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         
                         // Immediately update frontend and save to DB
                         // This provides faster visual feedback without waiting for the self-send
-                        {
+                        let msg_for_save = {
                             let pending_id_for_early_update = Arc::clone(&pending_id);
                             let mut state = STATE.lock().await;
-                            if let Some(msg) = state.chats.iter_mut()
-                                .find(|chat| chat.id() == &receiver || chat.has_participant(&receiver))
-                                .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == *pending_id_for_early_update))
-                            {
-                                // Update the message ID and clear pending state
-                                msg.id = rumor_id.to_hex();
-                                msg.pending = false;
-                                msg.wrapper_event_id = Some(wrapper_id);
-                                
-                                // Emit update to frontend for immediate visual feedback
-                                let handle = TAURI_APP.get().unwrap();
-                                let _ = handle.emit("message_update", serde_json::json!({
-                                    "old_id": pending_id_for_early_update.as_ref(),
-                                    "message": &msg,
-                                    "chat_id": &receiver
-                                }));
-                                
-                                // Save to DB immediately (don't wait for self-send)
-                                let message_to_save = msg.clone();
-                                let chat_to_save = state.get_chat(&receiver).cloned();
-                                drop(state); // Release lock before async DB operations
-                                
-                                if let Some(chat) = chat_to_save {
-                                    let _ = save_chat(handle.clone(), &chat).await;
-                                    let _ = crate::db::save_message(handle.clone(), &receiver, &message_to_save).await;
+                            let chat_idx = state.chats.iter().position(|c| c.id() == &receiver || c.has_participant(&receiver));
+                            if let Some(idx) = chat_idx {
+                                let real_id_hex = rumor_id.to_hex();
+                                if let Some(msg) = state.chats[idx].messages.find_by_hex_id_mut(&pending_id_for_early_update) {
+                                    // Update the message ID and clear pending state
+                                    msg.id = crate::simd::hex_to_bytes_32(&real_id_hex);
+                                    msg.set_pending(false);
+                                    msg.wrapper_id = Some(Box::new(crate::simd::hex_to_bytes_32(&wrapper_id)));
                                 }
+                                // Rebuild index since ID changed
+                                state.chats[idx].messages.rebuild_index();
+                                // Get data for emit and save - clone Chat for db, convert message for emit
+                                let chat_for_save = state.chats[idx].clone();
+                                let msg_for_emit = state.chats[idx].messages.find_by_hex_id(&real_id_hex)
+                                    .map(|m| (pending_id_for_early_update.to_string(), m.to_message(&state.interner)));
+                                (Some(chat_for_save), msg_for_emit)
+                            } else {
+                                (None, None)
                             }
+                        };
+
+                        if let (Some(chat), Some((old_id, msg))) = msg_for_save {
+                            let handle = TAURI_APP.get().unwrap();
+                            // Emit full message_update for backwards compatibility
+                            let _ = handle.emit("message_update", serde_json::json!({
+                                "old_id": old_id,
+                                "message": &msg,
+                                "chat_id": &receiver
+                            }));
+                            let _ = save_chat(handle.clone(), &chat).await;
+                            let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
                         }
                         
                         break;
@@ -924,7 +907,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         if send_attempts == MAX_ATTEMPTS {
                             // Final attempt failed
                             mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                            return Ok(false);
+                            return Ok(MessageSendResult {
+                                pending_id: pending_id.to_string(),
+                                event_id: None,
+                            });
                         }
                     }
                     
@@ -936,13 +922,16 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 Err(e) => {
                     // Network or other error - log and retry if we haven't exceeded attempts
                     eprintln!("Failed to send message (attempt {}/{}): {:?}", send_attempts, MAX_ATTEMPTS, e);
-                    
+
                     if send_attempts == MAX_ATTEMPTS {
                         // Final attempt failed
                         mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-                        return Ok(false);
+                        return Ok(MessageSendResult {
+                            pending_id: pending_id.to_string(),
+                            event_id: None,
+                        });
                     }
-                    
+
                     // Wait before retrying
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY)).await;
                 }
@@ -952,7 +941,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // If we get here without final_output, all attempts failed
         if final_output.is_none() {
             mark_message_failed(Arc::clone(&pending_id), &receiver).await;
-            return Ok(false);
+            return Ok(MessageSendResult {
+                pending_id: pending_id.to_string(),
+                event_id: None,
+            });
         }
 
         // Send message to our own public key, to allow for message recovering
@@ -960,12 +952,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             .gift_wrap(&my_public_key, built_rumor, [])
             .await;
 
-        Ok(true)
+        Ok(MessageSendResult {
+            pending_id: pending_id.to_string(),
+            event_id: Some(rumor_id.to_hex()),
+        })
     }
 }
 
 #[tauri::command]
-pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String, transparent: bool) -> Result<bool, String> {
+pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String, transparent: bool) -> Result<MessageSendResult, String> {
     // Platform-specific clipboard reading
     #[cfg(target_os = "android")]
     let img = {
@@ -1036,7 +1031,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 }
 
 #[tauri::command]
-pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<bool, String> {
+pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
         bytes: Arc::new(bytes),

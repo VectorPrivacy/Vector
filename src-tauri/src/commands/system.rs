@@ -187,50 +187,60 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     let mut updated_chats = std::collections::HashSet::new();
 
     // Process each chat to clear attachment metadata in messages
-    for chat in &mut state.chats {
-        let mut messages_to_update = Vec::new();
+    // Use index-based iteration to allow interner access for Message conversion
+    for chat_idx in 0..state.chats.len() {
+        let mut updated_msg_ids = Vec::new();
 
         // Iterate through all messages in this chat
-        for message in &mut chat.messages {
+        for message in state.chats[chat_idx].messages.iter_mut() {
             let mut attachment_updated = false;
 
             // Iterate through all attachments and reset their properties
             for attachment in &mut message.attachments {
-                if attachment.downloaded || !attachment.path.is_empty() {
-                    // Delete the file, if it exists
-                    if std::fs::exists(&attachment.path).unwrap_or(false) {
-                        let _ = std::fs::remove_file(&attachment.path);
-                    }
+                if attachment.downloaded() || !attachment.path.is_empty() {
+                    // Delete the file (ignore error if it doesn't exist)
+                    let _ = std::fs::remove_file(&*attachment.path);
                     // Reset attachment properties
-                    attachment.downloaded = false;
-                    attachment.downloading = false;
-                    attachment.path = String::new();
+                    attachment.set_downloaded(false);
+                    attachment.set_downloading(false);
+                    attachment.path = String::new().into_boxed_str();
                     attachment_updated = true;
                 }
             }
 
-            // If any attachment was updated, add to messages to update
+            // If any attachment was updated, track this message for save/emit
             if attachment_updated {
-                messages_to_update.push(message.clone());
+                updated_msg_ids.push(message.id);
             }
         }
 
         // If we have messages to update, save them to the database
-        if !messages_to_update.is_empty() {
+        if !updated_msg_ids.is_empty() {
+            let chat_id = state.chats[chat_idx].id().to_string();
+
+            // Convert updated messages to Message format for save and emit
+            let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
+                .filter_map(|msg_id| {
+                    let hex_id = crate::simd::bytes_to_hex_32(msg_id);
+                    state.chats[chat_idx].messages.find_by_hex_id(&hex_id)
+                        .map(|m| m.to_message(&state.interner))
+                })
+                .collect();
+
             // Save updated messages to database
-            db::save_chat_messages(handle.clone(), chat.id(), &messages_to_update).await
-                .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat.id(), e))?;
+            db::save_chat_messages(handle.clone(), &chat_id, &messages_to_update).await
+                .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
 
             // Emit message_update events for each updated message
             for message in &messages_to_update {
                 handle.emit("message_update", serde_json::json!({
                     "old_id": &message.id,
                     "message": message,
-                    "chat_id": chat.id()
-                })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat.id(), e))?;
+                    "chat_id": &chat_id
+                })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat_id, e))?;
             }
 
-            updated_chats.insert(chat.id().to_string());
+            updated_chats.insert(chat_id);
         }
     }
 

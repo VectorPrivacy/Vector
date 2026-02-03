@@ -1,20 +1,36 @@
+//! Chat types and management.
+//!
+//! This module provides:
+//! - `Chat`: Core chat struct with compact message storage
+//! - `SerializableChat`: Frontend-friendly format for Tauri communication
+//! - `ChatType`, `ChatMetadata`: Supporting types
+
 use serde::{Deserialize, Serialize};
-use crate::Message;
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+use crate::message::compact::{CompactMessage, CompactMessageVec, NpubInterner};
+use crate::Message;
+
+// ============================================================================
+// Chat (Internal Storage)
+// ============================================================================
+
+/// Chat with compact message storage for memory efficiency.
+///
+/// Messages are stored as `CompactMessage` with binary IDs and interned npubs.
+/// Use `to_serializable()` to convert to frontend-friendly format.
+#[derive(Clone, Debug)]
 pub struct Chat {
     pub id: String,
     pub chat_type: ChatType,
-    pub participants: Vec<String>, // List of npubs
-    pub messages: Vec<Message>,
+    pub participants: Vec<String>,
+    /// Compact message storage - O(log n) lookup by ID
+    pub messages: CompactMessageVec,
     pub last_read: String,
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
-    /// Typing participants for group chats (npub -> expires_at timestamp)
-    /// Memory-only, never persisted to disk
-    #[serde(skip)]
+    /// Typing participants (npub -> expires_at), memory-only
     pub typing_participants: HashMap<String, u64>,
 }
 
@@ -24,7 +40,7 @@ impl Chat {
             id,
             chat_type,
             participants,
-            messages: Vec::new(),
+            messages: CompactMessageVec::new(),
             last_read: String::new(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -36,7 +52,7 @@ impl Chat {
         }
     }
 
-    /// Create a new DM chat with another user
+    /// Create a new DM chat
     pub fn new_dm(their_npub: String) -> Self {
         Self::new(their_npub.clone(), ChatType::DirectMessage, vec![their_npub])
     }
@@ -46,79 +62,154 @@ impl Chat {
         Self::new(group_id, ChatType::MlsGroup, participants)
     }
 
-    /// Get the last message timestamp
+    // ========================================================================
+    // Message Access (Compact)
+    // ========================================================================
+
+    /// Number of messages
+    #[inline]
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Check if chat has no messages
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// Get last message timestamp
+    #[inline]
     pub fn last_message_time(&self) -> Option<u64> {
-        self.messages.last().map(|msg| msg.at)
+        self.messages.last_timestamp()
     }
 
-    /// Get a mutable message by ID
-    pub fn get_message_mut(&mut self, id: &str) -> Option<&mut Message> {
-        self.messages.iter_mut().find(|msg| msg.id == id)
+    /// Check if a message exists by ID - O(log n)
+    #[inline]
+    pub fn has_message(&self, id: &str) -> bool {
+        self.messages.contains_hex_id(id)
     }
 
-    /// Set the Last Received message as the "Last Read" message
+    /// Get a compact message by ID - O(log n)
+    #[inline]
+    pub fn get_compact_message(&self, id: &str) -> Option<&CompactMessage> {
+        self.messages.find_by_hex_id(id)
+    }
+
+    /// Get a mutable compact message by ID - O(log n)
+    #[inline]
+    pub fn get_compact_message_mut(&mut self, id: &str) -> Option<&mut CompactMessage> {
+        self.messages.find_by_hex_id_mut(id)
+    }
+
+    /// Get a message by ID, converting to full Message format - O(log n)
+    pub fn get_message(&self, id: &str, interner: &NpubInterner) -> Option<Message> {
+        self.messages.find_by_hex_id(id)
+            .map(|cm| cm.to_message(interner))
+    }
+
+    /// Iterate over compact messages (no conversion, supports .rev())
+    #[inline]
+    pub fn iter_compact(&self) -> std::slice::Iter<'_, CompactMessage> {
+        self.messages.iter()
+    }
+
+    /// Get all messages as full Message format (for serialization)
+    pub fn get_all_messages(&self, interner: &NpubInterner) -> Vec<Message> {
+        self.messages.iter()
+            .map(|cm| cm.to_message(interner))
+            .collect()
+    }
+
+    /// Get last N messages as full Message format
+    pub fn get_last_messages(&self, n: usize, interner: &NpubInterner) -> Vec<Message> {
+        let len = self.messages.len();
+        let start = len.saturating_sub(n);
+        self.messages.messages()[start..]
+            .iter()
+            .map(|cm| cm.to_message(interner))
+            .collect()
+    }
+
+    // ========================================================================
+    // Message Mutation
+    // ========================================================================
+
+    /// Add a Message, converting to compact format - O(log n) duplicate check
+    pub fn add_message(&mut self, message: Message, interner: &mut NpubInterner) -> bool {
+        let compact = CompactMessage::from_message(&message, interner);
+        self.messages.insert(compact)
+    }
+
+    /// Add a pre-converted CompactMessage directly
+    #[inline]
+    pub fn add_compact_message(&mut self, message: CompactMessage) -> bool {
+        self.messages.insert(message)
+    }
+
+    /// Set the last non-mine message as read
     pub fn set_as_read(&mut self) -> bool {
-        // Ensure we have at least one message received from others
         for msg in self.messages.iter().rev() {
-            if !msg.mine {
-                // Found the most recent message from others
-                self.last_read = msg.id.clone();
+            if !msg.flags.is_mine() {
+                self.last_read = msg.id_hex();
                 return true;
             }
         }
-        
-        // No messages from others, can't mark anything as read
         false
     }
 
-    /// Add a Message to this Chat
-    /// 
-    /// This method internally checks for and avoids duplicate messages.
-    pub fn internal_add_message(&mut self, message: Message) -> bool {
-        // Make sure we don't add the same message twice
-        if self.messages.iter().any(|m| m.id == message.id) {
-            // Message is already known by the state
-            return false;
-        }
+    // ========================================================================
+    // Compatibility Methods (for gradual migration)
+    // ========================================================================
 
-        // Fast path for common cases: newest or oldest messages
-        if self.messages.is_empty() {
-            // First message
-            self.messages.push(message);
-        } else if message.at >= self.messages.last().unwrap().at {
-            // Common case 1: Latest message (append to end)
-            self.messages.push(message);
-        } else if message.at <= self.messages.first().unwrap().at {
-            // Common case 2: Oldest message (insert at beginning)
-            self.messages.insert(0, message);
-        } else {
-            // Less common case: Message belongs somewhere in the middle
-            self.messages.insert(
-                self.messages.binary_search_by(|m| m.at.cmp(&message.at)).unwrap_or_else(|idx| idx),
-                message
-            );
-        }
-        true
+    /// Legacy: Add message (calls add_message internally)
+    /// Used during migration - prefer add_message() with explicit interner
+    pub fn internal_add_message(&mut self, message: Message, interner: &mut NpubInterner) -> bool {
+        self.add_message(message, interner)
     }
 
-    /// Add a Reaction - if it was not already added
-    pub fn add_reaction(&mut self, reaction: crate::Reaction, message_id: &str) -> bool {
-        // Find the message
-        if let Some(msg) = self.get_message_mut(message_id) {
-            // Make sure we don't add the same reaction twice
-            if !msg.reactions.iter().any(|r| r.id == reaction.id) {
-                msg.reactions.push(reaction);
-                true
-            } else {
-                // Reaction was already added previously
-                false
-            }
-        } else {
-            false
+    /// Get mutable message by ID (returns compact, caller must handle)
+    #[inline]
+    pub fn get_message_mut(&mut self, id: &str) -> Option<&mut CompactMessage> {
+        self.get_compact_message_mut(id)
+    }
+
+    // ========================================================================
+    // Serialization
+    // ========================================================================
+
+    /// Convert to SerializableChat for frontend communication
+    pub fn to_serializable(&self, interner: &NpubInterner) -> SerializableChat {
+        SerializableChat {
+            id: self.id.clone(),
+            chat_type: self.chat_type.clone(),
+            participants: self.participants.clone(),
+            messages: self.get_all_messages(interner),
+            last_read: self.last_read.clone(),
+            created_at: self.created_at,
+            metadata: self.metadata.clone(),
+            muted: self.muted,
         }
     }
 
-    /// Get other participant for DM chats
+    /// Convert to SerializableChat with only the last N messages (for efficiency)
+    pub fn to_serializable_with_last_n(&self, n: usize, interner: &NpubInterner) -> SerializableChat {
+        SerializableChat {
+            id: self.id.clone(),
+            chat_type: self.chat_type.clone(),
+            participants: self.participants.clone(),
+            messages: self.get_last_messages(n, interner),
+            last_read: self.last_read.clone(),
+            created_at: self.created_at,
+            metadata: self.metadata.clone(),
+            muted: self.muted,
+        }
+    }
+
+    // ========================================================================
+    // Chat Metadata & Participants
+    // ========================================================================
+
     pub fn get_other_participant(&self, my_npub: &str) -> Option<String> {
         match self.chat_type {
             ChatType::DirectMessage => {
@@ -126,33 +217,29 @@ impl Chat {
                     .find(|&p| p != my_npub)
                     .cloned()
             }
-            ChatType::MlsGroup => None, // Groups don't have a single "other" participant
+            ChatType::MlsGroup => None,
         }
     }
 
-    /// Check if this is a DM with a specific user
     pub fn is_dm_with(&self, npub: &str) -> bool {
-        matches!(self.chat_type, ChatType::DirectMessage) && self.participants.iter().any(|p| p == npub)
+        matches!(self.chat_type, ChatType::DirectMessage)
+            && self.participants.iter().any(|p| p == npub)
     }
 
-    /// Check if this is an MLS group
     pub fn is_mls_group(&self) -> bool {
         matches!(self.chat_type, ChatType::MlsGroup)
     }
 
-    /// Check if user is a participant in this chat
     pub fn has_participant(&self, npub: &str) -> bool {
         self.participants.iter().any(|p| p == npub)
     }
 
-    /// Get active typers (non-expired) for group chats
-    /// Returns a list of npubs that are currently typing
     pub fn get_active_typers(&self) -> Vec<String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         self.typing_participants
             .iter()
             .filter(|(_, &expires_at)| expires_at > now)
@@ -160,13 +247,8 @@ impl Chat {
             .collect()
     }
 
-    /// Update typing state for a participant in a group chat
-    /// Automatically cleans up expired entries
     pub fn update_typing_participant(&mut self, npub: String, expires_at: u64) {
-        // Add or update the typing participant
         self.typing_participants.insert(npub, expires_at);
-        
-        // Clean up expired entries
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -174,106 +256,115 @@ impl Chat {
         self.typing_participants.retain(|_, &mut exp| exp > now);
     }
 
-    // Getter methods for private fields
-    pub fn id(&self) -> &String {
-        &self.id
-    }
+    // Getters
+    pub fn id(&self) -> &String { &self.id }
+    pub fn chat_type(&self) -> &ChatType { &self.chat_type }
+    pub fn participants(&self) -> &Vec<String> { &self.participants }
+    pub fn last_read(&self) -> &String { &self.last_read }
+    pub fn created_at(&self) -> u64 { self.created_at }
+    pub fn metadata(&self) -> &ChatMetadata { &self.metadata }
+    pub fn muted(&self) -> bool { self.muted }
+}
 
-    pub fn chat_type(&self) -> &ChatType {
-        &self.chat_type
-    }
+// ============================================================================
+// SerializableChat (Frontend Communication)
+// ============================================================================
 
-    pub fn participants(&self) -> &Vec<String> {
-        &self.participants
-    }
+/// Serializable chat format for Tauri commands and emit().
+///
+/// This is what the frontend receives. Create via `chat.to_serializable(interner)`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SerializableChat {
+    pub id: String,
+    pub chat_type: ChatType,
+    pub participants: Vec<String>,
+    pub messages: Vec<Message>,
+    pub last_read: String,
+    pub created_at: u64,
+    pub metadata: ChatMetadata,
+    pub muted: bool,
+}
 
-    pub fn last_read(&self) -> &String {
-        &self.last_read
-    }
+impl SerializableChat {
+    /// Convert to a Chat with compact storage (for loading from DB)
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_chat(self, interner: &mut NpubInterner) -> Chat {
+        let mut chat = Chat::new(self.id, self.chat_type, self.participants);
+        chat.last_read = self.last_read;
+        chat.created_at = self.created_at;
+        chat.metadata = self.metadata;
+        chat.muted = self.muted;
 
-    pub fn created_at(&self) -> u64 {
-        self.created_at
-    }
+        for msg in self.messages {
+            chat.add_message(msg, interner);
+        }
 
-    pub fn metadata(&self) -> &ChatMetadata {
-        &self.metadata
-    }
-
-    pub fn muted(&self) -> bool {
-        self.muted
+        chat
     }
 }
+
+// ============================================================================
+// Supporting Types
+// ============================================================================
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ChatType {
     DirectMessage,
     MlsGroup,
-    // Future types can be added here
 }
 
 impl ChatType {
-    /// Convert ChatType to integer for database storage
-    /// 0 = DirectMessage, 1 = MlsGroup
     pub fn to_i32(&self) -> i32 {
         match self {
             ChatType::DirectMessage => 0,
             ChatType::MlsGroup => 1,
         }
     }
-    
-    /// Convert integer from database to ChatType
+
     pub fn from_i32(value: i32) -> Self {
         match value {
             1 => ChatType::MlsGroup,
-            _ => ChatType::DirectMessage, // Default to DM for safety
+            _ => ChatType::DirectMessage,
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ChatMetadata {
-    pub custom_fields: HashMap<String, String>, // For extensibility
+    pub custom_fields: HashMap<String, String>,
 }
 
 impl ChatMetadata {
     pub fn new() -> Self {
-        Self {
-            custom_fields: HashMap::new(),
-        }
+        Self { custom_fields: HashMap::new() }
     }
 
-    /// Set the group name in custom_fields
     pub fn set_name(&mut self, name: String) {
         self.custom_fields.insert("name".to_string(), name);
     }
 
-    /// Get the group name from custom_fields
     pub fn get_name(&self) -> Option<&str> {
         self.custom_fields.get("name").map(|s| s.as_str())
     }
 
-    /// Set the member count in custom_fields
     pub fn set_member_count(&mut self, count: usize) {
         self.custom_fields.insert("member_count".to_string(), count.to_string());
     }
 
-    /// Get the member count from custom_fields
     pub fn get_member_count(&self) -> Option<usize> {
         self.custom_fields.get("member_count").and_then(|s| s.parse().ok())
     }
 }
 
-//// Marks a specific message as read for a chat.
-/// Behavior:
-///  - If message_id is Some(id): set chat.last_read = id.
-///  - Else: call chat.set_as_read() to pick the last non-mine message.
-///  - Persist the chat (outside the STATE lock) and update unread counter on success.
+// ============================================================================
+// Tauri Commands
+// ============================================================================
+
+/// Marks a specific message as read for a chat.
 #[tauri::command]
 pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
-    // Apply the read change regardless of window focus; frontend intent is authoritative
     let handle = crate::TAURI_APP.get().unwrap();
 
-    // Apply the read change to the specified chat
     let (result, chat_id_for_save) = {
         let mut state = crate::STATE.lock().await;
         let mut result = false;
@@ -281,12 +372,10 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
 
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
             if let Some(msg_id) = &message_id {
-                // Explicit message -> set that as last_read
                 chat.last_read = msg_id.clone();
                 result = true;
                 chat_id_for_save = Some(chat.id.clone());
             } else {
-                // No explicit message -> fall back to set_as_read behaviour
                 result = chat.set_as_read();
                 if result {
                     chat_id_for_save = Some(chat.id.clone());
@@ -297,21 +386,16 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
         (result, chat_id_for_save)
     };
 
-    // Update the unread counter and save to DB if the marking was successful
     if result {
-        // Update the badge count
         crate::commands::messaging::update_unread_counter(handle.clone()).await;
 
-        // Save the updated chat to the DB
         if let Some(chat_id) = chat_id_for_save {
-            // Get the updated chat to save its metadata (including last_read)
-            let updated_chat = {
+            let chat_to_save = {
                 let state = crate::STATE.lock().await;
                 state.get_chat(&chat_id).cloned()
             };
 
-            // Save to DB
-            if let Some(chat) = updated_chat {
+            if let Some(chat) = chat_to_save {
                 let _ = crate::db::save_chat(handle.clone(), &chat).await;
             }
         }

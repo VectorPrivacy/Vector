@@ -273,19 +273,20 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                             }
 
                             // Update message in state and emit to frontend
-                            let mut state = STATE.lock().await;
-                            if let Some(chat) = state.get_chat_mut(&contact) {
-                                if let Some(msg) = chat.get_message_mut(&message_id) {
+                            let msg_for_emit = {
+                                let mut state = STATE.lock().await;
+                                state.update_message_in_chat(&contact, &message_id, |msg| {
                                     msg.apply_edit(new_content, edited_at);
+                                })
+                            };
 
-                                    // Emit update to frontend
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = handle.emit("message_update", serde_json::json!({
-                                            "old_id": &message_id,
-                                            "message": &msg,
-                                            "chat_id": &contact
-                                        }));
-                                    }
+                            if let Some(msg) = msg_for_emit {
+                                if let Some(handle) = TAURI_APP.get() {
+                                    let _ = handle.emit("message_update", serde_json::json!({
+                                        "old_id": &message_id,
+                                        "message": msg,
+                                        "chat_id": &contact
+                                    }));
                                 }
                             }
                             true
@@ -498,23 +499,14 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
     // Use a single lock scope to avoid nested locks
     let (reaction_added, chat_id_for_save) = {
         let mut state = STATE.lock().await;
-        let reaction_added = if let Some((chat_id, msg_mut)) = state.find_chat_and_message_mut(&reaction.reference_id) {
-            msg_mut.add_reaction(reaction.clone(), Some(chat_id))
+        // Use helper that handles interner access via split borrowing
+        if let Some((chat_id, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
+            (added, if added { Some(chat_id) } else { None })
         } else {
             // Message not found in any chat - this can happen during sync
             // TODO: track these "ahead" reactions and re-apply them once sync has finished
-            false
-        };
-        
-        // If reaction was added, get the chat_id for saving
-        let chat_id_for_save = if reaction_added {
-            state.find_message(&reaction.reference_id)
-                .map(|(chat, _)| chat.id().clone())
-        } else {
-            None
-        };
-        
-        (reaction_added, chat_id_for_save)
+            (false, None)
+        }
     };
 
     // Save the updated message with the new reaction to our DB (outside of state lock)
@@ -529,6 +521,11 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
             
             if let Some(msg) = updated_message {
                 let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
+                let _ = handle.emit("message_update", serde_json::json!({
+                    "old_id": &reaction.reference_id,
+                    "message": &msg,
+                    "chat_id": &chat_id
+                }));
             }
         }
     }

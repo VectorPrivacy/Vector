@@ -16,7 +16,7 @@ use crate::shared::image::read_file_checked;
 
 use super::types::{CachedCompressedImage, AttachmentFile, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
 use super::compression::{compress_bytes_internal, compress_image_internal};
-use super::message;
+use super::sending::{message, MessageSendResult};
 
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
@@ -153,7 +153,7 @@ pub async fn get_cached_bytes_compression_status() -> Result<Option<CompressionE
 
 /// Send cached file (with optional compression)
 #[tauri::command]
-pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool) -> Result<bool, String> {
+pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool) -> Result<MessageSendResult, String> {
     use super::compression::MIN_SAVINGS_PERCENT;
 
     if use_compression {
@@ -271,7 +271,7 @@ pub async fn send_file_bytes(
     file_bytes: Vec<u8>,
     file_name: String,
     use_compression: bool
-) -> Result<bool, String> {
+) -> Result<MessageSendResult, String> {
     use super::compression::MIN_SAVINGS_PERCENT;
 
     // Extract extension from filename
@@ -315,7 +315,7 @@ pub async fn send_file_bytes(
 }
 
 #[tauri::command]
-pub async fn file_message(receiver: String, replied_to: String, file_path: String) -> Result<bool, String> {
+pub async fn file_message(receiver: String, replied_to: String, file_path: String) -> Result<MessageSendResult, String> {
     // Load the file as AttachmentFile
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
@@ -620,7 +620,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
 
 /// Send a file with compression (for images)
 #[tauri::command]
-pub async fn file_message_compressed(receiver: String, replied_to: String, file_path: String) -> Result<bool, String> {
+pub async fn file_message_compressed(receiver: String, replied_to: String, file_path: String) -> Result<MessageSendResult, String> {
     // Load the file as AttachmentFile
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
@@ -809,7 +809,7 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
 
 /// Send a file using the cached compressed version if available
 #[tauri::command]
-pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String) -> Result<bool, String> {
+pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String) -> Result<MessageSendResult, String> {
     use super::compression::MIN_SAVINGS_PERCENT;
     
     // First check if compression is complete or still in progress

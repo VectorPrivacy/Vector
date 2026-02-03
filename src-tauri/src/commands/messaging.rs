@@ -29,21 +29,29 @@ pub async fn get_chat_messages_paginated<R: Runtime>(
 
     // Also add these messages to the backend state for cache synchronization
     // This ensures operations like fetch_msg_metadata can find the messages
+    // Clone for return, move originals to batch (zero-copy in batch insert)
+    let messages_for_return = messages.clone();
+
     if !messages.is_empty() {
+        #[cfg(debug_assertions)]
+        let start = std::time::Instant::now();
         let mut state = STATE.lock().await;
-        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-            for msg in &messages {
-                // Only add if not already present (avoid duplicates)
-                if !chat.messages.iter().any(|m| m.id == msg.id) {
-                    chat.messages.push(msg.clone());
-                }
-            }
-            // Sort messages by timestamp to maintain order
-            chat.messages.sort_by_key(|m| m.at);
+
+        // Use batch insert with zero-copy (moves the messages)
+        let added = state.add_messages_to_chat_batch(&chat_id, messages);
+
+        #[cfg(debug_assertions)]
+        if added > 0 {
+            state.cache_stats.insert_count += added as u64;
+            state.cache_stats.record_insert(start.elapsed());
+            let chats_clone = state.chats.clone();
+            state.cache_stats.update_from_chats(&chats_clone);
+            println!("[CacheStats] paginated load: added {} msgs in {:?}", added, start.elapsed());
+            state.cache_stats.log();
         }
     }
 
-    Ok(messages)
+    Ok(messages_for_return)
 }
 
 /// Get the total message count for a chat
@@ -70,17 +78,30 @@ pub async fn get_message_views<R: Runtime>(
     // Get materialized message views from events
     let messages = db::get_message_views(&handle, chat_int_id, limit, offset).await?;
 
-    // Sync to backend state for cache compatibility (uses binary search for efficient insertion)
+    // Sync to backend state for cache compatibility (batch insert for efficiency)
+    // Clone for return, move originals to batch (zero-copy in batch insert)
+    let messages_for_return = messages.clone();
+
     if !messages.is_empty() {
+        #[cfg(debug_assertions)]
+        let start = std::time::Instant::now();
         let mut state = STATE.lock().await;
-        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-            for msg in messages.iter().cloned() {
-                chat.internal_add_message(msg);
-            }
+
+        // Use batch insert with zero-copy (moves the messages)
+        let added = state.add_messages_to_chat_batch(&chat_id, messages);
+
+        #[cfg(debug_assertions)]
+        if added > 0 {
+            state.cache_stats.insert_count += added as u64;
+            state.cache_stats.record_insert(start.elapsed());
+            let chats_clone = state.chats.clone();
+            state.cache_stats.update_from_chats(&chats_clone);
+            println!("[CacheStats] message_views load: added {} msgs in {:?}", added, start.elapsed());
+            state.cache_stats.log();
         }
     }
 
-    Ok(messages)
+    Ok(messages_for_return)
 }
 
 /// Get messages around a specific message ID (for scrolling to replied-to messages)
@@ -95,16 +116,29 @@ pub async fn get_messages_around_id<R: Runtime>(
     let messages = db::get_messages_around_id(&handle, &chat_id, &target_message_id, context_before).await?;
 
     // Sync to backend state so fetch_msg_metadata and other functions can find these messages
+    // Clone for return, move originals to batch (zero-copy in batch insert)
+    let messages_for_return = messages.clone();
+
     if !messages.is_empty() {
+        #[cfg(debug_assertions)]
+        let start = std::time::Instant::now();
         let mut state = STATE.lock().await;
-        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-            for msg in messages.iter().cloned() {
-                chat.internal_add_message(msg);
-            }
+
+        // Use batch insert with zero-copy (moves the messages)
+        let added = state.add_messages_to_chat_batch(&chat_id, messages);
+
+        #[cfg(debug_assertions)]
+        if added > 0 {
+            state.cache_stats.insert_count += added as u64;
+            state.cache_stats.record_insert(start.elapsed());
+            let chats_clone = state.chats.clone();
+            state.cache_stats.update_from_chats(&chats_clone);
+            println!("[CacheStats] messages_around load: added {} msgs in {:?}", added, start.elapsed());
+            state.cache_stats.log();
         }
     }
 
-    Ok(messages)
+    Ok(messages_for_return)
 }
 
 // ============================================================================
@@ -156,11 +190,12 @@ pub async fn get_system_events<R: Runtime>(
 pub async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(), String> {
     let mut state = STATE.lock().await;
     if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-        let total = chat.messages.len();
+        let total = chat.message_count();
         if total > keep_count {
             // Keep only the last `keep_count` messages (most recent)
             let drain_count = total - keep_count;
             chat.messages.drain(0..drain_count);
+            chat.messages.rebuild_index();
         }
     }
     Ok(())

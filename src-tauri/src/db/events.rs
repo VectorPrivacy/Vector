@@ -859,7 +859,8 @@ pub async fn get_message_views<R: Runtime>(
         let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
 
         // Get attachments from the lookup map (for kind=15 file messages)
-        let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
+        let attachments: Vec<Attachment> = attachments_by_msg.remove(&event.id)
+            .unwrap_or_default();
 
         // Get original content (already decrypted by get_events())
         let original_content = if event.kind == event_kind::FILE_ATTACHMENT {

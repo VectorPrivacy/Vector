@@ -27,19 +27,15 @@ use tauri::{AppHandle, Runtime};
 use std::collections::HashMap;
 
 use crate::{Message, Attachment};
-use crate::util::{bytes_to_hex_32, bytes_to_hex_16, hex_to_bytes_32, hex_to_bytes_16};
+use crate::util::{bytes_to_hex_32, bytes_to_hex_string, hex_to_bytes_32, hex_string_to_bytes};
 use super::{get_chat_id_by_identifier, get_message_views};
 
-/// Lightweight attachment reference for file deduplication
-/// Contains only the data needed to reuse an existing upload
+/// Lightweight attachment reference for file deduplication.
+/// Contains only the data needed to reuse an existing upload.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AttachmentRef {
     /// The SHA256 hash of the original file (used as ID)
     pub hash: String,
-    /// The message ID containing this attachment
-    pub message_id: String,
-    /// The chat ID containing this message
-    pub chat_id: String,
     /// The encrypted file URL on the server
     pub url: String,
     /// The encryption key
@@ -60,7 +56,7 @@ pub struct AttachmentRef {
 /// Ultra-packed attachment entry optimized for memory efficiency.
 ///
 /// Uses fixed-size byte arrays instead of heap-allocated strings, and bitpacks
-/// indices for interned strings. Total size: 152 bytes per entry.
+/// indices for interned strings. Total size: 116 bytes per entry.
 ///
 /// # Memory Layout
 ///
@@ -68,10 +64,9 @@ pub struct AttachmentRef {
 /// |-----------------|---------|------------------------------------------|
 /// | `hash`          | 32 bytes| Original file hash (binary search key)  |
 /// | `url_file_hash` | 32 bytes| Encrypted hash from URL                 |
-/// | `message_id`    | 32 bytes| Event ID containing this attachment     |
 /// | `key`           | 32 bytes| Encryption key                          |
-/// | `nonce`         | 16 bytes| Encryption nonce                        |
-/// | `packed_indices`| 4 bytes | Bitpacked: chat(10) + url(6) + ext(6)   |
+/// | `nonce`         | 12 bytes| AES-GCM nonce (standard 96-bit)         |
+/// | `packed_indices`| 4 bytes | Bitpacked: base_url(6) + ext(6)         |
 /// | `size`          | 4 bytes | File size (max 4GB)                     |
 #[derive(Clone, Debug)]
 #[repr(C)] // Ensure predictable memory layout
@@ -81,46 +76,37 @@ pub struct UltraPackedEntry {
     /// Encrypted file hash extracted from URL (different from original).
     /// Required for URL reconstruction since encryption changes the hash.
     pub url_file_hash: [u8; 32],
-    /// Message/event ID containing this attachment.
-    pub message_id: [u8; 32],
     /// Encryption key for decrypting the file.
     pub key: [u8; 32],
-    /// Encryption nonce for decrypting the file.
-    pub nonce: [u8; 16],
+    /// Encryption nonce (12 bytes = 96-bit AES-GCM standard).
+    pub nonce: [u8; 12],
     /// Bitpacked indices into string tables.
-    /// Layout: `[chat_id: 10 bits][base_url: 6 bits][extension: 6 bits][unused: 10 bits]`
+    /// Layout: `[base_url: 6 bits][extension: 6 bits][unused: 20 bits]`
     pub packed_indices: u32,
     /// Encrypted file size in bytes (max 4GB per file).
     pub size: u32,
 }
 
 impl UltraPackedEntry {
-    /// Pack indices into a single u32
-    /// Layout: [chat_id: 10 bits][base_url: 6 bits][extension: 6 bits][unused: 10 bits]
+    /// Pack indices into a single u32.
+    /// Layout: `[base_url: 6 bits][extension: 6 bits][unused: 20 bits]`
     #[inline]
-    pub fn pack_indices(chat_id: u16, base_url: u16, extension: u8) -> u32 {
-        ((chat_id as u32 & 0x3FF) << 22)       // 10 bits, max 1023
-            | ((base_url as u32 & 0x3F) << 16) // 6 bits, max 63
-            | ((extension as u32 & 0x3F) << 10) // 6 bits, max 63
-            // 10 bits unused (for future use)
-    }
-
-    /// Unpack chat_id index
-    #[inline]
-    pub fn chat_id_idx(&self) -> u16 {
-        ((self.packed_indices >> 22) & 0x3FF) as u16
+    pub fn pack_indices(base_url: u16, extension: u8) -> u32 {
+        ((base_url as u32 & 0x3F) << 26)      // 6 bits, max 63
+            | ((extension as u32 & 0x3F) << 20) // 6 bits, max 63
+            // 20 bits unused (for future use)
     }
 
     /// Unpack base_url index
     #[inline]
     pub fn base_url_idx(&self) -> u16 {
-        ((self.packed_indices >> 16) & 0x3F) as u16
+        ((self.packed_indices >> 26) & 0x3F) as u16
     }
 
     /// Unpack extension index
     #[inline]
     pub fn extension_idx(&self) -> u8 {
-        ((self.packed_indices >> 10) & 0x3F) as u8
+        ((self.packed_indices >> 20) & 0x3F) as u8
     }
 }
 
@@ -128,13 +114,13 @@ impl UltraPackedEntry {
 ///
 /// This index enables O(log n) attachment lookup by file hash without the
 /// memory overhead of a HashMap. String interning further reduces memory
-/// by deduplicating repeated values like chat IDs and URLs.
+/// by deduplicating repeated values like URLs and extensions.
 ///
 /// # Memory Usage
 ///
-/// For 6,800 attachments: ~1 MB total
-/// - Entries: 152 bytes × 6,800 = ~1,034 KB
-/// - String tables: ~5 KB (interned, highly deduplicated)
+/// For 6,800 attachments: ~789 KB total
+/// - Entries: 116 bytes × 6,800 = ~789 KB
+/// - String tables: ~3 KB (interned, highly deduplicated)
 ///
 /// Compare to naive HashMap<String, AttachmentRef>: ~4.2 MB
 ///
@@ -143,8 +129,6 @@ impl UltraPackedEntry {
 /// Binary search: O(log n) = ~13 comparisons for 6,800 entries
 /// Typical lookup time: ~10μs
 pub struct UltraPackedFileHashIndex {
-    /// Interned chat IDs (npubs). Max 1024 unique values (10-bit index).
-    pub chat_ids: Vec<String>,
     /// Interned base URLs (host + API path + uploader). Max 64 unique values (6-bit index).
     pub base_urls: Vec<String>,
     /// Interned file extensions. Max 64 unique values (6-bit index).
@@ -172,11 +156,9 @@ impl UltraPackedFileHashIndex {
         use crate::stored_event::event_kind;
 
         // String interning tables
-        let mut chat_id_map: HashMap<String, u16> = HashMap::new();
         let mut base_url_map: HashMap<String, u16> = HashMap::new();
         let mut ext_map: HashMap<String, u8> = HashMap::new();
 
-        let mut chat_ids: Vec<String> = Vec::new();
         let mut base_urls: Vec<String> = Vec::new();
         let mut extensions: Vec<String> = Vec::new();
         let mut entries: Vec<UltraPackedEntry> = Vec::new();
@@ -246,22 +228,15 @@ impl UltraPackedFileHashIndex {
             }
         }
 
-        // Query attachment data
-        let attachment_data: Vec<(String, String, String)> = {
+        // Query attachment data (only need tags - no chat_id or message_id needed)
+        let attachment_data: Vec<String> = {
             let conn = crate::account_manager::get_db_connection_guard(handle)?;
             let mut stmt = conn.prepare(
-                "SELECT e.id, c.chat_identifier, e.tags
-                 FROM events e
-                 JOIN chats c ON e.chat_id = c.id
-                 WHERE e.kind = ?1"
+                "SELECT tags FROM events WHERE kind = ?1"
             ).map_err(|e| format!("Failed to prepare attachment query: {}", e))?;
 
             let rows = stmt.query_map(rusqlite::params![event_kind::FILE_ATTACHMENT], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+                row.get::<_, String>(0)
             }).map_err(|e| format!("Failed to query attachments: {}", e))?;
 
             rows.collect::<Result<Vec<_>, _>>()
@@ -270,7 +245,7 @@ impl UltraPackedFileHashIndex {
 
         const EMPTY_FILE_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-        for (message_id, chat_id, tags_json) in attachment_data {
+        for tags_json in attachment_data {
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
             let attachments_json = tags.iter()
                 .find(|tag| tag.first().map(|s| s.as_str()) == Some("attachments"))
@@ -286,30 +261,38 @@ impl UltraPackedFileHashIndex {
                     continue;
                 }
 
+                // Skip MLS attachments - they use rolling keys and can't be reused for deduplication.
+                // MLS attachments have original_hash set (used for key derivation).
+                if att.original_hash.is_some() {
+                    continue;
+                }
+
                 // Extract encrypted file hash from URL (this is different from att.id!)
                 let url_file_hash = extract_url_file_hash(&att.url);
 
                 // Extract and intern the base URL (includes host/api/uploader/)
                 let base_url = extract_base_url(&att.url);
                 let base_url_idx = intern_u16(&base_url, &mut base_url_map, &mut base_urls);
-
-                let chat_id_idx = intern_u16(&chat_id, &mut chat_id_map, &mut chat_ids);
                 let extension_idx = intern_u8(&att.extension, &mut ext_map, &mut extensions);
 
                 // Clamp size to u32 max (4GB)
                 let size = if att.size > u32::MAX as u64 { u32::MAX } else { att.size as u32 };
 
+                // Parse nonce (12 bytes = 24 hex chars for AES-GCM)
+                let nonce = {
+                    let bytes = hex_string_to_bytes(&att.nonce);
+                    let mut arr = [0u8; 12];
+                    let len = bytes.len().min(12);
+                    arr[..len].copy_from_slice(&bytes[..len]);
+                    arr
+                };
+
                 entries.push(UltraPackedEntry {
                     hash: hex_to_bytes_32(&att.id),
                     url_file_hash,
-                    message_id: hex_to_bytes_32(&message_id),
                     key: hex_to_bytes_32(&att.key),
-                    nonce: hex_to_bytes_16(&att.nonce),
-                    packed_indices: UltraPackedEntry::pack_indices(
-                        chat_id_idx,
-                        base_url_idx,
-                        extension_idx,
-                    ),
+                    nonce,
+                    packed_indices: UltraPackedEntry::pack_indices(base_url_idx, extension_idx),
                     size,
                 });
             }
@@ -318,7 +301,7 @@ impl UltraPackedFileHashIndex {
         // Sort by hash for binary search!
         entries.sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
 
-        let index = Self { chat_ids, base_urls, extensions, entries };
+        let index = Self { base_urls, extensions, entries };
         index.log_memory();
         Ok(index)
     }
@@ -365,11 +348,9 @@ impl UltraPackedFileHashIndex {
 
             AttachmentRef {
                 hash: hash_hex,
-                message_id: bytes_to_hex_32(&entry.message_id),
-                chat_id: self.chat_ids.get(entry.chat_id_idx() as usize).cloned().unwrap_or_default(),
                 url,
                 key: bytes_to_hex_32(&entry.key),
-                nonce: bytes_to_hex_16(&entry.nonce),
+                nonce: bytes_to_hex_string(&entry.nonce),
                 extension: ext.to_string(),
                 size: entry.size as u64,
             }
@@ -381,10 +362,9 @@ impl UltraPackedFileHashIndex {
     pub fn log_memory(&self) {
         let entry_size = std::mem::size_of::<UltraPackedEntry>();
         let entries_total = self.entries.len() * entry_size;
-        let string_tables: usize = self.chat_ids.iter().map(|s| s.capacity()).sum::<usize>()
-            + self.base_urls.iter().map(|s| s.capacity()).sum::<usize>()
+        let string_tables: usize = self.base_urls.iter().map(|s| s.capacity()).sum::<usize>()
             + self.extensions.iter().map(|s| s.capacity()).sum::<usize>();
-        let total_bytes = entries_total + string_tables + 24; // +24 for Vec overhead
+        let total_bytes = entries_total + string_tables + 16; // +16 for Vec overhead (2 Vecs)
 
         println!("[FileHashIndex] {} entries, {:.1} KB ({}B/entry, sorted Vec + binary search)",
             self.entries.len(), total_bytes as f64 / 1024.0, entry_size);
@@ -866,4 +846,90 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
     ).map_err(|e| format!("Failed to update event: {}", e))?;
 
     Ok(())
+}
+
+/// Check all downloaded attachments in the database for missing files.
+/// Updates the database directly for any files that no longer exist.
+/// Returns (total_checked, missing_count, elapsed_time).
+pub async fn check_downloaded_attachments_integrity<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<(usize, usize, std::time::Duration), String> {
+    let start = std::time::Instant::now();
+
+    // Query all events with file attachments that have downloaded files
+    // Using JSON extract to filter only events with downloaded attachments
+    let events_with_downloaded: Vec<(String, String)> = {
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+
+        // Query all file attachment events - we'll filter in Rust for downloaded=true
+        // This is more reliable than JSON filtering in SQLite
+        let mut stmt = conn.prepare(
+            "SELECT id, tags FROM events WHERE kind = 15"
+        ).map_err(|e| format!("Failed to prepare integrity query: {}", e))?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|e| format!("Failed to query attachments: {}", e))?;
+
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut total_checked = 0;
+    let mut missing_count = 0;
+    let mut updates: Vec<(String, String)> = Vec::new(); // (event_id, updated_tags_json)
+
+    for (event_id, tags_json) in events_with_downloaded {
+        let mut tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+        let attachments_tag_idx = tags.iter().position(|tag| {
+            tag.first().map(|s| s.as_str()) == Some("attachments")
+        });
+
+        let Some(idx) = attachments_tag_idx else { continue };
+        let Some(attachments_json) = tags.get(idx).and_then(|t| t.get(1)) else { continue };
+
+        let mut attachments: Vec<crate::Attachment> = serde_json::from_str(attachments_json)
+            .unwrap_or_default();
+
+        let mut modified = false;
+        for att in &mut attachments {
+            if att.downloaded && !att.path.is_empty() {
+                total_checked += 1;
+                if !std::path::Path::new(&att.path).exists() {
+                    att.downloaded = false;
+                    att.path = String::new();
+                    modified = true;
+                    missing_count += 1;
+                }
+            }
+        }
+
+        if modified {
+            let updated_attachments_json = serde_json::to_string(&attachments)
+                .map_err(|e| format!("Failed to serialize: {}", e))?;
+            tags[idx] = vec!["attachments".to_string(), updated_attachments_json];
+            let updated_tags_json = serde_json::to_string(&tags)
+                .map_err(|e| format!("Failed to serialize tags: {}", e))?;
+            updates.push((event_id, updated_tags_json));
+        }
+    }
+
+    // Batch update all modified events
+    if !updates.is_empty() {
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        for (event_id, tags_json) in updates {
+            conn.execute(
+                "UPDATE events SET tags = ?1 WHERE id = ?2",
+                rusqlite::params![tags_json, event_id],
+            ).ok(); // Ignore individual errors
+        }
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "[Integrity] Checked {} downloaded attachments in {:?}, {} missing files updated",
+        total_checked, elapsed, missing_count
+    );
+
+    Ok((total_checked, missing_count, elapsed))
 }

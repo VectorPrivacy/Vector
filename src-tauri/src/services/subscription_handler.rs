@@ -247,16 +247,23 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 // Save to database if message was added
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
-                                                                        // Get chat and save it
-                                                                        let chat_to_save = {
+                                                                        // Get chat and convert messages with interner access
+                                                                        let (chat_to_save, messages_to_save) = {
                                                                             let state = crate::STATE.lock().await;
-                                                                            state.get_chat(&group_id_for_persist).cloned()
+                                                                            if let Some(chat) = state.get_chat(&group_id_for_persist) {
+                                                                                let msgs: Vec<crate::Message> = chat.messages.iter()
+                                                                                    .map(|m| m.to_message(&state.interner))
+                                                                                    .collect();
+                                                                                (Some(chat.clone()), msgs)
+                                                                            } else {
+                                                                                (None, vec![])
+                                                                            }
                                                                         };
-                                                                        
+
                                                                         if let Some(chat) = chat_to_save {
                                                                             use crate::db::{save_chat, save_chat_messages};
                                                                             let _ = save_chat(handle.clone(), &chat).await;
-                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &chat.messages).await;
+                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &messages_to_save).await;
                                                                         }
                                                                     }
                                                                     Some(message)
@@ -365,21 +372,12 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 // Handle reactions in real-time
                                                                 let (was_added, chat_id_for_save) = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    let added = if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
-                                                                        msg.add_reaction(reaction.clone(), Some(chat_id))
+                                                                    // Use helper that handles interner access via split borrowing
+                                                                    if let Some((chat_id, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
+                                                                        (added, if added { Some(chat_id) } else { None })
                                                                     } else {
-                                                                        false
-                                                                    };
-                                                                    
-                                                                    // Get chat_id for saving if reaction was added
-                                                                    let chat_id_for_save = if added {
-                                                                        state.find_message(&reaction.reference_id)
-                                                                            .map(|(chat, _)| chat.id().clone())
-                                                                    } else {
-                                                                        None
-                                                                    };
-                                                                    
-                                                                    (added, chat_id_for_save)
+                                                                        (false, None)
+                                                                    }
                                                                 };
                                                                 
                                                                 // Save the updated message to database immediately (like DM reactions)
@@ -394,11 +392,16 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                             
                                                                             if let Some(msg) = updated_message {
                                                                                 let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
+                                                                                let _ = handle.emit("message_update", serde_json::json!({
+                                                                                    "old_id": &reaction.reference_id,
+                                                                                    "message": &msg,
+                                                                                    "chat_id": &chat_id
+                                                                                }));
                                                                             }
                                                                         }
                                                                     }
                                                                 }
-                                                                
+
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::TypingIndicator { profile_id, until } => {
@@ -572,19 +575,20 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 }
 
                                                                 // Update message in state and emit to frontend
-                                                                let mut state = crate::STATE.lock().await;
-                                                                if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
-                                                                    if let Some(msg) = chat.get_message_mut(&message_id) {
+                                                                let msg_for_emit = {
+                                                                    let mut state = crate::STATE.lock().await;
+                                                                    state.update_message_in_chat(&group_id_for_persist, &message_id, |msg| {
                                                                         msg.apply_edit(new_content, edited_at);
+                                                                    })
+                                                                };
 
-                                                                        // Emit update to frontend
-                                                                        if let Some(handle) = TAURI_APP.get() {
-                                                                            let _ = handle.emit("message_update", serde_json::json!({
-                                                                                "old_id": &message_id,
-                                                                                "message": &msg,
-                                                                                "chat_id": &group_id_for_persist
-                                                                            }));
-                                                                        }
+                                                                if let Some(msg) = msg_for_emit {
+                                                                    if let Some(handle) = TAURI_APP.get() {
+                                                                        let _ = handle.emit("message_update", serde_json::json!({
+                                                                            "old_id": &message_id,
+                                                                            "message": &msg,
+                                                                            "chat_id": &group_id_for_persist
+                                                                        }));
                                                                     }
                                                                 }
                                                                 None // Don't emit as message

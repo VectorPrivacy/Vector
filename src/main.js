@@ -2333,12 +2333,17 @@ async function playMiniAppAndInvite() {
     
     try {
         // Send the Mini App file to the current chat
-        await invoke('file_message', {
+        const result = await invoke('file_message', {
             receiver: targetChatId,
             repliedTo: '',
             filePath: app.src_url,
         });
-        
+
+        // Finalize the pending message
+        if (result && result.event_id) {
+            finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+        }
+
         console.log('Mini App sent to chat successfully');
     } catch (e) {
         console.error('Failed to send Mini App to chat:', e);
@@ -3761,6 +3766,48 @@ function getOrCreateDMChat(npub) {
 }
 
 /**
+ * Finalize a pending message after successful send.
+ * Updates the message ID and clears the pending state.
+ * @param {string} chatId - The chat ID
+ * @param {string} pendingId - The temporary pending ID
+ * @param {string} eventId - The real event ID from the backend
+ */
+function finalizePendingMessage(chatId, pendingId, eventId) {
+    const chat = getChat(chatId);
+    if (!chat) return;
+
+    const msgIdx = chat.messages.findIndex(m => m.id === pendingId);
+    if (msgIdx === -1) return;
+
+    const msg = chat.messages[msgIdx];
+    const oldId = msg.id;
+    msg.id = eventId;
+    msg.pending = false;
+
+    // Update event cache
+    if (eventCache.has(chatId)) {
+        const cachedEvents = eventCache.getEvents(chatId);
+        if (cachedEvents) {
+            const cacheIdx = cachedEvents.findIndex(m => m.id === oldId);
+            if (cacheIdx !== -1) {
+                cachedEvents[cacheIdx] = msg;
+            }
+        }
+    }
+
+    // Re-render if this chat is open
+    if (strOpenChat === chatId) {
+        const domMsg = document.getElementById(oldId);
+        if (domMsg) {
+            const profile = getProfile(chatId);
+            domMsg.replaceWith(renderMessage(msg, profile, oldId));
+        }
+        strLastMsgID = eventId;
+        softChatScroll();
+    }
+}
+
+/**
  * Compute a timestamp for sorting chats, falling back to metadata for empty groups.
  * @param {Chat} chat
  * @returns {number}
@@ -4782,7 +4829,10 @@ function markAsRead(chat, message) {
  * @param {string?} replied_to - The reference of the message, if any
  */
 async function message(pubkey, content, replied_to) {
-    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
+    const result = await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
+    if (result && result.event_id) {
+        finalizePendingMessage(pubkey, result.pending_id, result.event_id);
+    }
 }
 
 /**
@@ -4794,7 +4844,10 @@ async function message(pubkey, content, replied_to) {
 async function sendFile(pubkey, replied_to, filepath) {
     try {
         // Use the protocol-agnostic file_message command for both DMs and MLS groups
-        await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
+        const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
+        if (result && result.event_id) {
+            finalizePendingMessage(pubkey, result.pending_id, result.event_id);
+        }
     } catch (e) {
         // Notify of an attachment send failure
         popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -5537,6 +5590,31 @@ async function setupRustListeners() {
         const isLastMessage = nMsgIdx === cChat.messages.length - 1;
         if (isLastMessage) {
             updateChatlistPreview(evt.payload.chat_id);
+        }
+    });
+
+    // Listen for attachment URL updates (for file uploads and reuse)
+    await listen('attachment_update', (evt) => {
+        const { chat_id, message_id, attachment_id, url } = evt.payload;
+        const cChat = getChat(chat_id);
+        if (!cChat) return;
+
+        // Find the message
+        const msg = cChat.messages.find(m => m.id === message_id);
+        if (!msg || !msg.attachments) return;
+
+        // Find and update the attachment
+        const att = msg.attachments.find(a => a.id === attachment_id);
+        if (att) {
+            att.url = url;
+            // Re-render if this chat is open
+            if (strOpenChat === chat_id) {
+                const domMsg = document.getElementById(message_id);
+                if (domMsg) {
+                    const profile = getProfile(chat_id);
+                    domMsg.replaceWith(renderMessage(msg, profile, message_id));
+                }
+            }
         }
     });
 

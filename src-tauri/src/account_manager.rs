@@ -912,10 +912,17 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
 
     // Migration 13: Add preview_metadata column to events table for link preview caching
     run_atomic_migration(conn, 13, "Add preview_metadata to events table", |tx| {
-        tx.execute(
-            "ALTER TABLE events ADD COLUMN preview_metadata TEXT",
-            []
-        ).map_err(|e| format!("Failed to add preview_metadata column: {}", e))?;
+        // Check if column already exists (may have been added by a prior dev build)
+        let col_exists: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='preview_metadata'",
+            [], |row| row.get::<_, i32>(0)
+        ).map(|c| c > 0).unwrap_or(false);
+        if !col_exists {
+            tx.execute(
+                "ALTER TABLE events ADD COLUMN preview_metadata TEXT",
+                []
+            ).map_err(|e| format!("Failed to add preview_metadata column: {}", e))?;
+        }
         Ok(())
     })?;
 

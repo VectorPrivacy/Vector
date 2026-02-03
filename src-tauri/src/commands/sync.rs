@@ -10,10 +10,9 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
     db, profile, profile_sync,
-    ChatState, ChatType, Profile, SyncMode,
+    ChatType, Profile, SyncMode,
     NOSTR_CLIENT, STATE, WRAPPER_ID_CACHE,
 };
-use crate::db::save_chat_messages;
 
 // ============================================================================
 // Profile Sync Commands
@@ -135,7 +134,6 @@ pub async fn fetch_messages<R: Runtime>(
             }
 
             // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
-            let mut needs_integrity_check = false;
             if state.profiles.len() == 1 {
                 // Load profiles, chats, MLS groups, and last messages in parallel (all are independent reads)
                 let (profiles_result, slim_chats_result, mls_groups_result, last_messages_result) = tokio::join!(
@@ -158,17 +156,6 @@ pub async fn fetch_messages<R: Runtime>(
                 // Get the last messages map (single batch query result)
                 let mut last_messages_map = last_messages_result.unwrap_or_default();
 
-                // Check if any messages have downloaded attachments (for integrity check)
-                for messages in last_messages_map.values() {
-                    if needs_integrity_check { break; }
-                    for msg in messages {
-                        if msg.attachments.iter().any(|att| att.downloaded) {
-                            needs_integrity_check = true;
-                            break;
-                        }
-                    }
-                }
-
                 // Process chats
                 if let Ok(slim_chats) = slim_chats_result {
                     // Build HashSet of evicted MLS group IDs for O(1) lookup
@@ -188,6 +175,10 @@ pub async fn fetch_messages<R: Runtime>(
                     state.chats.reserve(slim_chats.len());
 
                     // Convert slim chats to full chats and merge last messages
+                    #[cfg(debug_assertions)]
+                    let start = std::time::Instant::now();
+                    let mut total_messages = 0usize;
+
                     for slim_chat in slim_chats {
                         // Skip evicted MLS groups (O(1) lookup)
                         if slim_chat.chat_type == ChatType::MlsGroup && evicted_groups.contains(slim_chat.id.as_str()) {
@@ -195,13 +186,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
 
                         let mut chat = slim_chat.to_chat();
-
-                        // Add last messages from our parallel fetch
-                        if let Some(messages) = last_messages_map.remove(chat.id()) {
-                            for message in messages {
-                                chat.internal_add_message(message);
-                            }
-                        }
+                        let chat_id = chat.id().to_string();
 
                         // Ensure profiles exist for all chat participants (O(1) lookup)
                         for participant in chat.participants() {
@@ -214,20 +199,50 @@ pub async fn fetch_messages<R: Runtime>(
                             }
                         }
 
+                        // Get messages to add (if any)
+                        let messages_to_add = last_messages_map.remove(&chat_id);
+
+                        // Add messages to the chat using interner, then push
+                        // This avoids double borrow by operating on local chat before adding to state
+                        if let Some(messages) = messages_to_add {
+                            total_messages += messages.len();
+                            for message in messages {
+                                chat.internal_add_message(message, &mut state.interner);
+                            }
+                        }
+
+                        // Push the chat (now with messages) to state
                         state.chats.push(chat);
                     }
 
                     // Sort chats by last message time (do once at the end, not per-chat)
                     state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
+
+                    // Record startup load timing (debug builds only)
+                    #[cfg(debug_assertions)]
+                    {
+                        let elapsed = start.elapsed();
+                        if total_messages > 0 {
+                            state.cache_stats.insert_count = total_messages as u64;
+                            state.cache_stats.record_insert(elapsed);
+                        }
+                        let chats_clone = state.chats.clone();
+                        state.cache_stats.update_from_chats(&chats_clone);
+                        println!("[CacheStats] startup load: {} chats, {} msgs in {:?}", state.chats.len(), total_messages, elapsed);
+                        state.cache_stats.log();
+                    }
                 } else {
                     eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
                 }
             }
 
-            // Check filesystem integrity if needed
-            if needs_integrity_check {
-                check_attachment_filesystem_integrity(&handle, &mut state).await;
-            }
+            // Check filesystem integrity for downloaded attachments (queries DB directly)
+            let handle_for_integrity = handle.clone();
+            tokio::spawn(async move {
+                if let Err(e) = db::check_downloaded_attachments_integrity(&handle_for_integrity).await {
+                    eprintln!("[Integrity] Check failed: {}", e);
+                }
+            });
 
             // Preload caches in parallel
             let (id_cache_result, wrapper_ids_result) = tokio::join!(
@@ -244,10 +259,13 @@ pub async fn fetch_messages<R: Runtime>(
                 cache.load(wrapper_ids);
             }
 
-            // Send the state to frontend
+            // Send the state to frontend (convert chats to serializable format)
+            let serializable_chats: Vec<_> = state.chats.iter()
+                .map(|c| c.to_serializable(&state.interner))
+                .collect();
             handle.emit("init_finished", serde_json::json!({
                 "profiles": &state.profiles,
-                "chats": &state.chats
+                "chats": serializable_chats
             })).unwrap();
 
             // ALWAYS begin with an initial sync of at least the last 2 days
@@ -555,120 +573,6 @@ pub async fn deep_rescan<R: Runtime>(handle: AppHandle<R>) -> Result<bool, Strin
     fetch_messages(handle, false, None).await;
 
     Ok(true)
-}
-
-// ============================================================================
-// Helper Functions (internal)
-// ============================================================================
-
-/// Checks if downloaded attachments still exist on the filesystem
-/// Sets downloaded=false for any missing files and updates the database
-async fn check_attachment_filesystem_integrity<R: Runtime>(
-    handle: &AppHandle<R>,
-    state: &mut ChatState,
-) {
-    let mut total_checked = 0;
-    let mut chats_with_updates = std::collections::HashMap::new();
-
-    // Capture the starting timestamp
-    let start_time = std::time::Instant::now();
-
-    // First pass: count total attachments to check
-    let mut total_attachments = 0;
-    for chat in &state.chats {
-        for message in &chat.messages {
-            for attachment in &message.attachments {
-                if attachment.downloaded {
-                    total_attachments += 1;
-                }
-            }
-        }
-    }
-
-    // Iterate through all chats and their messages with mutable access to update downloaded status
-    for (chat_idx, chat) in state.chats.iter_mut().enumerate() {
-        let mut updated_messages = Vec::new();
-
-        for message in &mut chat.messages {
-            let mut message_updated = false;
-
-            for attachment in &mut message.attachments {
-                // Only check attachments that are marked as downloaded
-                if attachment.downloaded {
-                    total_checked += 1;
-
-                    // Emit progress every 2 attachments or on the last one, but only if process has taken >1 second
-                    if (total_checked % 2 == 0 || total_checked == total_attachments) && start_time.elapsed().as_secs() >= 1 {
-                        handle.emit("progress_operation", serde_json::json!({
-                            "type": "progress",
-                            "current": total_checked,
-                            "total": total_attachments,
-                            "message": "Checking file integrity"
-                        })).unwrap();
-                    }
-
-                    // Check if the file exists on the filesystem
-                    let file_path = std::path::Path::new(&attachment.path);
-                    if !file_path.exists() {
-                        // File is missing, set downloaded to false
-                        attachment.downloaded = false;
-                        message_updated = true;
-                        attachment.path = String::new();
-                    }
-                }
-            }
-
-            // If any attachment in this message was updated, we need to save the message
-            if message_updated {
-                updated_messages.push(message.clone());
-            }
-        }
-
-        // If any messages in this chat were updated, store them for database update
-        if !updated_messages.is_empty() {
-            chats_with_updates.insert(chat_idx, updated_messages);
-        }
-    }
-
-    // Update database for any messages with missing attachments
-    if !chats_with_updates.is_empty() {
-        // Only emit progress if process has taken >1 second
-        if start_time.elapsed().as_secs() >= 1 {
-            handle.emit("progress_operation", serde_json::json!({
-                "type": "progress",
-                "total": chats_with_updates.len(),
-                "current": 0,
-                "message": "Updating database..."
-            })).unwrap();
-        }
-
-        // Save updated messages for each chat that had changes
-        let mut saved_count = 0;
-        let total_chats = chats_with_updates.len();
-        for (chat_idx, _updated_messages) in chats_with_updates {
-            // Since we're iterating over existing indices, we know the chat exists
-            let chat = &state.chats[chat_idx];
-            let chat_id = chat.id().clone();
-
-            // Save
-            let all_messages = &chat.messages;
-            if let Err(e) = save_chat_messages(handle.clone(), &chat_id, all_messages).await {
-                eprintln!("Failed to update messages after filesystem check: {}", e);
-            } else {
-                saved_count += 1;
-            }
-
-            // Emit progress for database updates, but only if process has taken >1 second
-            if ((saved_count) % 5 == 0 || saved_count == total_chats) && start_time.elapsed().as_secs() >= 1 {
-                handle.emit("progress_operation", serde_json::json!({
-                    "type": "progress",
-                    "current": saved_count,
-                    "total": total_chats,
-                    "message": "Updating database"
-                })).unwrap();
-            }
-        }
-    }
 }
 
 // Handler list for this module (for reference):

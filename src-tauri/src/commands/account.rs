@@ -66,11 +66,15 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
     println!("[Debug Hot-Reload] Sending cached state to frontend ({} profiles, {} chats)",
              state.profiles.len(), state.chats.len());
 
+    // Convert chats to serializable format
+    let serializable_chats: Vec<_> = state.chats.iter()
+        .map(|c| c.to_serializable(&state.interner))
+        .collect();
     Ok(serde_json::json!({
         "success": true,
         "npub": my_npub,
         "profiles": &state.profiles,
-        "chats": &state.chats,
+        "chats": serializable_chats,
         "is_syncing": state.is_syncing,
         "sync_mode": format!("{:?}", state.sync_mode)
     }))
