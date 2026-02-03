@@ -124,6 +124,10 @@ pub struct StoredEvent {
     /// Sender's npub (for group chats where sender varies)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub npub: Option<String>,
+
+    /// Cached link preview metadata (JSON serialized SiteMetadata)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_metadata: Option<String>,
 }
 
 impl StoredEvent {
@@ -144,6 +148,7 @@ impl StoredEvent {
             failed: false,
             wrapper_event_id: None,
             npub: None,
+            preview_metadata: None,
         }
     }
 
@@ -328,6 +333,7 @@ impl StoredEventBuilder {
             failed: self.failed,
             wrapper_event_id: self.wrapper_event_id,
             npub: self.npub,
+            preview_metadata: None,
         }
     }
 }
@@ -393,7 +399,7 @@ mod tests {
     fn test_unknown_kind() {
         let event = StoredEvent::new(
             "abc123".to_string(),
-            99999, // Unknown kind
+            65535, // Unknown kind (max u16 value)
             1,
             "Unknown content".to_string(),
             1234567890,

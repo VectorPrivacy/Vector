@@ -104,8 +104,8 @@ static RELAY_LOGS: Lazy<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
 
 /// Check if a URL is a default relay
 pub fn is_default_relay(url: &str) -> bool {
-    let normalized = url.trim().trim_end_matches('/').to_lowercase();
-    DEFAULT_RELAYS.iter().any(|r| r.to_lowercase() == normalized)
+    let normalized = url.trim().trim_end_matches('/');
+    DEFAULT_RELAYS.iter().any(|r| r.eq_ignore_ascii_case(normalized))
 }
 
 /// Validate a relay URL format (must be wss://)
@@ -303,10 +303,10 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
 
     // Add all default relays
     for default_url in DEFAULT_RELAYS {
-        let url_str = default_url.to_string();
-        let is_disabled = disabled_defaults.iter().any(|d| d.to_lowercase() == url_str.to_lowercase());
+        let url_str = *default_url;
+        let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(url_str));
 
-        let (status, mode) = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.to_string().to_lowercase() == url_str.to_lowercase()) {
+        let (status, mode) = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(url_str)) {
             let status = match relay.status() {
                 RelayStatus::Initialized => "initialized",
                 RelayStatus::Pending => "pending",
@@ -323,7 +323,7 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
         };
 
         relay_infos.push(RelayInfo {
-            url: url_str,
+            url: url_str.to_string(),
             status,
             is_default: true,
             is_custom: false,
@@ -334,7 +334,7 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
 
     // Add custom relays
     for custom in &custom_relays {
-        let status = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.to_string().to_lowercase() == custom.url.to_lowercase()) {
+        let status = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(&custom.url)) {
             match relay.status() {
                 RelayStatus::Initialized => "initialized",
                 RelayStatus::Pending => "pending",
@@ -385,9 +385,9 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
     let mut disabled = get_disabled_default_relays(&handle).await?;
 
     if enabled {
-        disabled.retain(|d| d.to_lowercase() != normalized_url.to_lowercase());
+        disabled.retain(|d| !d.eq_ignore_ascii_case(&normalized_url));
     } else {
-        if !disabled.iter().any(|d| d.to_lowercase() == normalized_url.to_lowercase()) {
+        if !disabled.iter().any(|d| d.eq_ignore_ascii_case(&normalized_url)) {
             disabled.push(normalized_url.clone());
         }
     }
@@ -427,8 +427,7 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
 
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = normalized_url.to_lowercase();
-    if relays.iter().any(|r| r.url.to_lowercase() == url_lower) {
+    if relays.iter().any(|r| r.url.eq_ignore_ascii_case(&normalized_url)) {
         return Err("Relay already exists".to_string());
     }
 
@@ -467,9 +466,8 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
 pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) -> Result<bool, String> {
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = url.to_lowercase();
     let original_len = relays.len();
-    relays.retain(|r| r.url.to_lowercase() != url_lower);
+    relays.retain(|r| !r.url.eq_ignore_ascii_case(&url));
 
     if relays.len() == original_len {
         return Ok(false);
@@ -493,12 +491,11 @@ pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) 
 pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, enabled: bool) -> Result<bool, String> {
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = url.to_lowercase();
     let mut found = false;
     let mut relay_mode = "both".to_string();
 
     for relay in relays.iter_mut() {
-        if relay.url.to_lowercase() == url_lower {
+        if relay.url.eq_ignore_ascii_case(&url) {
             relay.enabled = enabled;
             relay_mode = relay.mode.clone();
             found = true;
@@ -542,12 +539,11 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
 
     let mut relays = load_custom_relays(&handle).await?;
 
-    let url_lower = url.to_lowercase();
     let mut found = false;
     let mut is_enabled = false;
 
     for relay in relays.iter_mut() {
-        if relay.url.to_lowercase() == url_lower {
+        if relay.url.eq_ignore_ascii_case(&url) {
             relay.mode = mode.clone();
             is_enabled = relay.enabled;
             found = true;
@@ -758,55 +754,80 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // If we're already connected to some relays - skip and tell the frontend our client is already online
-    if client.relays().await.len() > 0 {
+    if !client.relays().await.is_empty() {
         return false;
     }
 
-    // Get disabled default relays
-    let disabled_defaults = get_disabled_default_relays(&handle).await.unwrap_or_default();
+    // Get disabled default relays and custom relays concurrently
+    let (disabled_defaults, custom_relays_result) = tokio::join!(
+        get_disabled_default_relays(&handle),
+        get_custom_relays(handle.clone())
+    );
+    let disabled_defaults = disabled_defaults.unwrap_or_default();
+
+    // Collect all relays to add (URL, options, is_default, mode_info)
+    let mut relays_to_add: Vec<(String, RelayOptions, bool, String)> = Vec::new();
 
     // Add default relays (unless disabled)
     for default_url in DEFAULT_RELAYS {
-        let is_disabled = disabled_defaults.iter().any(|d| d.to_lowercase() == default_url.to_lowercase());
+        let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(default_url));
         if !is_disabled {
-            match client.pool().add_relay(*default_url, RelayOptions::new().reconnect(false)).await {
-                Ok(_) => {
-                    println!("[Relay] Added default relay: {}", default_url);
-                    add_relay_log(default_url, "info", "Added to relay pool");
-                }
-                Err(e) => {
-                    eprintln!("[Relay] Failed to add default relay {}: {}", default_url, e);
-                    add_relay_log(default_url, "error", &format!("Failed to add: {}", e));
-                }
-            }
+            relays_to_add.push((
+                default_url.to_string(),
+                RelayOptions::new().reconnect(false),
+                true,
+                "both".to_string(),
+            ));
         } else {
             println!("[Relay] Skipping disabled default relay: {}", default_url);
             add_relay_log(default_url, "info", "Skipped (disabled by user)");
         }
     }
 
-    // Add user's custom relays (if any)
-    match get_custom_relays(handle.clone()).await {
-        Ok(custom_relays) => {
-            for relay in custom_relays {
-                if relay.enabled {
-                    match client.pool().add_relay(&relay.url, relay_options_for_mode(&relay.mode)).await {
-                        Ok(_) => {
-                            println!("[Relay] Added custom relay: {} (mode: {})", relay.url, relay.mode);
-                            add_relay_log(&relay.url, "info", &format!("Added to relay pool (mode: {})", relay.mode));
-                        }
-                        Err(e) => {
-                            eprintln!("[Relay] Failed to add custom relay {}: {}", relay.url, e);
-                            add_relay_log(&relay.url, "error", &format!("Failed to add: {}", e));
-                        }
+    // Add custom relays
+    if let Ok(custom_relays) = custom_relays_result {
+        for relay in custom_relays {
+            if relay.enabled {
+                relays_to_add.push((
+                    relay.url,
+                    relay_options_for_mode(&relay.mode),
+                    false,
+                    relay.mode,
+                ));
+            }
+        }
+    }
+
+    // Add all relays in parallel
+    let pool = client.pool();
+    let add_futures: Vec<_> = relays_to_add.into_iter().map(|(url, opts, is_default, mode)| {
+        let pool = pool.clone();
+        async move {
+            match pool.add_relay(&url, opts).await {
+                Ok(_) => {
+                    if is_default {
+                        println!("[Relay] Added default relay: {}", url);
+                        add_relay_log(&url, "info", "Added to relay pool");
+                    } else {
+                        println!("[Relay] Added custom relay: {} (mode: {})", url, mode);
+                        add_relay_log(&url, "info", &format!("Added to relay pool (mode: {})", mode));
                     }
+                }
+                Err(e) => {
+                    if is_default {
+                        eprintln!("[Relay] Failed to add default relay {}: {}", url, e);
+                    } else {
+                        eprintln!("[Relay] Failed to add custom relay {}: {}", url, e);
+                    }
+                    add_relay_log(&url, "error", &format!("Failed to add: {}", e));
                 }
             }
         }
-        Err(e) => eprintln!("[Relay] Failed to load custom relays: {}", e),
-    }
+    }).collect();
 
-    // Connect!
+    futures_util::future::join_all(add_futures).await;
+
+    // Connect to all added relays
     client.connect().await;
 
     // Post-connect: force-regenerate device KeyPackage if flagged by migration 13

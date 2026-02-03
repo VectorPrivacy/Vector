@@ -25,6 +25,7 @@ use log::{info, warn, debug};
 use serde_json::json;
 
 use crate::net::{ProgressReporter, download_with_reporter};
+use crate::util::bytes_to_hex_string;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
@@ -172,7 +173,7 @@ fn url_to_cache_key(url: &str) -> String {
     hasher.update(url.as_bytes());
     let result = hasher.finalize();
     // Use first 16 bytes for a shorter but still unique filename
-    hex::encode(&result[..16])
+    bytes_to_hex_string(&result[..16])
 }
 
 /// Validate image bytes and detect format
@@ -195,10 +196,17 @@ fn validate_image(bytes: &[u8]) -> Option<&'static str> {
         }
     }
 
-    // Also accept SVG (text-based)
+    // Also accept SVG (text-based) - search bytes directly to avoid allocation
     if bytes.len() > 5 {
-        let start = String::from_utf8_lossy(&bytes[..std::cmp::min(256, bytes.len())]);
-        if start.contains("<svg") || (start.contains("<?xml") && start.contains("<svg")) {
+        let check_len = std::cmp::min(512, bytes.len());
+        let header = &bytes[..check_len];
+
+        // Helper to find a pattern in bytes
+        fn contains_pattern(haystack: &[u8], needle: &[u8]) -> bool {
+            haystack.windows(needle.len()).any(|w| w == needle)
+        }
+
+        if contains_pattern(header, b"<svg") {
             return Some("svg");
         }
     }
@@ -222,9 +230,10 @@ pub fn get_cached_path<R: Runtime>(
     // Check for any file with this cache key (any extension)
     if let Ok(entries) = std::fs::read_dir(&cache_dir) {
         for entry in entries.flatten() {
-            let filename = entry.file_name().to_string_lossy().to_string();
-            if filename.starts_with(&cache_key) {
-                return Some(entry.path().to_string_lossy().to_string());
+            let filename = entry.file_name();
+            let filename_str = filename.to_string_lossy();
+            if filename_str.starts_with(&cache_key) {
+                return Some(entry.path().to_string_lossy().into_owned());
             }
         }
     }

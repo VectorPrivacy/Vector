@@ -23,8 +23,10 @@ use crate::{
 // Not exposed as a Tauri command to frontend
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
     // Get the wrapper (giftwrap) event ID for duplicate detection
+    // Use bytes for cache (memory efficient), hex string for DB operations
+    let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
     let wrapper_event_id = event.id.to_hex();
-    
+
     // For historical sync events (is_new = false), use the wrapper_id cache for fast duplicate detection
     // For real-time new events (is_new = true), skip cache checks - they're guaranteed to be new
     if !is_new {
@@ -32,7 +34,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
         // This cache is only populated during init and cleared after sync finishes
         {
             let cache = WRAPPER_ID_CACHE.lock().await;
-            if cache.contains(&wrapper_event_id) {
+            if cache.contains(&wrapper_event_id_bytes) {
                 // Already processed this giftwrap, skip (cache hit)
                 return false;
             }
@@ -95,7 +97,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                 // Dedup: the same welcome can arrive from multiple relays simultaneously
                 {
                     let cache = WRAPPER_ID_CACHE.lock().await;
-                    if cache.contains(&wrapper_event_id) {
+                    if cache.contains(&wrapper_event_id_bytes) {
                         return false;
                     }
                 }
@@ -137,7 +139,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         // Mark this wrapper as processed to prevent duplicates from other relays
                         {
                             let mut cache = WRAPPER_ID_CACHE.lock().await;
-                            cache.insert(wrapper_event_id.clone());
+                            cache.insert(wrapper_event_id_bytes);
                         }
                         // Only notify UI after initial sync is complete
                         // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
@@ -164,11 +166,12 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
             }
 
             // Convert rumor to RumorEvent for protocol-agnostic processing
+            // Move content and tags instead of cloning (rumor is owned and not used after this)
             let rumor_event = RumorEvent {
                 id: rumor.id.unwrap(),
                 kind: rumor.kind,
-                content: rumor.content.clone(),
-                tags: rumor.tags.clone(),
+                content: rumor.content,
+                tags: rumor.tags,
                 created_at: rumor.created_at,
                 pubkey: rumor.pubkey,
             };
@@ -187,12 +190,12 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         RumorProcessingResult::TextMessage(mut msg) => {
                             // Set the wrapper event ID for database storage
                             msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id).await
+                            handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::FileAttachment(mut msg) => {
                             // Set the wrapper event ID for database storage
                             msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id).await
+                            handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::Reaction(reaction) => {
                             handle_reaction(reaction, &contact).await
@@ -270,19 +273,20 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                             }
 
                             // Update message in state and emit to frontend
-                            let mut state = STATE.lock().await;
-                            if let Some(chat) = state.get_chat_mut(&contact) {
-                                if let Some(msg) = chat.get_message_mut(&message_id) {
+                            let msg_for_emit = {
+                                let mut state = STATE.lock().await;
+                                state.update_message_in_chat(&contact, &message_id, |msg| {
                                     msg.apply_edit(new_content, edited_at);
+                                })
+                            };
 
-                                    // Emit update to frontend
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = handle.emit("message_update", serde_json::json!({
-                                            "old_id": &message_id,
-                                            "message": &msg,
-                                            "chat_id": &contact
-                                        }));
-                                    }
+                            if let Some(msg) = msg_for_emit {
+                                if let Some(handle) = TAURI_APP.get() {
+                                    let _ = handle.emit("message_update", serde_json::json!({
+                                        "old_id": &message_id,
+                                        "message": msg,
+                                        "chat_id": &contact
+                                    }));
                                 }
                             }
                             true
@@ -300,7 +304,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
 }
 
 /// Handle a processed text message
-async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -313,7 +317,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                     if !updated {
                         // Message has a different wrapper_id - add this duplicate wrapper to cache
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id.to_string());
+                        cache.insert(wrapper_event_id_bytes);
                     }
                 }
                 return false;
@@ -387,7 +391,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
 }
 
 /// Handle a processed file attachment
-async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str) -> bool {
+async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Some(handle) = TAURI_APP.get() {
         if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
@@ -400,7 +404,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
                     if !updated {
                         // Message has a different wrapper_id - add this duplicate wrapper to cache
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id.to_string());
+                        cache.insert(wrapper_event_id_bytes);
                     }
                 }
                 return false;
@@ -495,23 +499,14 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
     // Use a single lock scope to avoid nested locks
     let (reaction_added, chat_id_for_save) = {
         let mut state = STATE.lock().await;
-        let reaction_added = if let Some((chat_id, msg_mut)) = state.find_chat_and_message_mut(&reaction.reference_id) {
-            msg_mut.add_reaction(reaction.clone(), Some(chat_id))
+        // Use helper that handles interner access via split borrowing
+        if let Some((chat_id, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
+            (added, if added { Some(chat_id) } else { None })
         } else {
             // Message not found in any chat - this can happen during sync
             // TODO: track these "ahead" reactions and re-apply them once sync has finished
-            false
-        };
-        
-        // If reaction was added, get the chat_id for saving
-        let chat_id_for_save = if reaction_added {
-            state.find_message(&reaction.reference_id)
-                .map(|(chat, _)| chat.id().clone())
-        } else {
-            None
-        };
-        
-        (reaction_added, chat_id_for_save)
+            (false, None)
+        }
     };
 
     // Save the updated message with the new reaction to our DB (outside of state lock)
@@ -526,6 +521,11 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
             
             if let Some(msg) = updated_message {
                 let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
+                let _ = handle.emit("message_update", serde_json::json!({
+                    "old_id": &reaction.reference_id,
+                    "message": &msg,
+                    "chat_id": &chat_id
+                }));
             }
         }
     }

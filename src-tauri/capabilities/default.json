@@ -67,7 +67,6 @@
     "allow-get-messages-around-id",
     "allow-get-system-events",
     "allow-get-chat-message-count",
-    "allow-get-file-hash-index",
     "allow-evict-chat-messages",
     "allow-generate-blurhash-preview",
     "allow-decode-blurhash",

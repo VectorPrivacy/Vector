@@ -1060,6 +1060,8 @@ async function sendPreviewedFile() {
     const isGroup = receiver.startsWith('group:');
     
     // Send file in background
+    const chatId = isGroup ? receiver.replace('group:', '') : receiver;
+    let result;
     try {
         if (fileObject) {
             // Android File object flow
@@ -1067,8 +1069,8 @@ async function sendPreviewedFile() {
             // Otherwise, read from File object directly
             if (shouldCompress || compressionWasStarted) {
                 // Use cached bytes (compression was started, so bytes are cached)
-                await invoke("send_cached_file", {
-                    receiver: isGroup ? receiver.replace('group:', '') : receiver,
+                result = await invoke("send_cached_file", {
+                    receiver: chatId,
                     repliedTo: replyRef,
                     useCompression: shouldCompress
                 });
@@ -1076,8 +1078,8 @@ async function sendPreviewedFile() {
                 // No compression needed and bytes weren't cached, read directly
                 const arrayBuffer = await fileObject.arrayBuffer();
                 const bytes = Array.from(new Uint8Array(arrayBuffer));
-                await invoke("send_file_bytes", {
-                    receiver: isGroup ? receiver.replace('group:', '') : receiver,
+                result = await invoke("send_file_bytes", {
+                    receiver: chatId,
                     repliedTo: replyRef,
                     fileBytes: bytes,
                     fileName: fileObject.name,
@@ -1086,26 +1088,31 @@ async function sendPreviewedFile() {
             }
         } else if (usingBytes) {
             // Legacy flow: use cached bytes from JS (clipboard paste)
-            await invoke("send_cached_file", {
-                receiver: isGroup ? receiver.replace('group:', '') : receiver,
+            result = await invoke("send_cached_file", {
+                receiver: chatId,
                 repliedTo: replyRef,
                 useCompression: shouldCompress
             });
         } else if (shouldCompress) {
             // Desktop: use cached compressed file (will wait if still compressing)
-            await invoke("send_cached_compressed_file", {
-                receiver: isGroup ? receiver.replace('group:', '') : receiver,
+            result = await invoke("send_cached_compressed_file", {
+                receiver: chatId,
                 repliedTo: replyRef,
                 filePath: filePath
             });
         } else {
             // Desktop: send without compression, but clear the cache first
             await invoke("clear_compression_cache", { filePath: filePath });
-            await invoke("file_message", {
-                receiver: isGroup ? receiver.replace('group:', '') : receiver,
+            result = await invoke("file_message", {
+                receiver: chatId,
                 repliedTo: replyRef,
                 filePath: filePath
             });
+        }
+
+        // Finalize the pending message with the real event ID
+        if (result && result.event_id) {
+            finalizePendingMessage(chatId, result.pending_id, result.event_id);
         }
     } catch (e) {
         console.error('Failed to send file:', e);

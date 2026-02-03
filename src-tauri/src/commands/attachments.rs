@@ -7,9 +7,9 @@
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::{STATE, TAURI_APP, ChatType, Attachment, Message};
-use crate::{util, crypto, net, db, mls};
-use crate::db::save_chat_messages;
+use crate::{STATE, TAURI_APP, ChatType, Attachment};
+use crate::{util, crypto, net, db, mls, simd};
+use crate::util::hex_string_to_bytes;
 
 // ============================================================================
 // Helper Functions
@@ -64,7 +64,8 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
 /// Decrypt an MLS attachment using MDK's MIP-04 decryption
 ///
 /// This derives the encryption key from the MLS group secret using the original file hash
-/// and other metadata stored in the MediaReference.
+/// and other metadata stored in the MediaReference. MDK internally handles epoch fallback,
+/// trying historical epoch secrets if the current epoch's key doesn't work.
 async fn decrypt_mls_attachment<R: Runtime>(
     handle: &AppHandle<R>,
     encrypted_data: &[u8],
@@ -89,8 +90,7 @@ async fn decrypt_mls_attachment<R: Runtime>(
     }
 
     // Parse the engine group ID
-    let engine_gid_bytes = hex::decode(&group_meta.engine_group_id)
-        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?;
+    let engine_gid_bytes = hex_string_to_bytes(&group_meta.engine_group_id);
     let gid = mdk_core::GroupId::from_slice(&engine_gid_bytes);
 
     // Get MDK engine and media manager
@@ -101,14 +101,12 @@ async fn decrypt_mls_attachment<R: Runtime>(
     // Parse the original_hash from the attachment
     let original_hash_hex = attachment.original_hash.as_ref()
         .ok_or("MLS attachment missing original_hash")?;
-    let original_hash_bytes = hex::decode(original_hash_hex)
-        .map_err(|e| format!("Invalid original_hash hex: {}", e))?;
+    let original_hash_bytes = hex_string_to_bytes(original_hash_hex);
     let original_hash: [u8; 32] = original_hash_bytes.try_into()
         .map_err(|_| "Invalid original_hash length (expected 32 bytes)")?;
 
     // Parse the nonce from the attachment
-    let nonce_bytes = hex::decode(&attachment.nonce)
-        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
+    let nonce_bytes = hex_string_to_bytes(&attachment.nonce);
     let nonce: [u8; 12] = nonce_bytes.try_into()
         .map_err(|_| "Invalid nonce length (expected 12 bytes)")?;
 
@@ -136,14 +134,13 @@ async fn decrypt_mls_attachment<R: Runtime>(
     let media_ref = MediaReference {
         url: attachment.url.clone(),
         original_hash,
-        mime_type: mime_type.clone(),
+        mime_type,
         filename,
         dimensions: attachment.img_meta.as_ref().map(|m| (m.width, m.height)),
         scheme_version,
         nonce,
     };
 
-    // Decrypt using MDK
     media_manager.decrypt_from_download(encrypted_data, &media_ref)
         .map_err(|e| format!("MIP-04 decryption failed: {}", e))
 }
@@ -171,7 +168,7 @@ pub async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<S
 
             if is_target_chat {
                 // Look for the message in this chat
-                if let Some(message) = chat.messages.iter().find(|m| m.id == msg_id) {
+                if let Some(message) = chat.messages.find_by_hex_id(&msg_id) {
                     // Get the first attachment
                     if let Some(attachment) = message.attachments.first() {
                         found_attachment = attachment.img_meta.clone();
@@ -221,10 +218,10 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             };
 
             if is_target_chat {
-                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
+                if let Some(message) = chat.messages.find_by_hex_id_mut(&msg_id) {
+                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id_eq(&attachment_id)) {
                         // Check that we're not already downloading
-                        if attachment.downloading {
+                        if attachment.downloading() {
                             return false;
                         }
 
@@ -236,11 +233,11 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         };
 
                         if let Ok(vector_dir) = handle.path().resolve("vector", base_directory) {
-                            let file_path = vector_dir.join(format!("{}.{}", &attachment.id, &attachment.extension));
+                            let file_path = vector_dir.join(format!("{}.{}", simd::bytes_to_hex_32(&attachment.id), &*attachment.extension));
                             if file_path.exists() {
                                 // File already exists! Update the state and return success
-                                attachment.downloaded = true;
-                                attachment.path = file_path.to_string_lossy().to_string();
+                                attachment.set_downloaded(true);
+                                attachment.path = file_path.to_string_lossy().to_string().into_boxed_str();
 
                                 // Emit success event
                                 handle.emit("attachment_download_result", serde_json::json!({
@@ -272,7 +269,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         }
 
                         // Enable the downloading flag to prevent re-calls
-                        attachment.downloading = true;
+                        attachment.set_downloading(true);
                         found_attachment = Some(attachment.clone());
                         break;
                     }
@@ -289,35 +286,22 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     };
 
     // Begin our download progress events
+    let attachment_hex_id = simd::bytes_to_hex_32(&attachment.id);
     handle.emit("attachment_download_progress", serde_json::json!({
-        "id": &attachment.id,
+        "id": &attachment_hex_id,
         "progress": 0
     })).unwrap();
 
     // Download the file - no timeout, allow large downloads to complete
-    let encrypted_data = match net::download(&attachment.url, handle, &attachment.id, None).await {
+    let encrypted_data = match net::download(&*attachment.url, handle, &attachment_hex_id, None).await {
         Ok(data) => data,
         Err(error) => {
             // Handle download error
             let mut state = STATE.lock().await;
-
-            // Find and update the attachment status
-            for chat in &mut state.chats {
-                let is_target_chat = match &chat.chat_type {
-                    ChatType::MlsGroup => chat.id == npub,
-                    ChatType::DirectMessage => chat.has_participant(&npub),
-                };
-
-                if is_target_chat {
-                    if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                        if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
-                            attachment.downloading = false;
-                            attachment.downloaded = false;
-                            break;
-                        }
-                    }
-                }
-            }
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                att.set_downloading(false);
+                att.set_downloaded(false);
+            });
 
             // Emit the error
             handle.emit("attachment_download_result", serde_json::json!({
@@ -335,24 +319,11 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
     if encrypted_data.len() < 16 {
         eprintln!("Downloaded file too small: {} bytes for attachment {}", encrypted_data.len(), attachment_id);
         let mut state = STATE.lock().await;
-
-        // Find and update the attachment status
-        for chat in &mut state.chats {
-            let is_target_chat = match &chat.chat_type {
-                ChatType::MlsGroup => chat.id == npub,
-                ChatType::DirectMessage => chat.has_participant(&npub),
-            };
-
-            if is_target_chat {
-                if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
-                        attachment.downloading = false;
-                        attachment.downloaded = false;
-                        break;
-                    }
-                }
-            }
-        }
+        state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+            att.set_downloading(false);
+            att.set_downloaded(false);
+        });
+        drop(state);
 
         // Emit a more helpful error
         let error_msg = format!("Downloaded file too small ({} bytes). URL may be invalid or expired.", encrypted_data.len());
@@ -366,8 +337,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         return false;
     }
 
-    // Decrypt and save the file
-    let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment).await;
+    // Decrypt and save the file (convert CompactAttachment to Attachment for compatibility)
+    let attachment_for_decrypt = attachment.to_attachment();
+    let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment_for_decrypt).await;
 
     // Process the result
     match result {
@@ -381,65 +353,16 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
             // Handle decryption/saving error
             let mut state = STATE.lock().await;
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                att.set_downloading(false);
+                att.set_downloaded(false);
+            });
 
-            // Find and update the attachment status
-            let mut should_remove = false;
-            for chat in &mut state.chats {
-                let is_target_chat = match &chat.chat_type {
-                    ChatType::MlsGroup => chat.id == npub,
-                    ChatType::DirectMessage => chat.has_participant(&npub),
-                };
-
-                if is_target_chat {
-                    if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                        if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id == attachment_id) {
-                            attachment.downloading = false;
-                            attachment.downloaded = false;
-
-                            // If it's a decryption error, mark for removal as it's corrupted
-                            if is_decryption_error {
-                                eprintln!("Marking corrupted attachment for removal: {}", attachment_id);
-                                should_remove = true;
-                            }
-                            break;
-                        }
-                    }
-                }
+            // Log decryption errors but don't remove the attachment - allow retry
+            if is_decryption_error {
+                eprintln!("Decryption error for attachment {} - keeping for retry", attachment_id);
             }
-
-            // Remove corrupted attachment if needed and save
-            if should_remove {
-                // Collect chat_id and messages to save
-                let save_data: Option<(String, Vec<Message>)> = {
-                    let mut result = None;
-                    for chat in &mut state.chats {
-                        let is_target_chat = match &chat.chat_type {
-                            ChatType::MlsGroup => chat.id == npub,
-                            ChatType::DirectMessage => chat.has_participant(&npub),
-                        };
-
-                        if is_target_chat {
-                            let chat_id = chat.id().to_string();
-
-                            if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                                let original_count = message.attachments.len();
-                                message.attachments.retain(|a| a.id != attachment_id);
-                                if message.attachments.len() < original_count {
-                                    result = Some((chat_id, vec![message.clone()]));
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    result
-                };
-
-                // Drop state and save
-                drop(state);
-                if let Some((chat_id, messages)) = save_data {
-                    let _ = save_chat_messages(handle.clone(), &chat_id, &messages).await;
-                }
-            }
+            drop(state);
 
             // Emit the error
             handle.emit("attachment_download_result", serde_json::json!({
@@ -447,8 +370,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 "msg_id": msg_id,
                 "id": attachment_id,
                 "success": false,
-                "result": if should_remove {
-                    "Corrupted attachment removed. Please re-send the file.".to_string()
+                "result": if is_decryption_error {
+                    "Decryption failed - file may be corrupted".to_string()
                 } else {
                     error
                 }
@@ -464,29 +387,19 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 .to_string();
 
             // Update state with successful download
+            let path_str = hash_file_path.to_string_lossy().to_string();
             {
                 let mut state = STATE.lock().await;
-
-                // Find and update the attachment
-                for chat in &mut state.chats {
-                    let is_target_chat = match &chat.chat_type {
-                        ChatType::MlsGroup => chat.id == npub,
-                        ChatType::DirectMessage => chat.has_participant(&npub),
-                    };
-
-                    if is_target_chat {
-                        if let Some(message) = chat.messages.iter_mut().find(|m| m.id == msg_id) {
-                            if let Some(attachment_index) = message.attachments.iter().position(|a| a.id == attachment_id) {
-                                let attachment = &mut message.attachments[attachment_index];
-                                attachment.id = file_hash.clone(); // Update ID from nonce to hash
-                                attachment.downloading = false;
-                                attachment.downloaded = true;
-                                attachment.path = hash_file_path.to_string_lossy().to_string(); // Update to hash-based path
-                                break;
-                            }
-                        }
+                state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                    // Update ID from nonce to hash
+                    let hash_bytes = hex_string_to_bytes(&file_hash);
+                    if hash_bytes.len() == 32 {
+                        att.id.copy_from_slice(&hash_bytes);
                     }
-                }
+                    att.set_downloading(false);
+                    att.set_downloaded(true);
+                    att.path = path_str.clone().into_boxed_str();
+                });
 
                 // Emit the finished download with both old and new IDs
                 handle.emit("attachment_download_result", serde_json::json!({
@@ -499,17 +412,18 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
                 // Persist updated message/attachment metadata to the database
                 if let Some(handle) = TAURI_APP.get() {
-                    // Find and save only the updated message
+                    // Find and save only the updated message (convert to Message for serialization)
                     let updated_chat = state.get_chat(&npub).unwrap();
-                    let updated_message = {
-                        updated_chat.messages.iter().find(|m| m.id == msg_id).cloned()
-                    }.unwrap();
+                    let chat_id = updated_chat.id().clone();
+                    let updated_message = updated_chat.messages.find_by_hex_id(&msg_id)
+                        .map(|m| m.to_message(&state.interner))
+                        .unwrap();
 
                     // Update the frontend state
                     handle.emit("message_update", serde_json::json!({
                         "old_id": &updated_message.id,
-                        "message": updated_message.clone(),
-                        "chat_id": updated_chat.id()
+                        "message": &updated_message,
+                        "chat_id": &chat_id
                     })).unwrap();
 
                     // Drop the STATE lock before performing async I/O

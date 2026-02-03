@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::error::Error;
 use super::state::{MiniAppInstance, MiniAppsState, MiniAppPackage, RealtimeChannelState};
 use super::realtime::{RealtimeEvent, encode_topic_id, encode_node_addr};
+use crate::util::bytes_to_hex_string;
 
 // Network isolation proxy - only used on Linux (not macOS due to version requirements, not Windows due to WebView2 freeze, not Android)
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
@@ -520,7 +521,7 @@ pub async fn miniapp_load_info_from_bytes(
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let file_hash = hex::encode(hasher.finalize());
+    let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
 
     let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback_name)?;
 

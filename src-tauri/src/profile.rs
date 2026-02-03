@@ -2,6 +2,8 @@ use nostr_sdk::prelude::*;
 use tauri::Emitter;
 
 #[cfg(not(target_os = "android"))]
+use std::sync::Arc;
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
 
 use crate::{NOSTR_CLIENT, STATE, TAURI_APP};
@@ -642,7 +644,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
                 .to_lowercase();
 
             AttachmentFile {
-                bytes,
+                bytes: Arc::new(bytes),
                 img_meta: None,
                 extension,
             }

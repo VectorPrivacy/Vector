@@ -27,16 +27,16 @@ pub fn generate_encryption_params() -> EncryptionParams {
     let nonce: [u8; 16] = rng.gen();
     
     EncryptionParams {
-        key: hex::encode(key),
-        nonce: hex::encode(nonce),
+        key: bytes_to_hex_string(&key),
+        nonce: bytes_to_hex_string(&nonce),
     }
 }
 
 /// Encrypts data using AES-256-GCM with a 16-byte nonce
 pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, String> {
     // Decode key and nonce from hex
-    let key_bytes = hex::decode(&params.key).unwrap();
-    let nonce_bytes = hex::decode(&params.nonce).unwrap();
+    let key_bytes = hex_string_to_bytes(&params.key);
+    let nonce_bytes = hex_string_to_bytes(&params.nonce);
 
     // Initialize AES-GCM cipher
     let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
@@ -185,8 +185,8 @@ pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Re
     }
 
     // Decode key and nonce from hex
-    let key_bytes = hex::decode(key_hex).unwrap();
-    let nonce_bytes = hex::decode(nonce_hex).unwrap();
+    let key_bytes = hex_string_to_bytes(key_hex);
+    let nonce_bytes = hex_string_to_bytes(nonce_hex);
 
     // Split input into ciphertext and authentication tag
     let (ciphertext, tag_bytes) = encrypted_data.split_at(encrypted_data.len() - 16);

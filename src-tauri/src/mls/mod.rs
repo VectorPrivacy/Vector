@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use tauri::{AppHandle, Runtime, Emitter};
-use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE};
+use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE, Message};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
 use crate::db::{save_chat, save_chat_messages};
+use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // Submodules
 mod types;
@@ -305,7 +306,7 @@ impl MlsService {
 
             // GroupId is already a GroupId type in MDK (no conversion needed)
             let gid_bytes = create_out.group.mls_group_id.as_slice();
-            let engine_gid_hex = hex::encode(gid_bytes);
+            let engine_gid_hex = bytes_to_hex_string(gid_bytes);
 
             // Attempt to derive wire id (wrapper 'h' tag, 64-hex) using a non-published dummy wrapper.
             // If unavailable, fall back to engine id.
@@ -547,10 +548,7 @@ impl MlsService {
             .ok_or(MlsError::GroupNotFound)?;
         
         // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(
-            &hex::decode(&group_meta.engine_group_id)
-                .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
-        );
+        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
         // Perform engine operations: add member and merge commit BEFORE publishing
         // This ensures our local state is correct before announcing to the network
@@ -647,8 +645,7 @@ impl MlsService {
         // Send a "leave request" application message so admins auto-remove us
         // This is more reliable than the MLS proposal which needs explicit commit
         if let Some(ref meta) = group_meta {
-            if let Ok(mls_group_id) = hex::decode(&meta.engine_group_id)
-                .map(|bytes| GroupId::from_slice(&bytes))
+            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&meta.engine_group_id));
             {
                 // Get our pubkey for building the rumor
                 if let Ok(signer) = client.signer().await {
@@ -750,10 +747,7 @@ impl MlsService {
             .ok_or(MlsError::GroupNotFound)?;
         
         // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(
-            &hex::decode(&group_meta.engine_group_id)
-                .map_err(|e| MlsError::CryptoError(format!("Invalid group ID hex: {}", e)))?
-        );
+        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
         // Perform engine operation: remove member and merge commit BEFORE publishing
         // This ensures our local state is correct before announcing to the network
@@ -1075,14 +1069,8 @@ impl MlsService {
             if let Some(ref check_id) = group_check_id {
                 // Try to verify if the engine knows about this group
                 // We'll attempt to create a dummy message to see if the group exists
-                let check_gid_bytes = match hex::decode(&check_id) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        eprintln!("[MLS] Invalid group_id hex for engine check: {}", check_id);
-                        vec![]
-                    }
-                };
-                
+                let check_gid_bytes = hex_string_to_bytes(check_id);
+
                 if !check_gid_bytes.is_empty() {
                     use nostr_sdk::prelude::*;
                     let check_gid = GroupId::from_slice(&check_gid_bytes);
@@ -1166,7 +1154,7 @@ impl MlsService {
                                 // Check if we're still a member of this group
                                 // Use group_check_id (engine's group_id) instead of gid_for_fetch (wrapper id)
                                 if let Some(ref check_id) = group_check_id {
-                                    let check_gid_bytes = hex::decode(check_id).unwrap_or_default();
+                                    let check_gid_bytes = hex_string_to_bytes(check_id);
                                     if !check_gid_bytes.is_empty() {
                                         let check_gid = GroupId::from_slice(&check_gid_bytes);
                                         let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
@@ -1251,12 +1239,20 @@ impl MlsService {
                                 // Log details to help diagnose. Note: ev.pubkey is ephemeral, not real sender.
                                 println!("[MLS] Unprocessable event: group={}, mls_gid={}, id={}, created_at={}",
                                          gid_for_fetch,
-                                         hex::encode(mls_group_id.as_slice()),
+                                         bytes_to_hex_string(mls_group_id.as_slice()),
                                          ev.id.to_hex(),
                                          ev.created_at.as_secs());
 
                                 // Queue for retry - might succeed after other commits are processed
                                 pending_retry.push(ev.clone());
+                            }
+                            MessageProcessingResult::PreviouslyFailed => {
+                                // MDK detected this event previously failed processing -
+                                // skip without retrying to avoid repeated failures
+                                processed = processed.saturating_add(1);
+                                last_seen_id = Some(ev.id);
+                                last_seen_at = ev.created_at.as_secs();
+                                events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
                             }
                         }
                     }
@@ -1366,7 +1362,7 @@ impl MlsService {
                                 MessageProcessingResult::Commit { mls_group_id: _ } => {
                                     // Check membership after commit
                                     if let Some(ref check_id) = group_check_id {
-                                        let check_gid_bytes = hex::decode(check_id).unwrap_or_default();
+                                        let check_gid_bytes = hex_string_to_bytes(check_id);
                                         if !check_gid_bytes.is_empty() {
                                             let check_gid = GroupId::from_slice(&check_gid_bytes);
                                             let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
@@ -1445,8 +1441,12 @@ impl MlsService {
                                 MessageProcessingResult::Unprocessable { mls_group_id } => {
                                     // Still can't process - keep for next retry round
                                     println!("[MLS] ✗ Retry still unprocessable: id={}, mls_gid={}",
-                                             ev.id.to_hex(), hex::encode(mls_group_id.as_slice()));
+                                             ev.id.to_hex(), bytes_to_hex_string(mls_group_id.as_slice()));
                                     still_pending.push(ev.clone());
+                                }
+                                MessageProcessingResult::PreviouslyFailed => {
+                                    // Previously failed - don't retry
+                                    println!("[MLS] ✗ Retry skipped (previously failed): id={}", ev.id.to_hex());
                                 }
                             }
                         }
@@ -1592,21 +1592,12 @@ impl MlsService {
                                 // Reactions now work with unified storage!
                                 let (was_added, chat_id_for_save) = {
                                     let mut state = STATE.lock().await;
-                                    let added = if let Some((chat_id, msg)) = state.find_chat_and_message_mut(&reaction.reference_id) {
-                                        msg.add_reaction(reaction.clone(), Some(chat_id))
+                                    // Use helper that handles interner access via split borrowing
+                                    if let Some((chat_id, added)) = state.add_reaction_to_message(&reaction.reference_id, reaction.clone()) {
+                                        (added, if added { Some(chat_id) } else { None })
                                     } else {
-                                        false
-                                    };
-                                    
-                                    // Get chat_id for saving if reaction was added
-                                    let chat_id_for_save = if added {
-                                        state.find_message(&reaction.reference_id)
-                                            .map(|(chat, _)| chat.id().clone())
-                                    } else {
-                                        None
-                                    };
-                                    
-                                    (added, chat_id_for_save)
+                                        (false, None)
+                                    }
                                 };
                                 
                                 // Save the updated message to database immediately (like DM reactions)
@@ -1781,15 +1772,19 @@ impl MlsService {
 
                                 // Update message in state and emit to frontend
                                 let mut state = STATE.lock().await;
-                                if let Some(chat) = state.get_chat_mut(&chat_id) {
-                                    if let Some(msg) = chat.get_message_mut(&message_id) {
+                                let chat_idx = state.chats.iter().position(|c| c.id == chat_id);
+                                if let Some(idx) = chat_idx {
+                                    // Mutate the message
+                                    if let Some(msg) = state.chats[idx].get_message_mut(&message_id) {
                                         msg.apply_edit(new_content, edited_at);
-
-                                        // Emit update to frontend
+                                    }
+                                    // Convert to Message for emit
+                                    if let Some(msg) = state.chats[idx].get_compact_message(&message_id) {
+                                        let msg_for_emit = msg.to_message(&state.interner);
                                         if let Some(handle) = TAURI_APP.get() {
                                             let _ = handle.emit("message_update", serde_json::json!({
                                                 "old_id": &message_id,
-                                                "message": &msg,
+                                                "message": msg_for_emit,
                                                 "chat_id": &chat_id
                                             }));
                                         }
@@ -1814,12 +1809,16 @@ impl MlsService {
                     // Only save the newly added messages (much more efficient!)
                     // Get the last N messages where N = number of new messages processed
                     if new_msgs > 0 {
-                        let messages_to_save: Vec<_> = chat.messages.iter()
-                            .rev()
-                            .take(new_msgs as usize)
-                            .cloned()
-                            .collect();
-                        
+                        // Need to get interner from state to convert CompactMessage to Message
+                        let messages_to_save: Vec<Message> = {
+                            let state = STATE.lock().await;
+                            chat.messages.iter()
+                                .rev()
+                                .take(new_msgs as usize)
+                                .map(|m| m.to_message(&state.interner))
+                                .collect()
+                        };
+
                         if !messages_to_save.is_empty() {
                             let _ = save_chat_messages(handle.clone(), &chat_id, &messages_to_save).await;
                         }

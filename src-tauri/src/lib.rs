@@ -60,6 +60,9 @@ mod audio;
 // Shared utilities module (error handling, image encoding, state access)
 mod shared;
 
+// SIMD-accelerated operations (hex encoding, image alpha, etc.)
+mod simd;
+
 // State management module
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility
@@ -278,7 +281,6 @@ pub fn run() {
             commands::messaging::get_messages_around_id,
             commands::messaging::get_system_events,
             commands::messaging::get_chat_message_count,
-            commands::messaging::get_file_hash_index,
             commands::messaging::evict_chat_messages,
             // Realtime signaling commands (commands/realtime.rs)
             commands::realtime::notifs,

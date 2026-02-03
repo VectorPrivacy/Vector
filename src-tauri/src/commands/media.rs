@@ -59,11 +59,6 @@ pub async fn transcribe<R: Runtime>(
     // Convert the file path to a Path
     let path = std::path::Path::new(&file_path);
 
-    // Check if the file exists
-    if !path.exists() {
-        return Err(format!("File does not exist: {}", file_path));
-    }
-
     // Decode and resample to 16kHz for Whisper
     match audio::decode_and_resample(path, 16000) {
         Ok(audio_data) => {

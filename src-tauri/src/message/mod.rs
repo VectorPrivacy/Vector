@@ -16,6 +16,7 @@ mod types;
 mod compression;
 mod sending;
 mod files;
+pub mod compact;
 
 // Re-exports (use * for Tauri commands to include generated __cmd__ macros)
 pub use sending::*;
@@ -23,6 +24,11 @@ pub use files::*;
 pub use types::{
     Message, ImageMetadata, Attachment,
     AttachmentFile, Reaction, EditEntry,
+};
+#[allow(unused_imports)]
+pub use compact::{
+    CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment,
+    AttachmentFlags, MessageFlags, NpubInterner, NO_NPUB,
 };
 
 /// Protocol-agnostic reaction function that works for both DMs and Group Chats
@@ -79,26 +85,29 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 emoji,
             };
             
-            let mut state = STATE.lock().await;
-            if let Some(chat) = state.chats.iter_mut().find(|c| c.has_participant(&chat_id)) {
-                if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == reference_id) {
-                    let was_added = msg.add_reaction(reaction, Some(&chat_id));
-                    
+            let msg_for_save = {
+                let mut state = STATE.lock().await;
+                // Use helper that handles interner access via split borrowing
+                if let Some((chat_id, was_added)) = state.add_reaction_to_message(&reference_id, reaction) {
                     if was_added {
-                        // Save the updated message to database
-                        if let Some(handle) = TAURI_APP.get() {
-                            let updated_message = msg.clone();
-                            let chat_id = chat.id.clone();
-                            drop(state); // Release lock before async operation
-                            let _ = crate::db::save_message(handle.clone(), &chat_id, &updated_message).await;
-                            return Ok(true);
-                        }
-                    }
-                    
-                    return Ok(was_added);
+                        state.find_message(&reference_id)
+                            .map(|(_, msg)| (chat_id, msg))
+                    } else { None }
+                } else { None }
+            };
+
+            if let Some((chat_id, msg)) = msg_for_save {
+                if let Some(handle) = TAURI_APP.get() {
+                    let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
+                    let _ = handle.emit("message_update", serde_json::json!({
+                        "old_id": &reference_id,
+                        "message": &msg,
+                        "chat_id": &chat_id
+                    }));
+                    return Ok(true);
                 }
             }
-            
+
             Ok(false)
         }
         ChatType::MlsGroup => {
@@ -122,26 +131,29 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 emoji,
             };
             
-            let mut state = STATE.lock().await;
-            if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-                if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == reference_id) {
-                    let was_added = msg.add_reaction(reaction, Some(&chat_id));
-                    
+            let msg_for_save = {
+                let mut state = STATE.lock().await;
+                // Use helper that handles interner access via split borrowing
+                if let Some((returned_chat_id, was_added)) = state.add_reaction_to_message(&reference_id, reaction) {
                     if was_added {
-                        // Save the updated message to database
-                        if let Some(handle) = TAURI_APP.get() {
-                            let updated_message = msg.clone();
-                            let chat_id_clone = chat.id.clone();
-                            drop(state); // Release lock before async operation
-                            let _ = crate::db::save_message(handle.clone(), &chat_id_clone, &updated_message).await;
-                            return Ok(true);
-                        }
-                    }
-                    
-                    return Ok(was_added);
+                        state.find_message(&reference_id)
+                            .map(|(_, msg)| (returned_chat_id, msg))
+                    } else { None }
+                } else { None }
+            };
+
+            if let Some((chat_id_clone, msg)) = msg_for_save {
+                if let Some(handle) = TAURI_APP.get() {
+                    let _ = crate::db::save_message(handle.clone(), &chat_id_clone, &msg).await;
+                    let _ = handle.emit("message_update", serde_json::json!({
+                        "old_id": &reference_id,
+                        "message": &msg,
+                        "chat_id": &chat_id_clone
+                    }));
+                    return Ok(true);
                 }
             }
-            
+
             Ok(false)
         }
     }
@@ -151,21 +163,23 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
 pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     // Find the message we're extracting metadata from
     let text = {
-        let mut state = STATE.lock().await;
-        let message = state.chats.iter_mut()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id));
+        let state = STATE.lock().await;
+        let chat_idx = state.chats.iter().position(|c| c.id == chat_id);
+        if let Some(idx) = chat_idx {
+            state.chats[idx].messages.find_by_hex_id(&msg_id)
+                .map(|m| m.content.clone())
+        } else { None }
+    };
 
-        // Message might not be in backend state (e.g., loaded via get_messages_around_id)
-        match message {
-            Some(msg) => msg.content.clone(),
-            None => return false,
-        }
+    // Message might not be in backend state (e.g., loaded via get_messages_around_id)
+    let text = match text {
+        Some(t) => t,
+        None => return false,
     };
 
     // Extract URLs from the message
     const MAX_URLS_TO_TRY: usize = 3;
-    let urls = util::extract_https_urls(text.as_str());
+    let urls = util::extract_https_urls(&text);
     if urls.is_empty() {
         return false;
     }
@@ -182,27 +196,24 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
 
                 // Extracted metadata!
                 if has_content {
-                    // Re-fetch the message and add our metadata
-                    let mut state = STATE.lock().await;
-                    let msg = state.chats.iter_mut()
-                        .find(|chat| chat.id == chat_id)
-                        .and_then(|chat| chat.messages.iter_mut().find(|m| m.id == msg_id))
-                        .unwrap();
-                    msg.preview_metadata = Some(metadata);
+                    // Update message with metadata
+                    let msg_for_save = {
+                        let mut state = STATE.lock().await;
+                        state.update_message_in_chat(&chat_id, &msg_id, |msg| {
+                            msg.preview_metadata = Some(Box::new(metadata));
+                        })
+                    };
 
-                    // Update the renderer
-                    let handle = TAURI_APP.get().unwrap();
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": &msg_id,
-                        "message": &msg,
-                        "chat_id": &chat_id
-                    })).unwrap();
-
-                    // Save the updated message with metadata to the DB
-                    let message_to_save = msg.clone();
-                    drop(state); // Release lock before async DB operation
-                    let _ = crate::db::save_message(handle.clone(), &chat_id, &message_to_save).await;
-                    return true;
+                    if let Some(msg) = msg_for_save {
+                        let handle = TAURI_APP.get().unwrap();
+                        handle.emit("message_update", serde_json::json!({
+                            "old_id": &msg_id,
+                            "message": &msg,
+                            "chat_id": &chat_id
+                        })).unwrap();
+                        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
+                        return true;
+                    }
                 }
             }
             Err(_) => continue,
@@ -227,11 +238,11 @@ pub async fn forward_attachment(
         // Search through all chats to find the message
         let mut found_path: Option<String> = None;
         for chat in &state.chats {
-            if let Some(msg) = chat.messages.iter().find(|m| m.id == source_msg_id) {
+            if let Some(msg) = chat.messages.find_by_hex_id(&source_msg_id) {
                 // Find the attachment in the message
-                if let Some(attachment) = msg.attachments.iter().find(|a| a.id == source_attachment_id) {
-                    if !attachment.path.is_empty() && attachment.downloaded {
-                        found_path = Some(attachment.path.clone());
+                if let Some(attachment) = msg.attachments.iter().find(|a| a.id_eq(&source_attachment_id)) {
+                    if !attachment.path.is_empty() && attachment.downloaded() {
+                        found_path = Some(attachment.path.to_string());
                     }
                 }
                 break;
@@ -240,11 +251,6 @@ pub async fn forward_attachment(
         
         found_path.ok_or_else(|| "Attachment not found or not downloaded".to_string())?
     };
-    
-    // Verify the file exists
-    if !std::path::Path::new(&attachment_path).exists() {
-        return Err("Attachment file not found on disk".to_string());
-    }
     
     // Send the file to the target chat using the existing file_message function
     // The hash-based reuse will automatically avoid re-uploading
@@ -329,42 +335,22 @@ pub async fn edit_message(
     }
 
     // Update local state
-    let mut state = STATE.lock().await;
-    if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-        if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == message_id) {
-            // Build edit history if not present
-            if msg.edit_history.is_none() {
-                // First edit: save original content
-                msg.edit_history = Some(vec![EditEntry {
-                    content: msg.content.clone(),
-                    edited_at: msg.at,
-                }]);
-            }
-
-            // Add new edit to history
-            let edit_timestamp_ms = created_at * 1000;
-            if let Some(ref mut history) = msg.edit_history {
-                history.push(EditEntry {
-                    content: new_content.clone(),
-                    edited_at: edit_timestamp_ms,
-                });
-            }
-
-            // Update the message content and flag
-            msg.content = new_content;
-            msg.edited = true;
-
-            // Clear preview metadata (URL may have changed or been removed)
+    let edit_timestamp_ms = created_at * 1000;
+    let msg_for_emit = {
+        let mut state = STATE.lock().await;
+        state.update_message_in_chat(&chat_id, &message_id, |msg| {
+            msg.apply_edit(new_content, edit_timestamp_ms);
             msg.preview_metadata = None;
+        })
+    };
 
-            // Emit update to frontend
-            if let Some(handle) = TAURI_APP.get() {
-                handle.emit("message_update", serde_json::json!({
-                    "old_id": &message_id,
-                    "message": &msg,
-                    "chat_id": &chat_id
-                })).ok();
-            }
+    if let Some(msg) = msg_for_emit {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_update", serde_json::json!({
+                "old_id": &message_id,
+                "message": msg,
+                "chat_id": &chat_id
+            })).ok();
         }
     }
 

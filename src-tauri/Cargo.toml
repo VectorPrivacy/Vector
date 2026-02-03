@@ -24,9 +24,9 @@ tauri-build = { version = "2.5.3", features = [] }
 [dependencies]
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
-mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c", features = ["mip04"] }
-mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
-mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "7c3157c" }
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24", features = ["mip04"] }
+mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
+mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time"] }
 futures-util = "0.3.31"
@@ -37,7 +37,6 @@ reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "block
 scraper = "0.24.0"
 aes = "0.8.4"
 aes-gcm = "0.10.3"
-hex = "0.4.3"
 sha2 = "0.10.9"
 once_cell = "1.21.3"
 lazy_static = "1.5.0"
@@ -58,6 +57,7 @@ hound = "3.5.1"
 rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+rayon = "1.11.0"
 
 # Mini Apps (WebXDC) support
 zip = "2.4"

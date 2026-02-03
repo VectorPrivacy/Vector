@@ -7,6 +7,7 @@
 use mdk_core::prelude::GroupId;
 use tauri::Emitter;
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS};
+use crate::util::hex_string_to_bytes;
 use super::{MlsService, MlsGroupMetadata};
 
 /// Send an MLS message (rumor) to a group
@@ -49,10 +50,7 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
             let engine_group_id = if group_meta.engine_group_id.is_empty() {
                 return Err("Group has no engine_group_id".to_string());
             } else {
-                GroupId::from_slice(
-                    &hex::decode(&group_meta.engine_group_id)
-                        .map_err(|e| format!("Invalid engine_group_id hex: {}", e))?
-                )
+                GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id))
             };
             
             // Now get the MLS engine and create message (no await while engine is in scope)
@@ -84,20 +82,20 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                     
                     // Mark pending message as failed if we have a pending_id
                     if let Some(ref pid) = pending_id {
-                        let mut state = crate::STATE.lock().await;
-                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
-                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == *pid) {
-                                msg.failed = true;
-                                msg.pending = false;
-                                
-                                if let Some(handle) = TAURI_APP.get() {
-                                    handle.emit("message_update", serde_json::json!({
-                                        "old_id": pid,
-                                        "message": msg,
-                                        "chat_id": &group_id
-                                    })).ok();
-                                }
-                            }
+                        let msg_for_emit = {
+                            let mut state = crate::STATE.lock().await;
+                            state.update_message_in_chat(&group_id, pid, |msg| {
+                                msg.set_failed(true);
+                                msg.set_pending(false);
+                            })
+                        };
+
+                        if let (Some(handle), Some(msg)) = (TAURI_APP.get(), msg_for_emit) {
+                            handle.emit("message_update", serde_json::json!({
+                                "old_id": pid,
+                                "message": msg,
+                                "chat_id": &group_id
+                            })).ok();
                         }
                     }
                     
@@ -158,48 +156,38 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                 match send_result {
                     Ok(_) => {
                         // Mark message as successfully sent and update ID
-                        let mut state = crate::STATE.lock().await;
-                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
-                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == *pid) {
-                                // Update to real ID and mark as sent
-                                msg.id = real_id.clone();
-                                msg.pending = false;
-                                
-                                // Emit update
-                                if let Some(handle) = TAURI_APP.get() {
-                                    handle.emit("message_update", serde_json::json!({
-                                        "old_id": pid,
-                                        "message": msg,
-                                        "chat_id": &group_id
-                                    })).ok();
-                                }
-                                
-                                // Save to database
-                                let msg_clone = msg.clone();
-                                drop(state);
-                                if let Some(handle) = TAURI_APP.get() {
-                                    let _ = crate::db::save_message(handle.clone(), &group_id, &msg_clone).await;
-                                }
+                        let result = {
+                            let mut state = crate::STATE.lock().await;
+                            state.finalize_pending_message(&group_id, pid, real_id)
+                        };
+
+                        if let Some((old_id, msg)) = result {
+                            if let Some(handle) = TAURI_APP.get() {
+                                handle.emit("message_update", serde_json::json!({
+                                    "old_id": &old_id,
+                                    "message": &msg,
+                                    "chat_id": &group_id
+                                })).ok();
+                                let _ = crate::db::save_message(handle.clone(), &group_id, &msg).await;
                             }
                         }
                     }
                     Err(e) => {
                         // Mark message as failed (keep pending ID)
-                        let mut state = crate::STATE.lock().await;
-                        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == group_id) {
-                            if let Some(msg) = chat.messages.iter_mut().find(|m| m.id == *pid) {
-                                msg.failed = true;
-                                msg.pending = false;
-                                
-                                // Emit update
-                                if let Some(handle) = TAURI_APP.get() {
-                                    handle.emit("message_update", serde_json::json!({
-                                        "old_id": pid,
-                                        "message": msg,
-                                        "chat_id": &group_id
-                                    })).ok();
-                                }
-                            }
+                        let msg_for_emit = {
+                            let mut state = crate::STATE.lock().await;
+                            state.update_message_in_chat(&group_id, pid, |msg| {
+                                msg.set_failed(true);
+                                msg.set_pending(false);
+                            })
+                        };
+
+                        if let (Some(handle), Some(msg)) = (TAURI_APP.get(), msg_for_emit) {
+                            handle.emit("message_update", serde_json::json!({
+                                "old_id": pid,
+                                "message": msg,
+                                "chat_id": &group_id
+                            })).ok();
                         }
                         return Err(format!("Failed to send MLS wrapper: {}", e));
                     }

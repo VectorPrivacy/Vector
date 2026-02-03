@@ -11,6 +11,7 @@ use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 use tauri::Emitter;
 use crate::{db, mls, MlsService, NotificationData, show_notification_generic, NOSTR_CLIENT, NOTIFIED_WELCOMES, STATE, TAURI_APP, TRUSTED_RELAYS};
+use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // ============================================================================
 // Device & KeyPackage Read Commands
@@ -342,7 +343,8 @@ pub async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, Str
 
             let mut members: Vec<String> = Vec::new();
             let mut admins: Vec<String> = Vec::new();
-            if let Ok(gid_bytes) = hex::decode(&engine_id) {
+            let gid_bytes = hex_string_to_bytes(&engine_id);
+            if !gid_bytes.is_empty() {
                 // Decode engine id to GroupId
                 let gid = GroupId::from_slice(&gid_bytes);
 
@@ -357,7 +359,7 @@ pub async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, Str
                 // Get admins from the group
                 if let Ok(groups) = engine.get_groups() {
                     for g in groups {
-                        let gid_hex = hex::encode(g.mls_group_id.as_slice());
+                        let gid_hex = bytes_to_hex_string(g.mls_group_id.as_slice());
                         if gid_hex == engine_id {
                             admins = g.admin_pubkeys.iter()
                                 .filter_map(|pk| pk.to_bech32().ok())
@@ -814,7 +816,7 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                 out.push(SimpleWelcome {
                     id: w.id.to_hex(),
                     wrapper_event_id: w.wrapper_event_id.to_hex(),
-                    nostr_group_id: hex::encode(w.nostr_group_id),
+                    nostr_group_id: bytes_to_hex_string(&w.nostr_group_id),
                     group_name: w.group_name.clone(),
                     group_description: Some(w.group_description.clone()),
                     group_image_url: None, // MDK uses group_image_hash/key/nonce instead of URL
@@ -919,7 +921,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                 engine.accept_welcome(&welcome).map_err(|e| e.to_string())?;
 
                 // The nostr_group_id is used for wire protocol (h tag on relays)
-                let nostr_group_id = hex::encode(&nostr_group_id_bytes);
+                let nostr_group_id = bytes_to_hex_string(&nostr_group_id_bytes);
 
                 // After accepting the welcome, get the actual group from the engine to find its internal ID
                 // This follows the pattern from the SDK example
@@ -930,11 +932,11 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
 
                     // Find the group that matches our nostr_group_id
                     let matching_group = groups.iter()
-                        .find(|g| hex::encode(&g.nostr_group_id) == nostr_group_id);
+                        .find(|g| bytes_to_hex_string(&g.nostr_group_id) == nostr_group_id);
 
                     if let Some(group) = matching_group {
                         // Found the group - use its internal MLS group ID
-                        let engine_id = hex::encode(group.mls_group_id.as_slice());
+                        let engine_id = bytes_to_hex_string(group.mls_group_id.as_slice());
                         println!("[MLS] Found group in engine after accept:");
                         println!("[MLS]   - nostr_group_id matches: {}", nostr_group_id);
                         println!("[MLS]   - engine mls_group_id: {}", engine_id);
@@ -945,8 +947,8 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                         eprintln!("[MLS] Groups in engine: {}", groups.len());
                         for g in groups.iter() {
                             eprintln!("[MLS]   - Group: nostr_id={}, mls_id={}",
-                                     hex::encode(&g.nostr_group_id),
-                                     hex::encode(g.mls_group_id.as_slice()));
+                                     bytes_to_hex_string(&g.nostr_group_id),
+                                     bytes_to_hex_string(g.mls_group_id.as_slice()));
                         }
                         // Use the nostr_group_id as fallback
                         nostr_group_id.clone()

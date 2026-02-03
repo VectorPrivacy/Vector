@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use lazy_static::lazy_static;
-use tokio::sync::Mutex;
 use crate::{profile, STATE};
 
 /// Priority levels for profile syncing
@@ -198,39 +197,42 @@ pub async fn start_profile_sync_processor() {
                 let npub = own_profile.id.clone();
                 drop(state);
                 
-                let mut queue = PROFILE_SYNC_QUEUE.lock().await;
+                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
                 queue.add(npub.clone(), SyncPriority::Low, false);
                 drop(queue);
             }
             last_own_profile_sync = std::time::Instant::now();
         }
         
-        // Check if we should process
-        let batch = {
-            let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-            
+        // Check if we should process (lock scoped to avoid holding across await)
+        let (should_wait, batch) = {
+            let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+
             // Prevent multiple processors
             if queue.is_processing {
-                drop(queue);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
+                (true, vec![])
+            } else {
+                queue.is_processing = true;
+                let batch = queue.get_next_batch();
+
+                // Mark all as processing
+                for entry in &batch {
+                    queue.mark_processing(&entry.npub);
+                }
+
+                (false, batch)
             }
-            
-            queue.is_processing = true;
-            let batch = queue.get_next_batch();
-            
-            // Mark all as processing
-            for entry in &batch {
-                queue.mark_processing(&entry.npub);
-            }
-            
-            batch
         };
+
+        if should_wait {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
 
         if batch.is_empty() {
             // No work to do, release lock and sleep
             {
-                let mut queue = PROFILE_SYNC_QUEUE.lock().await;
+                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
                 queue.is_processing = false;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -244,7 +246,7 @@ pub async fn start_profile_sync_processor() {
 
             // Mark as done
             {
-                let mut queue = PROFILE_SYNC_QUEUE.lock().await;
+                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
                 queue.mark_done(&entry.npub);
             }
 
@@ -254,7 +256,7 @@ pub async fn start_profile_sync_processor() {
 
         // Release processing lock
         {
-            let mut queue = PROFILE_SYNC_QUEUE.lock().await;
+            let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
             queue.is_processing = false;
         }
 
@@ -264,9 +266,9 @@ pub async fn start_profile_sync_processor() {
 }
 
 /// Queue a single profile for syncing
-pub async fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: bool) {
-    let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-    queue.add(npub.clone(), priority, force_refresh);
+pub fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: bool) {
+    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    queue.add(npub, priority, force_refresh);
 }
 
 /// Queue all profiles for a chat
@@ -313,7 +315,7 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
     drop(state); // Release state lock before queuing
 
     // Queue all profiles
-    let mut queue = PROFILE_SYNC_QUEUE.lock().await;
+    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
     
     for (npub, priority) in profiles_to_queue {
         queue.add(npub.to_string(), priority, false);
@@ -321,9 +323,9 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 }
 
 /// Force immediate refresh of a profile (for user clicks)
-pub async fn refresh_profile_now(npub: String) {
-    let mut queue = PROFILE_SYNC_QUEUE.lock().await;
-    queue.add(npub.clone(), SyncPriority::Critical, true);
+pub fn refresh_profile_now(npub: String) {
+    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    queue.add(npub, SyncPriority::Critical, true);
 }
 
 /// Sync all profiles in the system (replaces old fetchProfiles)
@@ -350,7 +352,7 @@ pub async fn sync_all_profiles() {
     drop(state); // Release state lock
     
     // Queue all profiles
-    let mut queue = PROFILE_SYNC_QUEUE.lock().await;
+    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
     
     for (npub, priority) in profiles_to_queue {
         queue.add(npub, priority, false);

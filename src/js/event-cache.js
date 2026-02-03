@@ -195,10 +195,6 @@ class EventCache {
         // Map of conversationId -> ConversationCacheEntry
         // Using Map to maintain insertion order for LRU
         this.cache = new Map();
-
-        // File hash index for deduplication (loaded once at init)
-        this.fileHashIndex = new Map();
-        this.fileHashIndexLoaded = false;
     }
 
     /**
@@ -463,8 +459,6 @@ class EventCache {
      */
     clear() {
         this.cache.clear();
-        this.fileHashIndex.clear();
-        this.fileHashIndexLoaded = false;
     }
 
     /**
@@ -488,44 +482,6 @@ class EventCache {
     }
 
     /**
-     * Load the file hash index for deduplication
-     * This should be called once at app init
-     * @returns {Promise<Map>}
-     */
-    async loadFileHashIndex() {
-        if (this.fileHashIndexLoaded) {
-            return this.fileHashIndex;
-        }
-
-        try {
-            const index = await invoke('get_file_hash_index');
-            this.fileHashIndex = new Map(Object.entries(index));
-            this.fileHashIndexLoaded = true;
-            return this.fileHashIndex;
-        } catch (error) {
-            return this.fileHashIndex;
-        }
-    }
-
-    /**
-     * Check if a file hash exists in the index
-     * @param {string} hash - The SHA256 hash of the file
-     * @returns {Object|null} - The attachment reference if found
-     */
-    getExistingAttachment(hash) {
-        return this.fileHashIndex.get(hash) || null;
-    }
-
-    /**
-     * Add a new file hash to the index (after upload)
-     * @param {string} hash - The SHA256 hash
-     * @param {Object} attachmentRef - The attachment reference data
-     */
-    addFileHash(hash, attachmentRef) {
-        this.fileHashIndex.set(hash, attachmentRef);
-    }
-
-    /**
      * Get overall cache statistics
      * @returns {Object}
      */
@@ -540,8 +496,7 @@ class EventCache {
         return {
             cachedConversations: totalConversations,
             maxConversations: EVENT_CACHE_CONFIG.maxCachedConversations,
-            totalCachedEvents: totalEvents,
-            fileHashCount: this.fileHashIndex.size
+            totalCachedEvents: totalEvents
         };
     }
 }

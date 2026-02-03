@@ -69,7 +69,6 @@ fn main() {
             "get_messages_around_id",
             "get_system_events",
             "get_chat_message_count",
-            "get_file_hash_index",
             "evict_chat_messages",
             "generate_blurhash_preview",
             "decode_blurhash",
