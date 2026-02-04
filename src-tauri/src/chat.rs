@@ -430,9 +430,14 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
         crate::commands::messaging::update_unread_counter(handle.clone()).await;
 
         if let Some(chat_id) = chat_id_for_save {
-            let state = crate::STATE.lock().await;
-            if let Some(chat) = state.get_chat(&chat_id) {
-                let _ = crate::db::save_chat(handle.clone(), chat, &state.interner).await;
+            let slim = {
+                let state = crate::STATE.lock().await;
+                state.get_chat(&chat_id).map(|chat| {
+                    crate::db::chats::SlimChatDB::from_chat(chat, &state.interner)
+                })
+            };
+            if let Some(slim) = slim {
+                let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
             }
         }
     }

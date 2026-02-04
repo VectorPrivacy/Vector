@@ -756,13 +756,12 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
             );
         }
 
-        // Save updated chat to disk
-        let chat_clone = state.chats[chat_idx].clone();
-        let interner_clone = state.interner.clone();
+        // Save updated chat to disk — build slim while locked (no full chat clone needed)
+        let slim = db::chats::SlimChatDB::from_chat(&state.chats[chat_idx], &state.interner);
         drop(state);
 
         if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = db::save_chat(handle.clone(), &chat_clone, &interner_clone).await {
+            if let Err(e) = db::chats::save_slim_chat(handle.clone(), slim).await {
                 eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
             }
         }
@@ -1028,9 +1027,14 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                         // Member count will be updated during sync when we process messages
                     }
 
-                    // Save chat to disk
-                    if let Some(chat) = state.get_chat(&chat_id) {
-                        if let Err(e) = db::save_chat(handle.clone(), chat, &state.interner).await {
+                    // Build slim while locked, save after drop
+                    let slim = state.get_chat(&chat_id).map(|chat| {
+                        db::chats::SlimChatDB::from_chat(chat, &state.interner)
+                    });
+                    drop(state);
+
+                    if let Some(slim) = slim {
+                        if let Err(e) = db::chats::save_slim_chat(handle.clone(), slim).await {
                             eprintln!("[MLS] Failed to save chat after welcome acceptance: {}", e);
                         }
                     }

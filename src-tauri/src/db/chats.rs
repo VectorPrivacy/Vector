@@ -309,10 +309,12 @@ pub async fn get_all_chats<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<Slim
 }
 
 /// Save a single chat to the database
-pub async fn save_chat<R: Runtime>(handle: AppHandle<R>, chat: &Chat, interner: &NpubInterner) -> Result<(), String> {
+///
+/// Takes a pre-built `SlimChatDB` so callers can build it while holding STATE
+/// (cheap — just metadata, no messages), drop the lock, then call this.
+pub async fn save_slim_chat<R: Runtime>(handle: AppHandle<R>, slim_chat: SlimChatDB) -> Result<(), String> {
     let conn = crate::account_manager::get_db_connection(&handle)?;
 
-    let slim_chat = SlimChatDB::from_chat(chat, interner);
     let chat_identifier = &slim_chat.id;
 
     let chat_type_int = slim_chat.chat_type.to_i32();

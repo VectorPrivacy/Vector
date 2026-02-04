@@ -9,7 +9,7 @@ pub mod settings;
 mod profiles;
 mod mls;
 mod miniapps;
-mod chats;
+pub mod chats;
 mod messages;
 mod attachments;
 mod events;
@@ -40,7 +40,7 @@ pub use miniapps::{
 pub use chats::{
     get_chat_id_by_identifier,
     preload_id_caches, clear_id_caches,
-    get_all_chats, save_chat, delete_chat,
+    get_all_chats, delete_chat,
 };
 // Internal chat helpers used by messages/events
 pub(crate) use chats::{get_or_create_chat_id, get_or_create_user_id};

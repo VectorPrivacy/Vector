@@ -413,35 +413,42 @@ pub async fn load_profile(npub: String) -> bool {
         Ok(meta) => {
             if meta.is_some() {
                 // If it's ours, mark it as such
-                let mut state = STATE.lock().await;
-                let profile_mutable = state.get_profile_mut(&npub).unwrap();
-                profile_mutable.mine = my_public_key == profile_pubkey;
+                let save_data = {
+                    let mut state = STATE.lock().await;
+                    let profile_mutable = state.get_profile_mut(&npub).unwrap();
+                    profile_mutable.mine = my_public_key == profile_pubkey;
 
-                // Update the Status, and track changes
-                let status_changed = profile_mutable.status != status;
-                profile_mutable.status = status;
+                    // Update the Status, and track changes
+                    let status_changed = profile_mutable.status != status;
+                    profile_mutable.status = status;
 
-                // Update the Metadata, and track changes
-                let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
+                    // Update the Metadata, and track changes
+                    let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
 
-                // Apply the current update time
-                profile_mutable.last_updated = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                    // Apply the current update time
+                    profile_mutable.last_updated = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
 
-                // If there's any change between our Old and New profile, emit an update
-                if status_changed || metadata_changed {
+                    // Only clone when something actually changed (common case: no change)
+                    if status_changed || metadata_changed {
+                        let handle = TAURI_APP.get().unwrap();
+                        handle.emit("profile_update", &profile_mutable).unwrap();
+                        let avatar_url = profile_mutable.avatar.clone();
+                        let banner_url = profile_mutable.banner.clone();
+                        Some((profile_mutable.clone(), avatar_url, banner_url))
+                    } else {
+                        None
+                    }
+                }; // Drop STATE lock before async operations
+
+                if let Some((profile_clone, avatar_url, banner_url)) = save_data {
                     let handle = TAURI_APP.get().unwrap();
-                    handle.emit("profile_update", &profile_mutable).unwrap();
-
-                    // Cache this profile in our DB, too
-                    db::set_profile(handle.clone(), profile_mutable.clone()).await.unwrap();
+                    db::set_profile(handle.clone(), profile_clone).await.unwrap();
 
                     // Cache avatar/banner images in the background for offline access
                     let npub_clone = npub.clone();
-                    let avatar_url = profile_mutable.avatar.clone();
-                    let banner_url = profile_mutable.banner.clone();
                     tokio::spawn(async move {
                         cache_profile_images(&npub_clone, &avatar_url, &banner_url).await;
                     });
@@ -478,77 +485,80 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     let signer = client.signer().await.unwrap();
     let my_public_key = signer.get_public_key().await.unwrap();
 
-    // Get our profile
-    let mut meta: Metadata;
-    let mut state = STATE.lock().await;
-    let profile = state
-        .get_profile(&my_public_key.to_bech32().unwrap())
-        .unwrap();
+    // Build metadata from current profile, then drop the lock before network I/O
+    let meta = {
+        let state = STATE.lock().await;
+        let profile = state
+            .get_profile(&my_public_key.to_bech32().unwrap())
+            .unwrap();
 
-    // We'll apply the changes to the previous profile and carry-on the rest
-    meta = Metadata::new().name(if name.is_empty() {
-        &profile.name
-    } else {
-        &name
-    });
+        // We'll apply the changes to the previous profile and carry-on the rest
+        let mut meta = Metadata::new().name(if name.is_empty() {
+            &profile.name
+        } else {
+            &name
+        });
 
-    // Optional avatar
-    let avatar_url_str = if avatar.is_empty() {
-        profile.avatar.as_str()
-    } else {
-        avatar.as_str()
-    };
-    if !avatar_url_str.is_empty() {
-        if let Ok(url) = Url::parse(avatar_url_str) {
-            meta = meta.picture(url);
+        // Optional avatar
+        let avatar_url_str = if avatar.is_empty() {
+            profile.avatar.as_str()
+        } else {
+            avatar.as_str()
+        };
+        if !avatar_url_str.is_empty() {
+            if let Ok(url) = Url::parse(avatar_url_str) {
+                meta = meta.picture(url);
+            }
         }
-    }
 
-    // Optional banner
-    let banner_url_str = if banner.is_empty() {
-        profile.banner.as_str()
-    } else {
-        banner.as_str()
-    };
-    if !banner_url_str.is_empty() {
-        if let Ok(url) = Url::parse(banner_url_str) {
-            meta = meta.banner(url);
+        // Optional banner
+        let banner_url_str = if banner.is_empty() {
+            profile.banner.as_str()
+        } else {
+            banner.as_str()
+        };
+        if !banner_url_str.is_empty() {
+            if let Ok(url) = Url::parse(banner_url_str) {
+                meta = meta.banner(url);
+            }
         }
-    }
 
-    // Add display_name
-    if !profile.display_name.is_empty() {
-        meta = meta.display_name(&profile.display_name);
-    }
-
-    // Add about
-    meta = meta.about(if about.is_empty() {
-        &profile.about
-    } else {
-        &about
-    });
-
-    // Add website
-    if !profile.website.is_empty() {
-        if let Ok(url) = Url::parse(&profile.website) {
-            meta = meta.website(url);
+        // Add display_name
+        if !profile.display_name.is_empty() {
+            meta = meta.display_name(&profile.display_name);
         }
-    }
 
-    // Add nip05
-    if !profile.nip05.is_empty() {
-        meta = meta.nip05(&profile.nip05);
-    }
+        // Add about
+        meta = meta.about(if about.is_empty() {
+            &profile.about
+        } else {
+            &about
+        });
 
-    // Add lud06
-    if !profile.lud06.is_empty() {
-        meta = meta.lud06(&profile.lud06);
-    }
+        // Add website
+        if !profile.website.is_empty() {
+            if let Ok(url) = Url::parse(&profile.website) {
+                meta = meta.website(url);
+            }
+        }
 
-    // Add lud16
-    if !profile.lud16.is_empty() {
-        meta = meta.lud16(&profile.lud16);
-    }
+        // Add nip05
+        if !profile.nip05.is_empty() {
+            meta = meta.nip05(&profile.nip05);
+        }
+
+        // Add lud06
+        if !profile.lud06.is_empty() {
+            meta = meta.lud06(&profile.lud06);
+        }
+
+        // Add lud16
+        if !profile.lud16.is_empty() {
+            meta = meta.lud16(&profile.lud16);
+        }
+
+        meta
+    }; // Drop STATE lock before network I/O
 
     // Serialize the metadata to JSON for the event content
     let metadata_json = serde_json::to_string(&meta).unwrap();
@@ -557,26 +567,26 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
         .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
 
-    // Broadcast the profile update
+    // Broadcast the profile update (no lock held during network I/O)
     match client.send_event_builder(metadata_event).await {
         Ok(_) => {
-            // Apply our Metadata to our Profile
+            // Re-acquire lock to apply metadata to our profile
             let npub = my_public_key.to_bech32().unwrap();
-            let profile_mutable = state
-                .get_profile_mut(&npub)
-                .unwrap();
-            profile_mutable.from_metadata(meta);
+            let (profile_clone, avatar_url, banner_url) = {
+                let mut state = STATE.lock().await;
+                let profile_mutable = state
+                    .get_profile_mut(&npub)
+                    .unwrap();
+                profile_mutable.from_metadata(meta);
 
-            // Update the frontend
+                // Update the frontend
+                let handle = TAURI_APP.get().unwrap();
+                handle.emit("profile_update", &profile_mutable).unwrap();
+
+                (profile_mutable.clone(), profile_mutable.avatar.clone(), profile_mutable.banner.clone())
+            }; // Drop STATE lock before async operations
+
             let handle = TAURI_APP.get().unwrap();
-            handle.emit("profile_update", &profile_mutable).unwrap();
-
-            // Save to database
-            let profile_clone = profile_mutable.clone();
-            let avatar_url = profile_mutable.avatar.clone();
-            let banner_url = profile_mutable.banner.clone();
-            drop(state); // Release lock before async operations
-
             db::set_profile(handle.clone(), profile_clone).await.ok();
 
             // Cache avatar/banner images in the background for offline access
@@ -709,23 +719,27 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 pub async fn toggle_muted(npub: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
 
-    let muted = match STATE.lock().await.get_profile_mut(&npub) {
-        Some(profile) => {
-            profile.muted = !profile.muted;
+    let (muted, profile_clone) = {
+        let mut state = STATE.lock().await;
+        match state.get_profile_mut(&npub) {
+            Some(profile) => {
+                profile.muted = !profile.muted;
 
-            // Update the frontend
-            handle.emit("profile_muted", serde_json::json!({
-                "profile_id": &profile.id,
-                "value": &profile.muted
-            })).unwrap();
+                // Update the frontend
+                handle.emit("profile_muted", serde_json::json!({
+                    "profile_id": &profile.id,
+                    "value": &profile.muted
+                })).unwrap();
 
-            // Save to DB
-            db::set_profile(handle.clone(), profile.clone()).await.unwrap();
-
-            profile.muted
+                (profile.muted, Some(profile.clone()))
+            }
+            None => (false, None)
         }
-        None => false
-    };
+    }; // Drop STATE lock before async DB operation
+
+    if let Some(profile) = profile_clone {
+        db::set_profile(handle.clone(), profile).await.unwrap();
+    }
 
     // Refresh unread badge count to reflect mute changes immediately
     let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;

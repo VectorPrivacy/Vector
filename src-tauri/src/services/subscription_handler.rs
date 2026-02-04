@@ -243,14 +243,15 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
                                                                         // Save chat metadata + the single new message
-                                                                        let save_data = {
+                                                                        let slim = {
                                                                             let state = crate::STATE.lock().await;
-                                                                            state.get_chat(&group_id_for_persist).map(|c| (c.clone(), state.interner.clone()))
+                                                                            state.get_chat(&group_id_for_persist).map(|c| {
+                                                                                crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
+                                                                            })
                                                                         };
 
-                                                                        if let Some((chat, interner)) = save_data {
-                                                                            use crate::db::save_chat;
-                                                                            let _ = save_chat(handle.clone(), &chat, &interner).await;
+                                                                        if let Some(slim) = slim {
+                                                                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
                                                                             let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
                                                                         }
                                                                     }
@@ -335,14 +336,15 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
                                                                         // Get chat and save it
-                                                                        let save_data = {
+                                                                        let slim = {
                                                                             let state = crate::STATE.lock().await;
-                                                                            state.get_chat(&group_id_for_persist).map(|c| (c.clone(), state.interner.clone()))
+                                                                            state.get_chat(&group_id_for_persist).map(|c| {
+                                                                                crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
+                                                                            })
                                                                         };
 
-                                                                        if let Some((chat, interner)) = save_data {
-                                                                            use crate::db::save_chat;
-                                                                            let _ = save_chat(handle.clone(), &chat, &interner).await;
+                                                                        if let Some(slim) = slim {
+                                                                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
                                                                             let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
                                                                         }
                                                                     }
