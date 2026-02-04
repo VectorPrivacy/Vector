@@ -242,23 +242,16 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 // Save to database if message was added
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
-                                                                        // Get chat and convert messages with interner access
-                                                                        let (save_data, messages_to_save) = {
+                                                                        // Save chat metadata + the single new message
+                                                                        let save_data = {
                                                                             let state = crate::STATE.lock().await;
-                                                                            if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                                                let msgs: Vec<crate::Message> = chat.messages.iter()
-                                                                                    .map(|m| m.to_message(&state.interner))
-                                                                                    .collect();
-                                                                                (Some((chat.clone(), state.interner.clone())), msgs)
-                                                                            } else {
-                                                                                (None, vec![])
-                                                                            }
+                                                                            state.get_chat(&group_id_for_persist).map(|c| (c.clone(), state.interner.clone()))
                                                                         };
 
                                                                         if let Some((chat, interner)) = save_data {
-                                                                            use crate::db::{save_chat, save_chat_messages};
+                                                                            use crate::db::save_chat;
                                                                             let _ = save_chat(handle.clone(), &chat, &interner).await;
-                                                                            let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &messages_to_save).await;
+                                                                            let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
                                                                         }
                                                                     }
                                                                     Some(message)

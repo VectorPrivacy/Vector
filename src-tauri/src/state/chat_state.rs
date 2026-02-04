@@ -131,8 +131,9 @@ impl ChatState {
         // Convert to compact using our interner
         let compact = CompactMessage::from_message(&message, &mut self.interner);
 
-        let is_msg_added = if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
-            chat.add_compact_message(compact)
+        let (is_msg_added, chat_idx) = if let Some(idx) = self.chats.iter().position(|c| c.id == chat_id) {
+            let added = self.chats[idx].add_compact_message(compact);
+            (added, idx)
         } else {
             // Chat doesn't exist, create it
             let mut chat = if chat_id.starts_with("npub1") {
@@ -142,13 +143,23 @@ impl ChatState {
             };
             let was_added = chat.add_compact_message(compact);
             self.chats.push(chat);
-            was_added
+            (was_added, self.chats.len() - 1)
         };
 
-        // Sort chats by last message time (newest first)
-        self.chats.sort_by(|a, b| {
-            b.last_message_time().cmp(&a.last_message_time())
-        });
+        // Move chat to its correct sorted position (newest first).
+        // Common case: new message makes this the most recent chat → move to front.
+        // This is O(n) rotate at worst but O(1) when already in position (the common
+        // case for an active conversation that's already at the front of the list).
+        if is_msg_added && chat_idx > 0 {
+            let this_time = self.chats[chat_idx].last_message_time();
+            // Find where this chat belongs (first chat with an older or equal timestamp)
+            let target = self.chats[..chat_idx].iter()
+                .position(|c| c.last_message_time() <= this_time)
+                .unwrap_or(chat_idx);
+            if target < chat_idx {
+                self.chats[target..=chat_idx].rotate_right(1);
+            }
+        }
 
         // Track stats (debug builds only)
         #[cfg(debug_assertions)]
@@ -164,7 +175,7 @@ impl ChatState {
 
     /// Batch add messages to a chat - much faster for pagination/history loads.
     ///
-    /// Sorts chats only once at the end instead of per-message.
+    /// Only repositions the chat if newer messages were added (pagination won't trigger re-sort).
     /// Returns the number of messages actually added.
     pub fn add_messages_to_chat_batch(&mut self, chat_id: &str, messages: Vec<Message>) -> usize {
         if messages.is_empty() {
@@ -177,31 +188,34 @@ impl ChatState {
             .collect();
 
         // Find or create the chat
-        let chat = if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
-            chat
+        let chat_idx = if let Some(idx) = self.chats.iter().position(|c| c.id == chat_id) {
+            idx
         } else {
-            // Chat doesn't exist, create it
             let chat = if chat_id.starts_with("npub1") {
                 Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
                 Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
             };
             self.chats.push(chat);
-            self.chats.last_mut().unwrap()
+            self.chats.len() - 1
         };
 
         // Track if last message time changes (only happens when adding newer messages)
-        let old_last_time = chat.messages.last_timestamp();
+        let old_last_time = self.chats[chat_idx].messages.last_timestamp();
 
         // Batch insert all messages
-        let added = chat.messages.insert_batch(compact_messages);
+        let added = self.chats[chat_idx].messages.insert_batch(compact_messages);
 
-        // Only sort chats if the last message time changed (i.e., we added newer messages)
+        // Only reposition if the last message time changed (i.e., we added newer messages)
         // Prepending older messages (pagination) doesn't change chat order
-        if added > 0 && chat.messages.last_timestamp() != old_last_time {
-            self.chats.sort_by(|a, b| {
-                b.last_message_time().cmp(&a.last_message_time())
-            });
+        if added > 0 && self.chats[chat_idx].messages.last_timestamp() != old_last_time && chat_idx > 0 {
+            let this_time = self.chats[chat_idx].last_message_time();
+            let target = self.chats[..chat_idx].iter()
+                .position(|c| c.last_message_time() <= this_time)
+                .unwrap_or(chat_idx);
+            if target < chat_idx {
+                self.chats[target..=chat_idx].rotate_right(1);
+            }
         }
 
         added
