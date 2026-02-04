@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, command, Runtime};
 
 use crate::{Profile, Status};
-use crate::message::compact::NpubInterner;
+use crate::profile::ProfileFlags;
+use crate::message::compact::{NpubInterner, secs_to_compact, secs_from_compact};
 
 /// Serializable profile for DB storage and frontend communication.
 ///
@@ -67,47 +68,56 @@ impl SlimProfile {
     pub fn from_profile(profile: &Profile, interner: &NpubInterner) -> Self {
         SlimProfile {
             id: interner.resolve(profile.id).unwrap_or("").to_string(),
-            name: profile.name.clone(),
-            display_name: profile.display_name.clone(),
-            nickname: profile.nickname.clone(),
-            lud06: profile.lud06.clone(),
-            lud16: profile.lud16.clone(),
-            banner: profile.banner.clone(),
-            avatar: profile.avatar.clone(),
-            about: profile.about.clone(),
-            website: profile.website.clone(),
-            nip05: profile.nip05.clone(),
-            status: profile.status.clone(),
-            last_updated: profile.last_updated,
-            mine: profile.mine,
-            muted: profile.muted,
-            bot: profile.bot,
-            avatar_cached: profile.avatar_cached.clone(),
-            banner_cached: profile.banner_cached.clone(),
+            name: profile.name.to_string(),
+            display_name: profile.display_name.to_string(),
+            nickname: profile.nickname.to_string(),
+            lud06: profile.lud06.to_string(),
+            lud16: profile.lud16.to_string(),
+            banner: profile.banner.to_string(),
+            avatar: profile.avatar.to_string(),
+            about: profile.about.to_string(),
+            website: profile.website.to_string(),
+            nip05: profile.nip05.to_string(),
+            status: Status {
+                title: profile.status_title.to_string(),
+                purpose: profile.status_purpose.to_string(),
+                url: profile.status_url.to_string(),
+            },
+            last_updated: secs_from_compact(profile.last_updated),
+            mine: profile.flags.is_mine(),
+            muted: profile.flags.is_muted(),
+            bot: profile.flags.is_bot(),
+            avatar_cached: profile.avatar_cached.to_string(),
+            banner_cached: profile.banner_cached.to_string(),
         }
     }
 
     /// Convert to internal Profile (id will be set by insert_or_replace_profile).
     pub fn to_profile(&self) -> crate::Profile {
+        let mut flags = ProfileFlags::default();
+        flags.set_mine(self.mine);
+        flags.set_muted(self.muted);
+        flags.set_bot(self.bot);
+
         crate::Profile {
             id: crate::message::compact::NO_NPUB,
-            name: self.name.clone(),
-            display_name: self.display_name.clone(),
-            nickname: self.nickname.clone(),
-            lud06: self.lud06.clone(),
-            lud16: self.lud16.clone(),
-            banner: self.banner.clone(),
-            avatar: self.avatar.clone(),
-            about: self.about.clone(),
-            website: self.website.clone(),
-            nip05: self.nip05.clone(),
-            status: self.status.clone(),
-            last_updated: self.last_updated,
-            mine: self.mine,
-            muted: self.muted,
-            bot: self.bot,
-            avatar_cached: self.avatar_cached.clone(),
-            banner_cached: self.banner_cached.clone(),
+            name: self.name.clone().into_boxed_str(),
+            display_name: self.display_name.clone().into_boxed_str(),
+            nickname: self.nickname.clone().into_boxed_str(),
+            lud06: self.lud06.clone().into_boxed_str(),
+            lud16: self.lud16.clone().into_boxed_str(),
+            banner: self.banner.clone().into_boxed_str(),
+            avatar: self.avatar.clone().into_boxed_str(),
+            about: self.about.clone().into_boxed_str(),
+            website: self.website.clone().into_boxed_str(),
+            nip05: self.nip05.clone().into_boxed_str(),
+            status_title: self.status.title.clone().into_boxed_str(),
+            status_purpose: self.status.purpose.clone().into_boxed_str(),
+            status_url: self.status.url.clone().into_boxed_str(),
+            last_updated: secs_to_compact(self.last_updated),
+            flags,
+            avatar_cached: self.avatar_cached.clone().into_boxed_str(),
+            banner_cached: self.banner_cached.clone().into_boxed_str(),
         }
     }
 }

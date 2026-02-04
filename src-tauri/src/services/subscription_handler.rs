@@ -215,9 +215,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                         let sender = if let Some(profile) = state.get_profile(&sender_npub) {
                                                                             if !profile.nickname.is_empty() {
-                                                                                profile.nickname.clone()
+                                                                                profile.nickname.to_string()
                                                                             } else if !profile.name.is_empty() {
-                                                                                profile.name.clone()
+                                                                                profile.name.to_string()
                                                                             } else {
                                                                                 "Someone".to_string()
                                                                             }
@@ -299,9 +299,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                         let sender = if let Some(profile) = state.get_profile(&sender_npub) {
                                                                             if !profile.nickname.is_empty() {
-                                                                                profile.nickname.clone()
+                                                                                profile.nickname.to_string()
                                                                             } else if !profile.name.is_empty() {
-                                                                                profile.name.clone()
+                                                                                profile.name.to_string()
                                                                             } else {
                                                                                 "Someone".to_string()
                                                                             }
@@ -421,8 +421,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     let state = crate::STATE.lock().await;
                                                                     state.get_profile(&member_pubkey)
                                                                         .map(|p| {
-                                                                            if !p.nickname.is_empty() { p.nickname.clone() }
-                                                                            else if !p.name.is_empty() { p.name.clone() }
+                                                                            if !p.nickname.is_empty() { p.nickname.to_string() }
+                                                                            else if !p.name.is_empty() { p.name.to_string() }
                                                                             else { member_pubkey.chars().take(12).collect::<String>() + "..." }
                                                                         })
                                                                 };

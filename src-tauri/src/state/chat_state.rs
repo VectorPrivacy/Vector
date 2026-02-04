@@ -68,7 +68,7 @@ impl ChatState {
             let npub = slim.id.clone();
             let mut full_profile = slim.to_profile();
             if let Ok(profile_pubkey) = PublicKey::from_bech32(&npub) {
-                full_profile.mine = my_public_key == profile_pubkey;
+                full_profile.flags.set_mine(my_public_key == profile_pubkey);
             }
             self.insert_or_replace_profile(&npub, full_profile);
         }
@@ -262,8 +262,7 @@ impl ChatState {
         // Ensure profile exists
         let id = self.interner.intern(their_npub);
         if self.get_profile_by_id(id).is_none() {
-            let mut profile = Profile::new();
-            profile.mine = false;
+            let profile = Profile::new();
             self.insert_or_replace_profile(their_npub, profile);
 
             if let Some(handle) = TAURI_APP.get() {
@@ -502,7 +501,7 @@ impl ChatState {
             // Skip if profile is muted (for DMs)
             if matches!(chat.chat_type, ChatType::DirectMessage) {
                 if let Some(profile) = self.get_profile(&chat.id) {
-                    if profile.muted {
+                    if profile.flags.is_muted() {
                         continue;
                     }
                 }

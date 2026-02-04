@@ -870,9 +870,9 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                 let state = STATE.lock().await;
                 if let Some(profile) = state.get_profile(&welcome.welcomer) {
                     if !profile.nickname.is_empty() {
-                        profile.nickname.clone()
+                        profile.nickname.to_string()
                     } else if !profile.name.is_empty() {
-                        profile.name.clone()
+                        profile.name.to_string()
                     } else {
                         "Someone".to_string()
                     }

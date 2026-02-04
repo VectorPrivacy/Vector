@@ -260,8 +260,8 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     let mut cleared_ids = Vec::new();
     for profile in &mut state.profiles {
         if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
-            profile.avatar_cached = String::new();
-            profile.banner_cached = String::new();
+            profile.avatar_cached = Box::<str>::default();
+            profile.banner_cached = Box::<str>::default();
             cleared_ids.push(profile.id);
         }
     }

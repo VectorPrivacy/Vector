@@ -267,8 +267,8 @@ impl MlsService {
                         let state = STATE.lock().await;
                         state.get_profile(member_npub)
                             .and_then(|p| {
-                                if !p.name.is_empty() { Some(p.name.clone()) }
-                                else if !p.display_name.is_empty() { Some(p.display_name.clone()) }
+                                if !p.name.is_empty() { Some(p.name.to_string()) }
+                                else if !p.display_name.is_empty() { Some(p.display_name.to_string()) }
                                 else { None }
                             })
                             .unwrap_or_else(|| member_npub.clone())
@@ -537,8 +537,8 @@ impl MlsService {
                 let state = STATE.lock().await;
                 state.get_profile(&member_pubkey)
                     .and_then(|p| {
-                        if !p.name.is_empty() { Some(p.name.clone()) }
-                        else if !p.display_name.is_empty() { Some(p.display_name.clone()) }
+                        if !p.name.is_empty() { Some(p.name.to_string()) }
+                        else if !p.display_name.is_empty() { Some(p.display_name.to_string()) }
                         else { None }
                     })
                     .unwrap_or_else(|| member_pubkey.to_string())
@@ -1651,8 +1651,8 @@ impl MlsService {
                                     let state = STATE.lock().await;
                                     state.get_profile(&member_pubkey)
                                         .map(|p| {
-                                            if !p.nickname.is_empty() { p.nickname.clone() }
-                                            else if !p.name.is_empty() { p.name.clone() }
+                                            if !p.nickname.is_empty() { p.nickname.to_string() }
+                                            else if !p.name.is_empty() { p.name.to_string() }
                                             else { member_pubkey.chars().take(12).collect::<String>() + "..." }
                                         })
                                 };

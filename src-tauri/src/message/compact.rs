@@ -72,6 +72,25 @@ pub fn timestamp_from_compact(compact: u32) -> u64 {
     EPOCH_2020_MS + (compact as u64 * 1000)
 }
 
+/// Custom epoch in seconds: 2020-01-01 00:00:00 UTC
+const EPOCH_2020_SECS: u64 = 1577836800;
+
+/// Convert Unix seconds timestamp to compact u32 (seconds since 2020).
+/// Preserves 0 as sentinel for "never set".
+#[inline]
+pub fn secs_to_compact(secs: u64) -> u32 {
+    if secs == 0 { return 0; }
+    secs.saturating_sub(EPOCH_2020_SECS) as u32
+}
+
+/// Convert compact u32 back to Unix seconds timestamp.
+/// Preserves 0 as sentinel for "never set".
+#[inline]
+pub fn secs_from_compact(compact: u32) -> u64 {
+    if compact == 0 { return 0; }
+    EPOCH_2020_SECS + compact as u64
+}
+
 // ============================================================================
 // Message Flags
 // ============================================================================

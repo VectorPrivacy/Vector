@@ -133,7 +133,7 @@ pub async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     // Add our profile (at least, the npub of it) to our state
     let npub = keys.public_key.to_bech32().unwrap();
     let mut profile = Profile::new();
-    profile.mine = true;
+    profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(&npub, profile);
 
     // Initialize profile database and set as current account
@@ -224,7 +224,7 @@ pub async fn create_account() -> Result<LoginKeyPair, String> {
     // Add our profile (at least, the npub of it) to our state
     let npub = keys.public_key.to_bech32().map_err(|e| e.to_string())?;
     let mut profile = Profile::new();
-    profile.mine = true;
+    profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(&npub, profile);
 
     // Save the seed in memory, ready for post-pin-setup encryption

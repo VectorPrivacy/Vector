@@ -193,7 +193,7 @@ pub async fn start_profile_sync_processor() {
         // Periodically queue our own profile to detect changes from other Nostr apps
         if last_own_profile_sync.elapsed() >= own_profile_sync_interval {
             let state = STATE.lock().await;
-            if let Some(own_profile) = state.profiles.iter().find(|p| p.mine) {
+            if let Some(own_profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
                 let npub = state.interner.resolve(own_profile.id).unwrap_or("").to_string();
                 drop(state);
                 

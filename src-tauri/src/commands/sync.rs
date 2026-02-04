@@ -192,8 +192,7 @@ pub async fn fetch_messages<R: Runtime>(
                         for &handle in chat.participants() {
                             if !known_profiles.contains(&handle) {
                                 if let Some(npub) = state.interner.resolve(handle).map(|s| s.to_string()) {
-                                    let mut profile = Profile::new();
-                                    profile.mine = false;
+                                    let profile = Profile::new();
                                     state.insert_or_replace_profile(&npub, profile);
                                     known_profiles.insert(handle);
                                 }

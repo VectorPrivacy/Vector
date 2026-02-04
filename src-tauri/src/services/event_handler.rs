@@ -347,13 +347,13 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                 let state = STATE.lock().await;
                 match state.get_profile(contact) {
                     Some(profile) => {
-                        if profile.muted {
+                        if profile.flags.is_muted() {
                             None // Profile is muted, don't send notification
                         } else {
                             let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.clone()
+                                profile.nickname.to_string()
                             } else if !profile.name.is_empty() {
-                                profile.name.clone()
+                                profile.name.to_string()
                             } else {
                                 String::from("New Message")
                             };
@@ -444,13 +444,13 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
                 let state = STATE.lock().await;
                 match state.get_profile(contact) {
                     Some(profile) => {
-                        if profile.muted {
+                        if profile.flags.is_muted() {
                             None // Profile is muted, don't send notification
                         } else {
                             let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.clone()
+                                profile.nickname.to_string()
                             } else if !profile.name.is_empty() {
-                                profile.name.clone()
+                                profile.name.to_string()
                             } else {
                                 String::from("New Message")
                             };
