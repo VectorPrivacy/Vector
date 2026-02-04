@@ -1815,4 +1815,134 @@ mod tests {
         assert_eq!(interner.len(), NUM_UNIQUE_USERS);
         assert_eq!(found_count, linear_found);
     }
+
+    /// Benchmark: Profile lookup — linear scan vs string binary search vs handle binary search
+    ///
+    /// Compares three approaches for finding a Profile in a Vec:
+    /// 1. Linear scan with string equality (old — O(n) × 63-byte strcmp, Profile.id was String)
+    /// 2. Binary search by npub string (intermediate — O(log n) × 63-byte strcmp)
+    /// 3. Direct u16 handle binary search (current — O(log n) × 2-byte int cmp, Profile.id is u16)
+    #[test]
+    fn benchmark_profile_lookup() {
+        use std::time::Instant;
+        use std::hint::black_box;
+
+        const NUM_PROFILES: usize = 60;
+        const NUM_LOOKUPS: usize = 100_000;
+
+        println!("\n========================================");
+        println!("  PROFILE LOOKUP BENCHMARK");
+        println!("  {} profiles, {} lookups each method", NUM_PROFILES, NUM_LOOKUPS);
+        println!("========================================\n");
+
+        // Generate realistic npubs (63 chars each: "npub1" + 58 hex-like chars)
+        let npubs: Vec<String> = (0..NUM_PROFILES)
+            .map(|i| format!("npub1{:0>58}", format!("{:x}", i * 7919 + 1000))) // spread out values
+            .collect();
+
+        // --- Setup: Method 1 - Linear scan (old approach, simulating id: String) ---
+        let old_ids: Vec<String> = npubs.iter().rev().cloned().collect(); // reversed = worst case
+
+        // --- Setup: Method 2 - String binary search (intermediate approach) ---
+        let mut sorted_ids: Vec<String> = npubs.clone();
+        sorted_ids.sort();
+
+        // --- Setup: Method 3 - Direct u16 handle lookup (current approach, id: u16) ---
+        let mut interner = NpubInterner::new();
+        let mut profiles: Vec<crate::Profile> = npubs.iter().map(|npub| {
+            let mut p = crate::Profile::new();
+            p.id = interner.intern(npub);
+            p
+        }).collect();
+        profiles.sort_by(|a, b| a.id.cmp(&b.id));
+
+        // Build lookup targets: cycle through all profiles
+        let lookup_targets: Vec<&str> = (0..NUM_LOOKUPS)
+            .map(|i| npubs[i % NUM_PROFILES].as_str())
+            .collect();
+
+        // Pre-resolve handles for method 3
+        let handle_targets: Vec<u16> = lookup_targets.iter()
+            .map(|&npub| interner.lookup(npub).unwrap())
+            .collect();
+
+        // ===== BENCHMARK 1: Linear scan (old — id: String) =====
+        let start = Instant::now();
+        let mut found = 0u64;
+        for &target in &lookup_targets {
+            if old_ids.iter().any(|id| id == target) {
+                found += 1;
+            }
+        }
+        let linear_elapsed = start.elapsed();
+        assert_eq!(found, NUM_LOOKUPS as u64);
+
+        // ===== BENCHMARK 2: String binary search (intermediate) =====
+        let start = Instant::now();
+        found = 0;
+        for &target in &lookup_targets {
+            if sorted_ids.binary_search_by(|id| id.as_str().cmp(target)).is_ok() {
+                found += 1;
+            }
+        }
+        let string_bs_elapsed = start.elapsed();
+        assert_eq!(found, NUM_LOOKUPS as u64);
+
+        // ===== BENCHMARK 3: Direct u16 handle lookup (current — id: u16) =====
+        let start = Instant::now();
+        found = 0;
+        for &handle in &handle_targets {
+            if profiles.binary_search_by(|p| p.id.cmp(black_box(&handle))).is_ok() {
+                found += 1;
+            }
+        }
+        let direct_elapsed = start.elapsed();
+        assert_eq!(found, NUM_LOOKUPS as u64);
+
+        // ===== RESULTS =====
+        println!("--- LOOKUP METHODS ---");
+        println!("  1. Linear scan (old id: String):");
+        println!("     {:?} total, {:.0} ns/lookup",
+            linear_elapsed,
+            linear_elapsed.as_nanos() as f64 / NUM_LOOKUPS as f64);
+        println!();
+        println!("  2. String binary search (intermediate):");
+        println!("     {:?} total, {:.0} ns/lookup",
+            string_bs_elapsed,
+            string_bs_elapsed.as_nanos() as f64 / NUM_LOOKUPS as f64);
+        println!("     vs linear: {:.1}x faster",
+            linear_elapsed.as_nanos() as f64 / string_bs_elapsed.as_nanos() as f64);
+        println!();
+        println!("  3. Direct u16 handle lookup (current id: u16):");
+        println!("     {:?} total, {:.0} ns/lookup",
+            direct_elapsed,
+            direct_elapsed.as_nanos() as f64 / NUM_LOOKUPS as f64);
+        println!("     vs linear: {:.1}x faster",
+            linear_elapsed.as_nanos() as f64 / direct_elapsed.as_nanos() as f64);
+        println!("     vs string BS: {:.1}x faster",
+            string_bs_elapsed.as_nanos() as f64 / direct_elapsed.as_nanos() as f64);
+        println!();
+
+        // ===== MEMORY COMPARISON =====
+        println!("--- MEMORY PER PROFILE ---");
+        println!("  Old (id: String):    ~87 bytes (24 String header + ~63 heap)");
+        println!("  Current (id: u16):     2 bytes (inline)");
+        println!("  Savings: ~85 bytes/profile, ~{} bytes for {} profiles",
+            85 * NUM_PROFILES, NUM_PROFILES);
+        println!("  Interner (shared):   {} bytes (shared with message system)",
+            interner.memory_usage());
+        println!();
+
+        println!("========================================");
+        println!("  BENCHMARK COMPLETE");
+        println!("========================================\n");
+
+        // Correctness: ensure all methods find the same profiles
+        for npub in &npubs {
+            assert!(old_ids.iter().any(|id| id == npub));
+            assert!(sorted_ids.binary_search_by(|id| id.as_str().cmp(npub.as_str())).is_ok());
+            let h = interner.lookup(npub).unwrap();
+            assert!(profiles.binary_search_by(|p| p.id.cmp(&h)).is_ok());
+        }
+    }
 }

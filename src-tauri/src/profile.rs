@@ -15,10 +15,13 @@ use crate::message::AttachmentFile;
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
 
-#[derive(serde::Serialize, Clone, Debug, PartialEq)]
-#[serde(default)]
+/// Internal profile representation. The `id` is a u16 interner handle —
+/// the canonical npub string lives in `NpubInterner` (single source of truth).
+/// Use `SlimProfile` for serialization boundaries (frontend, DB).
+#[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
-    pub id: String,
+    /// Interner handle — resolves to npub via `NpubInterner::resolve(id)`
+    pub id: u16,
     pub name: String,
     pub display_name: String,
     pub nickname: String,
@@ -49,7 +52,7 @@ impl Default for Profile {
 impl Profile {
     pub fn new() -> Self {
         Self {
-            id: String::new(),
+            id: crate::message::compact::NO_NPUB,
             name: String::new(),
             display_name: String::new(),
             nickname: String::new(),
@@ -230,28 +233,28 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
     // Update the profile with cached paths if we got any
     if !avatar_cached.is_empty() || !banner_cached.is_empty() {
         let mut state = STATE.lock().await;
-        if let Some(profile) = state.get_profile_mut(npub) {
-            let mut updated = false;
-
+        let id = match state.interner.lookup(npub) {
+            Some(id) => id,
+            None => return,
+        };
+        let updated = if let Some(profile) = state.get_profile_mut_by_id(id) {
+            let mut changed = false;
             if !avatar_cached.is_empty() && profile.avatar_cached != avatar_cached {
                 profile.avatar_cached = avatar_cached;
-                updated = true;
+                changed = true;
             }
-
             if !banner_cached.is_empty() && profile.banner_cached != banner_cached {
                 profile.banner_cached = banner_cached;
-                updated = true;
+                changed = true;
             }
+            changed
+        } else { false };
 
-            if updated {
-                // Emit update to frontend with cached paths
-                handle.emit("profile_update", &profile).ok();
-
-                // Save to database
-                let profile_clone = profile.clone();
-                drop(state); // Release lock before async DB operation
-                db::set_profile(handle.clone(), profile_clone).await.ok();
-            }
+        if updated {
+            let slim = state.serialize_profile(id).unwrap();
+            handle.emit("profile_update", &slim).ok();
+            drop(state);
+            db::set_profile(handle.clone(), slim).await.ok();
         }
     }
 }
@@ -265,17 +268,18 @@ pub async fn cache_all_profile_images() {
         None => return,
     };
 
-    // Get all profiles that need caching
+    // Get all profiles that need caching (resolve npub from interner)
     let profiles_to_cache: Vec<(String, String, String)> = {
         let state = STATE.lock().await;
         state.profiles.iter()
             .filter(|p| {
-                // Cache if has avatar URL but no cached path
                 (!p.avatar.is_empty() && p.avatar_cached.is_empty()) ||
-                // Or has banner URL but no cached path
                 (!p.banner.is_empty() && p.banner_cached.is_empty())
             })
-            .map(|p| (p.id.clone(), p.avatar.clone(), p.banner.clone()))
+            .filter_map(|p| {
+                state.interner.resolve(p.id)
+                    .map(|npub| (npub.to_string(), p.avatar.clone(), p.banner.clone()))
+            })
             .collect()
     };
 
@@ -294,15 +298,21 @@ pub async fn cache_all_profile_images() {
                 if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
                     image_cache::cache_avatar(&handle, &avatar_url).await
                 {
-                    // Update profile
                     let mut state = STATE.lock().await;
-                    if let Some(profile) = state.get_profile_mut(&npub) {
-                        if profile.avatar_cached.is_empty() {
-                            profile.avatar_cached = path;
-                            handle.emit("profile_update", &profile).ok();
-                            let profile_clone = profile.clone();
+                    if let Some(id) = state.interner.lookup(&npub) {
+                        let needs_emit = {
+                            if let Some(profile) = state.get_profile_mut_by_id(id) {
+                                if profile.avatar_cached.is_empty() {
+                                    profile.avatar_cached = path;
+                                    true
+                                } else { false }
+                            } else { false }
+                        };
+                        if needs_emit {
+                            let slim = state.serialize_profile(id).unwrap();
+                            handle.emit("profile_update", &slim).ok();
                             drop(state);
-                            db::set_profile(handle.clone(), profile_clone).await.ok();
+                            db::set_profile(handle.clone(), slim).await.ok();
                         }
                     }
                 }
@@ -314,13 +324,20 @@ pub async fn cache_all_profile_images() {
                     image_cache::cache_banner(&handle, &banner_url).await
                 {
                     let mut state = STATE.lock().await;
-                    if let Some(profile) = state.get_profile_mut(&npub) {
-                        if profile.banner_cached.is_empty() {
-                            profile.banner_cached = path;
-                            handle.emit("profile_update", &profile).ok();
-                            let profile_clone = profile.clone();
+                    if let Some(id) = state.interner.lookup(&npub) {
+                        let needs_emit = {
+                            if let Some(profile) = state.get_profile_mut_by_id(id) {
+                                if profile.banner_cached.is_empty() {
+                                    profile.banner_cached = path;
+                                    true
+                                } else { false }
+                            } else { false }
+                        };
+                        if needs_emit {
+                            let slim = state.serialize_profile(id).unwrap();
+                            handle.emit("profile_update", &slim).ok();
                             drop(state);
-                            db::set_profile(handle.clone(), profile_clone).await.ok();
+                            db::set_profile(handle.clone(), slim).await.ok();
                         }
                     }
                 }
@@ -360,9 +377,8 @@ pub async fn load_profile(npub: String) -> bool {
             Some(p) => p.status.clone(),
             None => {
                 // Create a new profile
-                let mut new_profile = Profile::new();
-                new_profile.id = npub.clone();
-                state.profiles.push(new_profile);
+                let new_profile = Profile::new();
+                state.insert_or_replace_profile(&npub, new_profile);
                 Status::new()
             }
         }
@@ -415,37 +431,43 @@ pub async fn load_profile(npub: String) -> bool {
                 // If it's ours, mark it as such
                 let save_data = {
                     let mut state = STATE.lock().await;
-                    let profile_mutable = state.get_profile_mut(&npub).unwrap();
-                    profile_mutable.mine = my_public_key == profile_pubkey;
+                    let id = state.interner.lookup(&npub).unwrap();
+                    let (changed, avatar_url, banner_url) = {
+                        let profile_mutable = state.get_profile_mut_by_id(id).unwrap();
+                        profile_mutable.mine = my_public_key == profile_pubkey;
 
-                    // Update the Status, and track changes
-                    let status_changed = profile_mutable.status != status;
-                    profile_mutable.status = status;
+                        // Update the Status, and track changes
+                        let status_changed = profile_mutable.status != status;
+                        profile_mutable.status = status;
 
-                    // Update the Metadata, and track changes
-                    let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
+                        // Update the Metadata, and track changes
+                        let metadata_changed = profile_mutable.from_metadata(meta.unwrap());
 
-                    // Apply the current update time
-                    profile_mutable.last_updated = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
+                        // Apply the current update time
+                        profile_mutable.last_updated = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
 
-                    // Only clone when something actually changed (common case: no change)
-                    if status_changed || metadata_changed {
+                        (status_changed || metadata_changed,
+                         profile_mutable.avatar.clone(),
+                         profile_mutable.banner.clone())
+                    };
+
+                    // Only serialize when something actually changed (common case: no change)
+                    if changed {
+                        let slim = state.serialize_profile(id).unwrap();
                         let handle = TAURI_APP.get().unwrap();
-                        handle.emit("profile_update", &profile_mutable).unwrap();
-                        let avatar_url = profile_mutable.avatar.clone();
-                        let banner_url = profile_mutable.banner.clone();
-                        Some((profile_mutable.clone(), avatar_url, banner_url))
+                        handle.emit("profile_update", &slim).unwrap();
+                        Some((slim, avatar_url, banner_url))
                     } else {
                         None
                     }
                 }; // Drop STATE lock before async operations
 
-                if let Some((profile_clone, avatar_url, banner_url)) = save_data {
+                if let Some((slim, avatar_url, banner_url)) = save_data {
                     let handle = TAURI_APP.get().unwrap();
-                    db::set_profile(handle.clone(), profile_clone).await.unwrap();
+                    db::set_profile(handle.clone(), slim).await.unwrap();
 
                     // Cache avatar/banner images in the background for offline access
                     let npub_clone = npub.clone();
@@ -572,22 +594,24 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
         Ok(_) => {
             // Re-acquire lock to apply metadata to our profile
             let npub = my_public_key.to_bech32().unwrap();
-            let (profile_clone, avatar_url, banner_url) = {
+            let (slim, avatar_url, banner_url) = {
                 let mut state = STATE.lock().await;
-                let profile_mutable = state
-                    .get_profile_mut(&npub)
-                    .unwrap();
-                profile_mutable.from_metadata(meta);
+                let id = state.interner.lookup(&npub).unwrap();
+                let (avatar_url, banner_url) = {
+                    let profile_mutable = state.get_profile_mut_by_id(id).unwrap();
+                    profile_mutable.from_metadata(meta);
+                    (profile_mutable.avatar.clone(), profile_mutable.banner.clone())
+                };
 
-                // Update the frontend
+                let slim = state.serialize_profile(id).unwrap();
                 let handle = TAURI_APP.get().unwrap();
-                handle.emit("profile_update", &profile_mutable).unwrap();
+                handle.emit("profile_update", &slim).unwrap();
 
-                (profile_mutable.clone(), profile_mutable.avatar.clone(), profile_mutable.banner.clone())
+                (slim, avatar_url, banner_url)
             }; // Drop STATE lock before async operations
 
             let handle = TAURI_APP.get().unwrap();
-            db::set_profile(handle.clone(), profile_clone).await.ok();
+            db::set_profile(handle.clone(), slim).await.ok();
 
             // Cache avatar/banner images in the background for offline access
             let npub_clone = npub.clone();
@@ -616,15 +640,18 @@ pub async fn update_status(status: String) -> bool {
         Ok(_) => {
             // Add the status to our profile
             let mut state = STATE.lock().await;
-            let profile = state
-                .get_profile_mut(&my_public_key.to_bech32().unwrap())
-                .unwrap();
-            profile.status.purpose = String::from("general");
-            profile.status.title = status;
+            let npub = my_public_key.to_bech32().unwrap();
+            let id = state.interner.lookup(&npub).unwrap();
+            {
+                let profile = state.get_profile_mut_by_id(id).unwrap();
+                profile.status.purpose = String::from("general");
+                profile.status.title = status;
+            }
 
             // Update the frontend
+            let slim = state.serialize_profile(id).unwrap();
             let handle = TAURI_APP.get().unwrap();
-            handle.emit("profile_update", &profile).unwrap();
+            handle.emit("profile_update", &slim).unwrap();
             true
         }
         Err(_) => false,
@@ -719,26 +746,29 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 pub async fn toggle_muted(npub: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
 
-    let (muted, profile_clone) = {
+    let (muted, slim) = {
         let mut state = STATE.lock().await;
-        match state.get_profile_mut(&npub) {
-            Some(profile) => {
+        if let Some(id) = state.interner.lookup(&npub) {
+            let muted_val = {
+                let profile = match state.get_profile_mut_by_id(id) {
+                    Some(p) => p,
+                    None => return false,
+                };
                 profile.muted = !profile.muted;
-
-                // Update the frontend
                 handle.emit("profile_muted", serde_json::json!({
-                    "profile_id": &profile.id,
+                    "profile_id": &npub,
                     "value": &profile.muted
                 })).unwrap();
-
-                (profile.muted, Some(profile.clone()))
-            }
-            None => (false, None)
+                profile.muted
+            };
+            (muted_val, state.serialize_profile(id))
+        } else {
+            (false, None)
         }
     }; // Drop STATE lock before async DB operation
 
-    if let Some(profile) = profile_clone {
-        db::set_profile(handle.clone(), profile).await.unwrap();
+    if let Some(slim) = slim {
+        db::set_profile(handle.clone(), slim).await.unwrap();
     }
 
     // Refresh unread badge count to reflect mute changes immediately
@@ -752,21 +782,23 @@ pub async fn set_nickname(npub: String, nickname: String) -> bool {
     let handle = TAURI_APP.get().unwrap();
     let mut state = STATE.lock().await;
 
-    match state.get_profile_mut(&npub) {
-        Some(profile) => {
+    if let Some(id) = state.interner.lookup(&npub) {
+        {
+            let profile = match state.get_profile_mut_by_id(id) {
+                Some(p) => p,
+                None => return false,
+            };
             profile.nickname = nickname;
-
-            // Update the frontend
             handle.emit("profile_nick_changed", serde_json::json!({
-                "profile_id": &profile.id,
+                "profile_id": &npub,
                 "value": &profile.nickname
             })).unwrap();
-
-            // Save to DB
-            db::set_profile(handle.clone(), profile.clone()).await.unwrap();
-
-            true
         }
-        None => false
+        let slim = state.serialize_profile(id).unwrap();
+        drop(state);
+        db::set_profile(handle.clone(), slim).await.unwrap();
+        true
+    } else {
+        false
     }
 }

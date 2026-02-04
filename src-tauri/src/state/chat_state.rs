@@ -54,7 +54,9 @@ impl ChatState {
     // Profile Management
     // ========================================================================
 
-    /// Merge multiple Vector Profiles from SlimProfile format into the state
+    /// Merge multiple Vector Profiles from SlimProfile format into the state.
+    ///
+    /// Profiles are kept sorted by interner handle for O(log n) integer binary search.
     pub async fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>) {
         let my_public_key = {
             let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -63,24 +65,58 @@ impl ChatState {
         };
 
         for slim in slim_profiles {
-            if let Some(position) = self.profiles.iter().position(|profile| profile.id == slim.id) {
-                let mut full_profile = slim.to_profile();
-                if let Ok(profile_pubkey) = PublicKey::from_bech32(&full_profile.id) {
-                    full_profile.mine = my_public_key == profile_pubkey;
-                }
-                self.profiles[position] = full_profile;
-            } else {
-                self.profiles.push(slim.to_profile());
+            let npub = slim.id.clone();
+            let mut full_profile = slim.to_profile();
+            if let Ok(profile_pubkey) = PublicKey::from_bech32(&npub) {
+                full_profile.mine = my_public_key == profile_pubkey;
             }
+            self.insert_or_replace_profile(&npub, full_profile);
         }
     }
 
-    pub fn get_profile(&self, id: &str) -> Option<&Profile> {
-        self.profiles.iter().find(|p| p.id == id)
+    /// Insert a profile in sorted order by interner handle, or replace if it already exists.
+    ///
+    /// Interns the npub to assign the profile its `id` handle.
+    pub fn insert_or_replace_profile(&mut self, npub: &str, mut profile: Profile) {
+        let id = self.interner.intern(npub);
+        profile.id = id;
+        match self.profiles.binary_search_by(|p| p.id.cmp(&id)) {
+            Ok(idx) => self.profiles[idx] = profile,
+            Err(idx) => self.profiles.insert(idx, profile),
+        }
     }
 
-    pub fn get_profile_mut(&mut self, id: &str) -> Option<&mut Profile> {
-        self.profiles.iter_mut().find(|p| p.id == id)
+    /// Look up a profile by npub string (boundary method).
+    ///
+    /// Delegates through the interner: O(log n) string search → O(log n) integer search.
+    /// Prefer `get_profile_by_id` when a handle is already available.
+    pub fn get_profile(&self, npub: &str) -> Option<&Profile> {
+        let id = self.interner.lookup(npub)?;
+        self.get_profile_by_id(id)
+    }
+
+    pub fn get_profile_mut(&mut self, npub: &str) -> Option<&mut Profile> {
+        let id = self.interner.lookup(npub)?;
+        self.get_profile_mut_by_id(id)
+    }
+
+    /// Look up a profile by interner handle — O(log n) integer binary search.
+    #[inline]
+    pub fn get_profile_by_id(&self, id: u16) -> Option<&Profile> {
+        self.profiles.binary_search_by(|p| p.id.cmp(&id))
+            .ok().map(|idx| &self.profiles[idx])
+    }
+
+    #[inline]
+    pub fn get_profile_mut_by_id(&mut self, id: u16) -> Option<&mut Profile> {
+        self.profiles.binary_search_by(|p| p.id.cmp(&id))
+            .ok().map(move |idx| &mut self.profiles[idx])
+    }
+
+    /// Serialize a profile for frontend/DB boundary (resolves u16 id → npub string).
+    pub fn serialize_profile(&self, id: u16) -> Option<SlimProfile> {
+        self.get_profile_by_id(id)
+            .map(|p| SlimProfile::from_profile(p, &self.interner))
     }
 
     // ========================================================================
@@ -224,16 +260,16 @@ impl ChatState {
     /// Add a message to a chat via participant npub
     pub fn add_message_to_participant(&mut self, their_npub: &str, message: Message) -> bool {
         // Ensure profile exists
-        if self.get_profile(their_npub).is_none() {
+        let id = self.interner.intern(their_npub);
+        if self.get_profile_by_id(id).is_none() {
             let mut profile = Profile::new();
-            profile.id = their_npub.to_string();
             profile.mine = false;
+            self.insert_or_replace_profile(their_npub, profile);
 
             if let Some(handle) = TAURI_APP.get() {
-                handle.emit("profile_update", &profile).unwrap();
+                let slim = self.serialize_profile(id).unwrap();
+                handle.emit("profile_update", &slim).unwrap();
             }
-
-            self.profiles.push(profile);
         }
 
         let chat_id = self.create_dm_chat(their_npub);

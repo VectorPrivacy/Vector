@@ -257,11 +257,17 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     audio::purge_sound_cache();
 
     // Clear cached paths from all profiles in state and database
+    let mut cleared_ids = Vec::new();
     for profile in &mut state.profiles {
         if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
             profile.avatar_cached = String::new();
             profile.banner_cached = String::new();
-            db::set_profile(handle.clone(), profile.clone()).await.ok();
+            cleared_ids.push(profile.id);
+        }
+    }
+    for id in cleared_ids {
+        if let Some(slim) = state.serialize_profile(id) {
+            db::set_profile(handle.clone(), slim).await.ok();
         }
     }
 

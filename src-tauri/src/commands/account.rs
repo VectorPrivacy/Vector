@@ -66,14 +66,17 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
     println!("[Debug Hot-Reload] Sending cached state to frontend ({} profiles, {} chats)",
              state.profiles.len(), state.chats.len());
 
-    // Convert chats to serializable format
+    // Convert to serializable formats at the boundary
     let serializable_chats: Vec<_> = state.chats.iter()
         .map(|c| c.to_serializable(&state.interner))
+        .collect();
+    let slim_profiles: Vec<db::SlimProfile> = state.profiles.iter()
+        .map(|p| db::SlimProfile::from_profile(p, &state.interner))
         .collect();
     Ok(serde_json::json!({
         "success": true,
         "npub": my_npub,
-        "profiles": &state.profiles,
+        "profiles": slim_profiles,
         "chats": serializable_chats,
         "is_syncing": state.is_syncing,
         "sync_mode": format!("{:?}", state.sync_mode)
@@ -130,9 +133,8 @@ pub async fn login(import_key: String) -> Result<LoginKeyPair, String> {
     // Add our profile (at least, the npub of it) to our state
     let npub = keys.public_key.to_bech32().unwrap();
     let mut profile = Profile::new();
-    profile.id = npub.clone();
     profile.mine = true;
-    STATE.lock().await.profiles.push(profile);
+    STATE.lock().await.insert_or_replace_profile(&npub, profile);
 
     // Initialize profile database and set as current account
     // Always init DB - this handles both new and existing accounts:
@@ -222,9 +224,8 @@ pub async fn create_account() -> Result<LoginKeyPair, String> {
     // Add our profile (at least, the npub of it) to our state
     let npub = keys.public_key.to_bech32().map_err(|e| e.to_string())?;
     let mut profile = Profile::new();
-    profile.id = npub.clone();
     profile.mine = true;
-    STATE.lock().await.profiles.push(profile);
+    STATE.lock().await.insert_or_replace_profile(&npub, profile);
 
     // Save the seed in memory, ready for post-pin-setup encryption
     let _ = MNEMONIC_SEED.set(mnemonic_string);

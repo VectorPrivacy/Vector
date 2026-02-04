@@ -78,7 +78,6 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         }
                     },
                     None => {
-                        eprintln!("No public key tag found");
                         // If no public key found in tags, fall back to sender
                         sender
                             .to_bech32()

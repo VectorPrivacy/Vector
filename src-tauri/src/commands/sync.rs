@@ -167,9 +167,9 @@ pub async fn fetch_messages<R: Runtime>(
                             .collect())
                         .unwrap_or_default();
 
-                    // Build HashSet of existing profile IDs for O(1) lookup
-                    let mut known_profiles: std::collections::HashSet<String> =
-                        state.profiles.iter().map(|p| p.id.clone()).collect();
+                    // Build HashSet of existing profile handles for O(1) lookup
+                    let mut known_profiles: std::collections::HashSet<u16> =
+                        state.profiles.iter().map(|p| p.id).collect();
 
                     // Pre-allocate capacity for chats (avoids reallocations during push)
                     state.chats.reserve(slim_chats.len());
@@ -189,17 +189,14 @@ pub async fn fetch_messages<R: Runtime>(
                         let chat_id = chat.id().to_string();
 
                         // Ensure profiles exist for all chat participants (O(1) lookup)
-                        // Resolve u16 handles to npub strings for profile creation
-                        let participant_npubs: Vec<String> = chat.participants().iter()
-                            .filter_map(|&h| state.interner.resolve(h).map(|s| s.to_string()))
-                            .collect();
-                        for participant in &participant_npubs {
-                            if !known_profiles.contains(participant.as_str()) {
-                                let mut profile = Profile::new();
-                                profile.id = participant.clone();
-                                profile.mine = false;
-                                state.profiles.push(profile);
-                                known_profiles.insert(participant.clone());
+                        for &handle in chat.participants() {
+                            if !known_profiles.contains(&handle) {
+                                if let Some(npub) = state.interner.resolve(handle).map(|s| s.to_string()) {
+                                    let mut profile = Profile::new();
+                                    profile.mine = false;
+                                    state.insert_or_replace_profile(&npub, profile);
+                                    known_profiles.insert(handle);
+                                }
                             }
                         }
 
@@ -263,12 +260,15 @@ pub async fn fetch_messages<R: Runtime>(
                 cache.load(wrapper_ids);
             }
 
-            // Send the state to frontend (convert chats to serializable format)
+            // Send the state to frontend (convert to serializable formats at boundary)
             let serializable_chats: Vec<_> = state.chats.iter()
                 .map(|c| c.to_serializable(&state.interner))
                 .collect();
+            let slim_profiles: Vec<db::SlimProfile> = state.profiles.iter()
+                .map(|p| db::SlimProfile::from_profile(p, &state.interner))
+                .collect();
             handle.emit("init_finished", serde_json::json!({
-                "profiles": &state.profiles,
+                "profiles": slim_profiles,
                 "chats": serializable_chats
             })).unwrap();
 
