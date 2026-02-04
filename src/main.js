@@ -4935,6 +4935,18 @@ async function setupRustListeners() {
             proceduralScrollState.totalMessageCount++;
         } else {
             console.log('Group chat not open, message added to background chat');
+            // Own message synced from another device — mark chat as read
+            // since we clearly saw the conversation before replying
+            if (message.mine) {
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                if (lastContactMsg) markAsRead(chat, lastContactMsg);
+            }
         }
         
         // Resort chat list order so recent groups bubble up (fallback to metadata)
@@ -5514,6 +5526,17 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
+        } else if (newMessage.mine) {
+            // Own message synced from another device — mark chat as read
+            // since we clearly saw the conversation before replying
+            let lastContactMsg = null;
+            for (let i = chat.messages.length - 1; i >= 0; i--) {
+                if (!chat.messages[i].mine) {
+                    lastContactMsg = chat.messages[i];
+                    break;
+                }
+            }
+            if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
         // Render the Chat List (only when user is viewing it)
@@ -9092,12 +9115,21 @@ async function openChat(contact) {
     
     updateChat(chat, initialMessages, profile, true);
 
-    // If the opened chat has messages, mark them as read (last message)
-    if (initialMessages) {
-        const lastMsg = initialMessages[initialMessages.length - 1];
-        markAsRead(chat, lastMsg);
+    // Mark as read on open (needed for Windows where is_focused may not work)
+    // Only mark the last contact message, not our own messages
+    if (initialMessages?.length) {
+        let lastContactMsg = null;
+        for (let i = initialMessages.length - 1; i >= 0; i--) {
+            if (!initialMessages[i].mine) {
+                lastContactMsg = initialMessages[i];
+                break;
+            }
+        }
+        if (lastContactMsg) {
+            markAsRead(chat, lastContactMsg);
+        }
     }
-    
+
     // Update the back button notification dot
     updateChatBackNotification();
 
@@ -9163,12 +9195,21 @@ async function closeChat() {
         domChild.remove();
     }
 
-    // If the chat had any messages, mark them as read before leaving
+    // If the chat had any messages, mark the last contact message as read before leaving
     if (strOpenChat) {
         const closedChat = arrChats.find(c => c.id === strOpenChat);
         if (closedChat?.messages?.length) {
-            const lastMsg = closedChat.messages[closedChat.messages.length - 1];
-            markAsRead(closedChat, lastMsg);
+            // Find the last non-mine message (same logic as updateChat)
+            let lastContactMsg = null;
+            for (let i = closedChat.messages.length - 1; i >= 0; i--) {
+                if (!closedChat.messages[i].mine) {
+                    lastContactMsg = closedChat.messages[i];
+                    break;
+                }
+            }
+            if (lastContactMsg) {
+                markAsRead(closedChat, lastContactMsg);
+            }
         }
     }
 
