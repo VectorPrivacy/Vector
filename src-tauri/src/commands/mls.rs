@@ -740,10 +740,12 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
 
     // Update the chat's participants array
     let mut state = STATE.lock().await;
-    if let Some(chat) = state.get_chat_mut(&group_id) {
-        let old_count = chat.participants.len();
-        chat.participants = group_members.members.clone();
-        let new_count = chat.participants.len();
+    if let Some(chat_idx) = state.chats.iter().position(|c| c.id == group_id) {
+        let old_count = state.chats[chat_idx].participants.len();
+        // Intern all member npubs, then assign (split borrow: interner + chats[idx])
+        let new_handles: Vec<u16> = group_members.members.iter().map(|p| state.interner.intern(p)).collect();
+        state.chats[chat_idx].participants = new_handles;
+        let new_count = state.chats[chat_idx].participants.len();
 
         if old_count != new_count {
             eprintln!(
@@ -755,11 +757,12 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
         }
 
         // Save updated chat to disk
-        let chat_clone = chat.clone();
+        let chat_clone = state.chats[chat_idx].clone();
+        let interner_clone = state.interner.clone();
         drop(state);
 
         if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = db::save_chat(handle.clone(), &chat_clone).await {
+            if let Err(e) = db::save_chat(handle.clone(), &chat_clone, &interner_clone).await {
                 eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
             }
         }
@@ -1027,7 +1030,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
 
                     // Save chat to disk
                     if let Some(chat) = state.get_chat(&chat_id) {
-                        if let Err(e) = db::save_chat(handle.clone(), chat).await {
+                        if let Err(e) = db::save_chat(handle.clone(), chat, &state.interner).await {
                             eprintln!("[MLS] Failed to save chat after welcome acceptance: {}", e);
                         }
                     }

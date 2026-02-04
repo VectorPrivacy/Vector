@@ -865,7 +865,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         let msg_for_save = {
                             let pending_id_for_early_update = Arc::clone(&pending_id);
                             let mut state = STATE.lock().await;
-                            let chat_idx = state.chats.iter().position(|c| c.id() == &receiver || c.has_participant(&receiver));
+                            let chat_idx = state.chats.iter().position(|c| c.id() == &receiver || c.has_participant(&receiver, &state.interner));
                             if let Some(idx) = chat_idx {
                                 let real_id_hex = rumor_id.to_hex();
                                 if let Some(msg) = state.chats[idx].messages.find_by_hex_id_mut(&pending_id_for_early_update) {
@@ -878,15 +878,16 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 state.chats[idx].messages.rebuild_index();
                                 // Get data for emit and save - clone Chat for db, convert message for emit
                                 let chat_for_save = state.chats[idx].clone();
+                                let interner_for_save = state.interner.clone();
                                 let msg_for_emit = state.chats[idx].messages.find_by_hex_id(&real_id_hex)
                                     .map(|m| (pending_id_for_early_update.to_string(), m.to_message(&state.interner)));
-                                (Some(chat_for_save), msg_for_emit)
+                                (Some((chat_for_save, interner_for_save)), msg_for_emit)
                             } else {
                                 (None, None)
                             }
                         };
 
-                        if let (Some(chat), Some((old_id, msg))) = msg_for_save {
+                        if let (Some((chat, interner)), Some((old_id, msg))) = msg_for_save {
                             let handle = TAURI_APP.get().unwrap();
                             // Emit full message_update for backwards compatibility
                             let _ = handle.emit("message_update", serde_json::json!({
@@ -894,7 +895,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 "message": &msg,
                                 "chat_id": &receiver
                             }));
-                            let _ = save_chat(handle.clone(), &chat).await;
+                            let _ = save_chat(handle.clone(), &chat, &interner).await;
                             let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
                         }
                         

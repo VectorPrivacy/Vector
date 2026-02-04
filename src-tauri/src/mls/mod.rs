@@ -438,13 +438,13 @@ impl MlsService {
             if let Some(handle) = TAURI_APP.get() {
                 let handle_clone = handle.clone();
                 if let Some(chat) = state.get_chat(&chat_id) {
-                    if let Err(e) = save_chat(handle_clone, chat).await {
+                    if let Err(e) = save_chat(handle_clone, chat, &state.interner).await {
                         eprintln!("[MLS] Failed to save chat after group creation: {}", e);
                     }
                 }
             }
         }
- 
+
         // Notify UI: reuse the same event used after welcome-accept so creator also sees the group immediately.
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("mls_group_initial_sync", serde_json::json!({
@@ -1532,7 +1532,7 @@ impl MlsService {
                     if let Some(handle) = TAURI_APP.get() {
                         let handle_clone = handle.clone();
                         if let Some(chat) = state.get_chat(&chat_id) {
-                            if let Err(e) = save_chat(handle_clone, chat).await {
+                            if let Err(e) = save_chat(handle_clone, chat, &state.interner).await {
                                 eprintln!("[MLS] Failed to save chat after metadata update: {}", e);
                             }
                         }
@@ -1621,12 +1621,7 @@ impl MlsService {
                                 // Update the chat's typing participants
                                 let active_typers = {
                                     let mut state = STATE.lock().await;
-                                    if let Some(chat) = state.get_chat_mut(&chat_id) {
-                                        chat.update_typing_participant(profile_id.clone(), until);
-                                        chat.get_active_typers()
-                                    } else {
-                                        vec![]
-                                    }
+                                    state.update_typing_and_get_active(&chat_id, &profile_id, until)
                                 };
 
                                 // Emit typing update event to frontend
@@ -1804,7 +1799,7 @@ impl MlsService {
                 let state = STATE.lock().await;
                 if let Some(chat) = state.get_chat(&chat_id) {
                     // Save chat metadata
-                    let _ = save_chat(handle.clone(), chat).await;
+                    let _ = save_chat(handle.clone(), chat, &state.interner).await;
                     
                     // Only save the newly added messages (much more efficient!)
                     // Get the last N messages where N = number of new messages processed

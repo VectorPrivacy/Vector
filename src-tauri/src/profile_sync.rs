@@ -292,10 +292,15 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
     // Queue profiles for all participants
     // Note: chat.participants should be kept up-to-date by the MLS event handlers
-    for member_npub in &chat.participants {
+    // Resolve u16 handles to npub strings for profile lookup
+    for &handle in chat.participants() {
+        let member_npub = match state.interner.resolve(handle) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
         // Check if profile exists and has ANY metadata (name, display_name, or avatar)
         // Also check last_updated to see if it was ever fetched from relays
-        let has_metadata = state.get_profile(member_npub)
+        let has_metadata = state.get_profile(&member_npub)
             .map(|p| {
                 let has_data = !p.name.is_empty() || !p.display_name.is_empty() || !p.avatar.is_empty();
                 let was_fetched = p.last_updated > 0;
@@ -309,7 +314,7 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
             base_priority
         };
 
-        profiles_to_queue.push((member_npub.clone(), priority));
+        profiles_to_queue.push((member_npub, priority));
     }
 
     drop(state); // Release state lock before queuing

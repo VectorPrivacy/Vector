@@ -185,12 +185,16 @@ pub async fn fetch_messages<R: Runtime>(
                             continue;
                         }
 
-                        let mut chat = slim_chat.to_chat();
+                        let mut chat = slim_chat.to_chat(&mut state.interner);
                         let chat_id = chat.id().to_string();
 
                         // Ensure profiles exist for all chat participants (O(1) lookup)
-                        for participant in chat.participants() {
-                            if !known_profiles.contains(participant) {
+                        // Resolve u16 handles to npub strings for profile creation
+                        let participant_npubs: Vec<String> = chat.participants().iter()
+                            .filter_map(|&h| state.interner.resolve(h).map(|s| s.to_string()))
+                            .collect();
+                        for participant in &participant_npubs {
+                            if !known_profiles.contains(participant.as_str()) {
                                 let mut profile = Profile::new();
                                 profile.id = participant.clone();
                                 profile.mine = false;

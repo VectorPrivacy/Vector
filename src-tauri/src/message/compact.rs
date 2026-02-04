@@ -823,6 +823,13 @@ impl NpubInterner {
         }
     }
 
+    /// Look up an npub without inserting. Returns its handle if already interned.
+    pub fn lookup(&self, npub: &str) -> Option<u16> {
+        self.sorted.binary_search_by(|&idx| {
+            self.npubs[idx as usize].as_str().cmp(npub)
+        }).ok().map(|pos| self.sorted[pos])
+    }
+
     /// Resolve an index back to the npub string.
     ///
     /// Returns None for NO_NPUB sentinel or out-of-bounds index.

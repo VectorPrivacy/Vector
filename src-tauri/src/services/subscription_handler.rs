@@ -202,22 +202,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     };
                                                                     
                                                                     // Clear typing indicator for sender
-                                                                    let typers = if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
-                                                                        chat.update_typing_participant(sender_npub.clone(), 0); // 0 = clear immediately
-                                                                        chat.get_active_typers()
-                                                                    } else {
-                                                                        Vec::new()
-                                                                    };
-                                                                    
+                                                                    let typers = state.update_typing_and_get_active(&group_id_for_persist, &sender_npub, 0);
+
                                                                     (added, typers, notify)
                                                                 };
-                                                                
+
                                                                 // Send OS notification for new group messages
                                                                 if was_added && should_notify {
                                                                     // Get sender name and group name for notification
                                                                     let (sender_name, group_name) = {
                                                                         let state = crate::STATE.lock().await;
-                                                                        
+
                                                                         let sender = if let Some(profile) = state.get_profile(&sender_npub) {
                                                                             if !profile.nickname.is_empty() {
                                                                                 profile.nickname.clone()
@@ -229,40 +224,40 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                         } else {
                                                                             "Someone".to_string()
                                                                         };
-                                                                        
+
                                                                         let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
                                                                             chat.metadata.get_name().unwrap_or("Group Chat").to_string()
                                                                         } else {
                                                                             "Group Chat".to_string()
                                                                         };
-                                                                        
+
                                                                         (sender, group)
                                                                     };
-                                                                    
+
                                                                     // Create notification for text message
                                                                     let notification = NotificationData::group_message(sender_name, group_name, message.content.clone());
                                                                     show_notification_generic(notification);
                                                                 }
-                                                                
+
                                                                 // Save to database if message was added
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
                                                                         // Get chat and convert messages with interner access
-                                                                        let (chat_to_save, messages_to_save) = {
+                                                                        let (save_data, messages_to_save) = {
                                                                             let state = crate::STATE.lock().await;
                                                                             if let Some(chat) = state.get_chat(&group_id_for_persist) {
                                                                                 let msgs: Vec<crate::Message> = chat.messages.iter()
                                                                                     .map(|m| m.to_message(&state.interner))
                                                                                     .collect();
-                                                                                (Some(chat.clone()), msgs)
+                                                                                (Some((chat.clone(), state.interner.clone())), msgs)
                                                                             } else {
                                                                                 (None, vec![])
                                                                             }
                                                                         };
 
-                                                                        if let Some(chat) = chat_to_save {
+                                                                        if let Some((chat, interner)) = save_data {
                                                                             use crate::db::{save_chat, save_chat_messages};
-                                                                            let _ = save_chat(handle.clone(), &chat).await;
+                                                                            let _ = save_chat(handle.clone(), &chat, &interner).await;
                                                                             let _ = save_chat_messages(handle.clone(), &group_id_for_persist, &messages_to_save).await;
                                                                         }
                                                                     }
@@ -297,22 +292,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     };
                                                                     
                                                                     // Clear typing indicator for sender
-                                                                    let typers = if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
-                                                                        chat.update_typing_participant(sender_npub.clone(), 0); // 0 = clear immediately
-                                                                        chat.get_active_typers()
-                                                                    } else {
-                                                                        Vec::new()
-                                                                    };
-                                                                    
+                                                                    let typers = state.update_typing_and_get_active(&group_id_for_persist, &sender_npub, 0);
+
                                                                     (added, typers, notify)
                                                                 };
-                                                                
+
                                                                 // Send OS notification for new group messages
                                                                 if was_added && should_notify {
                                                                     // Get sender name and group name for notification
                                                                     let (sender_name, group_name) = {
                                                                         let state = crate::STATE.lock().await;
-                                                                        
+
                                                                         let sender = if let Some(profile) = state.get_profile(&sender_npub) {
                                                                             if !profile.nickname.is_empty() {
                                                                                 profile.nickname.clone()
@@ -324,16 +314,16 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                         } else {
                                                                             "Someone".to_string()
                                                                         };
-                                                                        
+
                                                                         let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
                                                                             chat.metadata.get_name().unwrap_or("Group Chat").to_string()
                                                                         } else {
                                                                             "Group Chat".to_string()
                                                                         };
-                                                                        
+
                                                                         (sender, group)
                                                                     };
-                                                                    
+
                                                                     // Create appropriate notification (both text and files use group_message)
                                                                     let content = if is_file {
                                                                         let extension = message.attachments.first()
@@ -344,22 +334,22 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                         message.content.clone()
                                                                     };
                                                                     let notification = NotificationData::group_message(sender_name, group_name, content);
-                                                                    
+
                                                                     show_notification_generic(notification);
                                                                 }
-                                                                
+
                                                                 // Save to database if message was added
                                                                 if was_added {
                                                                     if let Some(handle) = TAURI_APP.get() {
                                                                         // Get chat and save it
-                                                                        let chat_to_save = {
+                                                                        let save_data = {
                                                                             let state = crate::STATE.lock().await;
-                                                                            state.get_chat(&group_id_for_persist).cloned()
+                                                                            state.get_chat(&group_id_for_persist).map(|c| (c.clone(), state.interner.clone()))
                                                                         };
-                                                                        
-                                                                        if let Some(chat) = chat_to_save {
+
+                                                                        if let Some((chat, interner)) = save_data {
                                                                             use crate::db::save_chat;
-                                                                            let _ = save_chat(handle.clone(), &chat).await;
+                                                                            let _ = save_chat(handle.clone(), &chat, &interner).await;
                                                                             let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
                                                                         }
                                                                     }
@@ -408,12 +398,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 // Handle typing indicators in real-time
                                                                 let active_typers = {
                                                                     let mut state = crate::STATE.lock().await;
-                                                                    if let Some(chat) = state.get_chat_mut(&group_id_for_persist) {
-                                                                        chat.update_typing_participant(profile_id.clone(), until);
-                                                                        chat.get_active_typers()
-                                                                    } else {
-                                                                        Vec::new()
-                                                                    }
+                                                                    state.update_typing_and_get_active(&group_id_for_persist, &profile_id, until)
                                                                 };
                                                                 
                                                                 // Emit typing update event

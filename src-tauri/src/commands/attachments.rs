@@ -163,7 +163,7 @@ pub async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<S
             // Check if this is the target chat (works for both DMs and group chats)
             let is_target_chat = match &chat.chat_type {
                 ChatType::MlsGroup => chat.id == npub,
-                ChatType::DirectMessage => chat.has_participant(&npub),
+                ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
             };
 
             if is_target_chat {
@@ -210,14 +210,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
         // Find the message and attachment in chats
         let mut found_attachment = None;
-        for chat in &mut state.chats {
-            // For group chats, npub is the group_id; for DMs, it's a participant npub
-            let is_target_chat = match &chat.chat_type {
-                ChatType::MlsGroup => chat.id == npub,
-                ChatType::DirectMessage => chat.has_participant(&npub),
-            };
-
-            if is_target_chat {
+        // Find target chat index first (immutable scan)
+        let target_idx = state.chats.iter().position(|chat| match &chat.chat_type {
+            ChatType::MlsGroup => chat.id == npub,
+            ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
+        });
+        // Then mutably access only that chat
+        if let Some(chat) = target_idx.map(|i| &mut state.chats[i]) {
                 if let Some(message) = chat.messages.find_by_hex_id_mut(&msg_id) {
                     if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id_eq(&attachment_id)) {
                         // Check that we're not already downloading
@@ -271,10 +270,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         // Enable the downloading flag to prevent re-calls
                         attachment.set_downloading(true);
                         found_attachment = Some(attachment.clone());
-                        break;
                     }
                 }
-            }
         }
 
         if found_attachment.is_none() {

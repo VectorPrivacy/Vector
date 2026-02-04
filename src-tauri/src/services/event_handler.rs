@@ -204,13 +204,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                             // Update the chat's typing participants
                             let active_typers = {
                                 let mut state = STATE.lock().await;
-                                // For DMs, the chat_id is the contact's npub
-                                if let Some(chat) = state.get_chat_mut(&contact) {
-                                    chat.update_typing_participant(profile_id.clone(), until);
-                                    chat.get_active_typers()
-                                } else {
-                                    vec![]
-                                }
+                                state.update_typing_and_get_active(&contact, &profile_id, until)
                             };
                             
                             // Emit typing update event to frontend
@@ -430,12 +424,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
         let added = state.add_message_to_participant(contact, msg.clone());
         
         // Clear typing indicator for the sender (they just sent a message)
-        let typers = if let Some(chat) = state.get_chat_mut(contact) {
-            chat.update_typing_participant(contact.to_string(), 0); // 0 = clear immediately
-            chat.get_active_typers()
-        } else {
-            Vec::new()
-        };
+        let typers = state.update_typing_and_get_active(contact, contact, 0);
         
         (added, typers)
     };

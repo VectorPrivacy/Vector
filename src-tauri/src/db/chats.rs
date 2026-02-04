@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
 
 use crate::{Chat, ChatType};
-use crate::message::compact::{encode_message_id, decode_message_id};
+use crate::message::compact::{encode_message_id, decode_message_id, NpubInterner};
 use super::{CHAT_ID_CACHE, USER_ID_CACHE};
 
 /// Slim version of Chat for database storage
@@ -235,12 +235,15 @@ pub fn clear_id_caches() {
     USER_ID_CACHE.write().unwrap().clear();
 }
 
-impl From<&Chat> for SlimChatDB {
-    fn from(chat: &Chat) -> Self {
+impl SlimChatDB {
+    /// Create from a Chat, resolving interned handles to strings for DB storage
+    pub fn from_chat(chat: &Chat, interner: &NpubInterner) -> Self {
         SlimChatDB {
             id: chat.id().clone(),
             chat_type: chat.chat_type().clone(),
-            participants: chat.participants().clone(),
+            participants: chat.participants().iter()
+                .filter_map(|&h| interner.resolve(h).map(|s| s.to_string()))
+                .collect(),
             last_read: if *chat.last_read() == [0u8; 32] {
                 String::new()
             } else {
@@ -251,12 +254,11 @@ impl From<&Chat> for SlimChatDB {
             muted: chat.muted(),
         }
     }
-}
 
-impl SlimChatDB {
-    // Convert back to full Chat (messages will be loaded separately)
-    pub fn to_chat(&self) -> Chat {
-        let mut chat = Chat::new(self.id.clone(), self.chat_type.clone(), self.participants.clone());
+    /// Convert back to full Chat (messages will be loaded separately)
+    pub fn to_chat(&self, interner: &mut NpubInterner) -> Chat {
+        let handles: Vec<u16> = self.participants.iter().map(|p| interner.intern(p)).collect();
+        let mut chat = Chat::new(self.id.clone(), self.chat_type.clone(), handles);
         chat.last_read = if self.last_read.is_empty() {
             [0u8; 32]
         } else {
@@ -307,10 +309,10 @@ pub async fn get_all_chats<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<Slim
 }
 
 /// Save a single chat to the database
-pub async fn save_chat<R: Runtime>(handle: AppHandle<R>, chat: &Chat) -> Result<(), String> {
+pub async fn save_chat<R: Runtime>(handle: AppHandle<R>, chat: &Chat, interner: &NpubInterner) -> Result<(), String> {
     let conn = crate::account_manager::get_db_connection(&handle)?;
 
-    let slim_chat = SlimChatDB::from(chat);
+    let slim_chat = SlimChatDB::from_chat(chat, interner);
     let chat_identifier = &slim_chat.id;
 
     let chat_type_int = slim_chat.chat_type.to_i32();

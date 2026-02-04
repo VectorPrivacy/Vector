@@ -229,16 +229,14 @@ impl DeepSize for Chat {
         std::mem::size_of::<Chat>()
             + self.id.capacity()
             + 32  // [u8; 32] is inline, no heap
-            + self.participants.iter().map(|s| s.capacity()).sum::<usize>()
+            + self.participants.capacity() * std::mem::size_of::<u16>()  // Vec<u16> heap buffer
             + self.messages.deep_size()
             // metadata.custom_fields HashMap
             + self.metadata.custom_fields.iter()
                 .map(|(k, v)| k.capacity() + v.capacity())
                 .sum::<usize>()
-            // typing_participants HashMap
-            + self.typing_participants.keys()
-                .map(|k| k.capacity() + std::mem::size_of::<u64>())
-                .sum::<usize>()
+            // typing_participants Vec<(u16, u64)> heap buffer
+            + self.typing_participants.capacity() * std::mem::size_of::<(u16, u64)>()
     }
 }
 

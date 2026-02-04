@@ -104,7 +104,7 @@ impl ChatState {
     /// Create a new DM chat if it doesn't exist
     pub fn create_dm_chat(&mut self, their_npub: &str) -> String {
         if self.get_chat(their_npub).is_none() {
-            let chat = Chat::new_dm(their_npub.to_string());
+            let chat = Chat::new_dm(their_npub.to_string(), &mut self.interner);
             self.chats.push(chat);
         }
         their_npub.to_string()
@@ -113,7 +113,7 @@ impl ChatState {
     /// Create or get an MLS group chat
     pub fn create_or_get_mls_group_chat(&mut self, group_id: &str, participants: Vec<String>) -> String {
         if self.get_chat(group_id).is_none() {
-            let chat = Chat::new_mls_group(group_id.to_string(), participants);
+            let chat = Chat::new_mls_group(group_id.to_string(), participants, &mut self.interner);
             self.chats.push(chat);
         }
         group_id.to_string()
@@ -136,7 +136,7 @@ impl ChatState {
         } else {
             // Chat doesn't exist, create it
             let mut chat = if chat_id.starts_with("npub1") {
-                Chat::new_dm(chat_id.to_string())
+                Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
                 Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
             };
@@ -182,7 +182,7 @@ impl ChatState {
         } else {
             // Chat doesn't exist, create it
             let chat = if chat_id.starts_with("npub1") {
-                Chat::new_dm(chat_id.to_string())
+                Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
                 Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
             };
@@ -374,7 +374,7 @@ impl ChatState {
         for chat in &mut self.chats {
             let is_target = match &chat.chat_type {
                 ChatType::MlsGroup => chat.id == chat_hint,
-                ChatType::DirectMessage => chat.has_participant(chat_hint),
+                ChatType::DirectMessage => chat.has_participant(chat_hint, &self.interner),
             };
 
             if is_target {
@@ -394,7 +394,7 @@ impl ChatState {
     /// Finds the message by ID in the specified chat and appends the attachment.
     /// Returns true if the message was found and attachment added.
     pub fn add_attachment_to_message(&mut self, chat_id: &str, msg_id: &str, attachment: CompactAttachment) -> bool {
-        let chat_idx = match self.chats.iter().position(|c| c.id == chat_id || c.has_participant(chat_id)) {
+        let chat_idx = match self.chats.iter().position(|c| c.id == chat_id || c.has_participant(chat_id, &self.interner)) {
             Some(idx) => idx,
             None => return false,
         };
@@ -473,6 +473,24 @@ impl ChatState {
         }
 
         total_unread
+    }
+
+    // ========================================================================
+    // Typing Indicators
+    // ========================================================================
+
+    /// Update typing indicator for an npub in a chat and return active typers.
+    ///
+    /// Handles split borrowing of `self.interner` and `self.chats`:
+    /// interns the npub, finds the chat, updates typing, returns active typers.
+    pub fn update_typing_and_get_active(&mut self, chat_id: &str, npub: &str, expires_at: u64) -> Vec<String> {
+        let handle = self.interner.intern(npub);
+        if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
+            chat.update_typing_participant(handle, expires_at);
+            chat.get_active_typers(&self.interner)
+        } else {
+            Vec::new()
+        }
     }
 
     // ========================================================================

@@ -23,19 +23,20 @@ use crate::Message;
 pub struct Chat {
     pub id: String,
     pub chat_type: ChatType,
-    pub participants: Vec<String>,
+    /// Interned participant handles (indices into NpubInterner)
+    pub participants: Vec<u16>,
     /// Compact message storage - O(log n) lookup by ID
     pub messages: CompactMessageVec,
     pub last_read: [u8; 32],
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
-    /// Typing participants (npub -> expires_at), memory-only
-    pub typing_participants: HashMap<String, u64>,
+    /// Typing participants (interned handle, expires_at), memory-only
+    pub typing_participants: Vec<(u16, u64)>,
 }
 
 impl Chat {
-    pub fn new(id: String, chat_type: ChatType, participants: Vec<String>) -> Self {
+    pub fn new(id: String, chat_type: ChatType, participants: Vec<u16>) -> Self {
         Self {
             id,
             chat_type,
@@ -48,18 +49,20 @@ impl Chat {
                 .as_secs(),
             metadata: ChatMetadata::new(),
             muted: false,
-            typing_participants: HashMap::new(),
+            typing_participants: Vec::new(),
         }
     }
 
     /// Create a new DM chat
-    pub fn new_dm(their_npub: String) -> Self {
-        Self::new(their_npub.clone(), ChatType::DirectMessage, vec![their_npub])
+    pub fn new_dm(their_npub: String, interner: &mut NpubInterner) -> Self {
+        let handle = interner.intern(&their_npub);
+        Self::new(their_npub, ChatType::DirectMessage, vec![handle])
     }
 
     /// Create a new MLS group chat
-    pub fn new_mls_group(group_id: String, participants: Vec<String>) -> Self {
-        Self::new(group_id, ChatType::MlsGroup, participants)
+    pub fn new_mls_group(group_id: String, participants: Vec<String>, interner: &mut NpubInterner) -> Self {
+        let handles: Vec<u16> = participants.iter().map(|p| interner.intern(p)).collect();
+        Self::new(group_id, ChatType::MlsGroup, handles)
     }
 
     // ========================================================================
@@ -178,12 +181,19 @@ impl Chat {
     // Serialization
     // ========================================================================
 
+    /// Resolve participant handles to strings
+    fn resolve_participants(&self, interner: &NpubInterner) -> Vec<String> {
+        self.participants.iter()
+            .filter_map(|&h| interner.resolve(h).map(|s| s.to_string()))
+            .collect()
+    }
+
     /// Convert to SerializableChat for frontend communication
     pub fn to_serializable(&self, interner: &NpubInterner) -> SerializableChat {
         SerializableChat {
             id: self.id.clone(),
             chat_type: self.chat_type.clone(),
-            participants: self.participants.clone(),
+            participants: self.resolve_participants(interner),
             messages: self.get_all_messages(interner),
             last_read: if self.last_read == [0u8; 32] {
                 String::new()
@@ -201,7 +211,7 @@ impl Chat {
         SerializableChat {
             id: self.id.clone(),
             chat_type: self.chat_type.clone(),
-            participants: self.participants.clone(),
+            participants: self.resolve_participants(interner),
             messages: self.get_last_messages(n, interner),
             last_read: if self.last_read == [0u8; 32] {
                 String::new()
@@ -218,31 +228,42 @@ impl Chat {
     // Chat Metadata & Participants
     // ========================================================================
 
-    pub fn get_other_participant(&self, my_npub: &str) -> Option<String> {
+    pub fn get_other_participant(&self, my_npub: &str, interner: &NpubInterner) -> Option<String> {
         match self.chat_type {
             ChatType::DirectMessage => {
+                let my_handle = interner.lookup(my_npub);
                 self.participants.iter()
-                    .find(|&p| p != my_npub)
-                    .cloned()
+                    .find(|&&h| Some(h) != my_handle)
+                    .and_then(|&h| interner.resolve(h).map(|s| s.to_string()))
             }
             ChatType::MlsGroup => None,
         }
     }
 
-    pub fn is_dm_with(&self, npub: &str) -> bool {
-        matches!(self.chat_type, ChatType::DirectMessage)
-            && self.participants.iter().any(|p| p == npub)
+    pub fn is_dm_with(&self, npub: &str, interner: &NpubInterner) -> bool {
+        if !matches!(self.chat_type, ChatType::DirectMessage) {
+            return false;
+        }
+        if let Some(handle) = interner.lookup(npub) {
+            self.participants.contains(&handle)
+        } else {
+            false
+        }
     }
 
     pub fn is_mls_group(&self) -> bool {
         matches!(self.chat_type, ChatType::MlsGroup)
     }
 
-    pub fn has_participant(&self, npub: &str) -> bool {
-        self.participants.iter().any(|p| p == npub)
+    pub fn has_participant(&self, npub: &str, interner: &NpubInterner) -> bool {
+        if let Some(handle) = interner.lookup(npub) {
+            self.participants.contains(&handle)
+        } else {
+            false
+        }
     }
 
-    pub fn get_active_typers(&self) -> Vec<String> {
+    pub fn get_active_typers(&self, interner: &NpubInterner) -> Vec<String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -250,24 +271,30 @@ impl Chat {
 
         self.typing_participants
             .iter()
-            .filter(|(_, &expires_at)| expires_at > now)
-            .map(|(npub, _)| npub.clone())
+            .filter(|(_, expires_at)| *expires_at > now)
+            .filter_map(|(handle, _)| interner.resolve(*handle).map(|s| s.to_string()))
             .collect()
     }
 
-    pub fn update_typing_participant(&mut self, npub: String, expires_at: u64) {
-        self.typing_participants.insert(npub, expires_at);
+    pub fn update_typing_participant(&mut self, handle: u16, expires_at: u64) {
+        // Update or insert
+        if let Some(entry) = self.typing_participants.iter_mut().find(|(h, _)| *h == handle) {
+            entry.1 = expires_at;
+        } else {
+            self.typing_participants.push((handle, expires_at));
+        }
+        // Prune expired
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        self.typing_participants.retain(|_, &mut exp| exp > now);
+        self.typing_participants.retain(|(_, exp)| *exp > now);
     }
 
     // Getters
     pub fn id(&self) -> &String { &self.id }
     pub fn chat_type(&self) -> &ChatType { &self.chat_type }
-    pub fn participants(&self) -> &Vec<String> { &self.participants }
+    pub fn participants(&self) -> &[u16] { &self.participants }
     pub fn last_read(&self) -> &[u8; 32] { &self.last_read }
     pub fn created_at(&self) -> u64 { self.created_at }
     pub fn metadata(&self) -> &ChatMetadata { &self.metadata }
@@ -297,7 +324,8 @@ impl SerializableChat {
     /// Convert to a Chat with compact storage (for loading from DB)
     #[allow(clippy::wrong_self_convention)]
     pub fn to_chat(self, interner: &mut NpubInterner) -> Chat {
-        let mut chat = Chat::new(self.id, self.chat_type, self.participants);
+        let handles: Vec<u16> = self.participants.iter().map(|p| interner.intern(p)).collect();
+        let mut chat = Chat::new(self.id, self.chat_type, handles);
         chat.last_read = if self.last_read.is_empty() {
             [0u8; 32]
         } else {
@@ -402,13 +430,9 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
         crate::commands::messaging::update_unread_counter(handle.clone()).await;
 
         if let Some(chat_id) = chat_id_for_save {
-            let chat_to_save = {
-                let state = crate::STATE.lock().await;
-                state.get_chat(&chat_id).cloned()
-            };
-
-            if let Some(chat) = chat_to_save {
-                let _ = crate::db::save_chat(handle.clone(), &chat).await;
+            let state = crate::STATE.lock().await;
+            if let Some(chat) = state.get_chat(&chat_id) {
+                let _ = crate::db::save_chat(handle.clone(), chat, &state.interner).await;
             }
         }
     }
