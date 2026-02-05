@@ -446,14 +446,39 @@ function showToast(message) {
         document.body.appendChild(toast);
     }
 
+    let backdrop = document.getElementById('toast-backdrop');
+    if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.id = 'toast-backdrop';
+        backdrop.style.cssText = `
+            position:fixed;
+            top:0;
+            left:0;
+            width:100%;
+            height:100%;
+            background:rgba(0,0,0,0);
+            backdrop-filter:blur(0px);
+            -webkit-backdrop-filter:blur(0px);
+            z-index:9999;pointer-events:none;
+            transition:background 0.3s ease,backdrop-filter 0.3s ease,-webkit-backdrop-filter 0.3s ease;
+        `;
+    document.body.appendChild(backdrop);
+    }
     toast.textContent = message;
     toast.style.opacity = '1';
 
-    // Hide after 3 seconds
+    backdrop.style.background = 'rgba(0, 0, 0, 0.8)';
+    backdrop.style.backdropFilter = 'blur(4px)';
+    backdrop.style.webkitBackdropFilter = 'blur(4px)';
+
+    // Hide after 1 second
     clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => {
+        backdrop.style.background = 'rgba(0, 0, 0, 0)';
+        backdrop.style.backdropFilter = 'blur(0px)';
+        backdrop.style.webkitBackdropFilter = 'blur(0px)';
         toast.style.opacity = '0';
-    }, 3000);
+    }, 1000);
 }
 
 /**
