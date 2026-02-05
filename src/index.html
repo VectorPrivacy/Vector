@@ -657,29 +657,33 @@
             <p class="chat-new-back-text">Back</p>
           </div>
         </div>
-        <center class="chat-new-content" style="margin-top: 80px;">
-          <h2 class="chat-new-title">My nPub Key</h2>
-          <hr class="divider chat-new-divider">
-          <div class="profile-npub-container" style="justify-content: center; margin-top: 10px;">
-            <span class="chat-new-npub" id="share-npub"></span>
-            <button id="chat-new-npub-copy" class="btn profile-npub-copy">
-              <span class="icon icon-copy"></span>
-            </button>
-          </div>
-        </center>
         <center class="chat-new-center-content">
-          <span class="icon icon-add-user chat-new-icon"></span>
-          <h2 class="chat-new-subtitle">Start a New Chat</h2>
+          <span class="icon icon-chat-bubble chat-new-icon"></span>
+          <h2 class="chat-new-subtitle">Create New Chat</h2>
           <hr class="divider chat-new-subtitle-divider">
           <div class="chat-new-content">
-            <span class="chat-new-description">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
+            <span class="chat-new-description">Enter your contact’s nPub Key below to begin a new chat with them.<br><br>This action will also add them as a contact.</span>
+          </div>
+          <div class="chat-new-help">
+            <a href="https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/features/add-contacts" target="_blank" class="chat-new-help-link">
+              <span class="icon icon-help chat-new-help-icon"></span>
+            </a>
+            <span class="chat-new-help-title">Need Help?</span>
+          </div>
+          <div class="chat-new-help-steps">
+            <span class="chat-new-help-step">Profile</span>
+            <span class="chat-new-help-arrow">›</span>
+            <span class="chat-new-help-step">nPub Key</span>
+            <span class="chat-new-help-arrow">›</span>
+            <span class="chat-new-help-step">Copy</span>
           </div>
         </center>
-        <div class="row input-box chat-new-input-box">
-          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container chat-new-input">
-          <span id="chat-new-btn" class="icon icon-add-user btn chat-new-add-btn"></span>
+        <div class="row input-box" id="chat-new-box">
+          <div class="row chat-input-container">
+            <input id="chat-new-input" type="text" placeholder="Paste nPub Key...">
+            <button id="chat-new-btn" style="display: none; margin-right: 3px;"><span class="icon icon-add-user"></span></button>
+          </div>
         </div>
-      </div>
 
       <div id="create-group" class="create-group-container" style="display: none;">
         <div class="chat-new-header">

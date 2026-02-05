@@ -160,6 +160,10 @@
   mask-image: url("./icons/chat-circle.svg");
 }
 
+.icon-chat-bubble {
+  mask-image: url("./icons/chat-bubble.svg")
+}
+
 .icon-settings {
   mask-image: url("./icons/settings.svg");
 }
@@ -224,6 +228,10 @@
 
 .icon-message {
   mask-image: url("./icons/message.svg");
+}
+
+.icon-help {
+  mask-image: url("./icons/help.svg")
 }
 
 :root {
@@ -3853,8 +3861,8 @@ select:disabled:hover {
 }
 
 .chat-new-content {
-  margin-left: 25px;
-  margin-right: 25px;
+  margin-left: 50px;
+  margin-right: 50px;
 }
 
 .chat-new-title {
@@ -3880,7 +3888,7 @@ select:disabled:hover {
 
 .chat-new-center-content {
   position: absolute;
-  bottom: 90px;
+  top: 90px;
   width: 100%;
 }
 
@@ -3915,28 +3923,100 @@ select:disabled:hover {
   line-height: 18px !important;
 }
 
-.chat-new-input-box {
+#chat-new-box {
   position: absolute;
   bottom: 0;
   width: 100%;
+  flex-shrink: 0;
+  padding-top: 5px;
+  padding-bottom: 5px;
 }
 
-.chat-new-input {
-  margin-top: 8px;
-  height: auto;
-  margin-bottom: 8px;
+#chat-new-input {
+  width: -webkit-fill-available;
+  height: 20px;
+  padding: 10px;
+  padding-left: 14px;
+  line-height: inherit;
+  border: none;
+  background: transparent;
+  color: white;
+  font-size: 15px;
 }
 
-.chat-new-add-btn {
-  width: 50px;
-  margin: 0;
-  height: 50px;
+#chat-new-btn .icon {
+  background-color: var(--icon-color-primary);
+}
+
+.chat-new-help {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 80px;
+  gap: 6px;
+}
+
+.chat-new-help-icon {
   position: relative;
-  display: block;
-  margin-left: auto;
-  margin-right: 8px;
-  margin-bottom: auto;
-  margin-top: auto;
+  width: 18px;
+  height: 18px;
+  min-width: 16px;
+  opacity: 0.5;
+  display: inline-block;
+  background-color: currentColor;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  padding: 0;
+  margin: 0;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+}
+
+.chat-new-help-title {
+  font-size: 14px;
+  opacity: 0.5;
+  font-weight: 500;
+}
+
+.chat-new-help-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chat-new-help-step {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chat-new-help-step :hover {
+  color: #ffffff50;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chat-new-help-arrow {
+  opacity: 1;
+  font-size: 14px;
+  color: #59FCB3;
+}
+
+.chat-new-help-link {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  color: #5B6060;
+}
+
+.chat-new-help-link:hover .chat-new-help-icon {
+  background-color: var(--icon-color-primary);
+  opacity: 1;
 }
 
 .settings-divider {

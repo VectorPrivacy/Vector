@@ -6425,7 +6425,7 @@ function renderCurrentProfile(cProfile) {
 
     /* Start Chat Tab */
     // Render our Share npub
-    domShareNpub.textContent = strPubkey;
+    if (domShareNpub) domShareNpub.textContent = strPubkey;
 }
 
 /**
@@ -10391,6 +10391,16 @@ window.addEventListener("DOMContentLoaded", async () => {
             domChatNewStartBtn.click();
         }
     };
+    domChatNewInput.addEventListener('input', function() {
+        domChatNewStartBtn.style.display = this.value.length > 0 ? '' : 'none';
+    });
+
+    // Tooltip for help icon
+    document.querySelector('.chat-new-help-link').addEventListener('mouseenter', function() {
+    showGlobalTooltip('Visit the Vector Privacy Docs', this);
+    });
+    document.querySelector('.chat-new-help-link').addEventListener('mouseleave', hideGlobalTooltip);
+
     domChatMessageInputCancel.onclick = () => {
         // Cancel edit mode if active, otherwise cancel reply
         if (strCurrentEditMessageId) {
