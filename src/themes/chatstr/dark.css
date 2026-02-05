@@ -6,6 +6,7 @@
   --icon-color-primary: #b188e2;
   --voice-progress-secondary: rgba(177, 136, 226, 0.4);
   --reply-highlight-border: #CD3DD3;
+  --toast-border-color: #b188e2;
 }
 
 .sync-line {

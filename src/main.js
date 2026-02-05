@@ -50,6 +50,7 @@ const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
+const domProfileOptionShare = document.getElementById('profile-option-share');
 const domProfileId = document.getElementById('profile-id');
 
 const domGroupOverview = document.getElementById('group-overview');
@@ -426,6 +427,13 @@ function showToast(message) {
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--toast-border-color);
+            box-shadow: 
+            0 0 4px rgba(0, 0, 0, 0.8),
+            0 0 12px rgba(0, 0, 0, 0.6),
+            0 0 30px rgba(0, 0, 0, 0.4);
             color: white;
             padding: 12px 24px;
             border-radius: 8px;
@@ -6556,9 +6564,9 @@ function renderProfileTab(cProfile) {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
             // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
+            navigator.clipboard.writeText(npub).then(() => {
+                showToast('Copied');
+                const copyBtn = e.target.closest('#profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
                     setTimeout(() => {
@@ -6624,6 +6632,21 @@ function renderProfileTab(cProfile) {
             if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         }
+
+        // Setup Share option
+        domProfileOptionShare.onclick = () => {
+            const npub = document.getElementById('profile-npub')?.textContent;
+            if (npub) {
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                navigator.clipboard.writeText(profileUrl).then(() => {
+                    // Brief visual feedback
+                    const icon = domProfileOptionShare.querySelector('span');
+                    showToast('Profile Link Copied!');
+                    icon.classList.replace('icon-share', 'icon-check');
+                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+                });
+            }
+        };
 
         // Hide edit buttons
         document.querySelector('.profile-avatar-edit').style.display = 'none';

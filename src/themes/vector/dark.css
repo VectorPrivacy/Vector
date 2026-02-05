@@ -5,6 +5,7 @@
   --voice-frequency-glow: rgba(89, 252, 179, 0.8);
   --icon-color-primary: #59fcb3;
   --reply-highlight-border: #33DB98;
+  --toast-border-color: #33DB98;
 }
 
 .sync-line {

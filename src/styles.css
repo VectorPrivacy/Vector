@@ -192,6 +192,12 @@
   mask-image: url("./icons/send.svg");
 }
 
+.icon-share {
+  mask-image: url("./icons/share.svg");
+  -webkit-mask-image: url("./icons/share.svg");
+  background-color: var(--icon-color-primary);
+}
+
 .icon-withdraw {
   mask-image: url("./icons/withdraw.svg");
 }
@@ -703,9 +709,9 @@ html, body {
   height: 50px;
   width: 50px;
   border-radius: 12px;
-  border-color: #393b3c;
+  border-color: #393B3C;
   border-style: solid;
-  border-width: 1px;
+  border-width: 2px;
   color: #b2b2b2;
   background-color: #060606;
   cursor: pointer;
