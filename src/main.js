@@ -467,9 +467,9 @@ function showToast(message) {
     toast.textContent = message;
     toast.style.opacity = '1';
 
-    backdrop.style.background = 'rgba(0, 0, 0, 0.8)';
-    backdrop.style.backdropFilter = 'blur(4px)';
-    backdrop.style.webkitBackdropFilter = 'blur(4px)';
+    backdrop.style.background = 'linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%)';
+    backdrop.style.backdropFilter = 'blur(0px)';
+    backdrop.style.webkitBackdropFilter = 'blur(0px)';
 
     // Hide after 1 second
     clearTimeout(toast._timeout);
