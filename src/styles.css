@@ -161,7 +161,8 @@
 }
 
 .icon-chat-bubble {
-  mask-image: url("./icons/chat-bubble.svg")
+  mask-image: url("./icons/chat-bubble.svg");
+  -webkit-mask-image: url("./icons/chat-bubble.svg");
 }
 
 .icon-settings {
@@ -231,7 +232,9 @@
 }
 
 .icon-help {
-  mask-image: url("./icons/help.svg")
+  mask-image: url("./icons/help.svg");
+  -webkit-mask-image: url("./icons/help.svg");
+  
 }
 
 :root {
@@ -3990,13 +3993,13 @@ select:disabled:hover {
 }
 
 .chat-new-help-step {
-  color: #fff;
+  color: #ffffff80;
   font-size: 13px;
   font-weight: 500;
 }
 
-.chat-new-help-step :hover {
-  color: #ffffff50;
+.chat-new-help-step:hover {
+  color: #ffffff;
   font-size: 13px;
   font-weight: 500;
 }
@@ -4004,7 +4007,7 @@ select:disabled:hover {
 .chat-new-help-arrow {
   opacity: 1;
   font-size: 14px;
-  color: #59FCB3;
+  color: var(--icon-color-primary);
 }
 
 .chat-new-help-link {

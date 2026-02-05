@@ -429,7 +429,7 @@ function showToast(message) {
             background: rgba(0, 0, 0, 0.8);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(10px);
-            border: 1px solid var(--toast-border-color);
+            border: 1px solid var(--toast-border-color, #161616);
             box-shadow: 
             0 0 4px rgba(0, 0, 0, 0.8),
             0 0 12px rgba(0, 0, 0, 0.6),
@@ -448,20 +448,20 @@ function showToast(message) {
 
     let backdrop = document.getElementById('toast-backdrop');
     if (!backdrop) {
-        backdrop = document.createElement('div');
-        backdrop.id = 'toast-backdrop';
-        backdrop.style.cssText = `
-            position:fixed;
-            top:0;
-            left:0;
-            width:100%;
-            height:100%;
-            background:rgba(0,0,0,0);
-            backdrop-filter:blur(0px);
-            -webkit-backdrop-filter:blur(0px);
-            z-index:9999;pointer-events:none;
-            transition:background 0.3s ease,backdrop-filter 0.3s ease,-webkit-backdrop-filter 0.3s ease;
-        `;
+    backdrop = document.createElement('div');
+    backdrop.id = 'toast-backdrop';
+    backdrop.style.cssText = `
+        position:fixed;
+        top:0;
+        left:0;
+        width:100%;
+        height:100%;
+        background:rgba(0,0,0,0);
+        backdrop-filter:blur(0px);
+        -webkit-backdrop-filter:blur(0px);
+        z-index:9999;pointer-events:none;
+        transition:background 0.3s ease,backdrop-filter 0.3s ease,-webkit-backdrop-filter 0.3s ease;
+    `;
     document.body.appendChild(backdrop);
     }
     toast.textContent = message;
@@ -6585,7 +6585,7 @@ function renderProfileTab(cProfile) {
     domProfileId.textContent = cProfile.id;
 
     // Add npub copy functionality
-    document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
+    document.getElementById('profile-npub-copy').onclick = (e) => {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
             // Copy the full profile URL for easy sharing
@@ -6600,7 +6600,7 @@ function renderProfileTab(cProfile) {
                 }
             });
         }
-    });
+    };
 
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
@@ -6666,9 +6666,11 @@ function renderProfileTab(cProfile) {
                 navigator.clipboard.writeText(profileUrl).then(() => {
                     // Brief visual feedback
                     const icon = domProfileOptionShare.querySelector('span');
-                    showToast('Profile Link Copied!');
+                    showToast('Profile Link Copied');
                     icon.classList.replace('icon-share', 'icon-check');
                     setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+                    }).catch(() => {
+                    showToast('Failed to copy profile link');
                 });
             }
         };
@@ -11110,24 +11112,6 @@ domChatMessageInput.oninput = async () => {
             popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
         };
     }
-
-    // Add npub copy functionality for chat-new section
-    document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
-        const npub = document.getElementById('share-npub')?.textContent;
-        if (npub) {
-            // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
-                if (copyBtn) {
-                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                    setTimeout(() => {
-                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-                    }, 2000);
-                }
-            });
-        }
-    });
 });
 
 // Listen for app-wide click interations
