@@ -4145,6 +4145,12 @@ select:disabled:hover {
     margin-top: 0px;
   }
 
+  .login-import-container {
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+  }
+
   #login-start {
     bottom: 10px !important;
   }
