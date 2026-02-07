@@ -4191,31 +4191,34 @@ select:disabled:hover {
   width: 275px;
 }
 
-.login-import-container {
-  position: absolute;
-  bottom: 0px;
-  width: 100%;
-}
-
 .login-input-container {
-  height: 52px;
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+  padding-top: 5px;
+  padding-bottom: 5px;
 }
 
 .login-input {
-  width: 100%;
-  margin-left: 10px;
-  margin-top: 5px;
-  margin-bottom: 5px;
-  background-color: black;
+  width: -webkit-fill-available;
+  height: 20px;
+  padding: 10px;
+  padding-left: 14px;
+  line-height: inherit;
+  border: none;
+  background: transparent;
+  color: white;
+  font-size: 15px;
 }
 
 .login-btn {
-  width: 50px;
-  height: 50px;
-  background-color: transparent;
-  padding: 3px;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
   margin: 0;
-  margin-right: 5px;
+  margin-right: 8px;
+  background: transparent;
+  color: var(--icon-color-primary);
 }
 
 .login-encrypt-container {

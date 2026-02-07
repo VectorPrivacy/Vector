@@ -10371,6 +10371,10 @@ window.addEventListener("DOMContentLoaded", async () => {
         domLoginImport.style.display = '';
         domLoginStart.style.display = 'none';
     };
+    domLoginBtn.style.display = 'none';
+    domLoginInput.addEventListener('input', function() {
+    domLoginBtn.style.display = this.value.length > 0 ? '' : 'none';
+    });
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
