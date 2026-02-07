@@ -6595,7 +6595,9 @@ function renderProfileTab(cProfile) {
         if (npub) {
             // Copy the full profile URL for easy sharing
             navigator.clipboard.writeText(npub).then(() => {
-                showToast('Copied');
+                showToast('Copied!');
+            }).catch(() => {
+                showToast('Failed to copy');
                 const copyBtn = e.target.closest('#profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
@@ -10372,7 +10374,6 @@ window.addEventListener("DOMContentLoaded", async () => {
             popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
     };
-    const domLoginBackBtn = document.getElementById('login-back-btn');
     domLoginAccountBtn.onclick = () => {
         domLoginImport.style.display = '';
         domLoginStart.style.display = 'none';
