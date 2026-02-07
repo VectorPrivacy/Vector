@@ -4179,6 +4179,7 @@ select:disabled:hover {
 .login-create-btn {
   background-color: #59fcb3;
   color: black;
+  font-weight: 600;
   width: 225px;
 }
 
