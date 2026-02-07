@@ -2982,6 +2982,10 @@ audio {
   border: none;
 }
 
+#login-form.has-back-bar {
+    padding-top: 40px;
+}
+
 #login-encrypt-pins {
   background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
   -webkit-box-shadow: 

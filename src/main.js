@@ -22,6 +22,11 @@ const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
+const domLoginImportError = document.getElementById('login-import-error');
+
+const domLoginBackBar = document.getElementById('login-back-bar');
+const domLoginBackBtn = document.getElementById('login-back-btn');
+
 const domLoginInvite = document.getElementById('login-invite');
 const domInviteInput = document.getElementById('invite-input');
 const domInviteBtn = document.getElementById('invite-btn');
@@ -10367,9 +10372,20 @@ window.addEventListener("DOMContentLoaded", async () => {
             popupConfirm(e, '', true, '', 'vector_warning.svg');
         }
     };
+    const domLoginBackBtn = document.getElementById('login-back-btn');
     domLoginAccountBtn.onclick = () => {
         domLoginImport.style.display = '';
         domLoginStart.style.display = 'none';
+        domLoginBackBar.style.display = '';
+        document.getElementById('login-form').classList.add('has-back-bar');
+    };
+    domLoginBackBtn.onclick = () => {
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginBackBar.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginInput.value = '';
+        document.getElementById('login-form').classList.remove('has-back-bar');
     };
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
