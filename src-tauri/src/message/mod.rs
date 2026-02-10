@@ -65,9 +65,8 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 .build(my_public_key);
             let rumor_id = rumor.id.ok_or("Failed to get rumor ID")?.to_hex();
             
-            // Send reaction to the receiver
-            client
-                .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+            // Send reaction to the receiver (routed to their inbox relays if available)
+            crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
                 .await
                 .map_err(|e| e.to_string())?;
             
@@ -303,9 +302,8 @@ pub async fn edit_message(
             // For DMs, send gift-wrapped edit
             let receiver_pubkey = PublicKey::from_bech32(&chat_id).map_err(|e| e.to_string())?;
 
-            // Send edit to the receiver
-            client
-                .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+            // Send edit to the receiver (routed to their inbox relays if available)
+            crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
                 .await
                 .map_err(|e| e.to_string())?;
 

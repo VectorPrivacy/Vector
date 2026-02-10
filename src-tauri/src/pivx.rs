@@ -1312,8 +1312,7 @@ pub async fn pivx_send_payment<R: Runtime>(
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
-        client
-            .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
@@ -1438,9 +1437,8 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
-        // Send to receiver
-        client
-            .gift_wrap(&receiver_pubkey, rumor.clone(), [])
+        // Send to receiver (routed to their inbox relays if available)
+        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, rumor.clone(), [])
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 

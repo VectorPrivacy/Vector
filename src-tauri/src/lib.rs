@@ -51,6 +51,9 @@ mod miniapps;
 // Image caching for avatars, banners, and Mini App icons
 mod image_cache;
 
+// NIP-17 Kind 10050 (DM Relay List) support
+mod inbox_relays;
+
 // PIVX Promos (addressless cryptocurrency payments)
 mod pivx;
 

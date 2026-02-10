@@ -848,8 +848,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         while send_attempts < MAX_ATTEMPTS {
             send_attempts += 1;
 
-            match client
-                .gift_wrap(&receiver_pubkey, built_rumor.clone(), [])
+            match crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey, built_rumor.clone(), [])
                 .await
             {
                 Ok(output) => {
