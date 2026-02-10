@@ -410,6 +410,7 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
                 println!("[Relay] Disabled default relay: {}", normalized_url);
             }
         }
+        crate::inbox_relays::republish_inbox_relays_debounced();
     }
 
     Ok(true)
@@ -452,6 +453,7 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
                     if let Err(e) = client.pool().connect_relay(&new_relay.url).await {
                         eprintln!("[Relay] Failed to connect to new relay: {}", e);
                     }
+                    crate::inbox_relays::republish_inbox_relays_debounced();
                 }
                 Err(e) => eprintln!("[Relay] Failed to add relay to pool: {}", e),
             }
@@ -482,6 +484,9 @@ pub async fn remove_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String) 
             println!("[Relay] Removed custom relay from pool: {}", url);
         }
     }
+
+    // Republish regardless of pool removal result — config changed either way
+    crate::inbox_relays::republish_inbox_relays_debounced();
 
     Ok(true)
 }
@@ -525,6 +530,7 @@ pub async fn toggle_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, 
                 println!("[Relay] Disabled custom relay: {}", url);
             }
         }
+        crate::inbox_relays::republish_inbox_relays_debounced();
     }
 
     Ok(true)
@@ -568,6 +574,8 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
                 Err(e) => eprintln!("[Relay] Failed to update relay mode: {}", e),
             }
         }
+        // Republish regardless — relay was removed and mode config changed either way
+        crate::inbox_relays::republish_inbox_relays_debounced();
     }
 
     Ok(true)
@@ -829,6 +837,20 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
 
     // Connect to all added relays
     client.connect().await;
+
+    // Post-connect: publish our kind 10050 (DM Relay List) so other clients know
+    // where to send gift-wrapped DMs to us.
+    tokio::spawn(async {
+        // Small delay to let relay connections stabilise
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let client = match NOSTR_CLIENT.get() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Err(e) = crate::inbox_relays::publish_inbox_relays(client).await {
+            eprintln!("[Relay] Failed to publish inbox relays: {}", e);
+        }
+    });
 
     // Post-connect: force-regenerate device KeyPackage if flagged by migration 13
     // (v0.3.0 upgrade: old keypackages used incompatible MLS engine format)
