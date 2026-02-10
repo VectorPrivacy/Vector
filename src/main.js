@@ -137,7 +137,6 @@ const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
-const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
@@ -6532,9 +6531,6 @@ function renderCurrentProfile(cProfile) {
     domAccountStatus.onclick = askForStatus;
     twemojify(domAccountStatus);
 
-    /* Start Chat Tab */
-    // Render our Share npub
-    if (domShareNpub) domShareNpub.textContent = strPubkey;
 }
 
 /**
