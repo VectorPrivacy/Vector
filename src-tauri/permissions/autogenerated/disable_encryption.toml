@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-disable-encryption"
+description = "Enables the disable_encryption command without any pre-configured scope."
+commands.allow = ["disable_encryption"]
+
+[[permission]]
+identifier = "deny-disable-encryption"
+description = "Denies the disable_encryption command without any pre-configured scope."
+commands.deny = ["disable_encryption"]

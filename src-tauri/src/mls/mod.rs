@@ -653,32 +653,30 @@ impl MlsService {
             let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&meta.engine_group_id));
             {
                 // Get our pubkey for building the rumor
-                if let Ok(signer) = client.signer().await {
-                    if let Ok(my_pubkey) = signer.get_public_key().await {
-                        // Build the leave request rumor (like typing indicator)
-                        let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
-                            .tag(Tag::custom(TagKind::d(), vec!["vector"]))
-                            .build(my_pubkey);
+                if let Some(&my_pubkey) = crate::MY_PUBLIC_KEY.get() {
+                    // Build the leave request rumor (like typing indicator)
+                    let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
+                        .tag(Tag::custom(TagKind::d(), vec!["vector"]))
+                        .build(my_pubkey);
 
-                        // Create and send the MLS message
-                        match self.engine() {
-                            Ok(engine) => {
-                                match engine.create_message(&mls_group_id, leave_rumor) {
-                                    Ok(mls_event) => {
-                                        if let Err(e) = client.send_event(&mls_event).await {
-                                            eprintln!("[MLS] Failed to send leave request message: {}", e);
-                                        } else {
-                                            println!("[MLS] Leave request message sent for group: {}", group_id);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[MLS] Failed to create leave request message: {}", e);
+                    // Create and send the MLS message
+                    match self.engine() {
+                        Ok(engine) => {
+                            match engine.create_message(&mls_group_id, leave_rumor) {
+                                Ok(mls_event) => {
+                                    if let Err(e) = client.send_event(&mls_event).await {
+                                        eprintln!("[MLS] Failed to send leave request message: {}", e);
+                                    } else {
+                                        println!("[MLS] Leave request message sent for group: {}", group_id);
                                     }
                                 }
+                                Err(e) => {
+                                    eprintln!("[MLS] Failed to create leave request message: {}", e);
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("[MLS] Could not get MLS engine for leave request: {}", e);
-                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[MLS] Could not get MLS engine for leave request: {}", e);
                         }
                     }
                 }
@@ -1042,12 +1040,8 @@ impl MlsService {
         let mut events_to_track: Vec<(String, u64)> = Vec::new();
         
         // Resolve my pubkey before entering engine scope (for mine flag)
-        let my_pubkey_hex = if let Ok(signer) = client.signer().await {
-            if let Ok(my_pubkey) = signer.get_public_key().await {
-                my_pubkey.to_hex()
-            } else {
-                String::new()
-            }
+        let my_pubkey_hex = if let Some(&pk) = crate::MY_PUBLIC_KEY.get() {
+            pk.to_hex()
         } else {
             String::new()
         };
@@ -1659,14 +1653,10 @@ impl MlsService {
 
                                 // Check if we're an admin for this group
                                 let am_i_admin = if let Some(meta) = &group_metadata {
-                                    if let Some(client) = NOSTR_CLIENT.get() {
-                                        if let Ok(signer) = client.signer().await {
-                                            if let Ok(my_pk) = signer.get_public_key().await {
-                                                let my_npub = my_pk.to_bech32().unwrap_or_default();
-                                                let my_hex = my_pk.to_hex();
-                                                meta.creator_pubkey == my_npub || meta.creator_pubkey == my_hex
-                                            } else { false }
-                                        } else { false }
+                                    if let Some(&my_pk) = crate::MY_PUBLIC_KEY.get() {
+                                        let my_npub = my_pk.to_bech32().unwrap_or_default();
+                                        let my_hex = my_pk.to_hex();
+                                        meta.creator_pubkey == my_npub || meta.creator_pubkey == my_hex
                                     } else { false }
                                 } else { false };
 

@@ -59,9 +59,8 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
         }
     };
 
-    // Resolve my pubkey (awaits before any MLS engine is created)
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    // Resolve my pubkey
+    let my_pubkey = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
     let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
     // If caching is requested, attempt to load and verify an existing KeyPackage
@@ -461,6 +460,7 @@ pub async fn refresh_keypackages_for_contact(
 
     // Merge new entries into the index, preserving local entries that share the same
     // keypackage_ref (they have the correct device_id, whereas network entries use event_id).
+    let mut index_changed = false;
     for new_entry in new_entries {
         let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
         let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
@@ -481,9 +481,14 @@ pub async fn refresh_keypackages_for_contact(
             !(same_owner && same_device)
         });
         index.push(new_entry);
+        index_changed = true;
     }
 
-    let _ = db::save_mls_keypackages(handle.clone(), &index).await;
+    // Only persist if the index was actually modified — avoids overwriting
+    // concurrent writes from regenerate_device_keypackage with stale data
+    if index_changed {
+        let _ = db::save_mls_keypackages(handle.clone(), &index).await;
+    }
 
     Ok(results)
 }

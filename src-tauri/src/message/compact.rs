@@ -10,7 +10,7 @@
 
 use crate::message::{Attachment, EditEntry, ImageMetadata, Reaction};
 use crate::net::SiteMetadata;
-use crate::simd::{bytes_to_hex_32, hex_to_bytes_32, hex_string_to_bytes};
+use crate::simd::{bytes_to_hex_32, hex_to_bytes_32};
 
 // ============================================================================
 // Pending ID Encoding
@@ -766,11 +766,7 @@ impl CompactAttachment {
 
 /// Parse a hex nonce string into [u8; 16]
 fn parse_nonce(hex: &str) -> [u8; 16] {
-    let mut result = [0u8; 16];
-    let bytes = hex_string_to_bytes(hex);
-    let len = bytes.len().min(16);
-    result[..len].copy_from_slice(&bytes[..len]);
-    result
+    crate::simd::hex_to_bytes_16(hex)
 }
 
 // ============================================================================

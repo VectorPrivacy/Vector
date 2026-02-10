@@ -27,7 +27,7 @@ use tauri::{AppHandle, Runtime};
 use std::collections::HashMap;
 
 use crate::{Message, Attachment};
-use crate::util::{bytes_to_hex_32, bytes_to_hex_string, hex_to_bytes_32, hex_string_to_bytes};
+use crate::util::{bytes_to_hex_32, bytes_to_hex_string, hex_to_bytes_16, hex_to_bytes_32};
 use super::{get_chat_id_by_identifier, get_message_views};
 
 /// Lightweight attachment reference for file deduplication.
@@ -56,7 +56,7 @@ pub struct AttachmentRef {
 /// Ultra-packed attachment entry optimized for memory efficiency.
 ///
 /// Uses fixed-size byte arrays instead of heap-allocated strings, and bitpacks
-/// indices for interned strings. Total size: 88 bytes per entry.
+/// indices for interned strings. Total size: 92 bytes per entry.
 ///
 /// # Memory Layout
 ///
@@ -65,7 +65,7 @@ pub struct AttachmentRef {
 /// | `hash`          | 6 bytes | Truncated file hash (binary search key) |
 /// | `url_file_hash` | 32 bytes| Encrypted hash from URL                 |
 /// | `key`           | 32 bytes| Encryption key                          |
-/// | `nonce`         | 12 bytes| AES-GCM nonce (standard 96-bit)         |
+/// | `nonce`         | 16 bytes| AES-GCM nonce (128-bit for DM compat)   |
 /// | `packed_indices`| 2 bytes | Bitpacked: base_url(6)+ext(6)+hash(4)   |
 /// | `size`          | 4 bytes | File size (max 4GB)                     |
 #[derive(Clone, Debug)]
@@ -79,8 +79,8 @@ pub struct UltraPackedEntry {
     pub url_file_hash: [u8; 32],
     /// Encryption key for decrypting the file.
     pub key: [u8; 32],
-    /// Encryption nonce (12 bytes = 96-bit AES-GCM standard).
-    pub nonce: [u8; 12],
+    /// Encryption nonce (16 bytes for DM AES-256-GCM, 12 bytes used for MLS).
+    pub nonce: [u8; 16],
     /// Bitpacked indices and extra hash bits.
     /// Layout: `[base_url: 6 bits][extension: 6 bits][hash_extra: 4 bits]`
     pub packed_indices: u16,
@@ -135,7 +135,7 @@ fn truncate_hash(hash: &[u8; 32]) -> ([u8; 6], u8) {
 /// # Memory Usage
 ///
 /// For 6,800 attachments: ~583 KB total
-/// - Entries: 88 bytes × 6,800 = ~583 KB
+/// - Entries: 92 bytes × 6,800 = ~610 KB
 /// - String tables: ~3 KB (interned, highly deduplicated)
 ///
 /// Compare to naive HashMap<String, AttachmentRef>: ~4.2 MB
@@ -285,14 +285,8 @@ impl UltraPackedFileHashIndex {
                 // Clamp size to u32 max (4GB)
                 let size = if att.size > u32::MAX as u64 { u32::MAX } else { att.size as u32 };
 
-                // Parse nonce (12 bytes = 24 hex chars for AES-GCM)
-                let nonce = {
-                    let bytes = hex_string_to_bytes(&att.nonce);
-                    let mut arr = [0u8; 12];
-                    let len = bytes.len().min(12);
-                    arr[..len].copy_from_slice(&bytes[..len]);
-                    arr
-                };
+                // Parse nonce (16 bytes for DM, 12 bytes for MLS - zero-padded)
+                let nonce = hex_to_bytes_16(&att.nonce);
 
                 let full_hash = hex_to_bytes_32(&att.id);
                 let (hash_prefix, hash_extra) = truncate_hash(&full_hash);
@@ -575,7 +569,7 @@ pub async fn get_chat_message_count<R: Runtime>(
     handle: &AppHandle<R>,
     chat_id: &str,
 ) -> Result<usize, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // Get integer chat ID from identifier
     let chat_int_id: i64 = conn.query_row(
@@ -591,7 +585,7 @@ pub async fn get_chat_message_count<R: Runtime>(
         |row| row.get(0)
     ).map_err(|e| format!("Failed to count messages: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
 
     Ok(count as usize)
 }
@@ -609,7 +603,7 @@ pub async fn get_messages_around_id<R: Runtime>(
 
     // First, find the timestamp of the target message (don't require chat_id match in case of edge cases)
     let target_timestamp: i64 = {
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
         // Try to find in the specified chat first
         let ts_result = conn.query_row(
             "SELECT created_at FROM events WHERE id = ?1 AND chat_id = ?2",
@@ -628,19 +622,19 @@ pub async fn get_messages_around_id<R: Runtime>(
                 ).map_err(|e| format!("Target message not found in any chat: {}", e))?
             }
         };
-        crate::account_manager::return_db_connection(conn);
+    
         ts
     };
 
     // Count how many messages are older than the target in this chat
     let older_count: i64 = {
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
         let count = conn.query_row(
             "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (9, 14, 15) AND created_at < ?2",
             rusqlite::params![chat_int_id, target_timestamp],
             |row| row.get(0)
         ).map_err(|e| format!("Failed to count older messages: {}", e))?;
-        crate::account_manager::return_db_connection(conn);
+    
         count
     };
 
@@ -667,7 +661,7 @@ pub async fn message_exists_in_db<R: Runtime>(
     message_id: &str,
 ) -> Result<bool, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard(handle) {
         Ok(c) => c,
         Err(_) => return Ok(false), // No DB, let in-memory check handle it
     };
@@ -679,7 +673,7 @@ pub async fn message_exists_in_db<R: Runtime>(
         |row| row.get(0)
     ).map_err(|e| format!("Failed to check event existence: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
 
     Ok(exists)
 }
@@ -691,7 +685,7 @@ pub async fn wrapper_event_exists<R: Runtime>(
     wrapper_event_id: &str,
 ) -> Result<bool, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard(handle) {
         Ok(c) => c,
         Err(_) => return Ok(false), // No DB, can't check
     };
@@ -703,7 +697,7 @@ pub async fn wrapper_event_exists<R: Runtime>(
         |row| row.get(0)
     ).map_err(|e| format!("Failed to check wrapper event existence: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
 
     Ok(exists)
 }
@@ -716,25 +710,17 @@ pub async fn update_wrapper_event_id<R: Runtime>(
     event_id: &str,
     wrapper_event_id: &str,
 ) -> Result<bool, String> {
-    // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection(handle) {
+    // Try to get the write connection - if it fails, we're not using DB mode
+    let conn = match crate::account_manager::get_write_connection_guard(handle) {
         Ok(c) => c,
         Err(_) => return Ok(false), // No DB, nothing to update
     };
 
     // Update in events table (unified storage)
-    let rows_updated = match conn.execute(
+    let rows_updated = conn.execute(
         "UPDATE events SET wrapper_event_id = ?1 WHERE id = ?2 AND (wrapper_event_id IS NULL OR wrapper_event_id = '')",
         rusqlite::params![wrapper_event_id, event_id],
-    ) {
-        Ok(n) => n,
-        Err(e) => {
-            crate::account_manager::return_db_connection(conn);
-            return Err(format!("Failed to update wrapper event ID: {}", e));
-        }
-    };
-
-    crate::account_manager::return_db_connection(conn);
+    ).map_err(|e| format!("Failed to update wrapper event ID: {}", e))?;
 
     // Returns true if backfill succeeded, false if event already has a wrapper_id (duplicate giftwrap)
     Ok(rows_updated > 0)
@@ -749,7 +735,7 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
     days: u64,
 ) -> Result<Vec<[u8; 32]>, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard(handle) {
         Ok(c) => c,
         Err(_) => return Ok(Vec::new()), // No DB, return empty vec
     };
@@ -778,7 +764,7 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
             .map_err(|e| format!("Failed to collect wrapper_ids: {}", e))
     };
 
-    crate::account_manager::return_db_connection(conn);
+
 
     match result {
         Ok(hex_ids) => {

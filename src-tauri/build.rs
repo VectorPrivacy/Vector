@@ -74,6 +74,9 @@ fn main() {
             "decode_blurhash",
             "download_attachment",
             "login",
+            "login_from_stored_key",
+            "setup_encryption",
+            "skip_encryption",
             "notifs",
             "get_relays",
             "get_media_servers",
@@ -186,6 +189,12 @@ fn main() {
             "run_maintenance",
             // Debug commands (conditional)
             "debug_hot_reload_sync",
+            // Encryption toggle commands
+            "get_encryption_status",
+            "disable_encryption",
+            "enable_encryption",
+            "get_encryption_and_key",
+            "rekey_encryption",
         ]),
     ))
     .expect("failed to run tauri-build");

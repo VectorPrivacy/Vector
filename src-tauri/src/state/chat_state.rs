@@ -2,14 +2,13 @@
 //!
 //! This module contains the core state management for profiles, chats, and sync status.
 
-use nostr_sdk::prelude::*;
 use tauri::Emitter;
 
 use crate::message::compact::{CompactMessage, CompactAttachment, NpubInterner};
 use crate::{Profile, Chat, ChatType, Message};
 use crate::chat::SerializableChat;
 use crate::db::SlimProfile;
-use super::globals::{TAURI_APP, NOSTR_CLIENT};
+use super::globals::TAURI_APP;
 use super::SyncMode;
 #[cfg(debug_assertions)]
 use super::stats::CacheStats;
@@ -57,20 +56,11 @@ impl ChatState {
     /// Merge multiple Vector Profiles from SlimProfile format into the state.
     ///
     /// Profiles are kept sorted by interner handle for O(log n) integer binary search.
-    pub async fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>) {
-        let my_public_key = {
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
-            signer.get_public_key().await.unwrap()
-        };
-
+    pub fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>, my_npub: &str) {
         for slim in slim_profiles {
-            let npub = slim.id.clone();
             let mut full_profile = slim.to_profile();
-            if let Ok(profile_pubkey) = PublicKey::from_bech32(&npub) {
-                full_profile.flags.set_mine(my_public_key == profile_pubkey);
-            }
-            self.insert_or_replace_profile(&npub, full_profile);
+            full_profile.flags.set_mine(slim.id == my_npub);
+            self.insert_or_replace_profile(&slim.id, full_profile);
         }
     }
 
@@ -559,22 +549,6 @@ impl ChatState {
             self.interner.len(), self.interner.memory_usage());
     }
 
-    #[cfg(debug_assertions)]
-    pub fn log_cache_stats(&mut self) {
-        self.update_and_log_stats();
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn cache_stats_summary(&mut self) -> String {
-        self.cache_stats.chat_count = self.chats.len();
-        self.cache_stats.message_count = self.chats.iter()
-            .map(|c| c.message_count())
-            .sum();
-        format!("{} interner={} npubs",
-            self.cache_stats.summary(),
-            self.interner.len()
-        )
-    }
 }
 
 impl Default for ChatState {

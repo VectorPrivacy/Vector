@@ -38,9 +38,8 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
     use crate::chat::ChatType;
     
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
-    
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+
     // Determine chat type
     let state = STATE.lock().await;
     let chat = state.chats.iter().find(|c| c.id == chat_id)
@@ -273,8 +272,7 @@ pub async fn edit_message(
     use crate::stored_event::event_kind;
 
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
     let my_npub = my_public_key.to_bech32().map_err(|e| e.to_string())?;
 
     // Determine chat type and get db chat_id

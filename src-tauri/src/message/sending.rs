@@ -140,9 +140,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
         .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
 
     // Upload the encrypted data to Blossom
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await
-        .map_err(|e| format!("Failed to get signer: {}", e))?;
+    let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
     let servers = crate::get_blossom_servers();
 
     let url = crate::blossom::upload_blob_with_progress_and_failover(
@@ -214,8 +212,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
     // Grab our pubkey first (needed for npub in group chats)
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     let msg = Message {
         id: pending_id.as_ref().clone(),
@@ -683,8 +680,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // Final attachment rumor - either reused or newly uploaded
         let final_attachment_rumor = if should_upload {
             // Upload the file to the server
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
+            let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
             let servers = crate::get_blossom_servers();
             let file_size = enc_file.len();
             // Clone the Arc outside the closure for use inside a seperate-threaded progress callback

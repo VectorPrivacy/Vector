@@ -49,8 +49,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let pubkey = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
 
     // Live GiftWraps to us (DMs, files, MLS welcomes)
     let giftwrap_filter = Filter::new()
@@ -106,13 +105,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         
                         // Resolve my pubkey for filtering and 'mine' flag
                         let (my_pubkey, my_pubkey_bech32) = {
-                            let client = NOSTR_CLIENT.get().unwrap();
-                            if let Ok(signer) = client.signer().await {
-                                if let Ok(pk) = signer.get_public_key().await {
-                                    (Some(pk), pk.to_bech32().unwrap())
-                                } else {
-                                    (None, String::new())
-                                }
+                            if let Some(&pk) = crate::MY_PUBLIC_KEY.get() {
+                                (Some(pk), pk.to_bech32().unwrap())
                             } else {
                                 (None, String::new())
                             }
@@ -438,12 +432,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     };
 
                                                                     // Get my hex pubkey for comparison
-                                                                    let my_hex = if let Some(client) = NOSTR_CLIENT.get() {
-                                                                        if let Ok(signer) = client.signer().await {
-                                                                            if let Ok(pk) = signer.get_public_key().await {
-                                                                                pk.to_hex()
-                                                                            } else { String::new() }
-                                                                        } else { String::new() }
+                                                                    let my_hex = if let Some(&pk) = crate::MY_PUBLIC_KEY.get() {
+                                                                        pk.to_hex()
                                                                     } else { String::new() };
 
                                                                     // Get group metadata to check admin status

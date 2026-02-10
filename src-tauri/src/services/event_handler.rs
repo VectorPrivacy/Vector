@@ -17,11 +17,25 @@ use crate::{
     MlsService, NotificationData, show_notification_generic,
     STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, SyncMode,
     util::get_file_type_description,
+    state::{is_processing_allowed, PENDING_EVENTS},
 };
 
 // Internal event handler - called by fetch_messages and real-time event stream
 // Not exposed as a Tauri command to frontend
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
+    // Check processing gate - queue events during encryption migration
+    if !is_processing_allowed() {
+        let mut queue = PENDING_EVENTS.lock().await;
+        // Re-check after acquiring lock: drain_pending_events opens the gate
+        // INSIDE this same lock, so if the gate is now open, drain already
+        // finished and we should process normally instead of queuing (TOCTOU fix).
+        if !is_processing_allowed() {
+            queue.push((event, is_new));
+            return false;
+        }
+        drop(queue);
+    }
+
     // Get the wrapper (giftwrap) event ID for duplicate detection
     // Use bytes for cache (memory efficient), hex string for DB operations
     let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
@@ -54,8 +68,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // Unwrap the gift wrap
     match client.unwrap_gift_wrap(&event).await {

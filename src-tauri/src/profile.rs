@@ -392,13 +392,9 @@ pub async fn load_profile(npub: String) -> bool {
     };
 
     // Grab our pubkey to check for profiles belonging to us
-    let signer = match client.signer().await {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let my_public_key = match signer.get_public_key().await {
-        Ok(pk) => pk,
-        Err(_) => return false,
+    let my_public_key = match crate::MY_PUBLIC_KEY.get() {
+        Some(&pk) => pk,
+        None => return false,
     };
 
     // Fetch immutable copies of our updateable profile parts (or, quickly generate a new one to pass to the fetching logic)
@@ -549,8 +545,7 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // Build metadata from current profile, then drop the lock before network I/O
     let meta = {
@@ -630,7 +625,7 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     // Serialize the metadata to JSON for the event content
     let metadata_json = serde_json::to_string(&meta).unwrap();
 
-    // Create the metadata event with the Vector tag
+    // Create the metadata event
     let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
         .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
 
@@ -675,8 +670,7 @@ pub async fn update_status(status: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // Build and broadcast the status
     let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
@@ -742,8 +736,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
     // Upload the file to the server using Blossom with automatic failover and progress
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.unwrap();
+    let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
     let servers = crate::get_blossom_servers();
 
     // Create progress callback that emits events to frontend

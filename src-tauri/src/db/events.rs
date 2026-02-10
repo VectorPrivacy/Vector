@@ -11,7 +11,7 @@ use tauri::{AppHandle, Runtime};
 
 use crate::{Message, Attachment, Reaction};
 use crate::message::EditEntry;
-use crate::crypto::{internal_encrypt, internal_decrypt};
+use crate::crypto::{maybe_encrypt, maybe_decrypt};
 use crate::stored_event::{StoredEvent, event_kind};
 use super::{get_or_create_chat_id, SystemEventType};
 
@@ -27,18 +27,18 @@ pub async fn save_event<R: Runtime>(
     handle: &AppHandle<R>,
     event: &StoredEvent,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     // Serialize tags to JSON
     let tags_json = serde_json::to_string(&event.tags)
         .unwrap_or_else(|_| "[]".to_string());
 
-    // For message and edit events, encrypt the content
+    // For message and edit events, conditionally encrypt based on user setting
     let content = if event.kind == event_kind::MLS_CHAT_MESSAGE
         || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         || event.kind == event_kind::MESSAGE_EDIT
     {
-        internal_encrypt(event.content.clone(), None).await
+        maybe_encrypt(handle, event.content.clone()).await
     } else {
         event.content.clone()
     };
@@ -70,7 +70,6 @@ pub async fn save_event<R: Runtime>(
         ],
     ).map_err(|e| format!("Failed to save event: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
     Ok(())
 }
 
@@ -127,7 +126,7 @@ pub async fn save_system_event_by_id<R: Runtime>(
     let tags_json = serde_json::to_string(&tags)
         .map_err(|e| format!("Failed to serialize tags: {}", e))?;
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     // Use INSERT OR IGNORE - returns 0 rows affected if duplicate
     let rows_affected = conn.execute(
@@ -155,8 +154,6 @@ pub async fn save_system_event_by_id<R: Runtime>(
         ],
     ).map_err(|e| format!("Failed to save system event: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
-
     // Return true if we actually inserted (not a duplicate)
     Ok(rows_affected > 0)
 }
@@ -168,7 +165,7 @@ pub async fn get_pivx_payments_for_chat<R: Runtime>(
     handle: &AppHandle<R>,
     conversation_id: &str,
 ) -> Result<Vec<StoredEvent>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // Get chat_id from conversation identifier
     let chat_id: i64 = conn.query_row(
@@ -230,7 +227,7 @@ pub async fn get_pivx_payments_for_chat<R: Runtime>(
         payments
     }; // stmt dropped here, releasing borrow on conn
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(payments)
 }
 
@@ -241,7 +238,7 @@ pub async fn get_system_events_for_chat<R: Runtime>(
     handle: &AppHandle<R>,
     conversation_id: &str,
 ) -> Result<Vec<StoredEvent>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     // Get chat_id from conversation identifier
     let chat_id: i64 = conn.query_row(
@@ -302,7 +299,7 @@ pub async fn get_system_events_for_chat<R: Runtime>(
         system_events
     }; // stmt dropped here, releasing borrow on conn
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(events)
 }
 
@@ -397,7 +394,7 @@ pub fn event_exists<R: Runtime>(
     handle: &AppHandle<R>,
     event_id: &str,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
@@ -405,7 +402,7 @@ pub fn event_exists<R: Runtime>(
         |row| row.get(0),
     ).map_err(|e| format!("Failed to check event existence: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(exists)
 }
 
@@ -502,7 +499,7 @@ pub async fn get_events<R: Runtime>(
     let mut decrypted_events = Vec::with_capacity(events.len());
     for mut event in events {
         if event.kind == event_kind::MLS_CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
-            event.content = internal_decrypt(event.content, None).await
+            event.content = maybe_decrypt(handle, event.content).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
         }
         decrypted_events.push(event);
@@ -701,7 +698,7 @@ async fn get_reply_contexts<R: Runtime>(
         let decrypted_content = if kind == event_kind::MLS_CHAT_MESSAGE as i32
             || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
         {
-            internal_decrypt(content_to_decrypt, None).await
+            maybe_decrypt(handle, content_to_decrypt).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string())
         } else {
             // File attachments don't have displayable content
@@ -779,7 +776,7 @@ pub async fn get_message_views<R: Runtime>(
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
                     // Edit content is encrypted, decrypt it here
-                    let decrypted_content = internal_decrypt(event.content.clone(), None).await
+                    let decrypted_content = maybe_decrypt(handle, event.content.clone()).await
                         .unwrap_or_else(|_| event.content.clone());
                     let timestamp_ms = event.created_at * 1000; // Convert to ms
                     edits_by_msg.entry(ref_id.clone()).or_default().push((timestamp_ms, decrypted_content));
@@ -825,7 +822,7 @@ pub async fn get_message_views<R: Runtime>(
     // Fall back to messages table for old migrated events without attachments tag
     // NOTE: This is a legacy fallback - the messages table may have been dropped
     if !events_needing_legacy_lookup.is_empty() {
-        let conn = crate::account_manager::get_db_connection(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
         // Check if messages table exists before querying it
         let has_messages_table: bool = conn.query_row(
@@ -847,7 +844,7 @@ pub async fn get_message_views<R: Runtime>(
                 }
             }
         }
-        crate::account_manager::return_db_connection(conn);
+    
     }
 
     // Step 4: Compose Message structs (with decryption and edit application)
@@ -953,33 +950,65 @@ pub async fn get_message_views<R: Runtime>(
     Ok(messages)
 }
 
+/// Extract a single tag value from raw tags JSON without full Vec<Vec<String>> allocation.
+/// Does a quick string check first — only parses JSON if the key pattern exists.
+fn extract_tag_from_json(tags_json: &str, key: &str) -> Option<String> {
+    // Fast path: skip empty tags "[]"
+    if tags_json.len() <= 2 { return None; }
+    // Quick check: look for ["key" pattern to avoid unnecessary parsing
+    let pattern = format!("[\"{}\"", key);
+    if !tags_json.contains(&pattern) { return None; }
+    // Key likely present — do proper JSON parse to extract value
+    let tags: Vec<Vec<String>> = serde_json::from_str(tags_json).ok()?;
+    tags.into_iter()
+        .find(|tag| tag.first().map(|s| s.as_str()) == Some(key))
+        .and_then(|tag| tag.into_iter().nth(1))
+}
+
+/// Extract a NIP-10 reply reference from raw tags JSON.
+/// Only returns the "e" tag value that has a "reply" marker at position 3,
+/// matching the same logic as StoredEvent::get_reply_reference().
+fn extract_reply_tag_from_json(tags_json: &str) -> Option<String> {
+    if tags_json.len() <= 2 { return None; }
+    if !tags_json.contains("[\"e\"") { return None; }
+    let tags: Vec<Vec<String>> = serde_json::from_str(tags_json).ok()?;
+    tags.into_iter()
+        .find(|tag| {
+            tag.first().map(|s| s.as_str()) == Some("e")
+                && tag.get(3).map(|s| s.as_str()) == Some("reply")
+        })
+        .and_then(|tag| tag.into_iter().nth(1))
+}
+
 /// Get the last message for ALL chats in a single batch query.
 ///
 /// This is optimized for app startup where we need one preview message per chat.
-/// Uses ROW_NUMBER() OVER (PARTITION BY chat_id) to get the latest message per chat
-/// in a single query, avoiding N separate queries.
+/// Uses correlated subquery with rowid join for fast per-chat lookups.
 ///
 /// Returns: HashMap<chat_identifier, Vec<Message>> (Vec will have 0 or 1 message)
 pub async fn get_all_chats_last_messages<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<HashMap<String, Vec<Message>>, String> {
-    // Step 1: Get the last message event for each chat using window function
-    let message_events: Vec<(String, StoredEvent)> = {
+    let fn_start = std::time::Instant::now();
+
+    // Step 1: Get the last message event for each chat
+    // Uses rowid join (integer) instead of text PK join for faster lookups
+    // Tags JSON stored raw - parsed on-demand in Steps 3/4 to avoid 111 upfront JSON parses
+    let message_events: Vec<(String, StoredEvent, String)> = {
         let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
-        // Use ROW_NUMBER to get the latest message per chat
-        // Join with chats table to get chat_identifier
         let sql = r#"
             SELECT c.chat_identifier,
                    e.id, e.kind, e.chat_id, e.user_id, e.content, e.tags, e.reference_id,
                    e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, e.preview_metadata
-            FROM (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY created_at DESC) as rn
-                FROM events
-                WHERE kind IN (?1, ?2, ?3)
-            ) e
-            JOIN chats c ON e.chat_id = c.id
-            WHERE e.rn = 1
+            FROM chats c
+            JOIN events e ON e.rowid = (
+                SELECT e2.rowid FROM events e2
+                WHERE e2.chat_id = c.id
+                AND e2.kind IN (?1, ?2, ?3)
+                ORDER BY e2.created_at DESC
+                LIMIT 1
+            )
         "#;
 
         let mut stmt = conn.prepare(sql)
@@ -994,7 +1023,6 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
             |row| {
                 let chat_identifier: String = row.get(0)?;
                 let tags_json: String = row.get(6)?;
-                let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
 
                 let event = StoredEvent {
                     id: row.get(1)?,
@@ -1002,7 +1030,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
                     chat_id: row.get(3)?,
                     user_id: row.get(4)?,
                     content: row.get(5)?,
-                    tags,
+                    tags: Vec::new(), // Deferred - parsed on-demand from tags_json
                     reference_id: row.get(7)?,
                     created_at: row.get::<_, i64>(8)? as u64,
                     received_at: row.get::<_, i64>(9)? as u64,
@@ -1013,20 +1041,26 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
                     npub: row.get(14)?,
                     preview_metadata: row.get(15)?,
                 };
-                Ok((chat_identifier, event))
+                Ok((chat_identifier, event, tags_json))
             }
         ).map_err(|e| format!("Failed to query batch last messages: {}", e))?;
 
         rows.filter_map(|r| r.ok()).collect()
     };
+    println!("[Boot]     Step 1 (window query): {:?}", fn_start.elapsed());
 
     if message_events.is_empty() {
         return Ok(HashMap::new());
     }
 
     // Step 2: Get related events (reactions, edits) for all these messages
-    let message_ids: Vec<String> = message_events.iter().map(|(_, e)| e.id.clone()).collect();
+    let step2_start = std::time::Instant::now();
+    let message_ids: Vec<String> = message_events.iter().map(|(_, e, _)| e.id.clone()).collect();
     let related_events = get_related_events(handle, &message_ids).await?;
+    println!("[Boot]     Step 2 (related events): {:?}", step2_start.elapsed());
+
+    // Check encryption status once for the entire function
+    let encryption_enabled = crate::crypto::is_encryption_enabled();
 
     // Group reactions and edits by message ID
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
@@ -1045,8 +1079,20 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
                     reactions_by_msg.entry(ref_id.clone()).or_default().push(reaction);
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
-                    let decrypted_content = internal_decrypt(event.content.clone(), None).await
-                        .unwrap_or_else(|_| event.content.clone());
+                    let decrypted_content = if encryption_enabled {
+                        match crate::crypto::internal_decrypt(event.content.clone(), None).await {
+                            Ok(decrypted) => decrypted,
+                            Err(_) => {
+                                if crate::crypto::looks_encrypted(&event.content) {
+                                    "[Decryption Failed]".to_string()
+                                } else {
+                                    event.content.clone()
+                                }
+                            }
+                        }
+                    } else {
+                        event.content.clone()
+                    };
                     let timestamp_ms = event.created_at * 1000;
                     edits_by_msg.entry(ref_id.clone()).or_default().push((timestamp_ms, decrypted_content));
                 }
@@ -1061,15 +1107,16 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
     }
 
     // Step 3: Parse attachments from event tags
+    let step3_start = std::time::Instant::now();
     let mut attachments_by_msg: HashMap<String, Vec<Attachment>> = HashMap::new();
 
-    for (_, event) in &message_events {
+    for (_, event, tags_json) in &message_events {
         if event.kind != event_kind::FILE_ATTACHMENT && event.kind != event_kind::MLS_CHAT_MESSAGE {
             continue;
         }
 
-        if let Some(attachments_json) = event.get_tag("attachments") {
-            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(attachments_json) {
+        if let Some(attachments_val) = extract_tag_from_json(tags_json, "attachments") {
+            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&attachments_val) {
                 if !attachments.is_empty() {
                     attachments_by_msg.insert(event.id.clone(), attachments);
                 }
@@ -1077,24 +1124,39 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
         }
     }
 
+    println!("[Boot]     Step 3 (parse attachments): {:?}", step3_start.elapsed());
+
     // Step 4: Compose into Message structs, grouped by chat_identifier
+    let step4_start = std::time::Instant::now();
     let mut result: HashMap<String, Vec<Message>> = HashMap::new();
 
-    for (chat_identifier, event) in message_events {
+    for (chat_identifier, event, tags_json) in message_events {
         let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
         let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
 
-        // Get replied_to from tags
-        let replied_to = event.get_tag("e")
-            .map(|s| s.to_string())
+        // Get replied_to from tags (NIP-10: only "e" tags with "reply" marker)
+        let replied_to = extract_reply_tag_from_json(&tags_json)
             .unwrap_or_default();
 
-        // Decrypt content
+        // Decrypt content (encryption status cached above)
         let original_content = if event.kind == event_kind::MLS_CHAT_MESSAGE
             || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         {
-            internal_decrypt(event.content.clone(), None).await
-                .unwrap_or_else(|_| event.content.clone())
+            if encryption_enabled {
+                match crate::crypto::internal_decrypt(event.content.clone(), None).await {
+                    Ok(decrypted) => decrypted,
+                    Err(_) => {
+                        if crate::crypto::looks_encrypted(&event.content) {
+                            "[Decryption Failed]".to_string()
+                        } else {
+                            // Doesn't look encrypted — likely plaintext from crash recovery
+                            event.content.clone()
+                        }
+                    }
+                }
+            } else {
+                event.content.clone()
+            }
         } else {
             String::new() // File attachments don't have displayable content
         };
@@ -1144,5 +1206,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
         result.entry(chat_identifier).or_default().push(message);
     }
 
+    println!("[Boot]     Step 4 (compose + decrypt): {:?}", step4_start.elapsed());
+    println!("[Boot]     Total get_all_chats_last_messages: {:?}", fn_start.elapsed());
     Ok(result)
 }

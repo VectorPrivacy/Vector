@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose};
 
 // Re-export SIMD-accelerated functions for backwards compatibility
 pub use crate::simd::{
-    bytes_to_hex_16, bytes_to_hex_32, bytes_to_hex_string,
+    bytes_to_hex_32, bytes_to_hex_string,
     hex_string_to_bytes, hex_to_bytes_16, hex_to_bytes_32,
     has_alpha_transparency, set_all_alpha_opaque,
 };

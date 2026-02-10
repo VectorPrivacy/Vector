@@ -8,6 +8,7 @@ use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
 use tauri::AppHandle;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ChatState;
 
@@ -66,10 +67,6 @@ impl WrapperIdCache {
         self.historical.len() + self.pending.len()
     }
 
-    /// Check if cache is empty
-    pub fn is_empty(&self) -> bool {
-        self.historical.is_empty() && self.pending.is_empty()
-    }
 }
 
 impl Default for WrapperIdCache {
@@ -115,11 +112,53 @@ pub fn get_blossom_servers() -> Vec<String> {
 /// Mnemonic seed for wallet/key derivation
 pub static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
 
-/// Encryption key derived from seed
-pub static ENCRYPTION_KEY: OnceCell<[u8; 32]> = OnceCell::new();
+/// Temporary nsec storage between create_account/login and setup_encryption/skip_encryption.
+/// The private key is set here and consumed by encryption setup — it never crosses IPC.
+pub static PENDING_NSEC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Encryption key derived from user's PIN via Argon2.
+/// Uses RwLock to allow clearing/updating (for PIN changes, encryption toggle).
+pub static ENCRYPTION_KEY: std::sync::RwLock<Option<[u8; 32]>> = std::sync::RwLock::new(None);
+
+/// Cached encryption-enabled flag. Read by every maybe_encrypt/maybe_decrypt call.
+/// Default: false (safe — no encryption until explicitly initialized, avoids panic if
+/// events arrive before key is set). Set to true by init_encryption_enabled at boot.
+/// Updated by: init_encryption_enabled (boot), enable/disable/skip_encryption (runtime).
+pub static ENCRYPTION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Read the cached encryption-enabled flag (~1ns atomic load).
+#[inline]
+pub fn is_encryption_enabled_fast() -> bool {
+    ENCRYPTION_ENABLED.load(Ordering::Acquire)
+}
+
+/// Update the cached encryption-enabled flag.
+#[inline]
+pub fn set_encryption_enabled(enabled: bool) {
+    ENCRYPTION_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// Initialize the encryption-enabled flag from the database at boot.
+/// Call once after DB is available (e.g., in login_from_stored_key).
+pub fn init_encryption_enabled<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
+    let enabled = crate::db::get_sql_setting(handle.clone(), "encryption_enabled".to_string())
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    set_encryption_enabled(enabled);
+}
 
 /// Global Nostr client instance
 pub static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
+
+/// Cached signer keys — set once at login, never changes during a session.
+/// `Keys` implements `NostrSigner`, so this can be used directly for signing.
+pub static MY_KEYS: OnceCell<Keys> = OnceCell::new();
+
+/// Cached public key — set once at login, never changes during a session.
+/// Avoids redundant async signer→get_public_key derivations.
+pub static MY_PUBLIC_KEY: OnceCell<PublicKey> = OnceCell::new();
 
 /// Global Tauri app handle for accessing app resources
 pub static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
@@ -152,4 +191,34 @@ lazy_static! {
 lazy_static! {
     /// Global chat state containing profiles, chats, and sync status
     pub static ref STATE: Mutex<ChatState> = Mutex::new(ChatState::new());
+}
+
+// ============================================================================
+// Processing Gate - Controls event processing during encryption migration
+// ============================================================================
+
+/// Gate controlling event processing. When false, events are queued instead of processed.
+/// Used during bulk encryption/decryption migrations to ensure atomic state transitions.
+pub static PROCESSING_GATE: AtomicBool = AtomicBool::new(true);
+
+lazy_static! {
+    /// Queue for events received while the processing gate is closed.
+    /// Events are drained and processed after migration completes.
+    pub static ref PENDING_EVENTS: Mutex<Vec<(Event, bool)>> = Mutex::new(Vec::new());
+}
+
+/// Check if event processing is allowed (gate is open)
+#[inline]
+pub fn is_processing_allowed() -> bool {
+    PROCESSING_GATE.load(Ordering::Acquire)
+}
+
+/// Close the processing gate - events will be queued instead of processed
+pub fn close_processing_gate() {
+    PROCESSING_GATE.store(false, Ordering::Release);
+}
+
+/// Open the processing gate - resume normal event processing
+pub fn open_processing_gate() {
+    PROCESSING_GATE.store(true, Ordering::Release);
 }

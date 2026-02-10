@@ -124,28 +124,12 @@ impl SlimProfile {
 
 // Function to get all profiles
 pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
-        // Get cached paths and validate they exist on disk
-        let avatar_cached: String = row.get(15)?;
-        let banner_cached: String = row.get(16)?;
-
-        // Only use cached paths if the files actually exist
-        let validated_avatar_cached = if !avatar_cached.is_empty() && std::path::Path::new(&avatar_cached).exists() {
-            avatar_cached
-        } else {
-            String::new()
-        };
-        let validated_banner_cached = if !banner_cached.is_empty() && std::path::Path::new(&banner_cached).exists() {
-            banner_cached
-        } else {
-            String::new()
-        };
-
         Ok(SlimProfile {
             id: row.get(0)?,  // npub column
             name: row.get(1)?,
@@ -167,16 +151,21 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
             mine: false,
             muted: row.get::<_, i32>(13)? != 0,
             bot: row.get::<_, i32>(14)? != 0,
-            avatar_cached: validated_avatar_cached,
-            banner_cached: validated_banner_cached,
+            avatar_cached: {
+                let p: String = row.get(15)?;
+                if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
+            },
+            banner_cached: {
+                let p: String = row.get(16)?;
+                if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
+            },
         })
     })
     .map_err(|e| format!("Failed to query profiles: {}", e))?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| format!("Failed to collect profiles: {}", e))?;
 
-    drop(stmt); // Explicitly drop stmt before returning connection
-    crate::account_manager::return_db_connection(conn);
+
     Ok(profiles)
 }
 
@@ -184,7 +173,7 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
 // Public command to set a profile
 #[command]
 pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: SlimProfile) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     conn.execute(
         "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached)
@@ -227,6 +216,5 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: SlimProfile)
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
     Ok(())
 }

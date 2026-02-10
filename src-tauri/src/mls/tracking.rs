@@ -13,7 +13,7 @@
 /// Check if an MLS event has already been processed.
 /// Returns true if the event_id exists in mls_processed_events table.
 pub fn is_mls_event_processed<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, event_id: &str) -> bool {
-    let conn = match crate::account_manager::get_db_connection(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard(handle) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -24,7 +24,7 @@ pub fn is_mls_event_processed<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, e
         |_| Ok(true)
     ).unwrap_or(false);
 
-    crate::account_manager::return_db_connection(conn);
+
     exists
 }
 
@@ -36,7 +36,7 @@ pub fn track_mls_event_processed<R: tauri::Runtime>(
     group_id: &str,
     event_created_at: u64,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -48,7 +48,7 @@ pub fn track_mls_event_processed<R: tauri::Runtime>(
         rusqlite::params![event_id, group_id, event_created_at as i64, now as i64],
     ).map_err(|e| format!("Failed to track processed event: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -59,7 +59,7 @@ pub fn cleanup_old_processed_events<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     max_age_secs: u64,
 ) -> Result<usize, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     let cutoff = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -72,7 +72,7 @@ pub fn cleanup_old_processed_events<R: tauri::Runtime>(
         rusqlite::params![cutoff as i64],
     ).map_err(|e| format!("Failed to cleanup old events: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(deleted)
 }
 

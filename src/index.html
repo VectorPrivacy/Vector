@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en" style="overflow-y: hidden;">
+<html lang="en" style="overflow-y: hidden; background: #030303;">
   <head>
     <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark">
     <link rel="stylesheet" href="styles.css" />
     <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
     <link rel="stylesheet" href="/highlight-github-dark.min.css" />
@@ -14,6 +15,9 @@
     <script src="/js/misc.js" defer></script>
     <script src="/js/db.js" defer></script>
     <script src="/js/voice.js" defer></script>
+    <!-- TODO: Compile-out platform-specific JS modules per distro (e.g. exclude updater.js
+         from Android builds where the updater plugin isn't available, avoiding the
+         'window.__TAURI__.updater is undefined' error on every boot). -->
     <script src="/js/updater.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
@@ -54,6 +58,64 @@
     <!-- Edit History Popup -->
     <div id="edit-history-popup" class="edit-history-popup" style="display: none;">
       <div id="edit-history-content" class="edit-history-content"></div>
+    </div>
+
+    <!-- Credential Entry Modal (reusable for PIN/Password/Type selection) -->
+    <div id="credential-modal-overlay" class="encryption-migration-overlay">
+      <div class="encryption-migration-modal credential-modal">
+        <div class="encryption-migration-icon">
+          <span class="icon icon-locked"></span>
+        </div>
+        <h2 id="credential-modal-title"></h2>
+        <p id="credential-modal-subtitle" class="encryption-migration-phase"></p>
+        <!-- Security type selector -->
+        <div id="credential-modal-type-select" style="display: none;">
+          <div class="security-type-selector">
+            <button id="credential-modal-type-pin" class="security-type-btn active">PIN</button>
+            <button id="credential-modal-type-password" class="security-type-btn">Password</button>
+          </div>
+          <p id="credential-modal-type-desc" class="login-encrypt-description">A 6-digit code. Quick and convenient.</p>
+        </div>
+        <!-- PIN row -->
+        <div id="credential-modal-pin-row" class="row pin-row" style="display: none;">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+        </div>
+        <!-- Password input -->
+        <div id="credential-modal-password" style="display: none;">
+          <input type="password" id="credential-modal-password-input" placeholder="Enter your password" autocomplete="off">
+        </div>
+        <!-- Buttons -->
+        <div id="credential-modal-buttons" class="credential-modal-buttons">
+          <button id="credential-modal-cancel" class="btn cancel-btn">Cancel</button>
+          <button id="credential-modal-confirm" class="btn">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Encryption Migration Progress Modal (non-dismissable) -->
+    <div id="encryption-migration-overlay" class="encryption-migration-overlay">
+      <div class="encryption-migration-modal">
+        <div class="encryption-migration-icon">
+          <span class="icon icon-locked"></span>
+        </div>
+        <h2 id="encryption-migration-title">Disabling Encryption</h2>
+        <p id="encryption-migration-phase" class="encryption-migration-phase">Preparing...</p>
+        <div class="progress-bar-track">
+          <div id="encryption-migration-progress-fill" class="progress-bar-fill">
+            <div class="progress-bar-glow"></div>
+          </div>
+          <span id="encryption-migration-progress-text" class="progress-text">0%</span>
+        </div>
+        <p class="encryption-migration-warning">
+          <span class="encryption-warning-icon"><span class="icon icon-info"></span></span>
+          Do not close the app during this process
+        </p>
+      </div>
     </div>
 
     <main class="container">
@@ -601,8 +663,9 @@
         </div>
         
         <div id="chat-list">
-          
+
         </div>
+        <div class="fadeout-bottom" style="position: fixed; bottom: 65px;"></div>
       </div>
 
       <div id="chat" class="chat" style="display: none;">
@@ -797,6 +860,21 @@
               <span class="neon-toggle"></span>
             </label>
           </div>
+        </div>
+
+        <!-- Security Settings Section -->
+        <div id="settings-security" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Security</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
+              <input type="checkbox" id="security-encryption-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+          <button id="security-change-credential" class="btn cancel-btn" style="display: none;">Change PIN</button>
         </div>
 
         <!-- Display Settings Section -->
@@ -1090,6 +1168,17 @@
             <img src="./icons/lock.svg" class="login-lock-icon">
             <h3 id="login-encrypt-title" class="login-encrypt-title">Choose an Encryption Pin</h3>
           </div>
+          <!-- Security type selector (shown for new account setup) -->
+          <div id="login-encrypt-type-select" style="display: none;">
+            <div class="security-type-options">
+              <button id="security-type-skip" class="security-type-option-btn">Skip Encryption</button>
+              <button id="security-type-password" class="security-type-option-btn">Create Password</button>
+              <p class="security-type-recommended">*Recommended Option</p>
+              <button id="security-type-pin" class="security-type-option-btn accent">Create PIN</button>
+            </div>
+            <img src="./icons/by-formlesslabs.svg" class="login-credits">
+          </div>
+          <!-- PIN input (6-digit) -->
           <div id="login-encrypt-pins" class="row pin-row input-box">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-0">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-1">
@@ -1097,6 +1186,15 @@
             <input type="password" inputmode="numeric" maxlength="1" id="pin-3">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-4">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-5">
+          </div>
+          <!-- Password input (text) -->
+          <div id="login-encrypt-password" class="login-encrypt-password" style="display: none;">
+            <div class="row input-box login-input-container">
+              <input type="password" id="login-password-input" class="login-input" placeholder="Enter your password" autocomplete="off">
+              <svg id="login-password-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
           </div>
         </div>
       </div>

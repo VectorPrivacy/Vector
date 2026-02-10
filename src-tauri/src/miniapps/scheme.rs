@@ -14,7 +14,7 @@ use nostr_sdk::prelude::ToBech32;
 use once_cell::sync::Lazy;
 
 use super::state::MiniAppsState;
-use crate::{NOSTR_CLIENT, STATE};
+use crate::STATE;
 
 /// Content Security Policy for Mini Apps - very restrictive for security
 /// Based on DeltaChat's implementation
@@ -120,7 +120,7 @@ const PERMISSIONS_POLICY_DENY_ALL: &str = concat!(
     "accelerometer=(), ",
     "ambient-light-sensor=(), ",
     "attribution-reporting=(), ",
-    "autoplay=(), ",
+    "autoplay=(self), ",
     "battery=(), ",
     "bluetooth=(), ",
     "camera=(), ",
@@ -365,16 +365,8 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
 /// when called from the protocol handler
 async fn get_user_info() -> (String, String) {
     // Get user's npub from Nostr client
-    let user_npub = if let Some(client) = NOSTR_CLIENT.get() {
-        if let Ok(signer) = client.signer().await {
-            if let Ok(pubkey) = signer.get_public_key().await {
-                pubkey.to_bech32().unwrap_or_else(|_| "unknown".to_string())
-            } else {
-                "unknown".to_string()
-            }
-        } else {
-            "unknown".to_string()
-        }
+    let user_npub = if let Some(&pk) = crate::MY_PUBLIC_KEY.get() {
+        pk.to_bech32().unwrap_or_else(|_| "unknown".to_string())
     } else {
         "unknown".to_string()
     };

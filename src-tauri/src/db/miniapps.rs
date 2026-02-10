@@ -52,7 +52,7 @@ pub fn record_miniapp_opened_with_metadata<R: Runtime>(
     marketplace_id: Option<String>,
     installed_version: Option<String>,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -77,7 +77,7 @@ pub fn record_miniapp_opened_with_metadata<R: Runtime>(
         rusqlite::params![name, src_url, attachment_ref, now, categories, marketplace_id, installed_version],
     ).map_err(|e| format!("Failed to record Mini App opened: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -126,7 +126,7 @@ pub fn toggle_miniapp_favorite<R: Runtime>(
     handle: &AppHandle<R>,
     id: i64,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     // Toggle the is_favorite value and return the new state
     conn.execute(
@@ -141,7 +141,7 @@ pub fn toggle_miniapp_favorite<R: Runtime>(
         |row| row.get::<_, i64>(0).map(|v| v != 0)
     ).map_err(|e| format!("Failed to get Mini App favorite state: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(new_state)
 }
 
@@ -151,14 +151,14 @@ pub fn set_miniapp_favorite<R: Runtime>(
     id: i64,
     is_favorite: bool,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     conn.execute(
         "UPDATE miniapps_history SET is_favorite = ?1 WHERE id = ?2",
         rusqlite::params![if is_favorite { 1 } else { 0 }, id],
     ).map_err(|e| format!("Failed to set Mini App favorite: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -167,14 +167,14 @@ pub fn remove_miniapp_from_history<R: Runtime>(
     handle: &AppHandle<R>,
     name: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     conn.execute(
         "DELETE FROM miniapps_history WHERE name = ?1",
         rusqlite::params![name],
     ).map_err(|e| format!("Failed to remove Mini App from history: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -184,14 +184,14 @@ pub fn update_miniapp_version<R: Runtime>(
     marketplace_id: &str,
     version: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     conn.execute(
         "UPDATE miniapps_history SET installed_version = ?1 WHERE marketplace_id = ?2",
         rusqlite::params![version, marketplace_id],
     ).map_err(|e| format!("Failed to update Mini App version: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -200,7 +200,7 @@ pub fn get_miniapp_installed_version<R: Runtime>(
     handle: &AppHandle<R>,
     marketplace_id: &str,
 ) -> Result<Option<String>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let result = conn.query_row(
         "SELECT installed_version FROM miniapps_history WHERE marketplace_id = ?1",
@@ -208,7 +208,7 @@ pub fn get_miniapp_installed_version<R: Runtime>(
         |row| row.get::<_, Option<String>>(0)
     );
 
-    crate::account_manager::return_db_connection(conn);
+
 
     match result {
         Ok(version) => Ok(version),
@@ -250,7 +250,7 @@ pub fn set_miniapp_permission<R: Runtime>(
     permission: &str,
     granted: bool,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -268,7 +268,7 @@ pub fn set_miniapp_permission<R: Runtime>(
         rusqlite::params![file_hash, permission, granted as i32, if granted { Some(now) } else { None::<i64> }],
     ).map_err(|e| format!("Failed to set Mini App permission: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -279,7 +279,7 @@ pub fn set_miniapp_permissions<R: Runtime>(
     file_hash: &str,
     permissions: &[(&str, bool)],
 ) -> Result<(), String> {
-    let mut conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let mut conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -314,7 +314,7 @@ pub fn has_miniapp_permission_prompt<R: Runtime>(
     handle: &AppHandle<R>,
     file_hash: &str,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM miniapp_permissions WHERE file_hash = ?1)",
@@ -322,7 +322,7 @@ pub fn has_miniapp_permission_prompt<R: Runtime>(
         |row| row.get(0)
     ).map_err(|e| format!("Failed to check permission prompt: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(exists)
 }
 
@@ -331,14 +331,14 @@ pub fn revoke_all_miniapp_permissions<R: Runtime>(
     handle: &AppHandle<R>,
     file_hash: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     conn.execute(
         "DELETE FROM miniapp_permissions WHERE file_hash = ?1",
         rusqlite::params![file_hash],
     ).map_err(|e| format!("Failed to revoke Mini App permissions: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -348,7 +348,7 @@ pub fn copy_miniapp_permissions<R: Runtime>(
     old_hash: &str,
     new_hash: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     // Copy all permission records from old hash to new hash
     conn.execute(
@@ -361,6 +361,6 @@ pub fn copy_miniapp_permissions<R: Runtime>(
         rusqlite::params![old_hash, new_hash],
     ).map_err(|e| format!("Failed to copy Mini App permissions: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }

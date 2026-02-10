@@ -13,15 +13,18 @@ mod sync;
 pub mod stats;
 
 pub use globals::{
-    TAURI_APP, NOSTR_CLIENT, STATE,
+    TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
     TRUSTED_RELAYS,
-    MNEMONIC_SEED, ENCRYPTION_KEY,
+    MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC,
     PENDING_INVITE, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     get_blossom_servers,
     PendingInviteAcceptance,
+    // Processing gate for encryption migration
+    PENDING_EVENTS,
+    is_processing_allowed, close_processing_gate, open_processing_gate,
+    // Cached encryption-enabled flag
+    is_encryption_enabled_fast, set_encryption_enabled, init_encryption_enabled,
 };
 
 pub use chat_state::ChatState;
 pub use sync::SyncMode;
-#[cfg(debug_assertions)]
-pub use stats::{CacheStats, DeepSize};
