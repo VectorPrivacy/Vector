@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use nostr_sdk::prelude::*;
@@ -33,6 +33,65 @@ struct CachedRelays {
 
 static INBOX_RELAY_CACHE: Lazy<Mutex<HashMap<PublicKey, CachedRelays>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Per-key locks to prevent cache stampede (thundering herd).
+/// When multiple messages target the same recipient with a cold cache, only the
+/// first fetch runs — others wait on the per-key lock, then hit the cache.
+/// Uses Weak references: the Mutex allocation is freed when Arc refcount drops.
+/// HashMap entries are removed eagerly by a per-call drop guard (normal return,
+/// cancellation, or panic unwind). Periodic retain() remains a fallback safety net.
+static FETCH_LOCKS: Lazy<Mutex<HashMap<PublicKey, Weak<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Counter for periodic fallback pruning of dead Weak entries in FETCH_LOCKS.
+/// Prune every PRUNE_INTERVAL cache misses to avoid O(n) scans on every access.
+/// This complements eager per-key cleanup after each completed call.
+static PRUNE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Prune dead Weak entries every N cache misses. Lower = more CPU for pruning,
+/// higher = more memory for stale entries. 100 is a good balance for production.
+#[cfg(not(test))]
+const PRUNE_INTERVAL: u64 = 100;
+
+/// In tests, prune every access for deterministic behavior (tests rely on
+/// immediate cleanup to verify pruning logic works correctly).
+#[cfg(test)]
+const PRUNE_INTERVAL: u64 = 1;
+
+/// Drop-guard for eager per-key lock-map cleanup.
+/// Runs on normal return and when the future is dropped (e.g. cancellation).
+struct FetchLockEntryCleanup {
+    pubkey: PublicKey,
+    key_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl FetchLockEntryCleanup {
+    fn new(pubkey: PublicKey, key_lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self { pubkey, key_lock }
+    }
+}
+
+impl Drop for FetchLockEntryCleanup {
+    fn drop(&mut self) {
+        let mut locks = match FETCH_LOCKS.lock() {
+            Ok(locks) => locks,
+            Err(_) => return, // fallback retain() handles stale entries later
+        };
+
+        let should_remove = match locks.get(&self.pubkey).and_then(|weak| weak.upgrade()) {
+            Some(current) => {
+                // upgrade() adds one temporary Arc. If strong_count == 2, only:
+                // 1) this drop-guard's Arc, 2) upgrade() temporary Arc.
+                // That means no other in-flight callers still hold this key lock.
+                Arc::ptr_eq(&current, &self.key_lock) && Arc::strong_count(&current) == 2
+            }
+            None => false,
+        };
+        if should_remove {
+            locks.remove(&self.pubkey);
+        }
+    }
+}
 
 // ============================================================================
 // Fetch
@@ -87,9 +146,16 @@ fn parse_relay_tags(tags: &Tags) -> Vec<String> {
         .collect()
 }
 
-/// Get inbox relays for a pubkey, using cache when available.
-async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<String> {
-    // Check cache first
+/// Generic cache-with-lock implementation used by both production and test code.
+/// Uses double-checked locking to prevent cache stampede: rapid requests to the
+/// same pubkey serialize through a per-key lock, so only one fetch happens.
+/// Different pubkeys never block each other.
+async fn get_or_fetch_with_lock<F, Fut>(pubkey: &PublicKey, fetch_fn: F) -> Vec<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = FetchResult>,
+{
+    // Fast path: cache hit (no per-key lock needed, no pruning)
     {
         let cache = INBOX_RELAY_CACHE.lock().unwrap();
         if let Some(entry) = cache.get(pubkey) {
@@ -100,22 +166,83 @@ async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<S
         }
     }
 
-    let result = fetch_inbox_relays(client, pubkey).await;
+    // Per-key lock — serializes fetches for the same pubkey only.
+    // Uses Weak references + periodic pruning (every PRUNE_INTERVAL cache misses).
+    let cleanup_guard = {
+        let mut locks = FETCH_LOCKS.lock().unwrap();
 
-    // Store in cache (even empty/error results to avoid hammering relays)
-    {
-        let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
-        cache.insert(
-            *pubkey,
-            CachedRelays {
-                relays: result.relays.clone(),
-                fetched_at: Instant::now(),
-                fetch_ok: result.fetch_ok,
-            },
-        );
-    }
+        // Periodic cleanup: remove dead Weak entries every PRUNE_INTERVAL accesses.
+        // Avoids O(n) scan in global critical section on every cache miss; instead
+        // amortizes cost to O(n/PRUNE_INTERVAL) per miss under heavy fan-out.
+        if PRUNE_COUNTER.fetch_add(1, Ordering::Relaxed) % PRUNE_INTERVAL == 0 {
+            locks.retain(|_, weak| Weak::strong_count(weak) > 0);
+        }
 
-    result.relays
+        let weak = locks.entry(*pubkey).or_insert_with(|| Weak::new());
+        // Try to upgrade the weak reference; if it fails (Arc was dropped),
+        // create a new Arc and update the map.
+        let key_lock = match weak.upgrade() {
+            Some(arc) => arc,
+            None => {
+                let new_arc = Arc::new(tokio::sync::Mutex::new(()));
+                *weak = Arc::downgrade(&new_arc);
+                new_arc
+            }
+        };
+        // Wrap lock Arc in drop-guard so map cleanup runs even on cancellation.
+        FetchLockEntryCleanup::new(*pubkey, key_lock)
+    };
+    let relays = {
+        let _guard = cleanup_guard.key_lock.lock().await;
+
+        // Double-check: another task may have filled the cache while we waited
+        let cached_relays = {
+            let cache = INBOX_RELAY_CACHE.lock().unwrap();
+            if let Some(entry) = cache.get(pubkey) {
+                let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
+                if entry.fetched_at.elapsed().as_secs() < ttl {
+                    Some(entry.relays.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        match cached_relays {
+            Some(relays) => relays,
+            None => {
+                // We won the race — do the actual fetch
+                let result = fetch_fn().await;
+
+                // Store in cache (even empty/error results to avoid hammering relays)
+                {
+                    let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+                    cache.insert(
+                        *pubkey,
+                        CachedRelays {
+                            relays: result.relays.clone(),
+                            fetched_at: Instant::now(),
+                            fetch_ok: result.fetch_ok,
+                        },
+                    );
+                }
+
+                result.relays
+            }
+        }
+    }; // per-key lock guard dropped here
+
+    // Explicit drop on normal path. On cancellation/panic unwind this still runs
+    // via Drop when the future is torn down.
+    drop(cleanup_guard);
+    relays
+}
+
+/// Get inbox relays for a pubkey, using cache when available.
+async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<String> {
+    get_or_fetch_with_lock(pubkey, || fetch_inbox_relays(client, pubkey)).await
 }
 
 // ============================================================================
@@ -294,8 +421,13 @@ mod tests {
         keys.public_key()
     }
 
+    // Serialize tests that mutate global cache/lock statics.
+    static TEST_GLOBALS_LOCK: Lazy<tokio::sync::Mutex<()>> =
+        Lazy::new(|| tokio::sync::Mutex::new(()));
+
     #[test]
     fn cache_stores_and_retrieves() {
+        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
         let pk = test_pubkey();
         let relays = vec!["wss://a.example.com".to_string()];
 
@@ -317,6 +449,7 @@ mod tests {
 
     #[test]
     fn cache_expires_after_ttl() {
+        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
         let pk = test_pubkey();
 
         {
@@ -335,6 +468,7 @@ mod tests {
 
     #[test]
     fn cache_stores_empty_results() {
+        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
         let pk = test_pubkey();
 
         {
@@ -355,6 +489,7 @@ mod tests {
 
     #[test]
     fn cache_error_uses_short_ttl() {
+        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
         let pk = test_pubkey();
 
         {
@@ -374,6 +509,174 @@ mod tests {
         assert!(entry.fetched_at.elapsed().as_secs() >= CACHE_TTL_ERROR_SECS);
         // But would still be valid under success TTL
         assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
+    }
+
+    // ---- Concurrency / stampede prevention ----
+
+    #[tokio::test]
+    async fn concurrent_fetches_for_same_pubkey_serialize() {
+        let _guard = TEST_GLOBALS_LOCK.lock().await;
+        let pk = test_pubkey();
+
+        // Clear cache so all tasks see a cold cache
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.remove(&pk);
+        }
+
+        let fetch_counter = Arc::new(AtomicU64::new(0));
+
+        // Spawn 10 concurrent tasks all trying to fetch the same pubkey.
+        // Uses production get_or_fetch_with_lock so this tests actual code path.
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let counter = fetch_counter.clone();
+            let handle = tokio::spawn(async move {
+                get_or_fetch_with_lock(&pk, || async {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    // Simulate network delay so concurrent tasks pile up
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    FetchResult {
+                        relays: vec!["wss://test.example.com".to_string()],
+                        fetch_ok: true,
+                    }
+                })
+                .await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        let results = futures_util::future::join_all(handles).await;
+
+        // All tasks should succeed and get the same result
+        for result in &results {
+            assert!(result.is_ok());
+            let relays = result.as_ref().unwrap();
+            assert_eq!(relays, &vec!["wss://test.example.com".to_string()]);
+        }
+
+        // CRITICAL: Only ONE fetch should have executed (others waited on lock + hit cache)
+        assert_eq!(
+            fetch_counter.load(Ordering::SeqCst),
+            1,
+            "Expected exactly 1 fetch for 10 concurrent requests to same pubkey"
+        );
+
+        let locks_after = {
+            let locks = FETCH_LOCKS.lock().unwrap();
+            locks.len()
+        };
+        assert_eq!(locks_after, 0, "Lock entry should be removed after all waiters complete");
+    }
+
+    #[tokio::test]
+    async fn fetch_locks_do_not_accumulate_after_calls_complete() {
+        let _guard = TEST_GLOBALS_LOCK.lock().await;
+
+        // Verify that lock entries are removed eagerly when the last in-flight
+        // caller for a key exits (true bounded growth, no idle-after-burst leak).
+
+        let pk1 = test_pubkey();
+        let pk2 = test_pubkey();
+        let pk3 = test_pubkey();
+
+        // Clear both cache and locks to avoid interference from other tests
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.clear();
+        }
+        {
+            let mut locks = FETCH_LOCKS.lock().unwrap();
+            locks.clear();
+        }
+
+        // Step 1: Fetch for pk1 (cache miss → creates lock entry)
+        get_or_fetch_with_lock(&pk1, || async {
+            FetchResult {
+                relays: vec!["wss://relay1.example.com".to_string()],
+                fetch_ok: true,
+            }
+        })
+        .await;
+
+        // Single-call path: no waiters, so eager cleanup should remove key immediately.
+
+        let locks_after_pk1 = {
+            let locks = FETCH_LOCKS.lock().unwrap();
+            locks.len()
+        };
+        assert_eq!(locks_after_pk1, 0, "No lock entries should remain after pk1 call");
+
+        // Step 2: repeat with pk2
+        get_or_fetch_with_lock(&pk2, || async {
+            FetchResult {
+                relays: vec!["wss://relay2.example.com".to_string()],
+                fetch_ok: true,
+            }
+        })
+        .await;
+
+        let locks_after_pk2 = {
+            let locks = FETCH_LOCKS.lock().unwrap();
+            locks.len()
+        };
+        assert_eq!(locks_after_pk2, 0, "No lock entries should remain after pk2 call");
+
+        // Step 3: repeat with pk3
+        get_or_fetch_with_lock(&pk3, || async {
+            FetchResult {
+                relays: vec!["wss://relay3.example.com".to_string()],
+                fetch_ok: true,
+            }
+        })
+        .await;
+
+        let locks_after_pk3 = {
+            let locks = FETCH_LOCKS.lock().unwrap();
+            locks.len()
+        };
+        assert_eq!(locks_after_pk3, 0, "No lock entries should remain after pk3 call");
+    }
+
+    #[tokio::test]
+    async fn cancelled_fetch_cleans_up_lock_entry() {
+        let _guard = TEST_GLOBALS_LOCK.lock().await;
+        let pk = test_pubkey();
+
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.clear();
+        }
+        {
+            let mut locks = FETCH_LOCKS.lock().unwrap();
+            locks.clear();
+        }
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let task_pk = pk;
+        let handle = tokio::spawn(async move {
+            get_or_fetch_with_lock(&task_pk, || async move {
+                let _ = started_tx.send(());
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                FetchResult { relays: Vec::new(), fetch_ok: false }
+            })
+            .await
+        });
+
+        started_rx.await.expect("fetch closure should start before abort");
+        handle.abort();
+        let _ = handle.await;
+        tokio::task::yield_now().await;
+
+        let locks_after = {
+            let locks = FETCH_LOCKS.lock().unwrap();
+            locks.len()
+        };
+        assert_eq!(
+            locks_after, 0,
+            "Lock entry should be removed even if fetch task is cancelled"
+        );
     }
 
     // ---- Debounce ----
