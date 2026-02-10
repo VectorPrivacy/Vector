@@ -14,7 +14,7 @@ pub async fn save_mls_groups<R: Runtime>(
     handle: AppHandle<R>,
     groups: &[crate::mls::MlsGroupMetadata],
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     // Store each group in the mls_groups table (all fields as columns)
     for group in groups {
@@ -35,7 +35,7 @@ pub async fn save_mls_groups<R: Runtime>(
     }
 
     println!("[SQL] Saved {} MLS groups to mls_groups table", groups.len());
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -44,7 +44,7 @@ pub async fn save_mls_group<R: Runtime>(
     handle: AppHandle<R>,
     group: &crate::mls::MlsGroupMetadata,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     // Insert or replace a single group
     conn.execute(
@@ -63,7 +63,7 @@ pub async fn save_mls_group<R: Runtime>(
     ).map_err(|e| format!("Failed to save MLS group {}: {}", group.group_id, e))?;
 
     println!("[SQL] Saved 1 MLS group to mls_groups table");
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -102,7 +102,7 @@ pub async fn save_mls_keypackages<R: Runtime>(
     handle: AppHandle<R>,
     packages: &[serde_json::Value],
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     // Clear existing keypackages
     conn.execute("DELETE FROM mls_keypackages", [])
@@ -125,7 +125,7 @@ pub async fn save_mls_keypackages<R: Runtime>(
     }
 
     println!("[SQL] Saved {} MLS keypackages", packages.len());
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -167,7 +167,7 @@ pub async fn save_mls_event_cursors<R: Runtime>(
     handle: AppHandle<R>,
     cursors: &HashMap<String, crate::mls::EventCursor>,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     for (group_id, cursor) in cursors {
         conn.execute(
@@ -177,7 +177,7 @@ pub async fn save_mls_event_cursors<R: Runtime>(
         ).map_err(|e| format!("Failed to save MLS event cursor: {}", e))?;
     }
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -212,7 +212,7 @@ pub async fn save_mls_device_id<R: Runtime>(
     handle: AppHandle<R>,
     device_id: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_device_id', ?1)",
@@ -220,7 +220,7 @@ pub async fn save_mls_device_id<R: Runtime>(
     ).map_err(|e| format!("Failed to save MLS device ID to SQL: {}", e))?;
 
     println!("[SQL] Saved MLS device ID");
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -228,7 +228,7 @@ pub async fn save_mls_device_id<R: Runtime>(
 pub async fn load_mls_device_id<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let device_id: Option<String> = conn.query_row(
         "SELECT value FROM settings WHERE key = 'mls_device_id'",
@@ -236,6 +236,6 @@ pub async fn load_mls_device_id<R: Runtime>(
         |row| row.get(0)
     ).ok();
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(device_id)
 }

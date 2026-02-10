@@ -59,9 +59,8 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
         }
     };
 
-    // Resolve my pubkey (awaits before any MLS engine is created)
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_pubkey = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    // Resolve my pubkey
+    let my_pubkey = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
     let owner_pubkey_b32 = my_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
     // If caching is requested, attempt to load and verify an existing KeyPackage
@@ -461,6 +460,7 @@ pub async fn refresh_keypackages_for_contact(
 
     // Merge new entries into the index, preserving local entries that share the same
     // keypackage_ref (they have the correct device_id, whereas network entries use event_id).
+    let mut index_changed = false;
     for new_entry in new_entries {
         let new_ref = new_entry.get("keypackage_ref").and_then(|v| v.as_str()).unwrap_or_default();
         let new_owner = new_entry.get("owner_pubkey").and_then(|v| v.as_str()).unwrap_or_default();
@@ -481,9 +481,14 @@ pub async fn refresh_keypackages_for_contact(
             !(same_owner && same_device)
         });
         index.push(new_entry);
+        index_changed = true;
     }
 
-    let _ = db::save_mls_keypackages(handle.clone(), &index).await;
+    // Only persist if the index was actually modified — avoids overwriting
+    // concurrent writes from regenerate_device_keypackage with stale data
+    if index_changed {
+        let _ = db::save_mls_keypackages(handle.clone(), &index).await;
+    }
 
     Ok(results)
 }
@@ -740,10 +745,12 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
 
     // Update the chat's participants array
     let mut state = STATE.lock().await;
-    if let Some(chat) = state.get_chat_mut(&group_id) {
-        let old_count = chat.participants.len();
-        chat.participants = group_members.members.clone();
-        let new_count = chat.participants.len();
+    if let Some(chat_idx) = state.chats.iter().position(|c| c.id == group_id) {
+        let old_count = state.chats[chat_idx].participants.len();
+        // Intern all member npubs, then assign (split borrow: interner + chats[idx])
+        let new_handles: Vec<u16> = group_members.members.iter().map(|p| state.interner.intern(p)).collect();
+        state.chats[chat_idx].participants = new_handles;
+        let new_count = state.chats[chat_idx].participants.len();
 
         if old_count != new_count {
             eprintln!(
@@ -754,12 +761,12 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
             );
         }
 
-        // Save updated chat to disk
-        let chat_clone = chat.clone();
+        // Save updated chat to disk — build slim while locked (no full chat clone needed)
+        let slim = db::chats::SlimChatDB::from_chat(&state.chats[chat_idx], &state.interner);
         drop(state);
 
         if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = db::save_chat(handle.clone(), &chat_clone).await {
+            if let Err(e) = db::chats::save_slim_chat(handle.clone(), slim).await {
                 eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
             }
         }
@@ -868,9 +875,9 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                 let state = STATE.lock().await;
                 if let Some(profile) = state.get_profile(&welcome.welcomer) {
                     if !profile.nickname.is_empty() {
-                        profile.nickname.clone()
+                        profile.nickname.to_string()
                     } else if !profile.name.is_empty() {
-                        profile.name.clone()
+                        profile.name.to_string()
                     } else {
                         "Someone".to_string()
                     }
@@ -1025,9 +1032,14 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                         // Member count will be updated during sync when we process messages
                     }
 
-                    // Save chat to disk
-                    if let Some(chat) = state.get_chat(&chat_id) {
-                        if let Err(e) = db::save_chat(handle.clone(), chat).await {
+                    // Build slim while locked, save after drop
+                    let slim = state.get_chat(&chat_id).map(|chat| {
+                        db::chats::SlimChatDB::from_chat(chat, &state.interner)
+                    });
+                    drop(state);
+
+                    if let Some(slim) = slim {
+                        if let Err(e) = db::chats::save_slim_chat(handle.clone(), slim).await {
                             eprintln!("[MLS] Failed to save chat after welcome acceptance: {}", e);
                         }
                     }

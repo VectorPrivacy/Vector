@@ -11,23 +11,18 @@ lazy_static! {
     /// Pending account waiting for encryption (npub stored before database creation)
     static ref PENDING_ACCOUNT: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
-    /// Persistent database connection pool (one per account)
-    /// Keeps connection open to avoid repeated open/close overhead
-    /// Note: Account switching is handled by set_current_account() which clears the pool,
-    /// so we don't need to track npub here - the pooled connection is always for the current account.
-    static ref DB_CONNECTION_POOL: Arc<Mutex<Option<rusqlite::Connection>>> =
+    /// Read connection pool — multiple connections for parallel reads (WAL mode).
+    /// Pre-warmed at login so boot queries get instant connections.
+    static ref DB_READ_POOL: Arc<Mutex<Vec<rusqlite::Connection>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
+    /// Single write connection — all writes go through this to avoid SQLITE_BUSY.
+    /// Protected by Mutex so only one write operation runs at a time.
+    static ref DB_WRITE_CONN: Arc<Mutex<Option<rusqlite::Connection>>> =
         Arc::new(Mutex::new(None));
 }
 
-/// RAII guard for database connections that automatically returns the connection to the pool on drop.
-/// This prevents connection leaks on early returns, errors, or panics.
-///
-/// Usage:
-/// ```
-/// let conn = get_db_connection_guard(handle)?;
-/// conn.execute("SELECT 1", [])?;  // Use via Deref
-/// // Connection automatically returned when `conn` goes out of scope
-/// ```
+/// RAII guard for READ connections — auto-returns to the read pool on drop.
 pub struct ConnectionGuard {
     conn: Option<rusqlite::Connection>,
 }
@@ -40,7 +35,6 @@ impl ConnectionGuard {
 
 impl Deref for ConnectionGuard {
     type Target = rusqlite::Connection;
-
     fn deref(&self) -> &Self::Target {
         self.conn.as_ref().expect("Connection already taken")
     }
@@ -60,12 +54,48 @@ impl Drop for ConnectionGuard {
     }
 }
 
-/// Get a database connection wrapped in an RAII guard.
-/// The connection is automatically returned to the pool when the guard is dropped.
-/// This is the preferred way to get connections as it prevents leaks on all code paths.
+/// RAII guard for the WRITE connection — auto-returns to the write slot on drop.
+pub struct WriteConnectionGuard {
+    conn: Option<rusqlite::Connection>,
+}
+
+impl WriteConnectionGuard {
+    fn new(conn: rusqlite::Connection) -> Self {
+        Self { conn: Some(conn) }
+    }
+}
+
+impl Deref for WriteConnectionGuard {
+    type Target = rusqlite::Connection;
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("Write connection already taken")
+    }
+}
+
+impl DerefMut for WriteConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn.as_mut().expect("Write connection already taken")
+    }
+}
+
+impl Drop for WriteConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            return_write_connection(conn);
+        }
+    }
+}
+
+/// Get a READ connection wrapped in an RAII guard (auto-returned to read pool on drop).
 pub fn get_db_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<ConnectionGuard, String> {
     let conn = get_db_connection(handle)?;
     Ok(ConnectionGuard::new(conn))
+}
+
+/// Get the WRITE connection wrapped in an RAII guard (auto-returned on drop).
+pub fn get_write_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<WriteConnectionGuard, String> {
+    let conn = get_write_connection(handle)?;
+    Ok(WriteConnectionGuard::new(conn))
 }
 
 /// SQL Schema for Vector database
@@ -388,13 +418,17 @@ pub fn auto_select_account<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<S
 }
 
 /// Set the currently active account
+/// Only clears the connection pool if actually switching to a different account.
 pub fn set_current_account(npub: String) -> Result<(), String> {
-    *CURRENT_ACCOUNT.write()
-        .map_err(|e| format!("Failed to write current account: {}", e))? = Some(npub.clone());
+    let mut current = CURRENT_ACCOUNT.write()
+        .map_err(|e| format!("Failed to write current account: {}", e))?;
 
-    // Close old connection when switching accounts
-    close_db_connection();
+    // Only close pool if switching to a different account
+    if current.as_ref() != Some(&npub) {
+        close_db_connection();
+    }
 
+    *current = Some(npub);
     Ok(())
 }
 
@@ -419,44 +453,73 @@ pub fn clear_pending_account() -> Result<(), String> {
     Ok(())
 }
 
-/// Get or reuse database connection for the current account.
-///
-/// This is a fast path - migrations are NOT run here.
-/// Migrations are handled once at login via `init_profile_database`.
-///
-/// Note: We don't need to verify the connection matches the current account because
-/// `set_current_account()` clears the pool when switching accounts.
+// ============================================================================
+// Read Connection Pool (multiple connections for parallel reads)
+// ============================================================================
+
+/// Get a READ connection from the pool. Falls back to opening a new one if pool is empty.
+/// This is the standard path for all SELECT queries.
 pub fn get_db_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::Connection, String> {
-    // Try to reuse existing connection from pool
-    let mut pool = DB_CONNECTION_POOL.lock().unwrap();
-
-    if let Some(conn) = pool.take() {
-        return Ok(conn);
+    {
+        let mut pool = DB_READ_POOL.lock().unwrap();
+        if let Some(conn) = pool.pop() {
+            return Ok(conn);
+        }
     }
-
-    // No pooled connection - open a new one for the current account
     let npub = get_current_account()?;
     let db_path = get_database_path(handle, &npub)?;
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open database: {}", e))?;
+    open_db_connection(&db_path)
+}
 
-    // Enable WAL mode for better concurrency
+/// Return a READ connection to the pool (capped at 4 — excess connections are closed).
+pub fn return_db_connection(conn: rusqlite::Connection) {
+    let mut pool = DB_READ_POOL.lock().unwrap();
+    if pool.len() < 4 {
+        pool.push(conn);
+    }
+}
+
+// ============================================================================
+// Write Connection (single connection for serialized writes)
+// ============================================================================
+
+/// Get the dedicated WRITE connection. Only one write operation runs at a time.
+/// Use this for INSERT, UPDATE, DELETE operations.
+pub fn get_write_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlite::Connection, String> {
+    {
+        let mut writer = DB_WRITE_CONN.lock().unwrap();
+        if let Some(conn) = writer.take() {
+            return Ok(conn);
+        }
+    }
+    let npub = get_current_account()?;
+    let db_path = get_database_path(handle, &npub)?;
+    open_db_connection(&db_path)
+}
+
+/// Return the WRITE connection.
+pub fn return_write_connection(conn: rusqlite::Connection) {
+    let mut writer = DB_WRITE_CONN.lock().unwrap();
+    *writer = Some(conn);
+}
+
+// ============================================================================
+// Connection Utilities
+// ============================================================================
+
+/// Open a new SQLite connection with standard pragmas.
+fn open_db_connection(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Failed to open database: {}", e))?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")
         .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
-
     Ok(conn)
 }
 
-/// Return connection to the pool for reuse
-pub fn return_db_connection(conn: rusqlite::Connection) {
-    let mut pool = DB_CONNECTION_POOL.lock().unwrap();
-    *pool = Some(conn);
-}
-
-/// Close the current database connection (e.g., when switching accounts)
+/// Close ALL database connections (read pool + writer). Used when switching accounts.
 pub fn close_db_connection() {
-    let mut pool = DB_CONNECTION_POOL.lock().unwrap();
-    *pool = None;
+    DB_READ_POOL.lock().unwrap().clear();
+    *DB_WRITE_CONN.lock().unwrap() = None;
 }
 
 /// List all accounts (Tauri command)
@@ -479,6 +542,42 @@ pub async fn init_profile_database<R: Runtime>(
     npub: &str
 ) -> Result<(), String> {
     let db_path = get_database_path(handle, npub)?;
+
+    // Fast path: if pool already has connections FOR THIS ACCOUNT, DB exists and schema is valid
+    // (get_encryption_and_key already opened a connection and queried settings)
+    // Guard: only use fast path when pool belongs to the same account (prevents wrong-DB on account switch)
+    let pool_size = DB_READ_POOL.lock().unwrap().len();
+    let same_account = get_current_account().map(|a| a == npub).unwrap_or(false);
+    if pool_size > 0 && same_account {
+        // Run migrations on existing pooled connection (usually all no-ops)
+        let mut conn = get_db_connection(handle)?;
+        run_migrations(&mut conn)?;
+        return_db_connection(conn);
+
+        // Warm remaining pool connections in background (not on critical path)
+        let db_path_bg = db_path.clone();
+        std::thread::spawn(move || {
+            {
+                let mut pool = DB_READ_POOL.lock().unwrap();
+                let needed = 4usize.saturating_sub(pool.len());
+                for _ in 0..needed {
+                    if let Ok(c) = open_db_connection(&db_path_bg) {
+                        pool.push(c);
+                    }
+                }
+            }
+            let mut writer = DB_WRITE_CONN.lock().unwrap();
+            if writer.is_none() {
+                if let Ok(w) = open_db_connection(&db_path_bg) {
+                    *writer = Some(w);
+                }
+            }
+        });
+
+        return Ok(());
+    }
+
+    // Slow path: first time init (no existing connections)
     println!("[Account Manager] Initializing database: {}", db_path.display());
 
     // Create the database directory if it doesn't exist
@@ -502,13 +601,26 @@ pub async fn init_profile_database<R: Runtime>(
     // Run migrations for existing databases (atomic - each migration is all-or-nothing)
     run_migrations(&mut conn)?;
 
-    // Pool the connection so get_db_connection can reuse it immediately
+    // Pre-warm read pool for parallel reads during boot
     {
-        let mut pool = DB_CONNECTION_POOL.lock().unwrap();
-        *pool = Some(conn);
+        let mut pool = DB_READ_POOL.lock().unwrap();
+        // 4 read connections for parallel boot queries
+        for _ in 0..3 {
+            if let Ok(extra) = open_db_connection(&db_path) {
+                pool.push(extra);
+            }
+        }
+        pool.push(conn); // Primary connection (used for migrations) joins the read pool
     }
 
-    println!("[Account Manager] Database initialized and connection pooled");
+    // Pre-warm dedicated write connection
+    {
+        if let Ok(writer) = open_db_connection(&db_path) {
+            *DB_WRITE_CONN.lock().unwrap() = Some(writer);
+        }
+    }
+
+    println!("[Account Manager] Database initialized (4 readers + 1 writer)");
 
     Ok(())
 }
@@ -547,6 +659,7 @@ fn mark_migration_applied(tx: &rusqlite::Transaction, migration_id: u32) -> Resu
 /// This is the ONLY way migrations should be run.
 fn run_atomic_migration<F>(
     conn: &mut rusqlite::Connection,
+    max_applied: u32,
     id: u32,
     name: &str,
     migrate: F,
@@ -554,8 +667,8 @@ fn run_atomic_migration<F>(
 where
     F: FnOnce(&rusqlite::Transaction) -> Result<(), String>,
 {
-    // Check if already applied (outside transaction - read-only)
-    if migration_applied(conn, id) {
+    // Fast path: already applied (cached, no DB round-trip)
+    if id <= max_applied {
         return Ok(());
     }
 
@@ -606,6 +719,13 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Bootstrap legacy migrations first (for existing databases)
     bootstrap_legacy_migrations(conn)?;
 
+    // Cache highest applied migration ID (1 query instead of N per-migration checks)
+    let max_applied: u32 = conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
     // Check if messages table exists (needed by some migrations)
     let has_messages_table: bool = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
@@ -618,7 +738,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Migration 1: Add wrapper_event_id column to messages table
     // =========================================================================
     if has_messages_table {
-        run_atomic_migration(conn, 1, "Add wrapper_event_id to messages", |tx| {
+        run_atomic_migration(conn, max_applied,1, "Add wrapper_event_id to messages", |tx| {
             tx.execute(
                 "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
                 []
@@ -636,7 +756,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 2: Create miniapps_history table
     // =========================================================================
-    run_atomic_migration(conn, 2, "Create miniapps_history table", |tx| {
+    run_atomic_migration(conn, max_applied,2, "Create miniapps_history table", |tx| {
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS miniapps_history (
@@ -659,7 +779,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 3: Add installed_version column to miniapps_history
     // =========================================================================
-    run_atomic_migration(conn, 3, "Add installed_version to miniapps_history", |tx| {
+    run_atomic_migration(conn, max_applied,3, "Add installed_version to miniapps_history", |tx| {
         tx.execute(
             "ALTER TABLE miniapps_history ADD COLUMN installed_version TEXT DEFAULT NULL",
             []
@@ -670,7 +790,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 4: Add cached image columns to profiles table
     // =========================================================================
-    run_atomic_migration(conn, 4, "Add avatar/banner cache columns to profiles", |tx| {
+    run_atomic_migration(conn, max_applied,4, "Add avatar/banner cache columns to profiles", |tx| {
         tx.execute(
             "ALTER TABLE profiles ADD COLUMN avatar_cached TEXT DEFAULT ''",
             []
@@ -687,7 +807,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 5: Create miniapp_permissions table
     // =========================================================================
-    run_atomic_migration(conn, 5, "Create miniapp_permissions table", |tx| {
+    run_atomic_migration(conn, max_applied,5, "Create miniapp_permissions table", |tx| {
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS miniapp_permissions (
@@ -713,7 +833,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 6: Create events table for flat event-based storage
     // =========================================================================
-    run_atomic_migration(conn, 6, "Create events table and migrate messages", |tx| {
+    run_atomic_migration(conn, max_applied,6, "Create events table and migrate messages", |tx| {
         // Create the events table
         tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS events (
@@ -752,13 +872,13 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Migration 7: Backfill attachment metadata into event tags
     // =========================================================================
     if has_messages_table {
-        run_atomic_migration(conn, 7, "Backfill attachment metadata to event tags", |tx| {
+        run_atomic_migration(conn, max_applied,7, "Backfill attachment metadata to event tags", |tx| {
             migrate_attachments_to_event_tags_atomic(tx)?;
             Ok(())
         })?;
     } else {
         // If messages table is gone, just mark as complete
-        run_atomic_migration(conn, 7, "Mark attachment migration complete (no messages table)", |tx| {
+        run_atomic_migration(conn, max_applied,7, "Mark attachment migration complete (no messages table)", |tx| {
             tx.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
                 []
@@ -770,7 +890,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 8: Create pivx_promos table
     // =========================================================================
-    run_atomic_migration(conn, 8, "Create pivx_promos table", |tx| {
+    run_atomic_migration(conn, max_applied,8, "Create pivx_promos table", |tx| {
         tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS pivx_promos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -792,7 +912,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 9: Fix DM chats with empty participants
     // =========================================================================
-    run_atomic_migration(conn, 9, "Fix DM chats with empty participants", |tx| {
+    run_atomic_migration(conn, max_applied,9, "Fix DM chats with empty participants", |tx| {
         let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM chats WHERE chat_type = 0 AND participants = '[]'",
             [],
@@ -814,7 +934,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 10: Backfill npub for events from user_id
     // =========================================================================
-    run_atomic_migration(conn, 10, "Backfill event npub from user_id", |tx| {
+    run_atomic_migration(conn, max_applied,10, "Backfill event npub from user_id", |tx| {
         let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM events WHERE npub IS NULL AND user_id IS NOT NULL",
             [],
@@ -838,7 +958,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // This tracks which MLS wrapper events have been processed to prevent
     // re-processing and enable proper deduplication.
     // =========================================================================
-    run_atomic_migration(conn, 11, "Create mls_processed_events table", |tx| {
+    run_atomic_migration(conn, max_applied,11, "Create mls_processed_events table", |tx| {
         tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS mls_processed_events (
                 event_id TEXT PRIMARY KEY,
@@ -867,7 +987,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     //
     // Users will need to re-join their groups after upgrading.
     // =========================================================================
-    run_atomic_migration(conn, 12, "v0.3.0 MLS reset: wipe data, add created_at, force keypackage regen", |tx| {
+    run_atomic_migration(conn, max_applied,12, "v0.3.0 MLS reset: wipe data, add created_at, force keypackage regen", |tx| {
         // Delete group chats (chat_type=1) — CASCADE deletes their events + messages
         tx.execute("DELETE FROM chats WHERE chat_type = 1", [])
             .map_err(|e| format!("Failed to delete group chats: {}", e))?;
@@ -911,7 +1031,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     // Migration 13: Add preview_metadata column to events table for link preview caching
-    run_atomic_migration(conn, 13, "Add preview_metadata to events table", |tx| {
+    run_atomic_migration(conn, max_applied,13, "Add preview_metadata to events table", |tx| {
         // Check if column already exists (may have been added by a prior dev build)
         let col_exists: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='preview_metadata'",
@@ -929,7 +1049,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Future migrations (14+) follow the same pattern:
     //
-    // run_atomic_migration(conn, 14, "Description here", |tx| {
+    // run_atomic_migration(conn, max_applied,14, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;

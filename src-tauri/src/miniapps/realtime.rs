@@ -199,18 +199,18 @@ impl IrohState {
         &self,
         topic: TopicId,
         peers: Vec<NodeAddr>,
-        event_channel: Channel<RealtimeEvent>,
+        event_target: EventTarget,
         app_handle: Option<AppHandle>,
     ) -> Result<(bool, Option<oneshot::Receiver<()>>)> {
         let mut channels = self.channels.write().await;
 
         // If channel already exists, we're re-joining (e.g., user closed and reopened the game)
-        // Update the shared event channel so the subscribe loop uses the new frontend channel
+        // Update the shared event target so the subscribe loop uses the new frontend channel
         if let Some(channel_state) = channels.get(&topic) {
-            info!("IROH_REALTIME: Re-joining existing gossip topic {:?}, updating event channel", topic);
-            let mut shared_channel = channel_state.event_channel.write().await;
-            *shared_channel = Some(event_channel);
-            println!("[WEBXDC] Updated shared event channel for existing topic");
+            info!("IROH_REALTIME: Re-joining existing gossip topic {:?}, updating event target", topic);
+            let mut shared_target = channel_state.event_target.write().await;
+            *shared_target = Some(event_target);
+            println!("[WEBXDC] Updated shared event target for existing topic");
             return Ok((true, None));
         }
 
@@ -236,9 +236,9 @@ impl IrohState {
             .subscribe_with_opts(topic, JoinOptions::with_bootstrap(node_ids))
             .split();
 
-        // Create shared event channel for the subscribe loop
-        let shared_event_channel: SharedEventChannel = Arc::new(RwLock::new(Some(event_channel)));
-        let shared_channel_clone = shared_event_channel.clone();
+        // Create shared event target for the subscribe loop
+        let shared_event_target: SharedEventTarget = Arc::new(RwLock::new(Some(event_target)));
+        let shared_target_clone = shared_event_target.clone();
         
         // Create shared peer count
         let shared_peer_count: SharedPeerCount = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -247,12 +247,12 @@ impl IrohState {
         let public_key = self.public_key;
         let topic_encoded = encode_topic_id(&topic);
         let subscribe_loop = tokio::spawn(async move {
-            if let Err(e) = run_subscribe_loop(gossip_receiver, topic, shared_channel_clone, join_tx, public_key, peer_count_clone, app_handle, topic_encoded).await {
+            if let Err(e) = run_subscribe_loop(gossip_receiver, topic, shared_target_clone, join_tx, public_key, peer_count_clone, app_handle, topic_encoded).await {
                 warn!("Subscribe loop failed: {e}");
             }
         });
 
-        channels.insert(topic, ChannelState::new(subscribe_loop, gossip_sender, shared_event_channel, shared_peer_count));
+        channels.insert(topic, ChannelState::new(subscribe_loop, gossip_sender, shared_event_target, shared_peer_count));
 
         Ok((false, Some(join_rx)))
     }
@@ -320,9 +320,9 @@ impl IrohState {
 
     /// Send data to a gossip topic
     pub async fn send_data(&self, topic: TopicId, mut data: Vec<u8>) -> Result<()> {
-        let mut channels = self.channels.write().await;
+        let channels = self.channels.read().await;
         let state = channels
-            .get_mut(&topic)
+            .get(&topic)
             .ok_or_else(|| anyhow!("Channel not found for topic"))?;
 
         // Append sequence number and public key for deduplication
@@ -361,6 +361,17 @@ impl IrohState {
         }
     }
 
+    /// Clear the event target for a topic (e.g., when the window is destroyed but
+    /// the Iroh channel is intentionally kept alive for peer count tracking).
+    /// Prevents the subscribe loop from logging errors on every received message.
+    pub async fn clear_event_target(&self, topic: &TopicId) {
+        let channels = self.channels.read().await;
+        if let Some(channel_state) = channels.get(topic) {
+            let mut target = channel_state.event_target.write().await;
+            *target = None;
+        }
+    }
+
     /// Check if a channel exists for a topic
     pub async fn has_channel(&self, topic: &TopicId) -> bool {
         self.channels.read().await.contains_key(topic)
@@ -375,8 +386,17 @@ impl IrohState {
     }
 }
 
-/// Shared event channel that can be updated when a user re-joins
-pub(crate) type SharedEventChannel = Arc<RwLock<Option<Channel<RealtimeEvent>>>>;
+/// Target for delivering realtime events (abstracts desktop vs Android)
+#[derive(Clone)]
+pub enum EventTarget {
+    /// Desktop: Tauri IPC channel
+    TauriChannel(Channel<RealtimeEvent>),
+    /// Android: bounded mpsc sender (delivery task forwards to WebView via JNI)
+    MpscSender(tokio::sync::mpsc::Sender<RealtimeEvent>),
+}
+
+/// Shared event target that can be updated when a user re-joins
+pub(crate) type SharedEventTarget = Arc<RwLock<Option<EventTarget>>>;
 
 /// Shared peer count that can be updated by the subscribe loop
 pub(crate) type SharedPeerCount = Arc<std::sync::atomic::AtomicUsize>;
@@ -387,8 +407,8 @@ pub(crate) struct ChannelState {
     subscribe_loop: JoinHandle<()>,
     /// Sender for broadcasting messages
     sender: iroh_gossip::net::GossipSender,
-    /// Shared event channel (can be updated on re-join)
-    event_channel: SharedEventChannel,
+    /// Shared event target (can be updated on re-join)
+    event_target: SharedEventTarget,
     /// Current number of connected peers
     peer_count: SharedPeerCount,
 }
@@ -398,18 +418,18 @@ impl std::fmt::Debug for ChannelState {
         f.debug_struct("ChannelState")
             .field("subscribe_loop", &"JoinHandle<()>")
             .field("sender", &"GossipSender")
-            .field("event_channel", &"SharedEventChannel")
+            .field("event_target", &"SharedEventTarget")
             .field("peer_count", &self.peer_count.load(std::sync::atomic::Ordering::Relaxed))
             .finish()
     }
 }
 
 impl ChannelState {
-    fn new(subscribe_loop: JoinHandle<()>, sender: iroh_gossip::net::GossipSender, event_channel: SharedEventChannel, peer_count: SharedPeerCount) -> Self {
+    fn new(subscribe_loop: JoinHandle<()>, sender: iroh_gossip::net::GossipSender, event_target: SharedEventTarget, peer_count: SharedPeerCount) -> Self {
         Self {
             subscribe_loop,
             sender,
-            event_channel,
+            event_target,
             peer_count,
         }
     }
@@ -429,17 +449,35 @@ pub enum RealtimeEvent {
     PeerLeft(String),
 }
 
-/// Helper to send an event through the shared channel
-async fn send_event(shared_channel: &SharedEventChannel, event: RealtimeEvent) -> bool {
-    let channel_guard = shared_channel.read().await;
-    if let Some(ref channel) = *channel_guard {
-        if let Err(e) = channel.send(event) {
-            println!("[WEBXDC] ERROR: Failed to send event to frontend: {e}");
-            return false;
+/// Helper to send an event through the shared event target
+async fn send_event(shared_target: &SharedEventTarget, event: RealtimeEvent) -> bool {
+    let guard = shared_target.read().await;
+    if let Some(ref target) = *guard {
+        match target {
+            EventTarget::TauriChannel(channel) => {
+                if let Err(e) = channel.send(event) {
+                    println!("[WEBXDC] ERROR: Failed to send event to frontend: {e}");
+                    return false;
+                }
+            }
+            EventTarget::MpscSender(sender) => {
+                use tokio::sync::mpsc::error::TrySendError;
+                match sender.try_send(event) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        println!("[WEBXDC] WARNING: Event delivery backpressure, dropping message");
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        println!("[WEBXDC] ERROR: Event delivery channel closed");
+                        return false;
+                    }
+                }
+            }
         }
         true
     } else {
-        println!("[WEBXDC] WARNING: No event channel available");
+        #[cfg(debug_assertions)]
+        println!("[WEBXDC] No event target available, skipping event delivery");
         false
     }
 }
@@ -461,7 +499,7 @@ fn emit_realtime_status(app_handle: &Option<AppHandle>, topic_encoded: &str, pee
 async fn run_subscribe_loop(
     mut receiver: iroh_gossip::net::GossipReceiver,
     topic: TopicId,
-    shared_event_channel: SharedEventChannel,
+    shared_event_target: SharedEventTarget,
     join_tx: oneshot::Sender<()>,
     our_public_key: PublicKey,
     peer_count: SharedPeerCount,
@@ -491,7 +529,7 @@ async fn run_subscribe_loop(
                     }
 
                     // Send data to frontend via shared channel
-                    send_event(&shared_event_channel, RealtimeEvent::Data(data)).await;
+                    send_event(&shared_event_target, RealtimeEvent::Data(data)).await;
                 }
                 GossipEvent::Joined(peers) => {
                     println!("[WEBXDC] Peers joined: {:?}", peers.len());
@@ -509,7 +547,7 @@ async fn run_subscribe_loop(
                     for peer in peers {
                         let peer_id = BASE32_NOPAD.encode(peer.as_bytes());
                         println!("[WEBXDC] Peer joined topic: {}", peer_id);
-                        send_event(&shared_event_channel, RealtimeEvent::PeerJoined(peer_id)).await;
+                        send_event(&shared_event_target, RealtimeEvent::PeerJoined(peer_id)).await;
                     }
                 }
                 GossipEvent::NeighborUp(peer) => {
@@ -526,25 +564,26 @@ async fn run_subscribe_loop(
                     // Signal that we're connected when first neighbor comes up
                     if let Some(tx) = join_tx.take() {
                         let _ = tx.send(());
-                        send_event(&shared_event_channel, RealtimeEvent::Connected).await;
+                        send_event(&shared_event_target, RealtimeEvent::Connected).await;
                     }
                 }
                 GossipEvent::NeighborDown(peer) => {
                     let peer_id = BASE32_NOPAD.encode(peer.as_bytes());
                     println!("[WEBXDC] Neighbor DOWN for topic: {}", peer_id);
-                    
-                    // Decrement peer count (saturating to avoid underflow)
-                    let old_count = peer_count.load(std::sync::atomic::Ordering::Relaxed);
-                    if old_count > 0 {
-                        peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                    }
+
+                    // Atomically decrement peer count (saturating to avoid underflow)
+                    let _ = peer_count.fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |count| if count > 0 { Some(count - 1) } else { None },
+                    );
                     let new_count = peer_count.load(std::sync::atomic::Ordering::Relaxed);
                     println!("[WEBXDC] Peer count now: {}", new_count);
                     
                     // Emit status update to main window
                     emit_realtime_status(&app_handle, &topic_encoded, new_count, true);
                     
-                    send_event(&shared_event_channel, RealtimeEvent::PeerLeft(peer_id)).await;
+                    send_event(&shared_event_target, RealtimeEvent::PeerLeft(peer_id)).await;
                 }
             },
             Ok(Event::Lagged) => {

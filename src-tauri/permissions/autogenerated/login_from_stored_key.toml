@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-login-from-stored-key"
+description = "Enables the login_from_stored_key command without any pre-configured scope."
+commands.allow = ["login_from_stored_key"]
+
+[[permission]]
+identifier = "deny-login-from-stored-key"
+description = "Denies the login_from_stored_key command without any pre-configured scope."
+commands.deny = ["login_from_stored_key"]

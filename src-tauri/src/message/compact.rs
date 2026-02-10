@@ -10,7 +10,7 @@
 
 use crate::message::{Attachment, EditEntry, ImageMetadata, Reaction};
 use crate::net::SiteMetadata;
-use crate::simd::{bytes_to_hex_32, hex_to_bytes_32, hex_string_to_bytes};
+use crate::simd::{bytes_to_hex_32, hex_to_bytes_32};
 
 // ============================================================================
 // Pending ID Encoding
@@ -24,7 +24,7 @@ const PENDING_ID_MARKER: u8 = 0x01;
 /// - Pending IDs ("pending-{nanoseconds}") are encoded with marker byte + timestamp
 /// - Regular hex IDs are decoded normally
 #[inline]
-fn encode_message_id(id: &str) -> [u8; 32] {
+pub fn encode_message_id(id: &str) -> [u8; 32] {
     if let Some(timestamp_str) = id.strip_prefix("pending-") {
         // Encode pending ID: marker byte + timestamp as u128 (16 bytes)
         let mut bytes = [0u8; 32];
@@ -40,7 +40,7 @@ fn encode_message_id(id: &str) -> [u8; 32] {
 
 /// Decode 32 bytes back to an ID string, handling pending IDs specially.
 #[inline]
-fn decode_message_id(bytes: &[u8; 32]) -> String {
+pub fn decode_message_id(bytes: &[u8; 32]) -> String {
     if bytes[0] == PENDING_ID_MARKER {
         // Decode pending ID: extract timestamp from bytes 1-16
         let mut timestamp_bytes = [0u8; 16];
@@ -70,6 +70,25 @@ pub fn timestamp_to_compact(ms: u64) -> u32 {
 #[inline]
 pub fn timestamp_from_compact(compact: u32) -> u64 {
     EPOCH_2020_MS + (compact as u64 * 1000)
+}
+
+/// Custom epoch in seconds: 2020-01-01 00:00:00 UTC
+const EPOCH_2020_SECS: u64 = 1577836800;
+
+/// Convert Unix seconds timestamp to compact u32 (seconds since 2020).
+/// Preserves 0 as sentinel for "never set".
+#[inline]
+pub fn secs_to_compact(secs: u64) -> u32 {
+    if secs == 0 { return 0; }
+    secs.saturating_sub(EPOCH_2020_SECS) as u32
+}
+
+/// Convert compact u32 back to Unix seconds timestamp.
+/// Preserves 0 as sentinel for "never set".
+#[inline]
+pub fn secs_from_compact(compact: u32) -> u64 {
+    if compact == 0 { return 0; }
+    EPOCH_2020_SECS + compact as u64
 }
 
 // ============================================================================
@@ -745,13 +764,20 @@ impl CompactAttachment {
     }
 }
 
-/// Parse a hex nonce string into [u8; 16]
+/// Parse a hex nonce string into [u8; 16], left-aligned, zero-allocation.
+/// Both DM (32 hex chars) and MLS (24 hex chars) nonces hit the SIMD fast path.
+/// Short nonces are right-padded with '0' to reach 32 chars before SIMD decode.
+#[inline]
 fn parse_nonce(hex: &str) -> [u8; 16] {
-    let mut result = [0u8; 16];
-    let bytes = hex_string_to_bytes(hex);
-    let len = bytes.len().min(16);
-    result[..len].copy_from_slice(&bytes[..len]);
-    result
+    let h = hex.as_bytes();
+    if h.len() >= 32 {
+        return crate::simd::hex_to_bytes_16(hex);
+    }
+    // Pad to 32 hex chars with '0' → SIMD decode → left-aligned result
+    let mut padded = [b'0'; 32];
+    padded[..h.len()].copy_from_slice(h);
+    // SAFETY: padded is all ASCII hex digits (original chars + '0' fill)
+    crate::simd::hex_to_bytes_16(unsafe { std::str::from_utf8_unchecked(&padded) })
 }
 
 // ============================================================================
@@ -821,6 +847,13 @@ impl NpubInterner {
             Some(s) if !s.is_empty() => self.intern(s),
             _ => NO_NPUB,
         }
+    }
+
+    /// Look up an npub without inserting. Returns its handle if already interned.
+    pub fn lookup(&self, npub: &str) -> Option<u16> {
+        self.sorted.binary_search_by(|&idx| {
+            self.npubs[idx as usize].as_str().cmp(npub)
+        }).ok().map(|pos| self.sorted[pos])
     }
 
     /// Resolve an index back to the npub string.
@@ -1807,5 +1840,135 @@ mod tests {
         assert_eq!(compact_vec.len(), NUM_MESSAGES);
         assert_eq!(interner.len(), NUM_UNIQUE_USERS);
         assert_eq!(found_count, linear_found);
+    }
+
+    /// Benchmark: Profile lookup — linear scan vs string binary search vs handle binary search
+    ///
+    /// Compares three approaches for finding a Profile in a Vec:
+    /// 1. Linear scan with string equality (old — O(n) × 63-byte strcmp, Profile.id was String)
+    /// 2. Binary search by npub string (intermediate — O(log n) × 63-byte strcmp)
+    /// 3. Direct u16 handle binary search (current — O(log n) × 2-byte int cmp, Profile.id is u16)
+    #[test]
+    fn benchmark_profile_lookup() {
+        use std::time::Instant;
+        use std::hint::black_box;
+
+        const NUM_PROFILES: usize = 60;
+        const NUM_LOOKUPS: usize = 100_000;
+
+        println!("\n========================================");
+        println!("  PROFILE LOOKUP BENCHMARK");
+        println!("  {} profiles, {} lookups each method", NUM_PROFILES, NUM_LOOKUPS);
+        println!("========================================\n");
+
+        // Generate realistic npubs (63 chars each: "npub1" + 58 hex-like chars)
+        let npubs: Vec<String> = (0..NUM_PROFILES)
+            .map(|i| format!("npub1{:0>58}", format!("{:x}", i * 7919 + 1000))) // spread out values
+            .collect();
+
+        // --- Setup: Method 1 - Linear scan (old approach, simulating id: String) ---
+        let old_ids: Vec<String> = npubs.iter().rev().cloned().collect(); // reversed = worst case
+
+        // --- Setup: Method 2 - String binary search (intermediate approach) ---
+        let mut sorted_ids: Vec<String> = npubs.clone();
+        sorted_ids.sort();
+
+        // --- Setup: Method 3 - Direct u16 handle lookup (current approach, id: u16) ---
+        let mut interner = NpubInterner::new();
+        let mut profiles: Vec<crate::Profile> = npubs.iter().map(|npub| {
+            let mut p = crate::Profile::new();
+            p.id = interner.intern(npub);
+            p
+        }).collect();
+        profiles.sort_by(|a, b| a.id.cmp(&b.id));
+
+        // Build lookup targets: cycle through all profiles
+        let lookup_targets: Vec<&str> = (0..NUM_LOOKUPS)
+            .map(|i| npubs[i % NUM_PROFILES].as_str())
+            .collect();
+
+        // Pre-resolve handles for method 3
+        let handle_targets: Vec<u16> = lookup_targets.iter()
+            .map(|&npub| interner.lookup(npub).unwrap())
+            .collect();
+
+        // ===== BENCHMARK 1: Linear scan (old — id: String) =====
+        let start = Instant::now();
+        let mut found = 0u64;
+        for &target in &lookup_targets {
+            if old_ids.iter().any(|id| id == target) {
+                found += 1;
+            }
+        }
+        let linear_elapsed = start.elapsed();
+        assert_eq!(found, NUM_LOOKUPS as u64);
+
+        // ===== BENCHMARK 2: String binary search (intermediate) =====
+        let start = Instant::now();
+        found = 0;
+        for &target in &lookup_targets {
+            if sorted_ids.binary_search_by(|id| id.as_str().cmp(target)).is_ok() {
+                found += 1;
+            }
+        }
+        let string_bs_elapsed = start.elapsed();
+        assert_eq!(found, NUM_LOOKUPS as u64);
+
+        // ===== BENCHMARK 3: Direct u16 handle lookup (current — id: u16) =====
+        let start = Instant::now();
+        found = 0;
+        for &handle in &handle_targets {
+            if profiles.binary_search_by(|p| p.id.cmp(black_box(&handle))).is_ok() {
+                found += 1;
+            }
+        }
+        let direct_elapsed = start.elapsed();
+        assert_eq!(found, NUM_LOOKUPS as u64);
+
+        // ===== RESULTS =====
+        println!("--- LOOKUP METHODS ---");
+        println!("  1. Linear scan (old id: String):");
+        println!("     {:?} total, {:.0} ns/lookup",
+            linear_elapsed,
+            linear_elapsed.as_nanos() as f64 / NUM_LOOKUPS as f64);
+        println!();
+        println!("  2. String binary search (intermediate):");
+        println!("     {:?} total, {:.0} ns/lookup",
+            string_bs_elapsed,
+            string_bs_elapsed.as_nanos() as f64 / NUM_LOOKUPS as f64);
+        println!("     vs linear: {:.1}x faster",
+            linear_elapsed.as_nanos() as f64 / string_bs_elapsed.as_nanos() as f64);
+        println!();
+        println!("  3. Direct u16 handle lookup (current id: u16):");
+        println!("     {:?} total, {:.0} ns/lookup",
+            direct_elapsed,
+            direct_elapsed.as_nanos() as f64 / NUM_LOOKUPS as f64);
+        println!("     vs linear: {:.1}x faster",
+            linear_elapsed.as_nanos() as f64 / direct_elapsed.as_nanos() as f64);
+        println!("     vs string BS: {:.1}x faster",
+            string_bs_elapsed.as_nanos() as f64 / direct_elapsed.as_nanos() as f64);
+        println!();
+
+        // ===== MEMORY COMPARISON =====
+        println!("--- MEMORY PER PROFILE ---");
+        println!("  Old (id: String):    ~87 bytes (24 String header + ~63 heap)");
+        println!("  Current (id: u16):     2 bytes (inline)");
+        println!("  Savings: ~85 bytes/profile, ~{} bytes for {} profiles",
+            85 * NUM_PROFILES, NUM_PROFILES);
+        println!("  Interner (shared):   {} bytes (shared with message system)",
+            interner.memory_usage());
+        println!();
+
+        println!("========================================");
+        println!("  BENCHMARK COMPLETE");
+        println!("========================================\n");
+
+        // Correctness: ensure all methods find the same profiles
+        for npub in &npubs {
+            assert!(old_ids.iter().any(|id| id == npub));
+            assert!(sorted_ids.binary_search_by(|id| id.as_str().cmp(npub.as_str())).is_ok());
+            let h = interner.lookup(npub).unwrap();
+            assert!(profiles.binary_search_by(|p| p.id.cmp(&h)).is_ok());
+        }
     }
 }

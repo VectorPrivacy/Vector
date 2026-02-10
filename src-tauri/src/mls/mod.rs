@@ -8,7 +8,8 @@ use mdk_sqlite_storage::MdkSqliteStorage;
 use tauri::{AppHandle, Runtime, Emitter};
 use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE, Message};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
-use crate::db::{save_chat, save_chat_messages};
+use crate::db::save_chat_messages;
+use crate::db::chats::{SlimChatDB, save_slim_chat};
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // Submodules
@@ -266,8 +267,8 @@ impl MlsService {
                         let state = STATE.lock().await;
                         state.get_profile(member_npub)
                             .and_then(|p| {
-                                if !p.name.is_empty() { Some(p.name.clone()) }
-                                else if !p.display_name.is_empty() { Some(p.display_name.clone()) }
+                                if !p.name.is_empty() { Some(p.name.to_string()) }
+                                else if !p.display_name.is_empty() { Some(p.display_name.to_string()) }
                                 else { None }
                             })
                             .unwrap_or_else(|| member_npub.clone())
@@ -434,17 +435,21 @@ impl MlsService {
                 chat.metadata.set_member_count(invited_count + 1); // +1 for creator
             }
             
-            // Save chat to disk
-            if let Some(handle) = TAURI_APP.get() {
-                let handle_clone = handle.clone();
-                if let Some(chat) = state.get_chat(&chat_id) {
-                    if let Err(e) = save_chat(handle_clone, chat).await {
+            // Save chat to disk — build slim while locked, save after drop
+            let slim = state.get_chat(&chat_id).map(|chat| {
+                SlimChatDB::from_chat(chat, &state.interner)
+            });
+            drop(state);
+
+            if let Some(slim) = slim {
+                if let Some(handle) = TAURI_APP.get() {
+                    if let Err(e) = save_slim_chat(handle.clone(), slim).await {
                         eprintln!("[MLS] Failed to save chat after group creation: {}", e);
                     }
                 }
             }
         }
- 
+
         // Notify UI: reuse the same event used after welcome-accept so creator also sees the group immediately.
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("mls_group_initial_sync", serde_json::json!({
@@ -532,8 +537,8 @@ impl MlsService {
                 let state = STATE.lock().await;
                 state.get_profile(&member_pubkey)
                     .and_then(|p| {
-                        if !p.name.is_empty() { Some(p.name.clone()) }
-                        else if !p.display_name.is_empty() { Some(p.display_name.clone()) }
+                        if !p.name.is_empty() { Some(p.name.to_string()) }
+                        else if !p.display_name.is_empty() { Some(p.display_name.to_string()) }
                         else { None }
                     })
                     .unwrap_or_else(|| member_pubkey.to_string())
@@ -648,32 +653,30 @@ impl MlsService {
             let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&meta.engine_group_id));
             {
                 // Get our pubkey for building the rumor
-                if let Ok(signer) = client.signer().await {
-                    if let Ok(my_pubkey) = signer.get_public_key().await {
-                        // Build the leave request rumor (like typing indicator)
-                        let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
-                            .tag(Tag::custom(TagKind::d(), vec!["vector"]))
-                            .build(my_pubkey);
+                if let Some(&my_pubkey) = crate::MY_PUBLIC_KEY.get() {
+                    // Build the leave request rumor (like typing indicator)
+                    let leave_rumor = EventBuilder::new(Kind::ApplicationSpecificData, "leave")
+                        .tag(Tag::custom(TagKind::d(), vec!["vector"]))
+                        .build(my_pubkey);
 
-                        // Create and send the MLS message
-                        match self.engine() {
-                            Ok(engine) => {
-                                match engine.create_message(&mls_group_id, leave_rumor) {
-                                    Ok(mls_event) => {
-                                        if let Err(e) = client.send_event(&mls_event).await {
-                                            eprintln!("[MLS] Failed to send leave request message: {}", e);
-                                        } else {
-                                            println!("[MLS] Leave request message sent for group: {}", group_id);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[MLS] Failed to create leave request message: {}", e);
+                    // Create and send the MLS message
+                    match self.engine() {
+                        Ok(engine) => {
+                            match engine.create_message(&mls_group_id, leave_rumor) {
+                                Ok(mls_event) => {
+                                    if let Err(e) = client.send_event(&mls_event).await {
+                                        eprintln!("[MLS] Failed to send leave request message: {}", e);
+                                    } else {
+                                        println!("[MLS] Leave request message sent for group: {}", group_id);
                                     }
                                 }
+                                Err(e) => {
+                                    eprintln!("[MLS] Failed to create leave request message: {}", e);
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("[MLS] Could not get MLS engine for leave request: {}", e);
-                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[MLS] Could not get MLS engine for leave request: {}", e);
                         }
                     }
                 }
@@ -1037,12 +1040,8 @@ impl MlsService {
         let mut events_to_track: Vec<(String, u64)> = Vec::new();
         
         // Resolve my pubkey before entering engine scope (for mine flag)
-        let my_pubkey_hex = if let Ok(signer) = client.signer().await {
-            if let Ok(my_pubkey) = signer.get_public_key().await {
-                my_pubkey.to_hex()
-            } else {
-                String::new()
-            }
+        let my_pubkey_hex = if let Some(&pk) = crate::MY_PUBLIC_KEY.get() {
+            pk.to_hex()
         } else {
             String::new()
         };
@@ -1507,40 +1506,37 @@ impl MlsService {
         // Process buffered rumors and persist after engine scope ends using unified Chat storage
         // BUT: Skip if we were evicted from this group during sync
         if !rumors_to_process.is_empty() && !was_evicted {
+            // Get group metadata BEFORE locking STATE (involves file I/O)
+            let group_meta = self.read_groups().await.ok()
+                .and_then(|groups| groups.into_iter().find(|g| g.group_id == gid_for_fetch));
+
             // Get or create the MLS group chat in STATE with metadata
-            let chat_id = {
+            let (chat_id, slim_to_save) = {
                 let mut state = STATE.lock().await;
-                
-                // Get group metadata to populate Chat metadata
-                let group_meta = self.read_groups().await.ok()
-                    .and_then(|groups| groups.into_iter().find(|g| g.group_id == gid_for_fetch));
-                
+
                 // Create or get the chat
                 let chat_id = state.create_or_get_mls_group_chat(&gid_for_fetch, vec![]);
-                
-                // Update metadata if we have group info
-                let mut metadata_updated = false;
+
+                // Update metadata if we have group info, build slim in same lookup
+                let mut slim_to_save = None;
                 if let Some(meta) = group_meta {
-                    if let Some(chat) = state.get_chat_mut(&chat_id) {
-                        chat.metadata.set_name(meta.name.clone());
-                        metadata_updated = true;
+                    if let Some(idx) = state.chats.iter().position(|c| c.id == chat_id) {
+                        state.chats[idx].metadata.set_name(meta.name.clone());
+                        slim_to_save = Some(SlimChatDB::from_chat(&state.chats[idx], &state.interner));
                     }
                 }
-                
-                // Save chat to disk if metadata was updated
-                if metadata_updated {
-                    if let Some(handle) = TAURI_APP.get() {
-                        let handle_clone = handle.clone();
-                        if let Some(chat) = state.get_chat(&chat_id) {
-                            if let Err(e) = save_chat(handle_clone, chat).await {
-                                eprintln!("[MLS] Failed to save chat after metadata update: {}", e);
-                            }
-                        }
+
+                (chat_id, slim_to_save)
+            }; // Drop STATE lock before DB I/O
+
+            // Save chat to disk if metadata was updated
+            if let Some(slim) = slim_to_save {
+                if let Some(handle) = TAURI_APP.get() {
+                    if let Err(e) = save_slim_chat(handle.clone(), slim).await {
+                        eprintln!("[MLS] Failed to save chat after metadata update: {}", e);
                     }
                 }
-                
-                chat_id
-            };
+            }
             
             for (rumor_event, _wrapper_id, is_mine) in rumors_to_process.iter() {
                 let rumor_context = RumorContext {
@@ -1621,12 +1617,7 @@ impl MlsService {
                                 // Update the chat's typing participants
                                 let active_typers = {
                                     let mut state = STATE.lock().await;
-                                    if let Some(chat) = state.get_chat_mut(&chat_id) {
-                                        chat.update_typing_participant(profile_id.clone(), until);
-                                        chat.get_active_typers()
-                                    } else {
-                                        vec![]
-                                    }
+                                    state.update_typing_and_get_active(&chat_id, &profile_id, until)
                                 };
 
                                 // Emit typing update event to frontend
@@ -1654,22 +1645,18 @@ impl MlsService {
                                     let state = STATE.lock().await;
                                     state.get_profile(&member_pubkey)
                                         .map(|p| {
-                                            if !p.nickname.is_empty() { p.nickname.clone() }
-                                            else if !p.name.is_empty() { p.name.clone() }
+                                            if !p.nickname.is_empty() { p.nickname.to_string() }
+                                            else if !p.name.is_empty() { p.name.to_string() }
                                             else { member_pubkey.chars().take(12).collect::<String>() + "..." }
                                         })
                                 };
 
                                 // Check if we're an admin for this group
                                 let am_i_admin = if let Some(meta) = &group_metadata {
-                                    if let Some(client) = NOSTR_CLIENT.get() {
-                                        if let Ok(signer) = client.signer().await {
-                                            if let Ok(my_pk) = signer.get_public_key().await {
-                                                let my_npub = my_pk.to_bech32().unwrap_or_default();
-                                                let my_hex = my_pk.to_hex();
-                                                meta.creator_pubkey == my_npub || meta.creator_pubkey == my_hex
-                                            } else { false }
-                                        } else { false }
+                                    if let Some(&my_pk) = crate::MY_PUBLIC_KEY.get() {
+                                        let my_npub = my_pk.to_bech32().unwrap_or_default();
+                                        let my_hex = my_pk.to_hex();
+                                        meta.creator_pubkey == my_npub || meta.creator_pubkey == my_hex
                                     } else { false }
                                 } else { false };
 
@@ -1801,27 +1788,30 @@ impl MlsService {
             
             // Persist the chat and new messages using unified storage
             if let Some(handle) = TAURI_APP.get() {
-                let state = STATE.lock().await;
-                if let Some(chat) = state.get_chat(&chat_id) {
-                    // Save chat metadata
-                    let _ = save_chat(handle.clone(), chat).await;
-                    
-                    // Only save the newly added messages (much more efficient!)
-                    // Get the last N messages where N = number of new messages processed
-                    if new_msgs > 0 {
-                        // Need to get interner from state to convert CompactMessage to Message
-                        let messages_to_save: Vec<Message> = {
-                            let state = STATE.lock().await;
+                let (slim, messages_to_save) = {
+                    let state = STATE.lock().await;
+                    if let Some(chat) = state.get_chat(&chat_id) {
+                        let slim = SlimChatDB::from_chat(chat, &state.interner);
+                        let messages_to_save: Vec<Message> = if new_msgs > 0 {
                             chat.messages.iter()
                                 .rev()
                                 .take(new_msgs as usize)
                                 .map(|m| m.to_message(&state.interner))
                                 .collect()
+                        } else {
+                            Vec::new()
                         };
+                        (Some(slim), messages_to_save)
+                    } else {
+                        (None, Vec::new())
+                    }
+                }; // Drop STATE lock before async DB operations
 
-                        if !messages_to_save.is_empty() {
-                            let _ = save_chat_messages(handle.clone(), &chat_id, &messages_to_save).await;
-                        }
+                if let Some(slim) = slim {
+                    let _ = save_slim_chat(handle.clone(), slim).await;
+
+                    if !messages_to_save.is_empty() {
+                        let _ = save_chat_messages(handle.clone(), &chat_id, &messages_to_save).await;
                     }
                 }
             }

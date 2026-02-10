@@ -2,14 +2,13 @@
 //!
 //! This module contains the core state management for profiles, chats, and sync status.
 
-use nostr_sdk::prelude::*;
 use tauri::Emitter;
 
 use crate::message::compact::{CompactMessage, CompactAttachment, NpubInterner};
 use crate::{Profile, Chat, ChatType, Message};
 use crate::chat::SerializableChat;
 use crate::db::SlimProfile;
-use super::globals::{TAURI_APP, NOSTR_CLIENT};
+use super::globals::TAURI_APP;
 use super::SyncMode;
 #[cfg(debug_assertions)]
 use super::stats::CacheStats;
@@ -54,33 +53,60 @@ impl ChatState {
     // Profile Management
     // ========================================================================
 
-    /// Merge multiple Vector Profiles from SlimProfile format into the state
-    pub async fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>) {
-        let my_public_key = {
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
-            signer.get_public_key().await.unwrap()
-        };
-
+    /// Merge multiple Vector Profiles from SlimProfile format into the state.
+    ///
+    /// Profiles are kept sorted by interner handle for O(log n) integer binary search.
+    pub fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>, my_npub: &str) {
         for slim in slim_profiles {
-            if let Some(position) = self.profiles.iter().position(|profile| profile.id == slim.id) {
-                let mut full_profile = slim.to_profile();
-                if let Ok(profile_pubkey) = PublicKey::from_bech32(&full_profile.id) {
-                    full_profile.mine = my_public_key == profile_pubkey;
-                }
-                self.profiles[position] = full_profile;
-            } else {
-                self.profiles.push(slim.to_profile());
-            }
+            let mut full_profile = slim.to_profile();
+            full_profile.flags.set_mine(slim.id == my_npub);
+            self.insert_or_replace_profile(&slim.id, full_profile);
         }
     }
 
-    pub fn get_profile(&self, id: &str) -> Option<&Profile> {
-        self.profiles.iter().find(|p| p.id == id)
+    /// Insert a profile in sorted order by interner handle, or replace if it already exists.
+    ///
+    /// Interns the npub to assign the profile its `id` handle.
+    pub fn insert_or_replace_profile(&mut self, npub: &str, mut profile: Profile) {
+        let id = self.interner.intern(npub);
+        profile.id = id;
+        match self.profiles.binary_search_by(|p| p.id.cmp(&id)) {
+            Ok(idx) => self.profiles[idx] = profile,
+            Err(idx) => self.profiles.insert(idx, profile),
+        }
     }
 
-    pub fn get_profile_mut(&mut self, id: &str) -> Option<&mut Profile> {
-        self.profiles.iter_mut().find(|p| p.id == id)
+    /// Look up a profile by npub string (boundary method).
+    ///
+    /// Delegates through the interner: O(log n) string search → O(log n) integer search.
+    /// Prefer `get_profile_by_id` when a handle is already available.
+    pub fn get_profile(&self, npub: &str) -> Option<&Profile> {
+        let id = self.interner.lookup(npub)?;
+        self.get_profile_by_id(id)
+    }
+
+    pub fn get_profile_mut(&mut self, npub: &str) -> Option<&mut Profile> {
+        let id = self.interner.lookup(npub)?;
+        self.get_profile_mut_by_id(id)
+    }
+
+    /// Look up a profile by interner handle — O(log n) integer binary search.
+    #[inline]
+    pub fn get_profile_by_id(&self, id: u16) -> Option<&Profile> {
+        self.profiles.binary_search_by(|p| p.id.cmp(&id))
+            .ok().map(|idx| &self.profiles[idx])
+    }
+
+    #[inline]
+    pub fn get_profile_mut_by_id(&mut self, id: u16) -> Option<&mut Profile> {
+        self.profiles.binary_search_by(|p| p.id.cmp(&id))
+            .ok().map(move |idx| &mut self.profiles[idx])
+    }
+
+    /// Serialize a profile for frontend/DB boundary (resolves u16 id → npub string).
+    pub fn serialize_profile(&self, id: u16) -> Option<SlimProfile> {
+        self.get_profile_by_id(id)
+            .map(|p| SlimProfile::from_profile(p, &self.interner))
     }
 
     // ========================================================================
@@ -104,7 +130,7 @@ impl ChatState {
     /// Create a new DM chat if it doesn't exist
     pub fn create_dm_chat(&mut self, their_npub: &str) -> String {
         if self.get_chat(their_npub).is_none() {
-            let chat = Chat::new_dm(their_npub.to_string());
+            let chat = Chat::new_dm(their_npub.to_string(), &mut self.interner);
             self.chats.push(chat);
         }
         their_npub.to_string()
@@ -113,7 +139,7 @@ impl ChatState {
     /// Create or get an MLS group chat
     pub fn create_or_get_mls_group_chat(&mut self, group_id: &str, participants: Vec<String>) -> String {
         if self.get_chat(group_id).is_none() {
-            let chat = Chat::new_mls_group(group_id.to_string(), participants);
+            let chat = Chat::new_mls_group(group_id.to_string(), participants, &mut self.interner);
             self.chats.push(chat);
         }
         group_id.to_string()
@@ -131,24 +157,35 @@ impl ChatState {
         // Convert to compact using our interner
         let compact = CompactMessage::from_message(&message, &mut self.interner);
 
-        let is_msg_added = if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
-            chat.add_compact_message(compact)
+        let (is_msg_added, chat_idx) = if let Some(idx) = self.chats.iter().position(|c| c.id == chat_id) {
+            let added = self.chats[idx].add_compact_message(compact);
+            (added, idx)
         } else {
             // Chat doesn't exist, create it
             let mut chat = if chat_id.starts_with("npub1") {
-                Chat::new_dm(chat_id.to_string())
+                Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
                 Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
             };
             let was_added = chat.add_compact_message(compact);
             self.chats.push(chat);
-            was_added
+            (was_added, self.chats.len() - 1)
         };
 
-        // Sort chats by last message time (newest first)
-        self.chats.sort_by(|a, b| {
-            b.last_message_time().cmp(&a.last_message_time())
-        });
+        // Move chat to its correct sorted position (newest first).
+        // Common case: new message makes this the most recent chat → move to front.
+        // This is O(n) rotate at worst but O(1) when already in position (the common
+        // case for an active conversation that's already at the front of the list).
+        if is_msg_added && chat_idx > 0 {
+            let this_time = self.chats[chat_idx].last_message_time();
+            // Find where this chat belongs (first chat with an older or equal timestamp)
+            let target = self.chats[..chat_idx].iter()
+                .position(|c| c.last_message_time() <= this_time)
+                .unwrap_or(chat_idx);
+            if target < chat_idx {
+                self.chats[target..=chat_idx].rotate_right(1);
+            }
+        }
 
         // Track stats (debug builds only)
         #[cfg(debug_assertions)]
@@ -164,7 +201,7 @@ impl ChatState {
 
     /// Batch add messages to a chat - much faster for pagination/history loads.
     ///
-    /// Sorts chats only once at the end instead of per-message.
+    /// Only repositions the chat if newer messages were added (pagination won't trigger re-sort).
     /// Returns the number of messages actually added.
     pub fn add_messages_to_chat_batch(&mut self, chat_id: &str, messages: Vec<Message>) -> usize {
         if messages.is_empty() {
@@ -177,31 +214,34 @@ impl ChatState {
             .collect();
 
         // Find or create the chat
-        let chat = if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
-            chat
+        let chat_idx = if let Some(idx) = self.chats.iter().position(|c| c.id == chat_id) {
+            idx
         } else {
-            // Chat doesn't exist, create it
             let chat = if chat_id.starts_with("npub1") {
-                Chat::new_dm(chat_id.to_string())
+                Chat::new_dm(chat_id.to_string(), &mut self.interner)
             } else {
                 Chat::new(chat_id.to_string(), ChatType::MlsGroup, vec![])
             };
             self.chats.push(chat);
-            self.chats.last_mut().unwrap()
+            self.chats.len() - 1
         };
 
         // Track if last message time changes (only happens when adding newer messages)
-        let old_last_time = chat.messages.last_timestamp();
+        let old_last_time = self.chats[chat_idx].messages.last_timestamp();
 
         // Batch insert all messages
-        let added = chat.messages.insert_batch(compact_messages);
+        let added = self.chats[chat_idx].messages.insert_batch(compact_messages);
 
-        // Only sort chats if the last message time changed (i.e., we added newer messages)
+        // Only reposition if the last message time changed (i.e., we added newer messages)
         // Prepending older messages (pagination) doesn't change chat order
-        if added > 0 && chat.messages.last_timestamp() != old_last_time {
-            self.chats.sort_by(|a, b| {
-                b.last_message_time().cmp(&a.last_message_time())
-            });
+        if added > 0 && self.chats[chat_idx].messages.last_timestamp() != old_last_time && chat_idx > 0 {
+            let this_time = self.chats[chat_idx].last_message_time();
+            let target = self.chats[..chat_idx].iter()
+                .position(|c| c.last_message_time() <= this_time)
+                .unwrap_or(chat_idx);
+            if target < chat_idx {
+                self.chats[target..=chat_idx].rotate_right(1);
+            }
         }
 
         added
@@ -210,16 +250,15 @@ impl ChatState {
     /// Add a message to a chat via participant npub
     pub fn add_message_to_participant(&mut self, their_npub: &str, message: Message) -> bool {
         // Ensure profile exists
-        if self.get_profile(their_npub).is_none() {
-            let mut profile = Profile::new();
-            profile.id = their_npub.to_string();
-            profile.mine = false;
+        let id = self.interner.intern(their_npub);
+        if self.get_profile_by_id(id).is_none() {
+            let profile = Profile::new();
+            self.insert_or_replace_profile(their_npub, profile);
 
             if let Some(handle) = TAURI_APP.get() {
-                handle.emit("profile_update", &profile).unwrap();
+                let slim = self.serialize_profile(id).unwrap();
+                handle.emit("profile_update", &slim).unwrap();
             }
-
-            self.profiles.push(profile);
         }
 
         let chat_id = self.create_dm_chat(their_npub);
@@ -374,7 +413,7 @@ impl ChatState {
         for chat in &mut self.chats {
             let is_target = match &chat.chat_type {
                 ChatType::MlsGroup => chat.id == chat_hint,
-                ChatType::DirectMessage => chat.has_participant(chat_hint),
+                ChatType::DirectMessage => chat.has_participant(chat_hint, &self.interner),
             };
 
             if is_target {
@@ -394,7 +433,7 @@ impl ChatState {
     /// Finds the message by ID in the specified chat and appends the attachment.
     /// Returns true if the message was found and attachment added.
     pub fn add_attachment_to_message(&mut self, chat_id: &str, msg_id: &str, attachment: CompactAttachment) -> bool {
-        let chat_idx = match self.chats.iter().position(|c| c.id == chat_id || c.has_participant(chat_id)) {
+        let chat_idx = match self.chats.iter().position(|c| c.id == chat_id || c.has_participant(chat_id, &self.interner)) {
             Some(idx) => idx,
             None => return false,
         };
@@ -452,20 +491,18 @@ impl ChatState {
             // Skip if profile is muted (for DMs)
             if matches!(chat.chat_type, ChatType::DirectMessage) {
                 if let Some(profile) = self.get_profile(&chat.id) {
-                    if profile.muted {
+                    if profile.flags.is_muted() {
                         continue;
                     }
                 }
             }
-
-            let last_read_id = &chat.last_read;
 
             let mut unread_count = 0;
             for msg in chat.iter_compact().rev() {
                 if msg.flags.is_mine() {
                     break;
                 }
-                if !last_read_id.is_empty() && msg.id_hex() == *last_read_id {
+                if chat.last_read != [0u8; 32] && msg.id == chat.last_read {
                     break;
                 }
                 unread_count += 1;
@@ -475,6 +512,24 @@ impl ChatState {
         }
 
         total_unread
+    }
+
+    // ========================================================================
+    // Typing Indicators
+    // ========================================================================
+
+    /// Update typing indicator for an npub in a chat and return active typers.
+    ///
+    /// Handles split borrowing of `self.interner` and `self.chats`:
+    /// interns the npub, finds the chat, updates typing, returns active typers.
+    pub fn update_typing_and_get_active(&mut self, chat_id: &str, npub: &str, expires_at: u64) -> Vec<String> {
+        let handle = self.interner.intern(npub);
+        if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
+            chat.update_typing_participant(handle, expires_at);
+            chat.get_active_typers(&self.interner)
+        } else {
+            Vec::new()
+        }
     }
 
     // ========================================================================
@@ -494,22 +549,6 @@ impl ChatState {
             self.interner.len(), self.interner.memory_usage());
     }
 
-    #[cfg(debug_assertions)]
-    pub fn log_cache_stats(&mut self) {
-        self.update_and_log_stats();
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn cache_stats_summary(&mut self) -> String {
-        self.cache_stats.chat_count = self.chats.len();
-        self.cache_stats.message_count = self.chats.iter()
-            .map(|c| c.message_count())
-            .sum();
-        format!("{} interner={} npubs",
-            self.cache_stats.summary(),
-            self.interner.len()
-        )
-    }
 }
 
 impl Default for ChatState {

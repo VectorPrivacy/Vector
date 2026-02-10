@@ -72,6 +72,9 @@
     "allow-decode-blurhash",
     "allow-download-attachment",
     "allow-login",
+    "allow-login-from-stored-key",
+    "allow-setup-encryption",
+    "allow-skip-encryption",
     "allow-notifs",
     "allow-get-relays",
     "allow-get-media-servers",
@@ -195,6 +198,12 @@
     "allow-set-notification-settings",
     "allow-preview-notification-sound",
     "allow-select-custom-notification-sound",
-    "allow-run-maintenance"
+    "allow-run-maintenance",
+    "allow-get-encryption-status",
+    "allow-get-encryption-and-key",
+    "allow-disable-encryption",
+    "allow-enable-encryption",
+    "allow-rekey-encryption",
+    "allow-verify-credential"
   ]
 }

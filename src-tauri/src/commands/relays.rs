@@ -177,7 +177,7 @@ async fn load_custom_relays<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<Cus
         return Ok(vec![]);
     }
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let result: Option<String> = conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
@@ -185,7 +185,7 @@ async fn load_custom_relays<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<Cus
         |row| row.get(0)
     ).ok();
 
-    crate::account_manager::return_db_connection(conn);
+
 
     match result {
         Some(json_str) => {
@@ -205,14 +205,14 @@ async fn save_custom_relays<R: Runtime>(handle: &AppHandle<R>, relays: &[CustomR
     let json_str = serde_json::to_string(relays)
         .map_err(|e| format!("Failed to serialize relays: {}", e))?;
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
         rusqlite::params!["custom_relays", json_str],
     ).map_err(|e| format!("Failed to save custom relays: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 
@@ -222,7 +222,7 @@ pub async fn get_disabled_default_relays<R: Runtime>(handle: &AppHandle<R>) -> R
         return Ok(vec![]);
     }
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let result: Option<String> = conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
@@ -230,7 +230,7 @@ pub async fn get_disabled_default_relays<R: Runtime>(handle: &AppHandle<R>) -> R
         |row| row.get(0)
     ).ok();
 
-    crate::account_manager::return_db_connection(conn);
+
 
     match result {
         Some(json_str) => {
@@ -250,14 +250,14 @@ async fn save_disabled_default_relays<R: Runtime>(handle: &AppHandle<R>, relays:
     let json_str = serde_json::to_string(relays)
         .map_err(|e| format!("Failed to serialize disabled relays: {}", e))?;
 
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
 
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
         rusqlite::params!["disabled_default_relays", json_str],
     ).map_err(|e| format!("Failed to save disabled default relays: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
+
     Ok(())
 }
 

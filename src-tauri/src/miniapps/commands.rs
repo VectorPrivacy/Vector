@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::Error;
 use super::state::{MiniAppInstance, MiniAppsState, MiniAppPackage, RealtimeChannelState};
-use super::realtime::{RealtimeEvent, encode_topic_id, encode_node_addr};
+use super::realtime::{RealtimeEvent, EventTarget, encode_topic_id, encode_node_addr};
 use crate::util::bytes_to_hex_string;
 
 // Network isolation proxy - only used on Linux (not macOS due to version requirements, not Windows due to WebView2 freeze, not Android)
@@ -784,9 +784,12 @@ pub async fn miniapp_open(
                     if let Some(channel) = channel_state {
                         let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
                         println!("[WEBXDC] Window destroyed, marking inactive for topic: {}", topic_encoded);
-                        
-                        // Get current peer count from the channel (we're still connected)
+
+                        // Get current peer count and clear the stale event target.
+                        // Clearing prevents the subscribe loop from logging errors
+                        // on every received message after the window is gone.
                         let peer_count = if let Ok(iroh) = state.realtime.get_or_init().await {
+                            iroh.clear_event_target(&channel.topic).await;
                             iroh.get_peer_count(&channel.topic).await
                         } else {
                             0
@@ -1036,7 +1039,8 @@ pub async fn miniapp_join_realtime_channel(
     
     // Join the Iroh gossip channel with no initial peers
     // Peers will be added via advertisements
-    let (is_rejoin, _join_rx) = iroh.join_channel(topic, vec![], channel.clone(), Some(app.clone())).await
+    let event_target = EventTarget::TauriChannel(channel.clone());
+    let (is_rejoin, _join_rx) = iroh.join_channel(topic, vec![], event_target, Some(app.clone())).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
     let topic_encoded = encode_topic_id(&topic);
@@ -1049,11 +1053,10 @@ pub async fn miniapp_join_realtime_channel(
         info!("Joined new realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
     }
     
-    // Store/update the channel state with the new event channel
-    // This is important for re-joins: the old event channel is stale (old window closed)
+    // Store/update the channel state
+    // This is important for re-joins: the old event target is stale (old window closed)
     let channel_state = RealtimeChannelState {
         topic,
-        event_channel: Some(channel),
         active: true,
     };
     state.set_realtime_channel(label, channel_state).await;

@@ -78,11 +78,11 @@ pub async fn fetch_messages<R: Runtime>(
     init: bool,
     relay_url: Option<String>
 ) {
+    println!("[Boot] fetch_messages called (init={})", init);
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // If relay_url is provided, this is a single-relay sync that bypasses global state
     if relay_url.is_some() {
@@ -97,10 +97,16 @@ pub async fn fetch_messages<R: Runtime>(
             .until(now);
 
         // Fetch from specific relay only
-        let mut events = client
+        let mut events = match client
             .stream_events_from(vec![relay_url.unwrap()], filter, std::time::Duration::from_secs(30))
             .await
-            .unwrap();
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("[Sync] Single-relay stream failed (relays not ready?): {}", e);
+                return;
+            }
+        };
 
         // Process events without affecting global sync state
         while let Some(event) = events.next().await {
@@ -117,7 +123,9 @@ pub async fn fetch_messages<R: Runtime>(
 
     // Regular sync logic with global state management
     let (since_timestamp, until_timestamp) = {
+        let boot_start = std::time::Instant::now();
         let mut state = STATE.lock().await;
+        println!("[Boot] STATE.lock acquired in {:?}", boot_start.elapsed());
 
         if init {
             // Set current account for SQL mode if profile database exists
@@ -136,17 +144,41 @@ pub async fn fetch_messages<R: Runtime>(
             // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
             if state.profiles.len() == 1 {
                 // Load profiles, chats, MLS groups, and last messages in parallel (all are independent reads)
+                let db_start = std::time::Instant::now();
                 let (profiles_result, slim_chats_result, mls_groups_result, last_messages_result) = tokio::join!(
-                    db::get_all_profiles(&handle),
-                    db::get_all_chats(&handle),
-                    db::load_mls_groups(&handle),
-                    db::get_all_chats_last_messages(&handle)
+                    async {
+                        let t = std::time::Instant::now();
+                        let r = db::get_all_profiles(&handle).await;
+                        println!("[Boot]   get_all_profiles: {:?}", t.elapsed());
+                        r
+                    },
+                    async {
+                        let t = std::time::Instant::now();
+                        let r = db::get_all_chats(&handle).await;
+                        println!("[Boot]   get_all_chats: {:?}", t.elapsed());
+                        r
+                    },
+                    async {
+                        let t = std::time::Instant::now();
+                        let r = db::load_mls_groups(&handle).await;
+                        println!("[Boot]   load_mls_groups: {:?}", t.elapsed());
+                        r
+                    },
+                    async {
+                        let t = std::time::Instant::now();
+                        let r = db::get_all_chats_last_messages(&handle).await;
+                        println!("[Boot]   get_all_chats_last_messages: {:?}", t.elapsed());
+                        r
+                    }
                 );
+                println!("[Boot] Parallel DB load in {:?}", db_start.elapsed());
 
                 // Process profiles
+                let merge_start = std::time::Instant::now();
                 if let Ok(profiles) = profiles_result {
-                    state.merge_db_profiles(profiles).await;
+                    state.merge_db_profiles(profiles, &npub);
                 }
+                println!("[Boot] Profile merge in {:?}", merge_start.elapsed());
 
                 // Spawn background task to cache profile images for offline support
                 tokio::spawn(async {
@@ -167,9 +199,9 @@ pub async fn fetch_messages<R: Runtime>(
                             .collect())
                         .unwrap_or_default();
 
-                    // Build HashSet of existing profile IDs for O(1) lookup
-                    let mut known_profiles: std::collections::HashSet<String> =
-                        state.profiles.iter().map(|p| p.id.clone()).collect();
+                    // Build HashSet of existing profile handles for O(1) lookup
+                    let mut known_profiles: std::collections::HashSet<u16> =
+                        state.profiles.iter().map(|p| p.id).collect();
 
                     // Pre-allocate capacity for chats (avoids reallocations during push)
                     state.chats.reserve(slim_chats.len());
@@ -185,17 +217,17 @@ pub async fn fetch_messages<R: Runtime>(
                             continue;
                         }
 
-                        let mut chat = slim_chat.to_chat();
+                        let mut chat = slim_chat.to_chat(&mut state.interner);
                         let chat_id = chat.id().to_string();
 
                         // Ensure profiles exist for all chat participants (O(1) lookup)
-                        for participant in chat.participants() {
-                            if !known_profiles.contains(participant) {
-                                let mut profile = Profile::new();
-                                profile.id = participant.clone();
-                                profile.mine = false;
-                                state.profiles.push(profile);
-                                known_profiles.insert(participant.clone());
+                        for &handle in chat.participants() {
+                            if !known_profiles.contains(&handle) {
+                                if let Some(npub) = state.interner.resolve(handle).map(|s| s.to_string()) {
+                                    let profile = Profile::new();
+                                    state.insert_or_replace_profile(&npub, profile);
+                                    known_profiles.insert(handle);
+                                }
                             }
                         }
 
@@ -244,29 +276,51 @@ pub async fn fetch_messages<R: Runtime>(
                 }
             });
 
-            // Preload caches in parallel
-            let (id_cache_result, wrapper_ids_result) = tokio::join!(
-                db::preload_id_caches(&handle),
-                db::load_recent_wrapper_ids(&handle, 30)
-            );
-
-            if let Err(e) = id_cache_result {
+            // Preload ID caches (fast, needed for serialization)
+            let cache_start = std::time::Instant::now();
+            if let Err(e) = db::preload_id_caches(&handle).await {
                 eprintln!("[Cache] Failed to preload ID caches: {}", e);
             }
+            println!("[Boot] preload_id_caches in {:?}", cache_start.elapsed());
 
-            if let Ok(wrapper_ids) = wrapper_ids_result {
-                let mut cache = WRAPPER_ID_CACHE.lock().await;
-                cache.load(wrapper_ids);
-            }
-
-            // Send the state to frontend (convert chats to serializable format)
+            // Send the state to frontend (convert to serializable formats at boundary)
+            let serialize_start = std::time::Instant::now();
             let serializable_chats: Vec<_> = state.chats.iter()
                 .map(|c| c.to_serializable(&state.interner))
                 .collect();
-            handle.emit("init_finished", serde_json::json!({
-                "profiles": &state.profiles,
-                "chats": serializable_chats
-            })).unwrap();
+            let slim_profiles: Vec<db::SlimProfile> = state.profiles.iter()
+                .map(|p| db::SlimProfile::from_profile(p, &state.interner))
+                .collect();
+            println!("[Boot] Serialization in {:?}", serialize_start.elapsed());
+
+            #[derive(serde::Serialize)]
+            struct InitPayload<'a> {
+                profiles: &'a [db::SlimProfile],
+                chats: &'a [crate::chat::SerializableChat],
+            }
+
+            let emit_start = std::time::Instant::now();
+            handle.emit("init_finished", &InitPayload {
+                profiles: &slim_profiles,
+                chats: &serializable_chats,
+            }).unwrap();
+            println!("[Boot] Event emit in {:?}", emit_start.elapsed());
+            println!("[Boot] Total init time: {:?}", boot_start.elapsed());
+
+            // Background preload wrapper IDs for sync deduplication (non-blocking)
+            // DB fallback in handle_event ensures correctness if this completes after sync starts
+            let handle_for_wrapper = handle.clone();
+            tokio::spawn(async move {
+                let t = std::time::Instant::now();
+                match db::load_recent_wrapper_ids(&handle_for_wrapper, 30).await {
+                    Ok(wrapper_ids) => {
+                        let mut cache = WRAPPER_ID_CACHE.lock().await;
+                        cache.load(wrapper_ids);
+                        println!("[Boot] load_recent_wrapper_ids (background): {:?}", t.elapsed());
+                    }
+                    Err(e) => eprintln!("[Cache] Failed to load wrapper IDs: {}", e),
+                }
+            });
 
             // ALWAYS begin with an initial sync of at least the last 2 days
             let now = Timestamp::now();
@@ -371,16 +425,28 @@ pub async fn fetch_messages<R: Runtime>(
 
     let mut event_stream = if let Some(url) = &relay_url {
         // Fetch from specific relay
-        client
+        match client
             .stream_events_from(vec![url], filter, std::time::Duration::from_secs(30))
             .await
-            .unwrap()
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("[Sync] Single-relay stream failed: {}", e);
+                return;
+            }
+        }
     } else {
         // Fetch from all relays
-        client
+        match client
             .stream_events(filter, std::time::Duration::from_secs(60))
             .await
-            .unwrap()
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("[Sync] Stream failed (relays not connected?): {}", e);
+                return;
+            }
+        }
     };
 
     // Count total events fetched (for DeepRescan) and new messages added (for other modes)

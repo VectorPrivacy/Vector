@@ -22,6 +22,11 @@ const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
+const domLoginImportError = document.getElementById('login-import-error');
+
+const domLoginBackBar = document.getElementById('login-back-bar');
+const domLoginBackBtn = document.getElementById('login-back-btn');
+
 const domLoginInvite = document.getElementById('login-invite');
 const domInviteInput = document.getElementById('invite-input');
 const domInviteBtn = document.getElementById('invite-btn');
@@ -31,6 +36,9 @@ const domLoginWelcome = document.getElementById('login-welcome');
 const domLoginEncrypt = document.getElementById('login-encrypt');
 const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
 const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
+const domLoginEncryptPassword = document.getElementById('login-encrypt-password');
+const domLoginPasswordInput = document.getElementById('login-password-input');
+const domLoginEncryptTypeSelect = document.getElementById('login-encrypt-type-select');
 
 const domProfile = document.getElementById('profile');
 const domProfileBackBtn = document.getElementById('profile-back-btn');
@@ -50,6 +58,7 @@ const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
+const domProfileOptionShare = document.getElementById('profile-option-share');
 const domProfileId = document.getElementById('profile-id');
 
 const domGroupOverview = document.getElementById('group-overview');
@@ -128,7 +137,6 @@ const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
-const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
@@ -426,6 +434,13 @@ function showToast(message) {
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--toast-border-color, #161616);
+            box-shadow: 
+            0 0 4px rgba(0, 0, 0, 0.8),
+            0 0 12px rgba(0, 0, 0, 0.6),
+            0 0 30px rgba(0, 0, 0, 0.4);
             color: white;
             padding: 12px 24px;
             border-radius: 8px;
@@ -438,14 +453,33 @@ function showToast(message) {
         document.body.appendChild(toast);
     }
 
+    let backdrop = document.getElementById('toast-backdrop');
+    if (!backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'toast-backdrop';
+    backdrop.style.cssText = `
+        position:fixed;
+        top:0;
+        left:0;
+        width:100%;
+        height:100%;
+        background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
+        opacity:0;
+        z-index:9999;pointer-events:none;
+        transition:opacity 0.3s ease;
+    `;
+    document.body.appendChild(backdrop);
+    }
     toast.textContent = message;
     toast.style.opacity = '1';
+    backdrop.style.opacity = '1';
 
-    // Hide after 3 seconds
+    // Hide after 1 second
     clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => {
+        backdrop.style.opacity = '0';
         toast.style.opacity = '0';
-    }, 3000);
+    }, 1000);
 }
 
 /**
@@ -3977,14 +4011,16 @@ let chatOpenTimestamp = 0;
 /**
  * Synchronise all messages from the backend
  */
-async function init() {
-    // Check if account is selected
-    try {
-        await invoke("get_current_account");
-    } catch (e) {
-        console.log('[Init] No account selected, triggering fetch_messages');
-        await invoke("fetch_messages", { init: true });
-        return;
+async function init(skipAccountCheck = false) {
+    // Check if account is selected (skip during boot — we just logged in)
+    if (!skipAccountCheck) {
+        try {
+            await invoke("get_current_account");
+        } catch (e) {
+            console.log('[Init] No account selected, triggering fetch_messages');
+            await invoke("fetch_messages", { init: true });
+            return;
+        }
     }
 
     // Set up UI maintenance interval first (before any async calls that might fail)
@@ -4096,7 +4132,7 @@ async function acceptMLSInvite(welcomeEventId) {
         }
     } catch (e) {
         console.error('Failed to accept invite:', e);
-        popupConfirm('Error', 'Failed to join group: ' + e, true, '', 'vector_warning.svg');
+        popupConfirm('Error', 'Failed to join group: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
@@ -4215,12 +4251,12 @@ let lastChatlistStateHash = '';
 function generateChatlistStateHash() {
     // Build a simple array of state values (faster than creating objects)
     const states = [];
-    
+
     // Add invite IDs first
     for (const inv of arrMLSInvites) {
         states.push(inv.id || inv.welcome_event_id || inv.group_id);
     }
-    
+
     // Add chat states (including chat ID to capture order changes)
     for (const chat of arrChats) {
         const isGroup = chat.chat_type === 'MlsGroup';
@@ -4228,7 +4264,7 @@ function generateChatlistStateHash() {
         const cLastMsg = chat.messages[chat.messages.length - 1];
         const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
         const activeTypers = chat.active_typers || [];
-        
+
         // Push values directly (faster than creating object)
         // Include chat.id to ensure order changes are detected
         states.push(
@@ -4243,7 +4279,7 @@ function generateChatlistStateHash() {
             chat.muted
         );
     }
-    
+
     return JSON.stringify(states);
 }
 
@@ -4260,12 +4296,15 @@ function renderChatlist() {
     if (currentStateHash === lastChatlistStateHash) return;
     lastChatlistStateHash = currentStateHash;
 
+    // Cache the accent color once (getComputedStyle is expensive per-call)
+    const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+
     // Prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
-    
+
     // Render invites first (at the top of the chat list)
     for (const invite of arrMLSInvites) {
-        const divInvite = renderInviteItem(invite);
+        const divInvite = renderInviteItem(invite, primaryColor);
         fragment.appendChild(divInvite);
     }
 
@@ -4278,27 +4317,16 @@ function renderChatlist() {
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
 
-        const divContact = renderChat(chat);
+        const divContact = renderChat(chat, primaryColor);
         fragment.appendChild(divContact);
     }
 
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
     if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
 
-    // Nuke the existing list
-    while (domChatList.firstChild) {
-        domChatList.removeChild(domChatList.firstChild);
-    }
-    
-    // Append our new fragment
-    domChatList.appendChild(fragment);
+    // Replace the existing list in one native call
+    domChatList.replaceChildren(fragment);
 
-    // Add a fade-in
-    const divFade = document.createElement('div');
-    divFade.classList.add(`fadeout-bottom`);
-    divFade.style.bottom = `65px`;
-    domChatList.appendChild(divFade);
-    
     // Update the back button notification
     updateChatBackNotification();
 }
@@ -4307,7 +4335,7 @@ function renderChatlist() {
  * Render an MLS invite as a chat-like item
  * @param {MLSWelcome} invite - The invite we're rendering
  */
-function renderInviteItem(invite) {
+function renderInviteItem(invite, primaryColor) {
     const groupId = invite.group_id || invite.id || '';
     const groupName =
         invite.group_name ||
@@ -4322,7 +4350,7 @@ function renderInviteItem(invite) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
-    divInvite.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+    divInvite.style.borderColor = primaryColor;
 
     // Avatar container with group placeholder
     const divAvatarContainer = document.createElement('div');
@@ -4498,18 +4526,18 @@ function generateChatPreviewText(chat) {
  * Render a Chat Preview for the Chat List
  * @param {Chat} chat - The profile we're rendering
  */
-function renderChat(chat) {
+function renderChat(chat, primaryColor) {
     // For groups, we don't have a profile, for DMs we do
     const isGroup = chat.chat_type === 'MlsGroup';
     const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
-    
+
     // Collect the Unread Message count for 'Unread' emphasis and badging
     // Ensure muted chats OR muted profiles do not show unread glow
     const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
 
     // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
-    if (nUnread) divContact.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+    if (nUnread) divContact.style.borderColor = primaryColor;
     divContact.classList.add('chatlist-contact');
     divContact.id = `chatlist-${chat.id}`;
 
@@ -4578,7 +4606,7 @@ function renderChat(chat) {
     } else {
         h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
-        
+
         // Add bot icon if this is a bot profile
         if (profile?.bot) {
             const botIconContainer = document.createElement('span');
@@ -4619,7 +4647,7 @@ function renderChat(chat) {
     }
     // Apply 'Unread' final styling
     if (nUnread) {
-        pTimeAgo.style.color = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+        pTimeAgo.style.color = primaryColor;
     } else {
         // Add 'read' class for smaller font size when no unread messages
         pTimeAgo.classList.add('read');
@@ -4859,8 +4887,12 @@ async function sendFile(pubkey, replied_to, filepath) {
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
+    // Fire all listener registrations in parallel (each await listen() is an IPC round-trip)
+    const _p = [];
+    const _on = (event, handler) => _p.push(listen(event, handler));
+
     // Listen for MLS message events
-    await listen('mls_message_new', async (evt) => {
+    _on('mls_message_new', async (evt) => {
         const { group_id, message } = evt.payload;
         console.log('MLS message received for group:', group_id, 'pending:', message?.pending, 'attachments:', message?.attachments?.length);
         
@@ -4935,6 +4967,18 @@ async function setupRustListeners() {
             proceduralScrollState.totalMessageCount++;
         } else {
             console.log('Group chat not open, message added to background chat');
+            // Own message synced from another device — mark chat as read
+            // since we clearly saw the conversation before replying
+            if (message.mine) {
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                if (lastContactMsg) markAsRead(chat, lastContactMsg);
+            }
         }
         
         // Resort chat list order so recent groups bubble up (fallback to metadata)
@@ -4948,7 +4992,7 @@ async function setupRustListeners() {
     });
 
     // Listen for MLS invite received events (real-time)
-    await listen('mls_invite_received', async (evt) => {
+    _on('mls_invite_received', async (evt) => {
         console.log('MLS invite received in real-time, refreshing invites list');
         // Reload invites list to show the new invite
         await loadMLSInvites();
@@ -4957,7 +5001,7 @@ async function setupRustListeners() {
     });
 
     // Listen for MLS group metadata updates
-    await listen('mls_group_metadata', async (evt) => {
+    _on('mls_group_metadata', async (evt) => {
         try {
             const metadata = evt.payload?.metadata;
             const { chat, changed } = applyMlsGroupMetadata(metadata);
@@ -4981,14 +5025,14 @@ async function setupRustListeners() {
     });
 
     // Listen for MLS welcome accepted events
-    await listen('mls_welcome_accepted', async (evt) => {
+    _on('mls_welcome_accepted', async (evt) => {
         console.log('MLS welcome accepted, refreshing groups and invites');
         // Reload invites
         await loadMLSInvites();
     });
 
     // Listen for MLS group updates (member additions, removals, etc.)
-    await listen('mls_group_updated', async (evt) => {
+    _on('mls_group_updated', async (evt) => {
         try {
             const { group_id } = evt.payload || {};
             console.log('MLS group updated:', group_id);
@@ -5016,7 +5060,7 @@ async function setupRustListeners() {
     });
     
     // Listen for MLS group left events
-    await listen('mls_group_left', async (evt) => {
+    _on('mls_group_left', async (evt) => {
         try {
             const { group_id } = evt.payload || {};
             console.log('[MLS][Frontend] Received mls_group_left event for group:', group_id?.substring(0, 16));
@@ -5050,7 +5094,7 @@ async function setupRustListeners() {
     });
     
     // Listen for MLS initial sync completion after joining a group
-    await listen('mls_group_initial_sync', async (evt) => {
+    _on('mls_group_initial_sync', async (evt) => {
         try {
             const { group_id, processed, new: newCount } = evt.payload || {};
             console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
@@ -5070,7 +5114,7 @@ async function setupRustListeners() {
     });
 
     // Listen for system events (member joined/left, etc.)
-    await listen('system_event', async (evt) => {
+    _on('system_event', async (evt) => {
         try {
             const { conversation_id, event_id, event_type, member_pubkey, member_name } = evt.payload || {};
             console.log('[System Event] Received:', event_id, event_type);
@@ -5131,7 +5175,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Synchronisation Finish updates
-    await listen('sync_finished', async (_) => {
+    _on('sync_finished', async (_) => {
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
         
@@ -5147,13 +5191,13 @@ async function setupRustListeners() {
     });
 
     // Listen for Synchronisation Slice updates
-    await listen('sync_slice_finished', (_) => {
+    _on('sync_slice_finished', (_) => {
         // Continue synchronising until event `sync_finished` is emitted
         invoke("fetch_messages", { init: false });
     });
 
     // Listen for Synchronisation Progress updates
-    await listen('sync_progress', (evt) => {
+    _on('sync_progress', (evt) => {
         // Show and activate the sync line when syncing is in progress
         // Only add 'active' if it's not already active to avoid restarting the animation
         if (!fInit && !domSyncLine.classList.contains('active')) {
@@ -5164,7 +5208,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Upload Progress events
-    await listen('attachment_upload_progress', async (evt) => {
+    _on('attachment_upload_progress', async (evt) => {
         if (strOpenChat) {
             let divUpload = document.getElementById(evt.payload.id + '_file');
             if (divUpload) {
@@ -5175,7 +5219,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Download Progress events
-    await listen('attachment_download_progress', async (evt) => {
+    _on('attachment_download_progress', async (evt) => {
         // Update the in-memory attachment
         if (strOpenChat) {
             let divDownload = document.getElementById(evt.payload.id);
@@ -5228,7 +5272,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Download Results
-    await listen('attachment_download_result', async (evt) => {
+    _on('attachment_download_result', async (evt) => {
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
@@ -5273,7 +5317,7 @@ async function setupRustListeners() {
     });
 
     // Listen for profile updates
-    await listen('profile_update', (evt) => {
+    _on('profile_update', (evt) => {
         // Check if the frontend is already aware
         const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
         let avatarCacheChanged = false;
@@ -5323,7 +5367,7 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
-    await listen('profile_muted', (evt) => {
+    _on('profile_muted', (evt) => {
         // Update the chat's muted status
         const cChat = getDMChat(evt.payload.profile_id);
         if (cChat) {
@@ -5346,7 +5390,7 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
-    await listen('profile_nick_changed', (evt) => {
+    _on('profile_nick_changed', (evt) => {
         // Update the profile's nickname
         const cProfile = getProfile(evt.payload.profile_id);
         if (cProfile) {
@@ -5360,7 +5404,7 @@ async function setupRustListeners() {
     });
 
     // Listen for PIVX payment events
-    await listen('pivx_payment_received', (evt) => {
+    _on('pivx_payment_received', (evt) => {
         const { conversation_id, gift_code, amount_piv, address, message_id, sender, is_mine } = evt.payload;
 
         // Find the chat
@@ -5429,7 +5473,7 @@ async function setupRustListeners() {
     });
 
     // Listen for typing indicator updates (both DMs and Groups)
-    await listen('typing-update', (evt) => {
+    _on('typing-update', (evt) => {
         const { conversation_id, typers } = evt.payload;
 
         // Find the chat (could be DM or group)
@@ -5450,7 +5494,7 @@ async function setupRustListeners() {
     });
 
     // Listen for incoming DM messages
-    await listen('message_new', (evt) => {
+    _on('message_new', (evt) => {
         // Get the chat for this message (chat_id is the npub for DMs)
         let chat = getOrCreateDMChat(evt.payload.chat_id);
         
@@ -5514,6 +5558,17 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
+        } else if (newMessage.mine) {
+            // Own message synced from another device — mark chat as read
+            // since we clearly saw the conversation before replying
+            let lastContactMsg = null;
+            for (let i = chat.messages.length - 1; i >= 0; i--) {
+                if (!chat.messages[i].mine) {
+                    lastContactMsg = chat.messages[i];
+                    break;
+                }
+            }
+            if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
         // Render the Chat List (only when user is viewing it)
@@ -5524,7 +5579,7 @@ async function setupRustListeners() {
     });
 
     // Listen for existing message updates (works for both DMs and MLS groups)
-    await listen('message_update', (evt) => {
+    _on('message_update', (evt) => {
         // Find the message we're updating
         const cChat = getChat(evt.payload.chat_id);
         if (!cChat) return;
@@ -5594,7 +5649,7 @@ async function setupRustListeners() {
     });
 
     // Listen for attachment URL updates (for file uploads and reuse)
-    await listen('attachment_update', (evt) => {
+    _on('attachment_update', (evt) => {
         const { chat_id, message_id, attachment_id, url } = evt.payload;
         const cChat = getChat(chat_id);
         if (!cChat) return;
@@ -5619,7 +5674,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
-    await listen('whisper_download_progress', async (evt) => {
+    _on('whisper_download_progress', async (evt) => {
         // Update the progression UI
         const spanProgression = document.getElementById('voice-model-download-progression');
         if (spanProgression) spanProgression.textContent = `(${evt.payload.progress}%)`;
@@ -5627,13 +5682,13 @@ async function setupRustListeners() {
 
     // Listen for Windows-specific Overlay Icon update requests
     // Note: this API seems unavailable in Tauri's Rust backend, so we're using the JS API as a workaround
-    await listen('update_overlay_icon', async (evt) => {
+    _on('update_overlay_icon', async (evt) => {
         // Enable or Disable our notification badge Overlay Icon
         await getCurrentWindow().setOverlayIcon(evt.payload.enable ? "./icons/icon_badge_notification.png" : undefined);
     });
 
     // Listen for relay status changes
-    await listen('relay_status_change', (evt) => {
+    _on('relay_status_change', (evt) => {
         // Update the relay status in the network list
         const relayItem = document.querySelector(`[data-relay-url="${evt.payload.url}"]`);
         if (relayItem) {
@@ -5660,7 +5715,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Mini App realtime status updates (peer count changes)
-    await listen('miniapp_realtime_status', (evt) => {
+    _on('miniapp_realtime_status', (evt) => {
         const { topic, peer_count, is_active, has_pending_peers } = evt.payload;
         console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'pending:', has_pending_peers);
         
@@ -5675,6 +5730,8 @@ async function setupRustListeners() {
             }
         });
     });
+
+    await Promise.all(_p);
 
     // Note: Deep link listener is set up early in DOMContentLoaded, before login flow
     // This ensures deep links work even when the app is opened from a closed state
@@ -5960,7 +6017,7 @@ async function handleAddRelay() {
         closeAddRelayDialog();
         renderRelayList();
     } catch (err) {
-        popupConfirm('Failed to Add Relay', err.toString(), true);
+        popupConfirm('Failed to Add Relay', escapeHtml(err.toString()), true);
     }
 }
 
@@ -6033,7 +6090,7 @@ async function refreshRelayInfoDialog() {
             logs.forEach(log => {
                 const li = document.createElement('li');
                 const time = new Date(log.timestamp * 1000).toLocaleTimeString();
-                li.innerHTML = `<span class="relay-log-time">${time}</span><span class="relay-log-message ${log.level}">${log.message}</span>`;
+                li.innerHTML = `<span class="relay-log-time">${escapeHtml(time)}</span><span class="relay-log-message ${escapeHtml(log.level)}">${escapeHtml(log.message)}</span>`;
                 logsList.appendChild(li);
             });
         }
@@ -6239,17 +6296,17 @@ function copyRelayLogs() {
 
 /**
  * Login to the Nostr network
+ * @param {boolean} skipAnimations - Skip intro animations (for instant login without PIN)
  */
-async function login() {
+async function login(skipAnimations = false) {
     if (strPubkey) {
-        // Connect to Nostr
-        await invoke("connect");
-
-        // Setup our Rust Event listeners for efficient back<-->front sync
-        await setupRustListeners();
+        // Fire connect + all listener registrations in parallel (no sequential IPC waits)
+        console.time('[Boot] connect + listeners');
+        const _connectP = invoke("connect");
+        const _listenersP = setupRustListeners();
 
         // Setup unified progress operation event listener
-        await listen('progress_operation', (evt) => {
+        const _progressP = listen('progress_operation', (evt) => {
             const { type, current, total, message } = evt.payload;
             
             switch (type) {
@@ -6283,41 +6340,36 @@ async function login() {
 
 
         // Setup a Rust Listener for the backend's init finish
-        await listen('init_finished', async (evt) => {
+        const _initFinishedP = listen('init_finished', async (evt) => {
+            console.timeEnd('[Boot] login() total');
+            console.time('[Boot] init_finished handler');
             // The backend now sends both profiles (without messages) and chats (with messages)
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
 
-            await hydrateMLSGroupMetadata();
+            // Fire metadata hydration in background — completes after first render,
+            // then re-renders chatlist if any group metadata changed
+            console.time('[Boot] hydrateMLSGroupMetadata (bg)');
+            hydrateMLSGroupMetadata().then(() => console.timeEnd('[Boot] hydrateMLSGroupMetadata (bg)'));
 
-            // Fadeout the login and encryption UI
-            domLogin.classList.add('fadeout-anim');
-            domLogin.addEventListener('animationend', async () => {
-                domLogin.classList.remove('fadeout-anim');
+            // Helper to show the main UI after login
+            const showMainUI = async () => {
+                console.time('[Boot] showMainUI:dom');
                 domLoginInput.value = "";
                 domLogin.style.display = 'none';
                 domLoginEncrypt.style.display = 'none';
 
-                // Fade-in the navbar
+                // Show navbar and bookmarks
                 domNavbar.style.display = '';
-                domNavbar.classList.add('fadein-anim');
-                domNavbar.addEventListener('animationend', () => {
-                    domNavbar.classList.remove('fadein-anim');
+                domChatBookmarksBtn.style.display = 'flex';
 
-                    // Fade-in the bookmarks icon
-                    domChatBookmarksBtn.style.display = 'flex';
-                    domChatBookmarksBtn.classList.add('fadein-anim');
-                    domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
-                }, { once: true });
-
-                // Render our profile with an intro animation
+                // Render our profile
                 const cProfile = arrProfiles.find(p => p.mine);
                 renderCurrentProfile(cProfile);
-                domAccount.style.display = ``;
-                domAccount.classList.add('fadein-anim');
-                domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+                domAccount.style.display = '';
+                console.timeEnd('[Boot] showMainUI:dom');
 
-                // Refresh our own profile from the network to catch any changes made on other clients
+                // Refresh our own profile from the network
                 if (cProfile?.id) {
                     invoke("queue_profile_sync", {
                         npub: cProfile.id,
@@ -6329,64 +6381,128 @@ async function login() {
                 // Finished boot!
                 fInit = false;
 
-                // Render the chatlist with an intro animation
-                domChatList.classList.add('intro-anim');
+                // Render the chatlist
+                console.time('[Boot] showMainUI:renderChatlist');
                 renderChatlist();
-                domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+                console.timeEnd('[Boot] showMainUI:renderChatlist');
 
-                // Show and animate the New Chat buttons
+                // Show the New Chat buttons
                 if (domChatNewDM) {
                     domChatNewDM.style.display = '';
-                    domChatNewDM.classList.add('intro-anim');
                     domChatNewDM.onclick = openNewChat;
-                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
                 }
                 if (domChatNewGroup) {
                     domChatNewGroup.style.display = '';
-                    domChatNewGroup.classList.add('intro-anim');
                     domChatNewGroup.onclick = openCreateGroup;
-                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
                 }
 
-                // Adjust the Chat List sizes to prevent mismatches
-                adjustSize();
+                // Adjust the Chat List sizes (deferred — layout reflows don't block first paint)
+                requestAnimationFrame(() => adjustSize());
+            };
 
-                // Setup a subscription for new websocket messages
-                invoke("notifs");
+            if (skipAnimations) {
+                console.time('[Boot] showMainUI');
+                await showMainUI();
+                console.timeEnd('[Boot] showMainUI');
+                console.timeEnd('[Boot] init_finished handler');
+                console.log('[Boot] UI visible - instant login complete');
 
-                // Setup our Unread Counters
-                await invoke("update_unread_counter");
+                // Apply the same intro animations as the encryption flow
+                domChatBookmarksBtn.style.opacity = '0';
+                domNavbar.classList.add('fadein-anim');
+                domNavbar.addEventListener('animationend', () => {
+                    domNavbar.classList.remove('fadein-anim');
+                    domChatBookmarksBtn.style.opacity = '';
+                    domChatBookmarksBtn.classList.add('fadein-anim');
+                    domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
+                }, { once: true });
 
-                // Monitor relay connections
-                invoke("monitor_relay_connections");
+                domAccount.classList.add('fadein-anim');
+                domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
 
-                // Render the initial relay list
-                renderRelayList();
-                
-                // Initialize the updater
-                initializeUpdater();
-                
-                // Execute any pending deep link action that was received before login
-                // The Rust backend stores deep links received before the frontend was ready
-                setTimeout(async () => {
-                    try {
-                        const pendingAction = await invoke('get_pending_deep_link');
-                        if (pendingAction) {
-                            console.log('Executing pending deep link action:', pendingAction);
-                            await executeDeepLinkAction(pendingAction);
-                        }
-                    } catch (e) {
-                        console.error('Failed to check for pending deep link:', e);
+                domChatList.classList.add('intro-anim');
+                domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+
+                if (domChatNewDM) {
+                    domChatNewDM.classList.add('intro-anim');
+                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
+                }
+                if (domChatNewGroup) {
+                    domChatNewGroup.classList.add('intro-anim');
+                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
+                }
+            } else {
+                // Fadeout the login and encryption UI with animation
+                domLogin.classList.add('fadeout-anim');
+                domLogin.addEventListener('animationend', async () => {
+                    domLogin.classList.remove('fadeout-anim');
+                    await showMainUI();
+
+                    // Add fade-in animations
+                    domChatBookmarksBtn.style.opacity = '0';
+                    domNavbar.classList.add('fadein-anim');
+                    domNavbar.addEventListener('animationend', () => {
+                        domNavbar.classList.remove('fadein-anim');
+                        domChatBookmarksBtn.style.opacity = '';
+                        domChatBookmarksBtn.classList.add('fadein-anim');
+                        domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
+                    }, { once: true });
+
+                    domAccount.classList.add('fadein-anim');
+                    domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+
+                    domChatList.classList.add('intro-anim');
+                    domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+
+                    if (domChatNewDM) {
+                        domChatNewDM.classList.add('intro-anim');
+                        domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
                     }
-                }, 1000);
-            }, { once: true });
+                    if (domChatNewGroup) {
+                        domChatNewGroup.classList.add('intro-anim');
+                        domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
+                    }
+                }, { once: true });
+            }
+
+            // Setup a subscription for new websocket messages (runs in both animation modes)
+            invoke("notifs");
+
+            // Setup our Unread Counters
+            await invoke("update_unread_counter");
+
+            // Monitor relay connections
+            invoke("monitor_relay_connections");
+
+            // Render the initial relay list
+            renderRelayList();
+
+            // Initialize the updater
+            initializeUpdater();
+
+            // Execute any pending deep link action that was received before login
+            setTimeout(async () => {
+                try {
+                    const pendingAction = await invoke('get_pending_deep_link');
+                    if (pendingAction) {
+                        console.log('Executing pending deep link action:', pendingAction);
+                        await executeDeepLinkAction(pendingAction);
+                    }
+                } catch (e) {
+                    console.error('Failed to check for pending deep link:', e);
+                }
+            }, 1000);
         });
+
+        // Wait for connect + all listener registrations to complete
+        await Promise.all([_connectP, _listenersP, _progressP, _initFinishedP]);
+        console.timeEnd('[Boot] connect + listeners');
 
         // Load and Decrypt our database; fetching the full chat state from disk for immediate bootup
         domLoginEncryptTitle.textContent = `Decrypting Database...`;
 
         // Note: this also begins the Rust backend's iterative sync, thus, init should ONLY be called once, to initiate it
-        init();
+        init(true);
     }
 }
 
@@ -6415,9 +6531,6 @@ function renderCurrentProfile(cProfile) {
     domAccountStatus.onclick = askForStatus;
     twemojify(domAccountStatus);
 
-    /* Start Chat Tab */
-    // Render our Share npub
-    domShareNpub.textContent = strPubkey;
 }
 
 /**
@@ -6552,13 +6665,15 @@ function renderProfileTab(cProfile) {
     domProfileId.textContent = cProfile.id;
 
     // Add npub copy functionality
-    document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
+    document.getElementById('profile-npub-copy').onclick = (e) => {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
             // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
+            navigator.clipboard.writeText(npub).then(() => {
+                showToast('Copied!');
+            }).catch(() => {
+                showToast('Failed to copy');
+                const copyBtn = e.target.closest('#profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
                     setTimeout(() => {
@@ -6567,7 +6682,7 @@ function renderProfileTab(cProfile) {
                 }
             });
         }
-    });
+    };
 
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
@@ -6625,6 +6740,23 @@ function renderProfileTab(cProfile) {
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         }
 
+        // Setup Share option
+        domProfileOptionShare.onclick = () => {
+            const npub = document.getElementById('profile-npub')?.textContent;
+            if (npub) {
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                navigator.clipboard.writeText(profileUrl).then(() => {
+                    // Brief visual feedback
+                    const icon = domProfileOptionShare.querySelector('span');
+                    showToast('Profile Link Copied');
+                    icon.classList.replace('icon-share', 'icon-check');
+                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+                    }).catch(() => {
+                    showToast('Failed to copy profile link');
+                });
+            }
+        };
+
         // Hide edit buttons
         document.querySelector('.profile-avatar-edit').style.display = 'none';
         document.querySelector('.profile-banner-edit').style.display = 'none';
@@ -6675,9 +6807,8 @@ function renderProfileTab(cProfile) {
 
 /**
  * Display the Invite code input flow.
- * @param {string} pkey - A private key to encrypt.
  */
-function openInviteFlow(pkey) {
+function openInviteFlow() {
     domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
     domLoginInvite.style.display = '';
@@ -6698,7 +6829,7 @@ function openInviteFlow(pkey) {
             
             // Hide invite screen and show welcome screen
             domLoginInvite.style.display = 'none';
-            showWelcomeScreen(pkey);
+            showWelcomeScreen();
         } catch (e) {
             // Display the specific error from the backend
             const errorMessage = e.toString() || 'Please check your invite code and try again.';
@@ -6725,210 +6856,342 @@ function openInviteFlow(pkey) {
 
 /**
  * Display the welcome screen after successful invite code acceptance
- * @param {string} pkey - A private key to encrypt after the welcome screen
  */
-function showWelcomeScreen(pkey) {
+function showWelcomeScreen() {
     // Hide the logo and subtext
     const domLogo = document.querySelector('.login-logo');
     const domSubtext = document.querySelector('.login-subtext');
     domLogo.style.display = 'none';
     domSubtext.style.display = 'none';
-    
+
     // Show the welcome screen
     domLoginWelcome.style.display = '';
-    
+
     // After 5 seconds, transition to the encryption flow
     setTimeout(() => {
         domLoginWelcome.style.display = 'none';
         // Restore the logo and subtext
         domLogo.style.display = '';
         domSubtext.style.display = '';
-        openEncryptionFlow(pkey, false);
+        openEncryptionFlow(false);
     }, 5000);
 }
 
 /**
  * Display the Encryption/Decryption flow.
- * @param {string} pkey - A private key to encrypt.
- * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one.
+ * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting a new one.
+ * @param {string} securityType - "pin" or "password" (determines which UI to show)
  */
-function openEncryptionFlow(pkey, fUnlock = false) {
+function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
     domLoginInvite.style.display = 'none';
     domLoginEncrypt.style.display = '';
 
-    let strPinLast = []; // Stores the first entered PIN for confirmation
-    let strPinCurrent = Array(6).fill('-'); // Current PIN being entered, '-' represents an empty digit
+    // Hide all input variants initially
+    domLoginEncryptPinRow.style.display = 'none';
+    domLoginEncryptPassword.style.display = 'none';
+    domLoginEncryptTypeSelect.style.display = 'none';
 
-    // Reusable Message Constants
-    const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
-    const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
-    const RE_ENTER_PROMPT = `Re-enter your Pin`;
-    const DECRYPTING_MSG = `Decrypting your keys...`;
-    const ENCRYPTING_MSG = `Encrypting your keys...`;
-    const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
-    const MISMATCH_PIN_MSG = `Pin doesn't match, re-try`;
+    // Track chosen security type
+    let chosenSecurityType = securityType;
 
-    const arrPinDOMs = document.querySelectorAll('.pin-row input');
-    const pinContainer = arrPinDOMs[0].closest('.pin-row');
+    // AbortControllers for listener cleanup (avoids cloning DOM — mobile WebViews
+    // don't reliably handle cloned inputs)
+    let pinAbortController = null;
+    let passwordAbortController = null;
 
-    /** Updates the status message displayed to the user. */
-    function updateStatusMessage(message, isProcessing = false) {
-        domLoginEncryptTitle.textContent = message;
-        if (isProcessing) {
+    // If unlocking, go straight to the appropriate input
+    if (fUnlock) {
+        startCredentialEntry(chosenSecurityType);
+    } else {
+        // New account setup — show security type selection first
+        showSecurityTypeSelector();
+    }
+
+    /** Show the security type selection phase */
+    function showSecurityTypeSelector() {
+        // Hide lock icon header — the type selector uses the login logo above instead
+        document.querySelector('.login-encrypt-header').style.display = 'none';
+        domLoginEncryptPinRow.style.display = 'none';
+        domLoginEncryptPassword.style.display = 'none';
+        domLoginEncryptTypeSelect.style.display = '';
+
+        const btnPin = document.getElementById('security-type-pin');
+        const btnPassword = document.getElementById('security-type-password');
+        const btnSkip = document.getElementById('security-type-skip');
+
+        btnPin.onclick = () => {
+            chosenSecurityType = 'pin';
+            domLoginEncryptTypeSelect.style.display = 'none';
+            startCredentialEntry('pin');
+        };
+
+        btnPassword.onclick = () => {
+            chosenSecurityType = 'password';
+            domLoginEncryptTypeSelect.style.display = 'none';
+            startCredentialEntry('password');
+        };
+
+        btnSkip.onclick = async () => {
+            // Skip encryption — backend stores the key in plaintext (key never crosses IPC)
+            domLoginEncryptTypeSelect.style.display = 'none';
+            document.querySelector('.login-encrypt-header').style.display = '';
+            document.querySelector('.login-lock-icon').style.display = 'none';
+            domLoginEncryptTitle.textContent = 'Setting up your account...';
             domLoginEncryptTitle.classList.add('startup-subtext-gradient');
-            domLoginEncryptPinRow.style.display = 'none'; // Hide PIN inputs during processing
+            await invoke('skip_encryption');
+            login();
+        };
+    }
+
+    /** Start the credential entry phase for the chosen type */
+    function startCredentialEntry(type) {
+        // Re-show lock icon header (hidden during type selector phase)
+        document.querySelector('.login-encrypt-header').style.display = '';
+        if (type === 'password') {
+            startPasswordFlow();
         } else {
-            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
-            domLoginEncryptPinRow.style.display = ''; // Ensure PIN inputs are visible
+            startPinFlow();
         }
     }
 
-    /** Resets the PIN input fields and optionally reverts the title from an error state. */
-    function resetPinDisplay(focusFirst = true, revertTitleFromErrorState = true) {
-        strPinCurrent = Array(6).fill('-');
-        arrPinDOMs.forEach(input => input.value = '');
+    // ========================================================================
+    // PIN Flow (existing 6-digit input logic)
+    // ========================================================================
+    function startPinFlow() {
+        // Abort previous listeners if startPinFlow is called again
+        if (pinAbortController) pinAbortController.abort();
+        pinAbortController = new AbortController();
+        const signal = pinAbortController.signal;
 
-        if (revertTitleFromErrorState) {
-            const currentTitle = domLoginEncryptTitle.textContent;
-            // If an error message is shown, change it back to the appropriate prompt
-            if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
-                const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-                updateStatusMessage(newTitle);
+        let strPinLast = [];
+        let strPinCurrent = Array(6).fill('-');
+
+        const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
+        const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
+        const RE_ENTER_PROMPT = `Re-enter your Pin`;
+        const DECRYPTING_MSG = `Decrypting your keys...`;
+        const ENCRYPTING_MSG = `Encrypting your keys...`;
+        const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
+        const MISMATCH_PIN_MSG = `Pin doesn't match, re-try`;
+
+        // Always query fresh from the live DOM
+        const pinRow = document.getElementById('login-encrypt-pins');
+        const arrPinDOMs = pinRow.querySelectorAll('input');
+
+        function updateStatusMessage(message, isProcessing = false) {
+            domLoginEncryptTitle.textContent = message;
+            if (isProcessing) {
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                pinRow.style.display = 'none';
+            } else {
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                pinRow.style.display = '';
+            }
+            domLoginEncryptPassword.style.display = 'none';
+        }
+
+        function resetPinDisplay(focusFirst = true, revertTitleFromErrorState = true) {
+            strPinCurrent = Array(6).fill('-');
+            arrPinDOMs.forEach(input => input.value = '');
+            if (revertTitleFromErrorState) {
+                const currentTitle = domLoginEncryptTitle.textContent;
+                if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
+                    const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+                    updateStatusMessage(newTitle);
+                }
+            }
+            if (focusFirst && arrPinDOMs.length > 0) {
+                arrPinDOMs[0].focus();
             }
         }
-        if (focusFirst && arrPinDOMs.length > 0) {
-            arrPinDOMs[0].focus();
+
+        let pinProcessing = false;
+
+        async function handleFullPinEntered() {
+            if (pinProcessing) return;
+            pinProcessing = true;
+            const currentPinString = strPinCurrent.join('');
+
+            if (strPinLast.length === 0) {
+                if (fUnlock) {
+                    updateStatusMessage(DECRYPTING_MSG, true);
+                    try {
+                        // Decrypt and login entirely in backend (key never crosses IPC)
+                        const npub = await invoke("login_from_stored_key", { password: currentPinString });
+                        strPubkey = npub;
+                        login();
+                    } catch (e) {
+                        updateStatusMessage(INCORRECT_PIN_MSG);
+                        resetPinDisplay(true, false);
+                        pinProcessing = false;
+                    }
+                } else {
+                    strPinLast = [...strPinCurrent];
+                    updateStatusMessage(RE_ENTER_PROMPT);
+                    resetPinDisplay(true, false);
+                    pinProcessing = false;
+                }
+            } else {
+                const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
+                if (isMatching) {
+                    updateStatusMessage(ENCRYPTING_MSG, true);
+                    // Encrypt and store key entirely in backend (key never crosses IPC)
+                    await invoke('setup_encryption', { password: strPinLast.join(''), securityType: chosenSecurityType });
+                    login();
+                } else {
+                    updateStatusMessage(MISMATCH_PIN_MSG);
+                    strPinLast = [];
+                    resetPinDisplay(true, true);
+                    pinProcessing = false;
+                }
+            }
         }
+
+        // Attach listeners directly to each original input with AbortController signal
+        arrPinDOMs.forEach((input, nIndex) => {
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Backspace') {
+                    event.preventDefault();
+                    const currentTitle = domLoginEncryptTitle.textContent;
+                    if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
+                        const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+                        updateStatusMessage(newTitle);
+                    }
+                    input.value = '';
+                    strPinCurrent[nIndex] = '-';
+                    if (nIndex > 0) arrPinDOMs[nIndex - 1].focus();
+                } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
+                    event.preventDefault();
+                }
+            }, { signal });
+
+            input.addEventListener('input', async () => {
+                let sanitizedValue = input.value.replace(/[^0-9]/g, '');
+                if (sanitizedValue.length > 1) sanitizedValue = sanitizedValue.charAt(0);
+                input.value = sanitizedValue;
+
+                if (sanitizedValue) {
+                    strPinCurrent[nIndex] = sanitizedValue;
+                    if (nIndex + 1 < arrPinDOMs.length) arrPinDOMs[nIndex + 1].focus();
+                } else {
+                    strPinCurrent[nIndex] = '-';
+                }
+
+                if (!strPinCurrent.includes('-')) {
+                    await handleFullPinEntered();
+                }
+            }, { signal });
+
+            input.value = '';
+        });
+
+        updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+        if (arrPinDOMs.length > 0) arrPinDOMs[0].focus();
     }
 
-    /** Focuses the PIN input at the specified index. */
-    function focusPinInput(index) {
-        if (index >= 0 && index < arrPinDOMs.length) {
-            arrPinDOMs[index].focus();
-        } else if (index >= arrPinDOMs.length && arrPinDOMs.length > 0) { // Wrap to first on last input
-            arrPinDOMs[0].focus(); // Reached end, focus first (or handle submission if all filled)
+    // ========================================================================
+    // Password Flow (text input)
+    // ========================================================================
+    function startPasswordFlow() {
+        let lastPassword = '';
+        let passwordProcessing = false;
+
+        const DECRYPTION_PROMPT = `Enter your Password`;
+        const INITIAL_ENCRYPTION_PROMPT = `Choose a Password`;
+        const RE_ENTER_PROMPT = `Re-enter your Password`;
+        const DECRYPTING_MSG = `Decrypting your keys...`;
+        const ENCRYPTING_MSG = `Encrypting your keys...`;
+        const INCORRECT_MSG = `Incorrect password, try again`;
+        const MISMATCH_MSG = `Passwords don't match, re-try`;
+        const TOO_SHORT_MSG = `Password must be at least 4 characters`;
+
+        function updateStatusMessage(message, isProcessing = false) {
+            domLoginEncryptTitle.textContent = message;
+            if (isProcessing) {
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                domLoginEncryptPassword.style.display = 'none';
+            } else {
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                domLoginEncryptPassword.style.display = '';
+            }
+            domLoginEncryptPinRow.style.display = 'none';
         }
-        // If index < 0 (e.g., backspace from the first input), focus remains on the current (first) input.
-    }
 
-    /** Flag to prevent multiple PIN submissions */
-    let pinProcessing = false;
+        updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
 
-    /** Handles the logic once all PIN digits have been entered. */
-    async function handleFullPinEntered() {
-        // Prevent multiple submissions
-        if (pinProcessing) {
-            return;
-        }
-        pinProcessing = true;
-        
-        const currentPinString = strPinCurrent.join('');
+        // Abort previous password listeners if startPasswordFlow is called again
+        if (passwordAbortController) passwordAbortController.abort();
+        passwordAbortController = new AbortController();
+        const signal = passwordAbortController.signal;
 
-        if (strPinLast.length === 0) { // Initial PIN entry (for decryption or first step of new encryption)
+        const newInput = document.getElementById('login-password-input');
+        newInput.value = '';
+        newInput.focus();
+
+        // Login button
+        const loginBtn = document.getElementById('login-password-btn');
+
+        async function handlePasswordSubmit() {
+            if (passwordProcessing) return;
+
+            const password = newInput.value;
+
             if (fUnlock) {
+                // Unlock flow — single password entry
+                if (!password) return;
+                passwordProcessing = true;
                 updateStatusMessage(DECRYPTING_MSG, true);
                 try {
-                    const decryptedPkey = await loadAndDecryptPrivateKey(currentPinString);
-                    const { public: pubKey /*, _private: privKey */ } = await invoke("login", { importKey: decryptedPkey });
-                    strPubkey = pubKey; // Store public key
-                    login(); // Proceed to login
+                    // Decrypt and login entirely in backend (key never crosses IPC)
+                    const npub = await invoke("login_from_stored_key", { password });
+                    strPubkey = npub;
+                    login();
                 } catch (e) {
-                    updateStatusMessage(INCORRECT_PIN_MSG);
-                    resetPinDisplay(true, false); // Keep error message, reset input fields
-                    pinProcessing = false; // Reset flag on error to allow retry
+                    updateStatusMessage(INCORRECT_MSG);
+                    newInput.value = '';
+                    newInput.focus();
+                    passwordProcessing = false;
                 }
-            } else { // First PIN entry for new encryption
-                strPinLast = [...strPinCurrent]; // Store the entered PIN
+            } else if (!lastPassword) {
+                // First entry — set password
+                if (password.length < 4) {
+                    updateStatusMessage(TOO_SHORT_MSG);
+                    return;
+                }
+                lastPassword = password;
                 updateStatusMessage(RE_ENTER_PROMPT);
-                resetPinDisplay(true, false); // Keep "Re-enter" message, reset input fields
-                pinProcessing = false; // Reset flag to allow second PIN entry
-            }
-        } else { // Second PIN entry (confirmation for new encryption)
-            const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
-            if (isMatching) {
-                updateStatusMessage(ENCRYPTING_MSG, true);
-                await saveAndEncryptPrivateKey(pkey, strPinLast.join(''));
-                login(); // Proceed to login
+                newInput.value = '';
+                newInput.focus();
             } else {
-                updateStatusMessage(MISMATCH_PIN_MSG);
-                strPinLast = []; // Clear the stored first PIN, requiring user to start over
-                resetPinDisplay(true, true); // Reset inputs and revert title from error to the initial prompt
-                pinProcessing = false; // Reset flag on mismatch to allow retry
+                // Confirmation entry
+                if (password === lastPassword) {
+                    passwordProcessing = true;
+                    updateStatusMessage(ENCRYPTING_MSG, true);
+                    // Encrypt and store key entirely in backend (key never crosses IPC)
+                    await invoke('setup_encryption', { password: lastPassword, securityType: chosenSecurityType });
+                    login();
+                } else {
+                    updateStatusMessage(MISMATCH_MSG);
+                    lastPassword = '';
+                    newInput.value = '';
+                    newInput.focus();
+                }
             }
         }
-    }
 
-    // --- Event Handlers (Delegated to pinContainer) ---
-
-    /** Handles keydown events, primarily for Backspace and preventing non-numeric input. */
-    function handleKeyDown(event) {
-        const targetInput = event.target;
-        // Ensure the event target is one of our designated PIN input fields
-        if (!Array.from(arrPinDOMs).includes(targetInput)) {
-            return;
-        }
-
-        const nIndex = Array.from(arrPinDOMs).indexOf(targetInput);
-
-        if (event.key === 'Backspace') {
-            event.preventDefault(); // Prevent default browser backspace behavior (e.g., navigation)
-
-            // If an error message is currently displayed, revert it to the relevant prompt for clarity
-            const currentTitle = domLoginEncryptTitle.textContent;
-            if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
-                const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-                updateStatusMessage(newTitle);
+        newInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                handlePasswordSubmit();
             }
+        }, { signal });
 
-            targetInput.value = ''; // Clear the input field's value
-            strPinCurrent[nIndex] = '-'; // Update the current PIN state
-            if (nIndex > 0) {
-                focusPinInput(nIndex - 1); // Move focus to the previous input field
-            }
-        } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
-            // Prevent single character non-numeric keys (allows Tab, Shift, Ctrl, Meta, etc.)
-            event.preventDefault();
-        }
+        if (loginBtn) loginBtn.addEventListener('click', handlePasswordSubmit, { signal });
+
+        newInput.focus();
     }
-
-    /** Handles input events for digit entry, sanitization, and moving focus forward. */
-    async function handleInput(event) {
-        const targetInput = event.target;
-        if (!Array.from(arrPinDOMs).includes(targetInput)) {
-            return;
-        }
-
-        const nIndex = Array.from(arrPinDOMs).indexOf(targetInput);
-        let sanitizedValue = targetInput.value.replace(/[^0-9]/g, ''); // Keep only digits
-
-        if (sanitizedValue.length > 1) { // If multiple digits were pasted, use only the first
-            sanitizedValue = sanitizedValue.charAt(0);
-        }
-        targetInput.value = sanitizedValue; // Update the input field with the sanitized value
-
-        if (sanitizedValue) { // If there's a digit
-            strPinCurrent[nIndex] = sanitizedValue;
-            focusPinInput(nIndex + 1); // Move focus to the next input field or wrap around
-        } else {
-            // If input became empty (e.g., via 'Delete' key or invalid paste), update state
-            strPinCurrent[nIndex] = '-';
-        }
-
-        // Check if all PIN digits have been entered
-        if (!strPinCurrent.includes('-')) {
-            await handleFullPinEntered();
-        }
-    }
-
-    // --- Initial Setup ---
-    updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-    resetPinDisplay(true, false); // Ensure inputs are clear, set focus, keep initial message
-
-    // Attach the event listeners to the common parent container
-    pinContainer.addEventListener('keydown', handleKeyDown);
-    pinContainer.addEventListener('input', handleInput);
 }
 
 
@@ -9092,12 +9355,21 @@ async function openChat(contact) {
     
     updateChat(chat, initialMessages, profile, true);
 
-    // If the opened chat has messages, mark them as read (last message)
-    if (initialMessages) {
-        const lastMsg = initialMessages[initialMessages.length - 1];
-        markAsRead(chat, lastMsg);
+    // Mark as read on open (needed for Windows where is_focused may not work)
+    // Only mark the last contact message, not our own messages
+    if (initialMessages?.length) {
+        let lastContactMsg = null;
+        for (let i = initialMessages.length - 1; i >= 0; i--) {
+            if (!initialMessages[i].mine) {
+                lastContactMsg = initialMessages[i];
+                break;
+            }
+        }
+        if (lastContactMsg) {
+            markAsRead(chat, lastContactMsg);
+        }
     }
-    
+
     // Update the back button notification dot
     updateChatBackNotification();
 
@@ -9163,12 +9435,21 @@ async function closeChat() {
         domChild.remove();
     }
 
-    // If the chat had any messages, mark them as read before leaving
+    // If the chat had any messages, mark the last contact message as read before leaving
     if (strOpenChat) {
         const closedChat = arrChats.find(c => c.id === strOpenChat);
         if (closedChat?.messages?.length) {
-            const lastMsg = closedChat.messages[closedChat.messages.length - 1];
-            markAsRead(closedChat, lastMsg);
+            // Find the last non-mine message (same logic as updateChat)
+            let lastContactMsg = null;
+            for (let i = closedChat.messages.length - 1; i >= 0; i--) {
+                if (!closedChat.messages[i].mine) {
+                    lastContactMsg = closedChat.messages[i];
+                    break;
+                }
+            }
+            if (lastContactMsg) {
+                markAsRead(closedChat, lastContactMsg);
+            }
         }
     }
 
@@ -10211,6 +10492,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Show the main window now that content is ready (prevents white flash on startup)
     // The window starts hidden via tauri.conf.json and Rust setup hides it explicitly
+    // The WKWebView background is set to dark natively in lib.rs so no delay is needed
     // Only needed on desktop - mobile doesn't have this issue
     if (!platformFeatures.is_mobile) {
         try {
@@ -10291,10 +10573,35 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     }
 
-    // If a local account exists, boot up the decryption UI (skip if hot-reloaded)
-    if (!fDebugHotReloaded && await hasAccount()) {
-        // Account is available, login screen!
-        openEncryptionFlow(null, true);
+    // Single IPC call: account existence + encryption status
+    // (auto_select_account already ran at Tauri startup, so this is just a static read + 1 DB query)
+    if (!fDebugHotReloaded) {
+        console.time('[Boot] getBootStatus');
+        const { account_exists, enabled, security_type } = await invoke('get_encryption_and_key');
+        console.timeEnd('[Boot] getBootStatus');
+        if (account_exists) {
+            if (enabled) {
+                // Encryption enabled - show PIN or password screen for decryption
+                openEncryptionFlow(true, security_type || 'pin');
+            } else {
+                // Encryption disabled - login directly from stored key (key never crosses IPC)
+                domLogin.style.display = 'none';
+                try {
+                    console.time('[Boot] login_from_stored_key');
+                    const npub = await invoke("login_from_stored_key", { password: null });
+                    console.timeEnd('[Boot] login_from_stored_key');
+
+                    strPubkey = npub;
+                    console.time('[Boot] login() total');
+                    login(true); // skipAnimations = true
+                } catch (e) {
+                    console.error('Direct login failed:', e);
+                    // Fallback to PIN screen in case of error
+                    domLogin.style.display = '';
+                    openEncryptionFlow(true);
+                }
+            }
+        }
     }
 
     // Hook up our static buttons
@@ -10304,14 +10611,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     domSettingsBtn.onclick = openSettings;
     domLoginAccountCreationBtn.onclick = async () => {
         try {
-            const { public: pubKey, private: privKey } = await invoke("create_account");
+            const { public: pubKey } = await invoke("create_account");
             strPubkey = pubKey;
-            
+
             // Connect to Nostr network
             await invoke("connect");
-            
-            // Skip invite flow - go directly to encryption
-            openEncryptionFlow(privKey, false);
+
+            // Skip invite flow - go directly to encryption (key stays backend-only)
+            openEncryptionFlow(false);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -10320,18 +10627,28 @@ window.addEventListener("DOMContentLoaded", async () => {
     domLoginAccountBtn.onclick = () => {
         domLoginImport.style.display = '';
         domLoginStart.style.display = 'none';
+        domLoginBackBar.style.display = '';
+        document.getElementById('login-form').classList.add('has-back-bar');
+    };
+    domLoginBackBtn.onclick = () => {
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginBackBar.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginInput.value = '';
+        document.getElementById('login-form').classList.remove('has-back-bar');
     };
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
-            const { public: pubKey, private: privKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            const { public: pubKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
             strPubkey = pubKey;
 
             // Connect to Nostr
             await invoke("connect");
 
-            // Skip invite flow - go directly to encryption
-            openEncryptionFlow(privKey);
+            // Skip invite flow - go directly to encryption (key stays backend-only)
+            openEncryptionFlow(false);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -10368,6 +10685,16 @@ window.addEventListener("DOMContentLoaded", async () => {
             domChatNewStartBtn.click();
         }
     };
+    domChatNewInput.addEventListener('input', function() {
+        domChatNewStartBtn.style.display = this.value.length > 0 ? '' : 'none';
+    });
+
+    // Tooltip for help icon
+    document.querySelector('.chat-new-help-link').addEventListener('mouseenter', function() {
+    showGlobalTooltip('Visit the Vector Privacy Docs', this);
+    });
+    document.querySelector('.chat-new-help-link').addEventListener('mouseleave', hideGlobalTooltip);
+
     domChatMessageInputCancel.onclick = () => {
         // Cancel edit mode if active, otherwise cancel reply
         if (strCurrentEditMessageId) {
@@ -11052,24 +11379,6 @@ domChatMessageInput.oninput = async () => {
             popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
         };
     }
-
-    // Add npub copy functionality for chat-new section
-    document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
-        const npub = document.getElementById('share-npub')?.textContent;
-        if (npub) {
-            // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
-                if (copyBtn) {
-                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                    setTimeout(() => {
-                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-                    }, 2000);
-                }
-            });
-        }
-    });
 });
 
 // Listen for app-wide click interations

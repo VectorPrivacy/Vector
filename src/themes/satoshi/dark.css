@@ -6,6 +6,7 @@
   --icon-color-primary: #F7931A;
   --voice-progress-secondary: #F7931A40;
   --reply-highlight-border: #F9AA4B;
+  --toast-border-color: #F7931A;
 }
 
 .sync-line {
@@ -105,7 +106,7 @@
 input,
 textarea,
 button {
-  background-color: #F9AA4B99;
+  background-color: #161616;
 }
 
 .corner-float {

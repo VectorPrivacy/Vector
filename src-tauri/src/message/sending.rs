@@ -16,7 +16,7 @@ use ::image::{ImageBuffer, Rgba};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
-use crate::db::{self, save_chat};
+use crate::db;
 use crate::mls::MlsService;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use crate::util::calculate_file_hash;
@@ -140,9 +140,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
         .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
 
     // Upload the encrypted data to Blossom
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await
-        .map_err(|e| format!("Failed to get signer: {}", e))?;
+    let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
     let servers = crate::get_blossom_servers();
 
     let url = crate::blossom::upload_blob_with_progress_and_failover(
@@ -214,8 +212,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
     let pending_id = Arc::new(String::from("pending-") + &current_time.as_nanos().to_string());
     // Grab our pubkey first (needed for npub in group chats)
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     let msg = Message {
         id: pending_id.as_ref().clone(),
@@ -683,8 +680,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // Final attachment rumor - either reused or newly uploaded
         let final_attachment_rumor = if should_upload {
             // Upload the file to the server
-            let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-            let signer = client.signer().await.unwrap();
+            let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
             let servers = crate::get_blossom_servers();
             let file_size = enc_file.len();
             // Clone the Arc outside the closure for use inside a seperate-threaded progress callback
@@ -864,7 +860,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         let msg_for_save = {
                             let pending_id_for_early_update = Arc::clone(&pending_id);
                             let mut state = STATE.lock().await;
-                            let chat_idx = state.chats.iter().position(|c| c.id() == &receiver || c.has_participant(&receiver));
+                            let chat_idx = state.chats.iter().position(|c| c.id() == &receiver || c.has_participant(&receiver, &state.interner));
                             if let Some(idx) = chat_idx {
                                 let real_id_hex = rumor_id.to_hex();
                                 if let Some(msg) = state.chats[idx].messages.find_by_hex_id_mut(&pending_id_for_early_update) {
@@ -875,17 +871,17 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 }
                                 // Rebuild index since ID changed
                                 state.chats[idx].messages.rebuild_index();
-                                // Get data for emit and save - clone Chat for db, convert message for emit
-                                let chat_for_save = state.chats[idx].clone();
+                                // Build slim for save (no full chat clone needed)
+                                let slim = crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner);
                                 let msg_for_emit = state.chats[idx].messages.find_by_hex_id(&real_id_hex)
                                     .map(|m| (pending_id_for_early_update.to_string(), m.to_message(&state.interner)));
-                                (Some(chat_for_save), msg_for_emit)
+                                (Some(slim), msg_for_emit)
                             } else {
                                 (None, None)
                             }
                         };
 
-                        if let (Some(chat), Some((old_id, msg))) = msg_for_save {
+                        if let (Some(slim), Some((old_id, msg))) = msg_for_save {
                             let handle = TAURI_APP.get().unwrap();
                             // Emit full message_update for backwards compatibility
                             let _ = handle.emit("message_update", serde_json::json!({
@@ -893,7 +889,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 "message": &msg,
                                 "chat_id": &receiver
                             }));
-                            let _ = save_chat(handle.clone(), &chat).await;
+                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
                             let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
                         }
                         

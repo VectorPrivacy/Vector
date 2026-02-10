@@ -649,9 +649,9 @@ async fn save_promo<R: Runtime>(
     address: &str,
     privkey: &[u8; 32],
 ) -> Result<(), String> {
-    // Encrypt private key
+    // Conditionally encrypt private key based on user setting
     let privkey_hex = bytes_to_hex_string(privkey);
-    let privkey_encrypted = crate::crypto::internal_encrypt(privkey_hex, None).await;
+    let privkey_encrypted = crate::crypto::maybe_encrypt(handle, privkey_hex).await;
 
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -670,8 +670,11 @@ async fn save_promo<R: Runtime>(
 
 /// Decrypt an encrypted private key string and convert to bytes
 /// Used for retrieving stored promo privkeys without re-deriving (avoids PoW cost)
-async fn decrypt_privkey_bytes(privkey_encrypted: String) -> Result<[u8; 32], String> {
-    let privkey_hex = crate::crypto::internal_decrypt(privkey_encrypted, None)
+async fn decrypt_privkey_bytes<R: Runtime>(
+    handle: &AppHandle<R>,
+    privkey_encrypted: String,
+) -> Result<[u8; 32], String> {
+    let privkey_hex = crate::crypto::maybe_decrypt(handle, privkey_encrypted)
         .await
         .map_err(|_| "Failed to decrypt private key".to_string())?;
 
@@ -715,7 +718,7 @@ async fn get_active_promos_with_keys<R: Runtime>(
     // Decrypt all private keys
     let mut promos = Vec::with_capacity(encrypted_promos.len());
     for (gift_code, address, privkey_encrypted, amount_piv) in encrypted_promos {
-        let privkey = decrypt_privkey_bytes(privkey_encrypted).await?;
+        let privkey = decrypt_privkey_bytes(handle, privkey_encrypted).await?;
         promos.push(DecryptedPromo { gift_code, address, privkey, amount_piv });
     }
 
@@ -1292,8 +1295,7 @@ pub async fn pivx_send_payment<R: Runtime>(
 
     // Now send the funded promo via Nostr
     let client = crate::NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
 
     let content = serde_json::json!({
         "amount_piv": amount_piv,
@@ -1409,8 +1411,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
     // Get Nostr client
     let client = crate::NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
 
     // Build content JSON
     let content = serde_json::json!({

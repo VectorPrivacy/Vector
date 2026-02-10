@@ -17,11 +17,25 @@ use crate::{
     MlsService, NotificationData, show_notification_generic,
     STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, SyncMode,
     util::get_file_type_description,
+    state::{is_processing_allowed, PENDING_EVENTS},
 };
 
 // Internal event handler - called by fetch_messages and real-time event stream
 // Not exposed as a Tauri command to frontend
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
+    // Check processing gate - queue events during encryption migration
+    if !is_processing_allowed() {
+        let mut queue = PENDING_EVENTS.lock().await;
+        // Re-check after acquiring lock: drain_pending_events opens the gate
+        // INSIDE this same lock, so if the gate is now open, drain already
+        // finished and we should process normally instead of queuing (TOCTOU fix).
+        if !is_processing_allowed() {
+            queue.push((event, is_new));
+            return false;
+        }
+        drop(queue);
+    }
+
     // Get the wrapper (giftwrap) event ID for duplicate detection
     // Use bytes for cache (memory efficient), hex string for DB operations
     let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
@@ -54,8 +68,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
 
     // Grab our pubkey
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // Unwrap the gift wrap
     match client.unwrap_gift_wrap(&event).await {
@@ -78,7 +91,6 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         }
                     },
                     None => {
-                        eprintln!("No public key tag found");
                         // If no public key found in tags, fall back to sender
                         sender
                             .to_bech32()
@@ -204,13 +216,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                             // Update the chat's typing participants
                             let active_typers = {
                                 let mut state = STATE.lock().await;
-                                // For DMs, the chat_id is the contact's npub
-                                if let Some(chat) = state.get_chat_mut(&contact) {
-                                    chat.update_typing_participant(profile_id.clone(), until);
-                                    chat.get_active_typers()
-                                } else {
-                                    vec![]
-                                }
+                                state.update_typing_and_get_active(&contact, &profile_id, until)
                             };
                             
                             // Emit typing update event to frontend
@@ -354,13 +360,13 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                 let state = STATE.lock().await;
                 match state.get_profile(contact) {
                     Some(profile) => {
-                        if profile.muted {
+                        if profile.flags.is_muted() {
                             None // Profile is muted, don't send notification
                         } else {
                             let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.clone()
+                                profile.nickname.to_string()
                             } else if !profile.name.is_empty() {
-                                profile.name.clone()
+                                profile.name.to_string()
                             } else {
                                 String::from("New Message")
                             };
@@ -430,12 +436,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
         let added = state.add_message_to_participant(contact, msg.clone());
         
         // Clear typing indicator for the sender (they just sent a message)
-        let typers = if let Some(chat) = state.get_chat_mut(contact) {
-            chat.update_typing_participant(contact.to_string(), 0); // 0 = clear immediately
-            chat.get_active_typers()
-        } else {
-            Vec::new()
-        };
+        let typers = state.update_typing_and_get_active(contact, contact, 0);
         
         (added, typers)
     };
@@ -456,13 +457,13 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
                 let state = STATE.lock().await;
                 match state.get_profile(contact) {
                     Some(profile) => {
-                        if profile.muted {
+                        if profile.flags.is_muted() {
                             None // Profile is muted, don't send notification
                         } else {
                             let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.clone()
+                                profile.nickname.to_string()
                             } else if !profile.name.is_empty() {
-                                profile.name.clone()
+                                profile.name.to_string()
                             } else {
                                 String::from("New Message")
                             };
