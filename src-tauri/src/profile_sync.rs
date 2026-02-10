@@ -193,8 +193,8 @@ pub async fn start_profile_sync_processor() {
         // Periodically queue our own profile to detect changes from other Nostr apps
         if last_own_profile_sync.elapsed() >= own_profile_sync_interval {
             let state = STATE.lock().await;
-            if let Some(own_profile) = state.profiles.iter().find(|p| p.mine) {
-                let npub = own_profile.id.clone();
+            if let Some(own_profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
+                let npub = state.interner.resolve(own_profile.id).unwrap_or("").to_string();
                 drop(state);
                 
                 let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
@@ -292,10 +292,14 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
     // Queue profiles for all participants
     // Note: chat.participants should be kept up-to-date by the MLS event handlers
-    for member_npub in &chat.participants {
+    for &handle in chat.participants() {
+        let member_npub = match state.interner.resolve(handle) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
         // Check if profile exists and has ANY metadata (name, display_name, or avatar)
         // Also check last_updated to see if it was ever fetched from relays
-        let has_metadata = state.get_profile(member_npub)
+        let has_metadata = state.get_profile_by_id(handle)
             .map(|p| {
                 let has_data = !p.name.is_empty() || !p.display_name.is_empty() || !p.avatar.is_empty();
                 let was_fetched = p.last_updated > 0;
@@ -309,7 +313,7 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
             base_priority
         };
 
-        profiles_to_queue.push((member_npub.clone(), priority));
+        profiles_to_queue.push((member_npub, priority));
     }
 
     drop(state); // Release state lock before queuing
@@ -336,17 +340,21 @@ pub async fn sync_all_profiles() {
     
     // Queue all profiles with appropriate priority
     for profile in &state.profiles {
+        let npub = match state.interner.resolve(profile.id) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
         // Check if profile has ANY metadata or was ever fetched
         let has_metadata = !profile.name.is_empty() || !profile.display_name.is_empty() || !profile.avatar.is_empty();
         let was_fetched = profile.last_updated > 0;
-        
+
         let priority = if !has_metadata && !was_fetched {
             SyncPriority::Critical
         } else {
             SyncPriority::Low // Passive refresh for existing profiles
         };
-        
-        profiles_to_queue.push((profile.id.clone(), priority));
+
+        profiles_to_queue.push((npub, priority));
     }
     
     drop(state); // Release state lock

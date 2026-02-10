@@ -8,7 +8,8 @@ use std::time::Duration;
 use crate::message::{Message, Attachment, Reaction, EditEntry, ImageMetadata};
 use crate::message::compact::{CompactMessage, CompactMessageVec, CompactReaction, CompactAttachment, MessageFlags, NpubInterner};
 use crate::net::SiteMetadata;
-use crate::Chat;
+use crate::profile::ProfileFlags;
+use crate::{Chat, Profile};
 
 /// Statistics for message cache operations
 #[derive(Debug, Default, Clone)]
@@ -228,17 +229,45 @@ impl DeepSize for Chat {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<Chat>()
             + self.id.capacity()
-            + self.last_read.capacity()
-            + self.participants.iter().map(|s| s.capacity()).sum::<usize>()
+            + 32  // [u8; 32] is inline, no heap
+            + self.participants.capacity() * std::mem::size_of::<u16>()  // Vec<u16> heap buffer
             + self.messages.deep_size()
             // metadata.custom_fields HashMap
             + self.metadata.custom_fields.iter()
                 .map(|(k, v)| k.capacity() + v.capacity())
                 .sum::<usize>()
-            // typing_participants HashMap
-            + self.typing_participants.keys()
-                .map(|k| k.capacity() + std::mem::size_of::<u64>())
-                .sum::<usize>()
+            // typing_participants Vec<(u16, u64)> heap buffer
+            + self.typing_participants.capacity() * std::mem::size_of::<(u16, u64)>()
+    }
+}
+
+// === Profile implementation ===
+
+impl DeepSize for ProfileFlags {
+    #[inline]
+    fn deep_size(&self) -> usize {
+        std::mem::size_of::<ProfileFlags>()
+    }
+}
+
+impl DeepSize for Profile {
+    fn deep_size(&self) -> usize {
+        std::mem::size_of::<Profile>()
+            + self.name.len()
+            + self.display_name.len()
+            + self.nickname.len()
+            + self.lud06.len()
+            + self.lud16.len()
+            + self.banner.len()
+            + self.avatar.len()
+            + self.about.len()
+            + self.website.len()
+            + self.nip05.len()
+            + self.status_title.len()
+            + self.status_purpose.len()
+            + self.status_url.len()
+            + self.avatar_cached.len()
+            + self.banner_cached.len()
     }
 }
 

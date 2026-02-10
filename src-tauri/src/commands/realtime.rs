@@ -16,8 +16,7 @@ use crate::{mls, NOSTR_CLIENT, TRUSTED_RELAYS};
 #[tauri::command]
 pub async fn start_typing(receiver: String) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
@@ -97,8 +96,7 @@ pub async fn send_webxdc_peer_advertisement(
     node_addr: String,
 ) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let signer = client.signer().await.unwrap();
-    let my_public_key = signer.get_public_key().await.unwrap();
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
     let my_npub = my_public_key.to_bech32().unwrap_or_else(|_| "unknown".to_string());
 
     println!("[WEBXDC] Sending peer advertisement: my_npub={}, receiver={}, topic={}", my_npub, receiver, topic_id);

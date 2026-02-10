@@ -7,10 +7,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use iroh_gossip::proto::TopicId;
-use tauri::ipc::Channel;
 
 use super::error::Error;
-use super::realtime::{RealtimeEvent, RealtimeManager};
+use super::realtime::RealtimeManager;
 use crate::util::bytes_to_hex_string;
 
 /// Metadata from manifest.toml in the Mini App package
@@ -198,23 +197,12 @@ pub struct MiniAppInstance {
 }
 
 /// Realtime channel state for a Mini App instance
+#[derive(Debug)]
 pub struct RealtimeChannelState {
     /// Topic ID for this channel
     pub topic: TopicId,
-    /// Event channel for sending data to frontend
-    pub event_channel: Option<Channel<RealtimeEvent>>,
     /// Whether the channel is active
     pub active: bool,
-}
-
-impl std::fmt::Debug for RealtimeChannelState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RealtimeChannelState")
-            .field("topic", &self.topic)
-            .field("event_channel", &self.event_channel.is_some())
-            .field("active", &self.active)
-            .finish()
-    }
 }
 
 /// Global state for managing Mini App instances

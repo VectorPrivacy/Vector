@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-skip-encryption"
+description = "Enables the skip_encryption command without any pre-configured scope."
+commands.allow = ["skip_encryption"]
+
+[[permission]]
+identifier = "deny-skip-encryption"
+description = "Denies the skip_encryption command without any pre-configured scope."
+commands.deny = ["skip_encryption"]

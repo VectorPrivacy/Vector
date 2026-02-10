@@ -54,8 +54,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
 
     // Get our public key
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
 
     // Check if we've already published an invite on the network
     let filter = Filter::new()
@@ -145,8 +144,7 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     let inviter_npub = inviter_pubkey.to_bech32().map_err(|e| e.to_string())?;
 
     // Get our public key
-    let signer = client.signer().await.map_err(|e| e.to_string())?;
-    let my_public_key = signer.get_public_key().await.map_err(|e| e.to_string())?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
 
     // Check if we're trying to accept our own invite
     if inviter_pubkey == my_public_key {

@@ -135,8 +135,7 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                 wrapper_builder = wrapper_builder.tag(Tag::expiration(expiry_time));
                 
                 // Build and sign the wrapper
-                let signer = client.signer().await
-                    .map_err(|e| format!("Failed to get signer: {}", e))?;
+                let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
                 let wrapper_with_expiry = wrapper_builder.sign(&signer).await
                     .map_err(|e| format!("Failed to sign wrapper with expiration: {}", e))?;
                 

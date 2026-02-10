@@ -67,10 +67,10 @@ mod simd;
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility
 pub(crate) use state::{
-    ChatState, SyncMode,
-    TAURI_APP, NOSTR_CLIENT, STATE,
+    SyncMode,
+    TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
     TRUSTED_RELAYS, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
-    MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_INVITE,
+    MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
     get_blossom_servers, PendingInviteAcceptance,
 };
 
@@ -148,21 +148,28 @@ pub fn run() {
             
             let handle = app.app_handle().clone();
 
-            // Setup a graceful shutdown for our Nostr subscriptions
             let window = app.get_webview_window("main").unwrap();
+
+            // Setup a graceful shutdown for our Nostr subscriptions
             #[cfg(desktop)]
             let handle_for_window_state = handle.clone();
             window.on_window_event(move |event| {
                 match event {
                     // This catches when the window is being closed
-                    tauri::WindowEvent::CloseRequested { .. } => {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        // Block close during encryption migration
+                        if !state::is_processing_allowed() {
+                            api.prevent_close();
+                            return;
+                        }
+
                         // Save window state (position, size, maximized, etc.) before closing
                         #[cfg(desktop)]
                         {
                             use tauri_plugin_window_state::{AppHandleExt, StateFlags};
                             let _ = handle_for_window_state.save_window_state(StateFlags::all());
                         }
-                        
+
                         // Cleanly shutdown our Nostr client
                         if let Some(nostr_client) = NOSTR_CLIENT.get() {
                             tauri::async_runtime::block_on(async {
@@ -413,6 +420,9 @@ pub fn run() {
             // ================================================================
             // Account commands (commands/account.rs)
             commands::account::login,
+            commands::account::login_from_stored_key,
+            commands::account::setup_encryption,
+            commands::account::skip_encryption,
             #[cfg(debug_assertions)]
             commands::account::debug_hot_reload_sync,
             commands::account::logout,
@@ -442,6 +452,13 @@ pub fn run() {
             commands::sync::sync_all_profiles,
             // System commands (commands/system.rs)
             commands::system::run_maintenance,
+            // Encryption toggle commands (commands/encryption.rs)
+            commands::encryption::get_encryption_status,
+            commands::encryption::get_encryption_and_key,
+            commands::encryption::disable_encryption,
+            commands::encryption::enable_encryption,
+            commands::encryption::rekey_encryption,
+            commands::encryption::verify_credential,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]
             whisper::delete_whisper_model,
             #[cfg(all(not(target_os = "android"), feature = "whisper"))]

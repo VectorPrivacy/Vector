@@ -1,34 +1,41 @@
 //! Profile database operations.
 //!
 //! This module handles:
-//! - SlimProfile struct for efficient database storage
+//! - SlimProfile struct for serialization boundaries (DB + frontend)
 //! - Profile CRUD operations
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, command, Runtime};
 
 use crate::{Profile, Status};
+use crate::profile::ProfileFlags;
+use crate::message::compact::{NpubInterner, secs_to_compact, secs_from_compact};
 
+/// Serializable profile for DB storage and frontend communication.
+///
+/// This is the boundary type: Profile uses `id: u16` (interner handle) internally,
+/// SlimProfile uses `id: String` (npub) for external interfaces.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct SlimProfile {
     pub id: String,
-    name: String,
-    display_name: String,
-    nickname: String,
-    lud06: String,
-    lud16: String,
-    banner: String,
-    avatar: String,
-    about: String,
-    website: String,
-    nip05: String,
-    status: Status,
-    muted: bool,
-    bot: bool,
-    avatar_cached: String,
-    banner_cached: String,
-    // Omitting: messages, last_updated, mine
+    pub name: String,
+    pub display_name: String,
+    pub nickname: String,
+    pub lud06: String,
+    pub lud16: String,
+    pub banner: String,
+    pub avatar: String,
+    pub about: String,
+    pub website: String,
+    pub nip05: String,
+    pub status: Status,
+    pub last_updated: u64,
+    pub mine: bool,
+    pub muted: bool,
+    pub bot: bool,
+    pub avatar_cached: String,
+    pub banner_cached: String,
 }
 
 impl Default for SlimProfile {
@@ -46,6 +53,8 @@ impl Default for SlimProfile {
             website: String::new(),
             nip05: String::new(),
             status: Status::new(),
+            last_updated: 0,
+            mine: false,
             muted: false,
             bot: false,
             avatar_cached: String::new(),
@@ -54,79 +63,73 @@ impl Default for SlimProfile {
     }
 }
 
-impl From<&Profile> for SlimProfile {
-    fn from(profile: &Profile) -> Self {
+impl SlimProfile {
+    /// Resolve a Profile's interned id to string for serialization.
+    pub fn from_profile(profile: &Profile, interner: &NpubInterner) -> Self {
         SlimProfile {
-            id: profile.id.clone(),
-            name: profile.name.clone(),
-            display_name: profile.display_name.clone(),
-            nickname: profile.nickname.clone(),
-            lud06: profile.lud06.clone(),
-            lud16: profile.lud16.clone(),
-            banner: profile.banner.clone(),
-            avatar: profile.avatar.clone(),
-            about: profile.about.clone(),
-            website: profile.website.clone(),
-            nip05: profile.nip05.clone(),
-            status: profile.status.clone(),
-            muted: profile.muted,
-            bot: profile.bot,
-            avatar_cached: profile.avatar_cached.clone(),
-            banner_cached: profile.banner_cached.clone(),
+            id: interner.resolve(profile.id).unwrap_or("").to_string(),
+            name: profile.name.to_string(),
+            display_name: profile.display_name.to_string(),
+            nickname: profile.nickname.to_string(),
+            lud06: profile.lud06.to_string(),
+            lud16: profile.lud16.to_string(),
+            banner: profile.banner.to_string(),
+            avatar: profile.avatar.to_string(),
+            about: profile.about.to_string(),
+            website: profile.website.to_string(),
+            nip05: profile.nip05.to_string(),
+            status: Status {
+                title: profile.status_title.to_string(),
+                purpose: profile.status_purpose.to_string(),
+                url: profile.status_url.to_string(),
+            },
+            last_updated: secs_from_compact(profile.last_updated),
+            mine: profile.flags.is_mine(),
+            muted: profile.flags.is_muted(),
+            bot: profile.flags.is_bot(),
+            avatar_cached: profile.avatar_cached.to_string(),
+            banner_cached: profile.banner_cached.to_string(),
         }
     }
-}
 
-impl SlimProfile {
-    // Convert back to full Profile
+    /// Convert to internal Profile (id will be set by insert_or_replace_profile).
     pub fn to_profile(&self) -> crate::Profile {
+        let mut flags = ProfileFlags::default();
+        flags.set_mine(self.mine);
+        flags.set_muted(self.muted);
+        flags.set_bot(self.bot);
+
         crate::Profile {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            display_name: self.display_name.clone(),
-            nickname: self.nickname.clone(),
-            lud06: self.lud06.clone(),
-            lud16: self.lud16.clone(),
-            banner: self.banner.clone(),
-            avatar: self.avatar.clone(),
-            about: self.about.clone(),
-            website: self.website.clone(),
-            nip05: self.nip05.clone(),
-            status: self.status.clone(),
-            last_updated: 0,      // Default value
-            mine: false,          // Default value
-            muted: self.muted,
-            bot: self.bot,
-            avatar_cached: self.avatar_cached.clone(),
-            banner_cached: self.banner_cached.clone(),
+            id: crate::message::compact::NO_NPUB,
+            name: self.name.clone().into_boxed_str(),
+            display_name: self.display_name.clone().into_boxed_str(),
+            nickname: self.nickname.clone().into_boxed_str(),
+            lud06: self.lud06.clone().into_boxed_str(),
+            lud16: self.lud16.clone().into_boxed_str(),
+            banner: self.banner.clone().into_boxed_str(),
+            avatar: self.avatar.clone().into_boxed_str(),
+            about: self.about.clone().into_boxed_str(),
+            website: self.website.clone().into_boxed_str(),
+            nip05: self.nip05.clone().into_boxed_str(),
+            status_title: self.status.title.clone().into_boxed_str(),
+            status_purpose: self.status.purpose.clone().into_boxed_str(),
+            status_url: self.status.url.clone().into_boxed_str(),
+            last_updated: secs_to_compact(self.last_updated),
+            flags,
+            avatar_cached: self.avatar_cached.clone().into_boxed_str(),
+            banner_cached: self.banner_cached.clone().into_boxed_str(),
         }
     }
 }
 
 // Function to get all profiles
 pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
-    let conn = crate::account_manager::get_db_connection(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
     let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
-        // Get cached paths and validate they exist on disk
-        let avatar_cached: String = row.get(15)?;
-        let banner_cached: String = row.get(16)?;
-
-        // Only use cached paths if the files actually exist
-        let validated_avatar_cached = if !avatar_cached.is_empty() && std::path::Path::new(&avatar_cached).exists() {
-            avatar_cached
-        } else {
-            String::new()
-        };
-        let validated_banner_cached = if !banner_cached.is_empty() && std::path::Path::new(&banner_cached).exists() {
-            banner_cached
-        } else {
-            String::new()
-        };
-
         Ok(SlimProfile {
             id: row.get(0)?,  // npub column
             name: row.get(1)?,
@@ -141,29 +144,36 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
             nip05: row.get(10)?,
             status: crate::Status {
                 title: row.get(11)?,
-                purpose: String::new(), // Not stored separately
+                purpose: String::new(),
                 url: row.get(12)?,
             },
+            last_updated: 0,
+            mine: false,
             muted: row.get::<_, i32>(13)? != 0,
             bot: row.get::<_, i32>(14)? != 0,
-            avatar_cached: validated_avatar_cached,
-            banner_cached: validated_banner_cached,
+            avatar_cached: {
+                let p: String = row.get(15)?;
+                if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
+            },
+            banner_cached: {
+                let p: String = row.get(16)?;
+                if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
+            },
         })
     })
     .map_err(|e| format!("Failed to query profiles: {}", e))?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| format!("Failed to collect profiles: {}", e))?;
 
-    drop(stmt); // Explicitly drop stmt before returning connection
-    crate::account_manager::return_db_connection(conn);
+
     Ok(profiles)
 }
 
 
 // Public command to set a profile
 #[command]
-pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection(&handle)?;
+pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: SlimProfile) -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
     conn.execute(
         "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached)
@@ -206,6 +216,5 @@ pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: Profile) -> 
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 
-    crate::account_manager::return_db_connection(conn);
     Ok(())
 }

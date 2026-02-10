@@ -9,7 +9,7 @@ pub mod settings;
 mod profiles;
 mod mls;
 mod miniapps;
-mod chats;
+pub mod chats;
 mod messages;
 mod attachments;
 mod events;
@@ -17,7 +17,7 @@ mod events;
 // Re-exports
 pub use maintenance::check_and_vacuum_if_needed;
 // Settings functions used internally (not just as Tauri commands)
-pub use settings::{get_sql_setting, set_sql_setting, get_seed, set_seed, get_pkey, remove_setting};
+pub use settings::{get_sql_setting, set_sql_setting, get_seed, set_seed, get_pkey, set_pkey, remove_setting};
 // Profile types and functions
 pub use profiles::{SlimProfile, get_all_profiles, set_profile};
 // MLS database functions
@@ -40,7 +40,7 @@ pub use miniapps::{
 pub use chats::{
     get_chat_id_by_identifier,
     preload_id_caches, clear_id_caches,
-    get_all_chats, save_chat, delete_chat,
+    get_all_chats, delete_chat,
 };
 // Internal chat helpers used by messages/events
 pub(crate) use chats::{get_or_create_chat_id, get_or_create_user_id};
