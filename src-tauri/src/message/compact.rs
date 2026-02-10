@@ -764,9 +764,20 @@ impl CompactAttachment {
     }
 }
 
-/// Parse a hex nonce string into [u8; 16]
+/// Parse a hex nonce string into [u8; 16], left-aligned, zero-allocation.
+/// Both DM (32 hex chars) and MLS (24 hex chars) nonces hit the SIMD fast path.
+/// Short nonces are right-padded with '0' to reach 32 chars before SIMD decode.
+#[inline]
 fn parse_nonce(hex: &str) -> [u8; 16] {
-    crate::simd::hex_to_bytes_16(hex)
+    let h = hex.as_bytes();
+    if h.len() >= 32 {
+        return crate::simd::hex_to_bytes_16(hex);
+    }
+    // Pad to 32 hex chars with '0' → SIMD decode → left-aligned result
+    let mut padded = [b'0'; 32];
+    padded[..h.len()].copy_from_slice(h);
+    // SAFETY: padded is all ASCII hex digits (original chars + '0' fill)
+    crate::simd::hex_to_bytes_16(unsafe { std::str::from_utf8_unchecked(&padded) })
 }
 
 // ============================================================================
