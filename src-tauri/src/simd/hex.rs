@@ -889,14 +889,50 @@ pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
     }
 
     #[cfg(target_arch = "x86_64")]
-    {
-        // For x86, use scalar for now (SSE2 decode is more complex for variable length)
-        for chunk in h.chunks(2) {
-            if chunk.len() == 2 {
-                result.push(
-                    (HEX_DECODE_LUT[chunk[0] as usize] << 4) | HEX_DECODE_LUT[chunk[1] as usize]
-                );
-            }
+    unsafe {
+        result.set_len(out_len);
+        let out_ptr: *mut u8 = result.as_mut_ptr();
+
+        let mask_0f = _mm_set1_epi8(0x0F);
+        let mask_40 = _mm_set1_epi8(0x40);
+        let nine = _mm_set1_epi8(9);
+        let hi_mask = _mm_set1_epi16(0x00F0u16 as i16);
+        let lo_mask = _mm_set1_epi16(0x000Fu16 as i16);
+        let zero = _mm_setzero_si128();
+
+        let chunks = out_len / 8; // 16 hex chars → 8 output bytes per SSE2 iteration
+        for chunk in 0..chunks {
+            let in_offset = chunk * 16;
+            let out_offset = chunk * 8;
+
+            let hex_chars = _mm_loadu_si128(h.as_ptr().add(in_offset) as *const __m128i);
+
+            // Convert ASCII to nibbles: (char & 0x0F) + 9 if letter (bit 0x40 set)
+            let lo = _mm_and_si128(hex_chars, mask_0f);
+            let masked = _mm_and_si128(hex_chars, mask_40);
+            let is_letter = _mm_cmpeq_epi8(masked, mask_40);
+            let nine_if_letter = _mm_and_si128(is_letter, nine);
+            let nibbles = _mm_add_epi8(lo, nine_if_letter);
+
+            // Pack pairs of nibbles into bytes (same as hex_decode_32_sse2)
+            let hi_nibbles = _mm_slli_epi16(nibbles, 4);
+            let hi = _mm_and_si128(hi_nibbles, hi_mask);
+            let lo_shifted = _mm_and_si128(_mm_srli_epi16(nibbles, 8), lo_mask);
+            let combined = _mm_or_si128(hi, lo_shifted);
+
+            let packed = _mm_packus_epi16(combined, zero);
+            _mm_storel_epi64(out_ptr.add(out_offset) as *mut __m128i, packed);
+        }
+
+        // Scalar remainder
+        let remainder_start = chunks * 16;
+        let mut out_idx = chunks * 8;
+        let mut i = remainder_start;
+        while i + 1 < h.len() {
+            *out_ptr.add(out_idx) = (HEX_DECODE_LUT[h[i] as usize] << 4)
+                                  | HEX_DECODE_LUT[h[i + 1] as usize];
+            out_idx += 1;
+            i += 2;
         }
     }
 
