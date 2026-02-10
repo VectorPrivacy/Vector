@@ -22,6 +22,11 @@ const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
+const domLoginImportError = document.getElementById('login-import-error');
+
+const domLoginBackBar = document.getElementById('login-back-bar');
+const domLoginBackBtn = document.getElementById('login-back-btn');
+
 const domLoginInvite = document.getElementById('login-invite');
 const domInviteInput = document.getElementById('invite-input');
 const domInviteBtn = document.getElementById('invite-btn');
@@ -53,6 +58,7 @@ const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
+const domProfileOptionShare = document.getElementById('profile-option-share');
 const domProfileId = document.getElementById('profile-id');
 
 const domGroupOverview = document.getElementById('group-overview');
@@ -131,7 +137,6 @@ const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
-const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
@@ -429,6 +434,13 @@ function showToast(message) {
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--toast-border-color, #161616);
+            box-shadow: 
+            0 0 4px rgba(0, 0, 0, 0.8),
+            0 0 12px rgba(0, 0, 0, 0.6),
+            0 0 30px rgba(0, 0, 0, 0.4);
             color: white;
             padding: 12px 24px;
             border-radius: 8px;
@@ -441,14 +453,33 @@ function showToast(message) {
         document.body.appendChild(toast);
     }
 
+    let backdrop = document.getElementById('toast-backdrop');
+    if (!backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'toast-backdrop';
+    backdrop.style.cssText = `
+        position:fixed;
+        top:0;
+        left:0;
+        width:100%;
+        height:100%;
+        background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
+        opacity:0;
+        z-index:9999;pointer-events:none;
+        transition:opacity 0.3s ease;
+    `;
+    document.body.appendChild(backdrop);
+    }
     toast.textContent = message;
     toast.style.opacity = '1';
+    backdrop.style.opacity = '1';
 
-    // Hide after 3 seconds
+    // Hide after 1 second
     clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => {
+        backdrop.style.opacity = '0';
         toast.style.opacity = '0';
-    }, 3000);
+    }, 1000);
 }
 
 /**
@@ -6500,9 +6531,6 @@ function renderCurrentProfile(cProfile) {
     domAccountStatus.onclick = askForStatus;
     twemojify(domAccountStatus);
 
-    /* Start Chat Tab */
-    // Render our Share npub
-    domShareNpub.textContent = strPubkey;
 }
 
 /**
@@ -6637,13 +6665,15 @@ function renderProfileTab(cProfile) {
     domProfileId.textContent = cProfile.id;
 
     // Add npub copy functionality
-    document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
+    document.getElementById('profile-npub-copy').onclick = (e) => {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
             // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
+            navigator.clipboard.writeText(npub).then(() => {
+                showToast('Copied!');
+            }).catch(() => {
+                showToast('Failed to copy');
+                const copyBtn = e.target.closest('#profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
                     setTimeout(() => {
@@ -6652,7 +6682,7 @@ function renderProfileTab(cProfile) {
                 }
             });
         }
-    });
+    };
 
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
@@ -6709,6 +6739,23 @@ function renderProfileTab(cProfile) {
             if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         }
+
+        // Setup Share option
+        domProfileOptionShare.onclick = () => {
+            const npub = document.getElementById('profile-npub')?.textContent;
+            if (npub) {
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                navigator.clipboard.writeText(profileUrl).then(() => {
+                    // Brief visual feedback
+                    const icon = domProfileOptionShare.querySelector('span');
+                    showToast('Profile Link Copied');
+                    icon.classList.replace('icon-share', 'icon-check');
+                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+                    }).catch(() => {
+                    showToast('Failed to copy profile link');
+                });
+            }
+        };
 
         // Hide edit buttons
         document.querySelector('.profile-avatar-edit').style.display = 'none';
@@ -10580,6 +10627,16 @@ window.addEventListener("DOMContentLoaded", async () => {
     domLoginAccountBtn.onclick = () => {
         domLoginImport.style.display = '';
         domLoginStart.style.display = 'none';
+        domLoginBackBar.style.display = '';
+        document.getElementById('login-form').classList.add('has-back-bar');
+    };
+    domLoginBackBtn.onclick = () => {
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginBackBar.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginInput.value = '';
+        document.getElementById('login-form').classList.remove('has-back-bar');
     };
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
@@ -10628,6 +10685,16 @@ window.addEventListener("DOMContentLoaded", async () => {
             domChatNewStartBtn.click();
         }
     };
+    domChatNewInput.addEventListener('input', function() {
+        domChatNewStartBtn.style.display = this.value.length > 0 ? '' : 'none';
+    });
+
+    // Tooltip for help icon
+    document.querySelector('.chat-new-help-link').addEventListener('mouseenter', function() {
+    showGlobalTooltip('Visit the Vector Privacy Docs', this);
+    });
+    document.querySelector('.chat-new-help-link').addEventListener('mouseleave', hideGlobalTooltip);
+
     domChatMessageInputCancel.onclick = () => {
         // Cancel edit mode if active, otherwise cancel reply
         if (strCurrentEditMessageId) {
@@ -11312,24 +11379,6 @@ domChatMessageInput.oninput = async () => {
             popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
         };
     }
-
-    // Add npub copy functionality for chat-new section
-    document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
-        const npub = document.getElementById('share-npub')?.textContent;
-        if (npub) {
-            // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
-                if (copyBtn) {
-                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                    setTimeout(() => {
-                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-                    }, 2000);
-                }
-            });
-        }
-    });
 });
 
 // Listen for app-wide click interations

@@ -572,6 +572,10 @@
         <span class="icon icon-volume-mute navbar-icon"></span>
         <p class="navbar-text">Mute</p>
       </div>
+      <div id="profile-option-share" class="profile-option">
+        <span class="icon icon-share navbar-icon"></span>
+        <p class="navbar-text">Share</p>
+      </div>
     </div>
     <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
     <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
@@ -715,31 +719,35 @@
             <span class="icon icon-chevron-double-left nav-icon"></span>
             <p class="chat-new-back-text">Back</p>
           </div>
-        </div>
-        <center class="chat-new-content" style="margin-top: 80px;">
-          <h2 class="chat-new-title">My nPub Key</h2>
-          <hr class="divider chat-new-divider">
-          <div class="profile-npub-container" style="justify-content: center; margin-top: 10px;">
-            <span class="chat-new-npub" id="share-npub"></span>
-            <button id="chat-new-npub-copy" class="btn profile-npub-copy">
-              <span class="icon icon-copy"></span>
-            </button>
-          </div>
-        </center>
+        </div>  
         <center class="chat-new-center-content">
-          <span class="icon icon-add-user chat-new-icon"></span>
-          <h2 class="chat-new-subtitle">Start a New Chat</h2>
+          <span class="icon icon-chat-bubble chat-new-icon"></span>
+          <h2 class="chat-new-subtitle">Create New Chat</h2>
           <hr class="divider chat-new-subtitle-divider">
           <div class="chat-new-content">
-            <span class="chat-new-description">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
+            <span class="chat-new-description">Enter your contact’s nPub Key below to begin a new chat with them.<br><br>This action will also add them as a contact.</span>
+          </div>
+          <div class="chat-new-help">
+            <a href="https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/features/add-contacts" target="_blank" class="chat-new-help-link">
+              <span class="icon icon-help chat-new-help-icon"></span>
+            </a>
+            <span class="chat-new-help-title">Need Help?</span>
+          </div>
+          <div class="chat-new-help-steps">
+            <span class="chat-new-help-step">Profile</span>
+            <span class="chat-new-help-arrow">›</span>
+            <span class="chat-new-help-step">nPub Key</span>
+            <span class="chat-new-help-arrow">›</span>
+            <span class="chat-new-help-step">Copy</span>
           </div>
         </center>
-        <div class="row input-box chat-new-input-box">
-          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container chat-new-input">
-          <span id="chat-new-btn" class="icon icon-add-user btn chat-new-add-btn"></span>
+        <div class="row input-box" id="chat-new-box">
+          <div class="row chat-input-container">
+            <input id="chat-new-input" type="text" placeholder="Paste nPub Key...">
+            <button id="chat-new-btn" style="display: none; margin-right: 3px;"><span class="icon icon-add-user"></span></button>
+          </div>
         </div>
       </div>
-
       <div id="create-group" class="create-group-container" style="display: none;">
         <div class="chat-new-header">
           <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
@@ -1122,6 +1130,12 @@
       </div>
 
       <div id="login-form" class="fadein-anim">
+        <div id="login-back-bar" class="chat-new-header" style="display: none;">
+            <div id="login-back-btn" class="btn chat-new-back-text-btn">
+                <span class="icon icon-chevron-double-left nav-icon"></span>
+                <p class="chat-new-back-text">Back</p>
+            </div>
+        </div>
         <img src="./icons/vector-logo.svg" class="login-logo">
         <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
         <div id="login-start">
@@ -1133,12 +1147,14 @@
         </div>
         <div id="login-import" class="login-import-container" style="display: none;">
           <img src="./icons/by-formlesslabs.svg" class="login-credits">
-          <div class="row input-box login-input-container">
+            <div class="row input-box login-input-container">
+          <div class="row chat-input-container">
             <input type="password" class="login-input" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
-            <svg id="login-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg id="login-btn" class="btn login-btn" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
+        </div>
         </div>
         <div id="login-invite" class="login-invite-container" style="display: none;">
           <div class="login-invite-header">
@@ -1146,12 +1162,14 @@
           </div>
           <p class="login-invite-description">Enter your invite code to join Vector Beta</p>
           <div class="row input-box login-input-container">
-            <input type="text" class="login-input" id="invite-input" placeholder="Invite code..." />
-            <button id="invite-btn" class="btn login-btn">
-              <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
+            <div class="row chat-input-container">
+              <input type="text" class="login-input" id="invite-input" placeholder="Invite code..." />
+              <button id="invite-btn" class="btn login-btn">
+                <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
         <div id="login-welcome" class="login-welcome-container" style="display: none;">
