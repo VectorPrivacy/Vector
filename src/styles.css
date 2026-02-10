@@ -1217,7 +1217,8 @@ html, body {
   position: relative;
 }
 
-#profile {
+#profile,
+#group-overview {
   height: 100%;
   overflow: hidden;
 }
