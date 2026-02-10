@@ -4051,10 +4051,30 @@ select:disabled:hover {
   line-break: anywhere;
 }
 
+#chat-new {
+  position: relative;
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#chat-new-input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .chat-new-center-content {
   position: absolute;
   top: 90px;
-  width: 100%;
+  bottom: 55px;
+  left: 0;
+  right: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  text-align: center;
 }
 
 .chat-new-icon {
@@ -4117,7 +4137,8 @@ select:disabled:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-top: 80px;
+  margin-top: auto;
+  padding-bottom: 5px;
   gap: 6px;
 }
 
@@ -4152,6 +4173,7 @@ select:disabled:hover {
   justify-content: center;
   gap: 6px;
   margin-top: 6px;
+  padding-bottom: 25px;
 }
 
 .chat-new-help-step {
