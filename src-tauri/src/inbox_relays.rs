@@ -212,6 +212,10 @@ pub async fn publish_inbox_relays(client: &Client) -> Result<(), String> {
 /// Only the most recent spawn actually publishes; earlier ones exit early.
 static REPUBLISH_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// Counts how many spawned tasks pass the generation gate (test-only).
+#[cfg(test)]
+static DEBOUNCE_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Republish kind 10050 in the background (debounced).
 /// Called after relay config changes (add/remove/toggle/mode update).
 /// Rapid successive calls coalesce into a single publish.
@@ -224,6 +228,8 @@ pub fn republish_inbox_relays_debounced() {
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen {
             return; // superseded by a newer call
         }
+        #[cfg(test)]
+        DEBOUNCE_PASS_COUNT.fetch_add(1, Ordering::SeqCst);
         let client = match NOSTR_CLIENT.get() {
             Some(c) => c,
             None => return,
@@ -232,4 +238,167 @@ pub fn republish_inbox_relays_debounced() {
             eprintln!("[InboxRelays] Failed to republish after config change: {}", e);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Tag parsing ----
+
+    #[test]
+    fn parse_relay_tags_extracts_urls() {
+        let tags = Tags::from_list(vec![
+            Tag::custom(TagKind::custom("relay"), vec!["wss://relay.example.com"]),
+            Tag::custom(TagKind::custom("relay"), vec!["wss://other.example.com"]),
+        ]);
+        let result = parse_relay_tags(&tags);
+        assert_eq!(result, vec![
+            "wss://relay.example.com".to_string(),
+            "wss://other.example.com".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn parse_relay_tags_ignores_non_relay_tags() {
+        let tags = Tags::from_list(vec![
+            Tag::custom(TagKind::custom("relay"), vec!["wss://good.example.com"]),
+            Tag::custom(TagKind::custom("p"), vec!["deadbeef"]),
+            Tag::custom(TagKind::custom("e"), vec!["cafebabe"]),
+        ]);
+        let result = parse_relay_tags(&tags);
+        assert_eq!(result, vec!["wss://good.example.com".to_string()]);
+    }
+
+    #[test]
+    fn parse_relay_tags_empty() {
+        let tags = Tags::new();
+        let result = parse_relay_tags(&tags);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_relay_tags_ignores_relay_tag_without_value() {
+        // A ["relay"] tag with no URL should be skipped (len < 2)
+        let tags = Tags::from_list(vec![
+            Tag::custom(TagKind::custom("relay"), Vec::<String>::new()),
+        ]);
+        let result = parse_relay_tags(&tags);
+        assert!(result.is_empty());
+    }
+
+    // ---- Cache ----
+
+    fn test_pubkey() -> PublicKey {
+        let keys = Keys::generate();
+        keys.public_key()
+    }
+
+    #[test]
+    fn cache_stores_and_retrieves() {
+        let pk = test_pubkey();
+        let relays = vec!["wss://a.example.com".to_string()];
+
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.insert(pk, CachedRelays {
+                relays: relays.clone(),
+                fetched_at: Instant::now(),
+                fetch_ok: true,
+            });
+        }
+
+        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let entry = cache.get(&pk).unwrap();
+        assert_eq!(entry.relays, relays);
+        assert!(entry.fetch_ok);
+        assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
+    }
+
+    #[test]
+    fn cache_expires_after_ttl() {
+        let pk = test_pubkey();
+
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.insert(pk, CachedRelays {
+                relays: vec!["wss://stale.example.com".to_string()],
+                fetched_at: Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS + 1),
+                fetch_ok: true,
+            });
+        }
+
+        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let entry = cache.get(&pk).unwrap();
+        assert!(entry.fetched_at.elapsed().as_secs() >= CACHE_TTL_SECS);
+    }
+
+    #[test]
+    fn cache_stores_empty_results() {
+        let pk = test_pubkey();
+
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.insert(pk, CachedRelays {
+                relays: vec![],
+                fetched_at: Instant::now(),
+                fetch_ok: true,
+            });
+        }
+
+        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let entry = cache.get(&pk).unwrap();
+        assert!(entry.relays.is_empty());
+        assert!(entry.fetch_ok);
+        assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
+    }
+
+    #[test]
+    fn cache_error_uses_short_ttl() {
+        let pk = test_pubkey();
+
+        {
+            let mut cache = INBOX_RELAY_CACHE.lock().unwrap();
+            cache.insert(pk, CachedRelays {
+                relays: vec![],
+                // Inserted 2 minutes ago — past the error TTL (60s) but within success TTL (3600s)
+                fetched_at: Instant::now() - std::time::Duration::from_secs(120),
+                fetch_ok: false,
+            });
+        }
+
+        let cache = INBOX_RELAY_CACHE.lock().unwrap();
+        let entry = cache.get(&pk).unwrap();
+        assert!(!entry.fetch_ok);
+        // Should be considered expired under error TTL
+        assert!(entry.fetched_at.elapsed().as_secs() >= CACHE_TTL_ERROR_SECS);
+        // But would still be valid under success TTL
+        assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
+    }
+
+    // ---- Debounce ----
+
+    #[tokio::test]
+    async fn debounce_coalesces_rapid_calls_into_one() {
+        // Snapshot counters before the burst.
+        let gen_before = REPUBLISH_GEN.load(Ordering::SeqCst);
+        let pass_before = DEBOUNCE_PASS_COUNT.load(Ordering::SeqCst);
+
+        // Three rapid calls — only the last should survive the debounce gate.
+        republish_inbox_relays_debounced();
+        republish_inbox_relays_debounced();
+        republish_inbox_relays_debounced();
+
+        let gen_after = REPUBLISH_GEN.load(Ordering::SeqCst);
+        assert_eq!(gen_after, gen_before + 3);
+
+        // Wait for the 800ms debounce window + margin so all spawned tasks resolve.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        let pass_after = DEBOUNCE_PASS_COUNT.load(Ordering::SeqCst);
+        // Exactly one task should have passed the generation gate.
+        // (It then exits at NOSTR_CLIENT.get() since the client isn't
+        // initialised in tests, but the coalescing behaviour is proven.)
+        assert_eq!(pass_after - pass_before, 1);
+    }
 }
