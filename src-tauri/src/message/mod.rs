@@ -70,11 +70,11 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 .await
                 .map_err(|e| e.to_string())?;
             
-            // Send reaction to ourselves for recovery
-            client
-                .gift_wrap(&my_public_key, rumor, [])
-                .await
-                .map_err(|e| e.to_string())?;
+            // Send reaction to ourselves for recovery (fire-and-forget)
+            tokio::spawn(async move {
+                let client = crate::NOSTR_CLIENT.get().unwrap();
+                let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+            });
             
             // Add reaction to local state
             let reaction = Reaction {
@@ -306,11 +306,11 @@ pub async fn edit_message(
                 .await
                 .map_err(|e| e.to_string())?;
 
-            // Send edit to ourselves for recovery
-            client
-                .gift_wrap(&my_public_key, rumor, [])
-                .await
-                .map_err(|e| e.to_string())?;
+            // Send edit to ourselves for recovery (fire-and-forget)
+            tokio::spawn(async move {
+                let client = crate::NOSTR_CLIENT.get().unwrap();
+                let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+            });
         }
         ChatType::MlsGroup => {
             // For group chats, send edit through MLS

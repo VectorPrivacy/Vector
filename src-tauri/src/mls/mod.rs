@@ -366,35 +366,39 @@ impl MlsService {
                 );
             }
             let min_len = std::cmp::min(welcome_rumors.len(), invited_recipients.len());
-            for i in 0..min_len {
-                let welcome = welcome_rumors[i].clone(); // UnsignedEvent
-                let target = invited_recipients[i];
-                match NOSTR_CLIENT
-                    .get()
-                    .unwrap()
-                    .gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &target, welcome, [])
-                    .await
-                {
-                    Ok(wrapper_id) => {
-                        let recipient = target.to_bech32().unwrap_or_default();
-                        println!(
-                            "[MLS][welcome][published] wrapper_id={}, recipient={}, relays={:?}",
-                            wrapper_id.to_hex(),
-                            recipient,
-                            TRUSTED_RELAYS
-                        );
+            let client = NOSTR_CLIENT.get().unwrap();
+            let futs: Vec<_> = (0..min_len)
+                .map(|i| {
+                    let welcome = welcome_rumors[i].clone();
+                    let target = invited_recipients[i];
+                    async move {
+                        match client
+                            .gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &target, welcome, [])
+                            .await
+                        {
+                            Ok(wrapper_id) => {
+                                let recipient = target.to_bech32().unwrap_or_default();
+                                println!(
+                                    "[MLS][welcome][published] wrapper_id={}, recipient={}, relays={:?}",
+                                    wrapper_id.to_hex(),
+                                    recipient,
+                                    TRUSTED_RELAYS
+                                );
+                            }
+                            Err(e) => {
+                                let recipient = target.to_bech32().unwrap_or_default();
+                                eprintln!(
+                                    "[MLS][welcome][publish_error] recipient={}, relays={:?}, err={}",
+                                    recipient,
+                                    TRUSTED_RELAYS,
+                                    e
+                                );
+                            }
+                        }
                     }
-                    Err(e) => {
-                        let recipient = target.to_bech32().unwrap_or_default();
-                        eprintln!(
-                            "[MLS][welcome][publish_error] recipient={}, relays={:?}, err={}",
-                            recipient,
-                            TRUSTED_RELAYS,
-                            e
-                        );
-                    }
-                }
-            }
+                })
+                .collect();
+            futures_util::future::join_all(futs).await;
         } else {
             println!(
                 "[MLS] No welcome rumors (invited={}, self-only path likely)",
@@ -581,28 +585,31 @@ impl MlsService {
             (add_result.evolution_event, add_result.welcome_rumors)
         };
 
-        // Now publish evolution event (commit) to the relay - local state is already updated
-        match client.send_event(&evolution_event).await {
-            Ok(_) => {
-                // Track our own published event so it's skipped when it comes back via sync
-                if let Some(handle) = TAURI_APP.get() {
-                    let _ = track_mls_event_processed(handle, &evolution_event.id.to_hex(), group_id, evolution_event.created_at.as_secs());
+        // Publish evolution event (commit) in the background — local state is already updated
+        let group_id_clone = group_id.to_string();
+        tokio::spawn(async move {
+            let client = NOSTR_CLIENT.get().unwrap();
+            match client.send_event(&evolution_event).await {
+                Ok(_) => {
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = track_mls_event_processed(handle, &evolution_event.id.to_hex(), &group_id_clone, evolution_event.created_at.as_secs());
+                    }
                 }
+                Err(e) => eprintln!("[MLS] Failed to publish commit: {}", e),
             }
-            Err(e) => {
-                eprintln!("[MLS] Failed to publish commit: {}", e);
-                // Note: Local state is already updated, so group will work locally
-                // Other members will receive the commit on next sync attempt
-            }
-        }
+        });
 
-        // Send welcome messages to the new member
+        // Send welcome messages to the new member (concurrently)
         if let Some(welcome_rumors) = welcome_rumors {
-            for welcome in welcome_rumors {
-                if let Err(e) = client.gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &member_pk, welcome, []).await {
-                    eprintln!("[MLS] Failed to send welcome: {}", e);
-                }
-            }
+            let futs: Vec<_> = welcome_rumors
+                .into_iter()
+                .map(|welcome| async {
+                    if let Err(e) = client.gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &member_pk, welcome, []).await {
+                        eprintln!("[MLS] Failed to send welcome: {}", e);
+                    }
+                })
+                .collect();
+            futures_util::future::join_all(futs).await;
         }
 
         // Update group metadata timestamp
@@ -638,8 +645,8 @@ impl MlsService {
     pub async fn leave_group(&self, group_id: &str) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
-        // Resolve client
-        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        // Verify client is initialized (spawned tasks fetch their own reference)
+        let _client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
 
         // Find the group's MLS group ID (may not exist if already partially cleaned)
         let groups = self.read_groups().await.unwrap_or_default();
@@ -664,11 +671,15 @@ impl MlsService {
                         Ok(engine) => {
                             match engine.create_message(&mls_group_id, leave_rumor) {
                                 Ok(mls_event) => {
-                                    if let Err(e) = client.send_event(&mls_event).await {
-                                        eprintln!("[MLS] Failed to send leave request message: {}", e);
-                                    } else {
-                                        println!("[MLS] Leave request message sent for group: {}", group_id);
-                                    }
+                                    let gid = group_id.to_string();
+                                    tokio::spawn(async move {
+                                        let client = NOSTR_CLIENT.get().unwrap();
+                                        if let Err(e) = client.send_event(&mls_event).await {
+                                            eprintln!("[MLS] Failed to send leave request message: {}", e);
+                                        } else {
+                                            println!("[MLS] Leave request message sent for group: {}", gid);
+                                        }
+                                    });
                                 }
                                 Err(e) => {
                                     eprintln!("[MLS] Failed to create leave request message: {}", e);
@@ -736,8 +747,8 @@ impl MlsService {
     ) -> Result<(), MlsError> {
         use nostr_sdk::prelude::*;
 
-        // Resolve client
-        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        // Verify client is initialized (spawned tasks fetch their own reference)
+        let _client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
 
         // Parse member pubkey
         let member_pk = PublicKey::from_bech32(member_pubkey)
@@ -795,20 +806,19 @@ impl MlsService {
             remove_result.evolution_event
         };
 
-        // Now publish evolution event (commit) to the relay - local state is already updated
-        match client.send_event(&evolution_event).await {
-            Ok(_) => {
-                // Track our own published event so it's skipped when it comes back via sync
-                if let Some(handle) = TAURI_APP.get() {
-                    let _ = track_mls_event_processed(handle, &evolution_event.id.to_hex(), group_id, evolution_event.created_at.as_secs());
+        // Publish evolution event (commit) in the background — local state is already updated
+        let group_id_clone = group_id.to_string();
+        tokio::spawn(async move {
+            let client = NOSTR_CLIENT.get().unwrap();
+            match client.send_event(&evolution_event).await {
+                Ok(_) => {
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = track_mls_event_processed(handle, &evolution_event.id.to_hex(), &group_id_clone, evolution_event.created_at.as_secs());
+                    }
                 }
+                Err(e) => eprintln!("[MLS] Failed to publish commit: {}", e),
             }
-            Err(e) => {
-                eprintln!("[MLS] Failed to publish commit: {}", e);
-                // Note: Local state is already updated, so group will work locally
-                // Other members will receive the commit on next sync attempt
-            }
-        }
+        });
 
         // Emit event to refresh UI member list
         if let Some(handle) = TAURI_APP.get() {

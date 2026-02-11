@@ -6,7 +6,7 @@
 
 use mdk_core::prelude::GroupId;
 use tauri::Emitter;
-use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS};
+use crate::{TAURI_APP, NOSTR_CLIENT};
 use crate::util::hex_string_to_bytes;
 use super::{MlsService, MlsGroupMetadata};
 
@@ -139,15 +139,13 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                 let wrapper_with_expiry = wrapper_builder.sign(&signer).await
                     .map_err(|e| format!("Failed to sign wrapper with expiration: {}", e))?;
                 
-                // Send the wrapper with expiration
-                client
-                    .send_event_to(TRUSTED_RELAYS.iter().copied(), &wrapper_with_expiry)
-                    .await
+                // Send the wrapper with expiration (first-ACK for faster pending→sent)
+                let urls = crate::inbox_relays::trusted_relay_urls();
+                crate::inbox_relays::send_event_first_ok(client, urls, &wrapper_with_expiry).await
             } else {
-                // Send normal wrapper without expiration
-                client
-                    .send_event_to(TRUSTED_RELAYS.iter().copied(), &mls_wrapper)
-                    .await
+                // Send normal wrapper without expiration (first-ACK for faster pending→sent)
+                let urls = crate::inbox_relays::trusted_relay_urls();
+                crate::inbox_relays::send_event_first_ok(client, urls, &mls_wrapper).await
             };
             
             // Update pending message based on send result

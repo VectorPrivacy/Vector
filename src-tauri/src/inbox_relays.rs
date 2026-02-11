@@ -249,21 +249,127 @@ async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<S
 // Send helper
 // ============================================================================
 
+/// Parsed `TRUSTED_RELAYS` URLs — computed once on first access.
+static TRUSTED_RELAY_URLS: Lazy<Vec<RelayUrl>> = Lazy::new(|| {
+    crate::TRUSTED_RELAYS
+        .iter()
+        .filter_map(|s| RelayUrl::parse(s).ok())
+        .collect()
+});
+
+/// Get the cached parsed trusted relay URLs.
+pub(crate) fn trusted_relay_urls() -> Vec<RelayUrl> {
+    TRUSTED_RELAY_URLS.clone()
+}
+
+/// Send an event to specific relays, returning as soon as the **first** relay
+/// acknowledges success. Remaining relays continue sending in the background.
+pub(crate) async fn send_event_first_ok(
+    client: &Client,
+    urls: Vec<RelayUrl>,
+    event: &Event,
+) -> Result<Output<EventId>, Error> {
+    let pool = client.pool();
+    let relays = pool.relays().await;
+    let event_id = event.id;
+
+    // Resolve URL → Relay handles, filtering to relays we actually have
+    let mut resolved: Vec<(RelayUrl, Relay)> = Vec::new();
+    for url in urls {
+        if let Some(relay) = relays.get(&url) {
+            resolved.push((url, relay.clone()));
+        }
+    }
+
+    if resolved.is_empty() {
+        return client.send_event(event).await;
+    }
+
+    // Spawn all relay sends as individual tasks
+    let mut handles = Vec::with_capacity(resolved.len());
+    for (url, relay) in resolved {
+        let event = event.clone();
+        handles.push(tokio::spawn(async move {
+            (url, relay.send_event(&event).await)
+        }));
+    }
+
+    // Race: return as soon as the first relay succeeds
+    let mut output = Output {
+        val: event_id,
+        success: std::collections::HashSet::new(),
+        failed: HashMap::new(),
+    };
+
+    let mut remaining = handles;
+    while !remaining.is_empty() {
+        let (result, _index, rest) = futures_util::future::select_all(remaining).await;
+        remaining = rest;
+
+        if let Ok((url, relay_result)) = result {
+            match relay_result {
+                Ok(_) => {
+                    output.success.insert(url);
+                    // First success — remaining spawned tasks continue in background
+                    // (dropping JoinHandles detaches but does NOT cancel them)
+                    drop(remaining);
+                    return Ok(output);
+                }
+                Err(e) => {
+                    output.failed.insert(url, e.to_string());
+                }
+            }
+        }
+    }
+
+    // All relays failed — return output so caller can inspect .failed
+    Ok(output)
+}
+
+/// Send an event to all write-relays in the pool, returning as soon as the
+/// **first** relay acknowledges success.
+pub(crate) async fn send_event_pool_first_ok(
+    client: &Client,
+    event: &Event,
+) -> Result<Output<EventId>, Error> {
+    let pool = client.pool();
+    let relays = pool.relays().await;
+    let write_urls: Vec<RelayUrl> = relays
+        .iter()
+        .filter(|(_, r)| r.flags().has_write())
+        .map(|(url, _)| url.clone())
+        .collect();
+    send_event_first_ok(client, write_urls, event).await
+}
+
 /// Send a gift-wrapped rumor to a recipient, routing to their inbox relays
 /// (kind 10050) when available. Falls back to pool broadcast if no inbox
 /// relays are found or if targeted delivery fails entirely.
+///
+/// Returns as soon as the first relay acknowledges success — remaining relays
+/// continue in the background. This minimises the time messages spend in
+/// "pending" state.
 pub async fn send_gift_wrap(
     client: &Client,
     recipient: &PublicKey,
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<Output<EventId>, Error> {
-    let inbox = get_or_fetch_inbox_relays(client, recipient).await;
+    // Wrap once upfront so we can reuse on fallback (avoids ~165µs re-encrypt)
+    let signer = client.signer().await?;
+    let event = EventBuilder::gift_wrap(&signer, recipient, rumor, extra_tags).await?;
 
-    if inbox.is_empty() {
-        // No 10050 found — broadcast to pool (current behaviour)
-        return client.gift_wrap(recipient, rumor, extra_tags).await;
+    let inbox_strs = get_or_fetch_inbox_relays(client, recipient).await;
+
+    if inbox_strs.is_empty() {
+        // No 10050 found — broadcast to pool
+        return send_event_pool_first_ok(client, &event).await;
     }
+
+    let inbox: Vec<RelayUrl> = inbox_strs
+        .iter()
+        .filter_map(|s| RelayUrl::parse(s).ok())
+        .collect();
 
     println!(
         "[InboxRelays] Routing gift-wrap to {} inbox relays for {}",
@@ -271,28 +377,15 @@ pub async fn send_gift_wrap(
         recipient
     );
 
-    // Collect tags so they can be reused on fallback
-    let tags: Vec<Tag> = extra_tags.into_iter().collect();
-
-    match client
-        .gift_wrap_to(inbox, recipient, rumor.clone(), tags.clone())
-        .await
-    {
+    match send_event_first_ok(client, inbox, &event).await {
         Ok(output) if !output.success.is_empty() => Ok(output),
-        Ok(_) => {
-            // All inbox relays failed — fall back to pool broadcast
+        Ok(_) | Err(_) => {
+            // All inbox relays failed — fall back to pool broadcast with same wrap
             eprintln!(
-                "[InboxRelays] All inbox relays failed for {}, falling back to pool broadcast",
+                "[InboxRelays] Inbox relays failed for {}, falling back to pool broadcast",
                 recipient
             );
-            client.gift_wrap(recipient, rumor, tags).await
-        }
-        Err(e) => {
-            eprintln!(
-                "[InboxRelays] gift_wrap_to error for {}: {}, falling back to pool broadcast",
-                recipient, e
-            );
-            client.gift_wrap(recipient, rumor, tags).await
+            send_event_pool_first_ok(client, &event).await
         }
     }
 }

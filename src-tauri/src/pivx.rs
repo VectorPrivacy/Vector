@@ -1318,10 +1318,11 @@ pub async fn pivx_send_payment<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        client
-            .gift_wrap(&my_public_key, rumor, [])
-            .await
-            .map_err(|e| format!("Failed to send self-copy: {}", e))?;
+        // Send self-copy for recovery (fire-and-forget)
+        tokio::spawn(async move {
+            let client = crate::NOSTR_CLIENT.get().unwrap();
+            let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+        });
 
         event_id
     } else {
@@ -1443,11 +1444,11 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Send to ourselves for recovery
-        client
-            .gift_wrap(&my_public_key, rumor, [])
-            .await
-            .map_err(|e| format!("Failed to send self-copy: {}", e))?;
+        // Send self-copy for recovery (fire-and-forget)
+        tokio::spawn(async move {
+            let client = crate::NOSTR_CLIENT.get().unwrap();
+            let _ = client.gift_wrap(&my_public_key, rumor, []).await;
+        });
 
         event_id
     } else {

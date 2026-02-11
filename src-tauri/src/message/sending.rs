@@ -942,10 +942,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
         }
 
-        // Send message to our own public key, to allow for message recovering
-        let _ = client
-            .gift_wrap(&my_public_key, built_rumor, [])
-            .await;
+        // Send message to our own public key for recovery (fire-and-forget)
+        tokio::spawn(async move {
+            let client = crate::NOSTR_CLIENT.get().unwrap();
+            let _ = client.gift_wrap(&my_public_key, built_rumor, []).await;
+        });
 
         Ok(MessageSendResult {
             pending_id: pending_id.to_string(),

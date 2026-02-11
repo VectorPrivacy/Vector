@@ -629,8 +629,12 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
         .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
 
-    // Broadcast the profile update (no lock held during network I/O)
-    match client.send_event_builder(metadata_event).await {
+    // Sign and broadcast the profile update (no lock held during network I/O)
+    // Uses first-ACK send so UI updates as soon as the fastest relay responds
+    let Ok(event) = client.sign_event_builder(metadata_event).await else {
+        return false;
+    };
+    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
         Ok(_) => {
             // Re-acquire lock to apply metadata to our profile
             let npub = my_public_key.to_bech32().unwrap();
@@ -675,7 +679,10 @@ pub async fn update_status(status: String) -> bool {
     // Build and broadcast the status
     let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
         .tag(Tag::custom(TagKind::d(), vec!["general"]));
-    match client.send_event_builder(status_builder).await {
+    let Ok(event) = client.sign_event_builder(status_builder).await else {
+        return false;
+    };
+    match crate::inbox_relays::send_event_pool_first_ok(client, &event).await {
         Ok(_) => {
             // Add the status to our profile
             let mut state = STATE.lock().await;

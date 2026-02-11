@@ -965,8 +965,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     // Publish to relays
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
     
-    client
-        .send_event(&event)
+    crate::inbox_relays::send_event_pool_first_ok(client, &event)
         .await
         .map_err(|e| format!("Failed to publish marketplace event: {}", e))?;
 
