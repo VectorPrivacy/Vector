@@ -1254,6 +1254,11 @@ html, body {
   max-width: 100%;
 }
 
+.chat-header .profile-header-info {
+  max-width: 70%;
+  overflow: hidden;
+}
+
 .chat-header #chat-contact-status,
 .chat-header #group-overview-status {
   width: 100%;

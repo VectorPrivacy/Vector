@@ -11,7 +11,7 @@
  *   node scripts/build-frontend.mjs --dev    # plain copy, no minification
  */
 
-import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync, unlinkSync } from 'fs';
 import { join, dirname, extname, basename } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -22,19 +22,34 @@ const DIST = join(ROOT, 'dist');
 
 const isDev = process.argv.includes('--dev');
 
-// ── Step 1: Copy src → dist ─────────────────────────────────────────────
-
 console.log(`[build-frontend] ${isDev ? 'DEV' : 'RELEASE'} build`);
 
-// Clean and copy
-rmSync(DIST, { recursive: true, force: true });
-cpSync(SRC, DIST, { recursive: true });
-console.log(`  Copied src/ → dist/`);
+// Remove dist safely — if it's a symlink, just unlink it (never follow into src/)
+function cleanDist() {
+    try {
+        const st = lstatSync(DIST);
+        if (st.isSymbolicLink()) {
+            unlinkSync(DIST);
+        } else {
+            rmSync(DIST, { recursive: true });
+        }
+    } catch {}
+}
 
 if (isDev) {
-    console.log('  Dev mode — skipping minification');
+    // Symlink dist → src so Tauri watches src/ changes directly
+    cleanDist();
+    symlinkSync(SRC, DIST, 'dir');
+    console.log('  Symlinked dist/ → src/ (hot-reload enabled)');
     process.exit(0);
 }
+
+// ── Step 1: Copy src → dist ─────────────────────────────────────────────
+
+// Clean and copy
+cleanDist();
+cpSync(SRC, DIST, { recursive: true });
+console.log(`  Copied src/ → dist/`);
 
 // ── Step 2: Minify JS with terser ────────────────────────────────────────
 
