@@ -17,7 +17,9 @@
     "android:build": "tauri android build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.9.6"
+    "@tauri-apps/cli": "^2.9.6",
+    "lightningcss": "^1.31.1",
+    "terser": "^5.46.0"
   },
   "dependencies": {
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",

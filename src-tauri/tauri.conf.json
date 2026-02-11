@@ -4,7 +4,9 @@
   "mainBinaryName": "Vector",
   "identifier": "io.vectorapp",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../dist",
+    "beforeDevCommand": "node scripts/build-frontend.mjs --dev",
+    "beforeBuildCommand": "node scripts/build-frontend.mjs"
   },
   "app": {
     "macOSPrivateApi": true,
