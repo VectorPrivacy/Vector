@@ -9542,6 +9542,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "tokio",
  "toml 0.8.23",
  "url",

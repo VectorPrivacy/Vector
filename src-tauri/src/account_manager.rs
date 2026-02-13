@@ -395,11 +395,13 @@ pub fn get_current_account() -> Result<String, String> {
         .ok_or_else(|| "No account selected".to_string())
 }
 
-/// Auto-select the first available account if none is currently selected
-/// This is useful when an account exists but isn't selected yet
+/// Auto-select the first available account if none is currently selected.
+/// Also ensures the database schema and migrations are up-to-date before
+/// any other code (background tasks, frontend IPC) can access the DB.
 pub fn auto_select_account<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<String>, String> {
     // Check if an account is already selected
     if let Ok(current) = get_current_account() {
+        ensure_schema_ready(handle, &current)?;
         return Ok(Some(current));
     }
 
@@ -414,7 +416,44 @@ pub fn auto_select_account<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<S
     let first_account = accounts[0].clone();
     set_current_account(first_account.clone())?;
 
+    // Ensure schema + migrations complete BEFORE anything else touches the DB.
+    // This runs synchronously in Tauri setup(), so background tasks spawned
+    // after this point always see a fully migrated schema.
+    ensure_schema_ready(handle, &first_account)?;
+
     Ok(Some(first_account))
+}
+
+/// Ensure the database schema and all migrations are applied for an existing account.
+/// Opens a connection, runs SQL_SCHEMA (CREATE IF NOT EXISTS — safe for existing tables),
+/// then runs all migrations (each is idempotent). The connection is pooled afterwards.
+///
+/// For new accounts (no DB file yet), this is a no-op — init_profile_database handles creation.
+fn ensure_schema_ready<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<(), String> {
+    let db_path = get_database_path(handle, npub)?;
+
+    // No DB file = new account, nothing to migrate (init_profile_database will create it)
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    // If pool already has connections, schema was already ensured (e.g. second call)
+    if DB_READ_POOL.lock().unwrap().len() > 0 {
+        return Ok(());
+    }
+
+    println!("[Account Manager] Ensuring schema and migrations for {}", npub);
+
+    let mut conn = open_db_connection(&db_path)?;
+    conn.execute_batch(SQL_SCHEMA)
+        .map_err(|e| format!("Failed to apply schema: {}", e))?;
+    run_migrations(&mut conn)?;
+
+    // Pool this connection so subsequent reads reuse it
+    DB_READ_POOL.lock().unwrap().push(conn);
+
+    println!("[Account Manager] Schema ready");
+    Ok(())
 }
 
 /// Set the currently active account
@@ -511,8 +550,8 @@ pub fn return_write_connection(conn: rusqlite::Connection) {
 fn open_db_connection(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL;")
-        .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        .map_err(|e| format!("Failed to set pragmas: {}", e))?;
     Ok(conn)
 }
 
@@ -586,13 +625,8 @@ pub async fn init_profile_database<R: Runtime>(
             .map_err(|e| format!("Failed to create database directory: {}", e))?;
     }
 
-    // Open connection and create schema
-    let mut conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open database: {}", e))?;
-
-    // Enable WAL mode for better concurrency
-    conn.execute_batch("PRAGMA journal_mode=WAL;")
-        .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
+    // Open connection with standard pragmas (WAL + busy_timeout)
+    let mut conn = open_db_connection(&db_path)?;
 
     // Execute the schema to create all tables
     conn.execute_batch(SQL_SCHEMA)
@@ -659,7 +693,6 @@ fn mark_migration_applied(tx: &rusqlite::Transaction, migration_id: u32) -> Resu
 /// This is the ONLY way migrations should be run.
 fn run_atomic_migration<F>(
     conn: &mut rusqlite::Connection,
-    max_applied: u32,
     id: u32,
     name: &str,
     migrate: F,
@@ -667,8 +700,11 @@ fn run_atomic_migration<F>(
 where
     F: FnOnce(&rusqlite::Transaction) -> Result<(), String>,
 {
-    // Fast path: already applied (cached, no DB round-trip)
-    if id <= max_applied {
+    // Check if this specific migration was already applied.
+    // We check each individually rather than using MAX(id) because bootstrap_legacy_migrations
+    // can leave gaps (e.g. m1, m2, m8 applied but m3-m7 not) when SQL_SCHEMA creates tables
+    // before bootstrap inspects them.
+    if migration_applied(conn, id) {
         return Ok(());
     }
 
@@ -719,13 +755,6 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Bootstrap legacy migrations first (for existing databases)
     bootstrap_legacy_migrations(conn)?;
 
-    // Cache highest applied migration ID (1 query instead of N per-migration checks)
-    let max_applied: u32 = conn.query_row(
-        "SELECT COALESCE(MAX(id), 0) FROM schema_migrations",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
-
     // Check if messages table exists (needed by some migrations)
     let has_messages_table: bool = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
@@ -738,7 +767,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Migration 1: Add wrapper_event_id column to messages table
     // =========================================================================
     if has_messages_table {
-        run_atomic_migration(conn, max_applied,1, "Add wrapper_event_id to messages", |tx| {
+        run_atomic_migration(conn,1, "Add wrapper_event_id to messages", |tx| {
             tx.execute(
                 "ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT",
                 []
@@ -756,7 +785,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 2: Create miniapps_history table
     // =========================================================================
-    run_atomic_migration(conn, max_applied,2, "Create miniapps_history table", |tx| {
+    run_atomic_migration(conn,2, "Create miniapps_history table", |tx| {
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS miniapps_history (
@@ -779,7 +808,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 3: Add installed_version column to miniapps_history
     // =========================================================================
-    run_atomic_migration(conn, max_applied,3, "Add installed_version to miniapps_history", |tx| {
+    run_atomic_migration(conn,3, "Add installed_version to miniapps_history", |tx| {
         tx.execute(
             "ALTER TABLE miniapps_history ADD COLUMN installed_version TEXT DEFAULT NULL",
             []
@@ -790,7 +819,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 4: Add cached image columns to profiles table
     // =========================================================================
-    run_atomic_migration(conn, max_applied,4, "Add avatar/banner cache columns to profiles", |tx| {
+    run_atomic_migration(conn,4, "Add avatar/banner cache columns to profiles", |tx| {
         tx.execute(
             "ALTER TABLE profiles ADD COLUMN avatar_cached TEXT DEFAULT ''",
             []
@@ -807,7 +836,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 5: Create miniapp_permissions table
     // =========================================================================
-    run_atomic_migration(conn, max_applied,5, "Create miniapp_permissions table", |tx| {
+    run_atomic_migration(conn,5, "Create miniapp_permissions table", |tx| {
         tx.execute(
             r#"
             CREATE TABLE IF NOT EXISTS miniapp_permissions (
@@ -833,7 +862,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 6: Create events table for flat event-based storage
     // =========================================================================
-    run_atomic_migration(conn, max_applied,6, "Create events table and migrate messages", |tx| {
+    run_atomic_migration(conn,6, "Create events table and migrate messages", |tx| {
         // Create the events table
         tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS events (
@@ -872,13 +901,13 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Migration 7: Backfill attachment metadata into event tags
     // =========================================================================
     if has_messages_table {
-        run_atomic_migration(conn, max_applied,7, "Backfill attachment metadata to event tags", |tx| {
+        run_atomic_migration(conn,7, "Backfill attachment metadata to event tags", |tx| {
             migrate_attachments_to_event_tags_atomic(tx)?;
             Ok(())
         })?;
     } else {
         // If messages table is gone, just mark as complete
-        run_atomic_migration(conn, max_applied,7, "Mark attachment migration complete (no messages table)", |tx| {
+        run_atomic_migration(conn,7, "Mark attachment migration complete (no messages table)", |tx| {
             tx.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_version', '3')",
                 []
@@ -890,7 +919,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 8: Create pivx_promos table
     // =========================================================================
-    run_atomic_migration(conn, max_applied,8, "Create pivx_promos table", |tx| {
+    run_atomic_migration(conn,8, "Create pivx_promos table", |tx| {
         tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS pivx_promos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -912,7 +941,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 9: Fix DM chats with empty participants
     // =========================================================================
-    run_atomic_migration(conn, max_applied,9, "Fix DM chats with empty participants", |tx| {
+    run_atomic_migration(conn,9, "Fix DM chats with empty participants", |tx| {
         let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM chats WHERE chat_type = 0 AND participants = '[]'",
             [],
@@ -934,7 +963,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Migration 10: Backfill npub for events from user_id
     // =========================================================================
-    run_atomic_migration(conn, max_applied,10, "Backfill event npub from user_id", |tx| {
+    run_atomic_migration(conn,10, "Backfill event npub from user_id", |tx| {
         let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM events WHERE npub IS NULL AND user_id IS NOT NULL",
             [],
@@ -958,7 +987,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // This tracks which MLS wrapper events have been processed to prevent
     // re-processing and enable proper deduplication.
     // =========================================================================
-    run_atomic_migration(conn, max_applied,11, "Create mls_processed_events table", |tx| {
+    run_atomic_migration(conn,11, "Create mls_processed_events table", |tx| {
         tx.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS mls_processed_events (
                 event_id TEXT PRIMARY KEY,
@@ -987,7 +1016,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     //
     // Users will need to re-join their groups after upgrading.
     // =========================================================================
-    run_atomic_migration(conn, max_applied,12, "v0.3.0 MLS reset: wipe data, add created_at, force keypackage regen", |tx| {
+    run_atomic_migration(conn,12, "v0.3.0 MLS reset: wipe data, add created_at, force keypackage regen", |tx| {
         // Delete group chats (chat_type=1) — CASCADE deletes their events + messages
         tx.execute("DELETE FROM chats WHERE chat_type = 1", [])
             .map_err(|e| format!("Failed to delete group chats: {}", e))?;
@@ -1031,7 +1060,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     })?;
 
     // Migration 13: Add preview_metadata column to events table for link preview caching
-    run_atomic_migration(conn, max_applied,13, "Add preview_metadata to events table", |tx| {
+    run_atomic_migration(conn,13, "Add preview_metadata to events table", |tx| {
         // Check if column already exists (may have been added by a prior dev build)
         let col_exists: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='preview_metadata'",
@@ -1049,7 +1078,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // =========================================================================
     // Future migrations (14+) follow the same pattern:
     //
-    // run_atomic_migration(conn, max_applied,14, "Description here", |tx| {
+    // run_atomic_migration(conn,14, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;
@@ -1406,4 +1435,610 @@ pub async fn switch_account<R: Runtime>(
     // This will be done when we update the MLS module
 
     Ok(())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exact replica of the v0.2.3 SQL_SCHEMA (the last version before the
+    /// standardised migration system was introduced in v0.3.0).
+    ///
+    /// Key differences from v0.3.1 schema:
+    /// - profiles: NO avatar_cached, banner_cached columns
+    /// - NO events table (messages were stored in the messages table)
+    /// - NO miniapps_history table
+    /// - NO pivx_promos table
+    /// - NO miniapp_permissions table
+    /// - NO mls_processed_events table
+    /// - NO schema_migrations table
+    /// - mls_keypackages: NO created_at column
+    const V0_2_3_SCHEMA: &str = r#"
+        CREATE TABLE IF NOT EXISTS profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            npub TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            nickname TEXT NOT NULL DEFAULT '',
+            lud06 TEXT NOT NULL DEFAULT '',
+            lud16 TEXT NOT NULL DEFAULT '',
+            banner TEXT NOT NULL DEFAULT '',
+            avatar TEXT NOT NULL DEFAULT '',
+            about TEXT NOT NULL DEFAULT '',
+            website TEXT NOT NULL DEFAULT '',
+            nip05 TEXT NOT NULL DEFAULT '',
+            status_content TEXT NOT NULL DEFAULT '',
+            status_url TEXT NOT NULL DEFAULT '',
+            muted INTEGER NOT NULL DEFAULT 0,
+            bot INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_profiles_npub ON profiles(npub);
+        CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
+
+        CREATE TABLE IF NOT EXISTS chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_identifier TEXT UNIQUE NOT NULL,
+            chat_type INTEGER NOT NULL,
+            participants TEXT NOT NULL,
+            last_read TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            muted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_chats_identifier ON chats(chat_identifier);
+        CREATE INDEX IF NOT EXISTS idx_chats_created ON chats(created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            content_encrypted TEXT NOT NULL,
+            replied_to TEXT NOT NULL DEFAULT '',
+            preview_metadata TEXT,
+            attachments TEXT NOT NULL DEFAULT '[]',
+            reactions TEXT NOT NULL DEFAULT '[]',
+            at INTEGER NOT NULL,
+            mine INTEGER NOT NULL,
+            user_id INTEGER,
+            wrapper_event_id TEXT,
+            FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, at);
+        CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(at DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_wrapper ON messages(wrapper_event_id);
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS mls_groups (
+            group_id TEXT PRIMARY KEY,
+            engine_group_id TEXT NOT NULL DEFAULT '',
+            creator_pubkey TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            avatar_ref TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            evicted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_mls_groups_evicted_updated ON mls_groups(evicted, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mls_groups_creator ON mls_groups(creator_pubkey);
+
+        CREATE TABLE IF NOT EXISTS mls_keypackages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_pubkey TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            keypackage_ref TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey);
+
+        CREATE TABLE IF NOT EXISTS mls_event_cursors (
+            group_id TEXT PRIMARY KEY,
+            last_seen_event_id TEXT NOT NULL,
+            last_seen_at INTEGER NOT NULL
+        );
+    "#;
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// Create a temp database with the v0.2.3 schema and seed data.
+    fn create_v0_2_3_db() -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let db_path = dir.path().join("vector.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;").unwrap();
+        conn.execute_batch(V0_2_3_SCHEMA).unwrap();
+
+        // Seed realistic data
+        conn.execute(
+            "INSERT INTO profiles (npub, name, display_name, avatar, about) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["npub1testuser", "alice", "Alice", "https://example.com/avatar.png", "Hello world"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO profiles (npub, name, display_name) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["npub1otheruser", "bob", "Bob"],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO chats (chat_identifier, chat_type, participants, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["chat_dm_abc", 0, "[\"npub1testuser\",\"npub1otheruser\"]", 1700000000],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO messages (id, chat_id, content_encrypted, at, mine, user_id, wrapper_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params!["evt_001", 1, "encrypted_hello", 1700000100, 1, 1, "wrap_001"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, chat_id, content_encrypted, at, mine, user_id, attachments) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params!["evt_002", 1, "encrypted_reply", 1700000200, 0, 2, "[{\"type\":\"image\",\"url\":\"https://example.com/img.png\"}]"],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('pkey', 'encrypted_nsec_data')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('encryption_enabled', 'true')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO mls_groups (group_id, engine_group_id, creator_pubkey, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["grp_001", "eng_001", "npub1testuser", 1700000000, 1700000000],
+        ).unwrap();
+
+        (dir, conn)
+    }
+
+    /// Helper: check if a column exists in a table.
+    fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = ?1", table),
+            rusqlite::params![column],
+            |row| row.get::<_, i32>(0),
+        ).map(|c| c > 0).unwrap_or(false)
+    }
+
+    /// Helper: check if a table exists.
+    fn has_table(conn: &rusqlite::Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+            rusqlite::params![table],
+            |row| row.get::<_, i32>(0),
+        ).map(|c| c > 0).unwrap_or(false)
+    }
+
+    /// Helper: get the highest applied migration ID.
+    fn max_migration(conn: &rusqlite::Connection) -> u32 {
+        conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0)
+    }
+
+    // ── Test Cases ──────────────────────────────────────────────────────
+
+    /// Simulate the v0.2.3 → v0.3.1 upgrade path:
+    /// 1. Start with exact v0.2.3 schema + data
+    /// 2. Run current SQL_SCHEMA + run_migrations
+    /// 3. Verify all new tables/columns exist and data is preserved
+    #[test]
+    fn upgrade_v0_2_3_to_current() {
+        let (_dir, mut conn) = create_v0_2_3_db();
+
+        // --- Pre-upgrade assertions (v0.2.3 state) ---
+        assert!(!has_column(&conn, "profiles", "avatar_cached"), "v0.2.3 should NOT have avatar_cached");
+        assert!(!has_table(&conn, "events"), "v0.2.3 should NOT have events table");
+        assert!(!has_table(&conn, "schema_migrations"), "v0.2.3 should NOT have schema_migrations");
+        assert!(!has_table(&conn, "miniapps_history"), "v0.2.3 should NOT have miniapps_history");
+        assert!(!has_table(&conn, "pivx_promos"), "v0.2.3 should NOT have pivx_promos");
+
+        // --- Run the upgrade (same as ensure_schema_ready) ---
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        // --- Schema assertions ---
+        // Migration 4: avatar/banner cache columns
+        assert!(has_column(&conn, "profiles", "avatar_cached"), "Should have avatar_cached after migration");
+        assert!(has_column(&conn, "profiles", "banner_cached"), "Should have banner_cached after migration");
+
+        // New tables from SQL_SCHEMA + migrations
+        assert!(has_table(&conn, "events"), "Should have events table");
+        assert!(has_table(&conn, "miniapps_history"), "Should have miniapps_history table");
+        assert!(has_table(&conn, "pivx_promos"), "Should have pivx_promos table");
+        assert!(has_table(&conn, "miniapp_permissions"), "Should have miniapp_permissions table");
+        assert!(has_table(&conn, "mls_processed_events"), "Should have mls_processed_events table");
+        assert!(has_table(&conn, "schema_migrations"), "Should have schema_migrations table");
+
+        // Migration 3: installed_version on miniapps_history
+        assert!(has_column(&conn, "miniapps_history", "installed_version"), "Should have installed_version");
+
+        // Migration 13: preview_metadata on events
+        assert!(has_column(&conn, "events", "preview_metadata"), "Should have preview_metadata on events");
+
+        // Migration 12: mls_keypackages should have created_at
+        assert!(has_column(&conn, "mls_keypackages", "created_at"), "Should have created_at on mls_keypackages");
+
+        // --- Data preservation assertions ---
+        // Profiles survived
+        let profile_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM profiles", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(profile_count, 2, "Both profiles should survive upgrade");
+
+        // Profile data intact (including new columns defaulting correctly)
+        let (name, avatar_cached): (String, String) = conn.query_row(
+            "SELECT name, avatar_cached FROM profiles WHERE npub = 'npub1testuser'",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        assert_eq!(name, "alice");
+        assert_eq!(avatar_cached, "", "New columns should default to empty string");
+
+        // Chat survived
+        let chat_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM chats", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(chat_count, 1, "Chat should survive upgrade");
+
+        // Migration 6: messages migrated to events table
+        let events_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(events_count, 2, "Both messages should be migrated to events");
+
+        // Verify event data integrity
+        let (content, wrapper): (String, Option<String>) = conn.query_row(
+            "SELECT content, wrapper_event_id FROM events WHERE id = 'evt_001'",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        assert_eq!(content, "encrypted_hello");
+        assert_eq!(wrapper.as_deref(), Some("wrap_001"));
+
+        // Settings preserved
+        let pkey: String = conn.query_row(
+            "SELECT value FROM settings WHERE key = 'pkey'",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(pkey, "encrypted_nsec_data");
+
+        // MLS groups wiped by migration 12 (v0.3.0 MLS reset)
+        let group_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM mls_groups", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(group_count, 0, "MLS groups should be wiped by migration 12 (v0.3.0 reset)");
+
+        // All 13 migrations should be recorded
+        assert!(max_migration(&conn) >= 13, "All migrations should be applied");
+    }
+
+    /// Fresh install: run schema + migrations on an empty database.
+    /// Ensures no migration crashes on missing tables.
+    #[test]
+    fn fresh_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("vector.db");
+        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;").unwrap();
+
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        // All tables exist
+        for table in &[
+            "profiles", "chats", "messages", "settings", "events",
+            "mls_groups", "mls_keypackages", "mls_event_cursors",
+            "miniapps_history", "pivx_promos", "miniapp_permissions",
+            "mls_processed_events", "schema_migrations",
+        ] {
+            assert!(has_table(&conn, table), "Missing table: {}", table);
+        }
+
+        // Current schema columns present
+        assert!(has_column(&conn, "profiles", "avatar_cached"));
+        assert!(has_column(&conn, "profiles", "banner_cached"));
+        assert!(has_column(&conn, "events", "preview_metadata"));
+        assert!(has_column(&conn, "mls_keypackages", "created_at"));
+        assert!(has_column(&conn, "miniapps_history", "installed_version"));
+    }
+
+    /// Idempotency: running schema + migrations twice should not error.
+    #[test]
+    fn idempotent_double_run() {
+        let (_dir, mut conn) = create_v0_2_3_db();
+
+        // First run
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn).unwrap();
+        let first_max = max_migration(&conn);
+
+        // Second run (should be all no-ops)
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn).unwrap();
+        let second_max = max_migration(&conn);
+
+        assert_eq!(first_max, second_max, "Migration max should not change on second run");
+
+        // Data not duplicated
+        let profile_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM profiles", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(profile_count, 2);
+
+        let events_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(events_count, 2, "Events should not be duplicated on second run");
+    }
+
+    /// The critical query that caused the v0.3.0 hang: SELECT with avatar_cached/banner_cached.
+    /// After upgrade, this must succeed (not fail with "no such column").
+    #[test]
+    fn critical_profile_query_after_upgrade() {
+        let (_dir, mut conn) = create_v0_2_3_db();
+
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        // This is the exact query from db/profiles.rs that caused the v0.3.0 panic
+        let mut stmt = conn.prepare(
+            "SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, \
+             about, website, nip05, status_content, status_url, muted, bot, \
+             avatar_cached, banner_cached FROM profiles"
+        ).expect("Critical profile query should succeed after upgrade");
+
+        let rows: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&"npub1testuser".to_string()));
+        assert!(rows.contains(&"npub1otheruser".to_string()));
+    }
+
+    // ── v0.3.0 vs v0.3.1 comparison ────────────────────────────────────
+
+    /// Replica of the v0.3.0 migration runner that used MAX(id) as a shortcut.
+    /// This is the BUGGY logic that skipped migrations when bootstrap left gaps.
+    fn run_migrations_v0_3_0(conn: &mut rusqlite::Connection) -> Result<(), String> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                id INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            )", [],
+        ).map_err(|e| format!("Failed to create schema_migrations: {}", e))?;
+
+        bootstrap_legacy_migrations(conn)?;
+
+        // THE BUG: uses MAX(id) to skip all migrations at or below
+        let max_applied: u32 = conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM schema_migrations",
+            [], |row| row.get(0),
+        ).unwrap_or(0);
+
+        let has_messages_table: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+            [], |row| row.get::<_, i32>(0)
+        ).map(|count| count > 0).unwrap_or(false);
+
+        // Run migrations using the old buggy skip logic (id <= max_applied → skip)
+        fn run_atomic_migration_v030<F>(
+            conn: &mut rusqlite::Connection,
+            max_applied: u32,
+            id: u32,
+            _name: &str,
+            migrate: F,
+        ) -> Result<(), String>
+        where F: FnOnce(&rusqlite::Transaction) -> Result<(), String> {
+            if id <= max_applied { return Ok(()); } // THE BUG
+            let tx = conn.transaction()
+                .map_err(|e| format!("Migration {}: tx failed: {}", id, e))?;
+            migrate(&tx)?;
+            mark_migration_applied(&tx, id)?;
+            tx.commit().map_err(|e| format!("Migration {}: commit failed: {}", id, e))?;
+            Ok(())
+        }
+
+        if has_messages_table {
+            run_atomic_migration_v030(conn, max_applied, 1, "wrapper_event_id", |tx| {
+                tx.execute("ALTER TABLE messages ADD COLUMN wrapper_event_id TEXT", [])
+                    .map_err(|e| format!("{}", e))?;
+                Ok(())
+            })?;
+        }
+        // Migration 4 is the critical one (avatar_cached/banner_cached)
+        run_atomic_migration_v030(conn, max_applied, 4, "avatar/banner cache", |tx| {
+            tx.execute_batch(
+                "ALTER TABLE profiles ADD COLUMN avatar_cached TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE profiles ADD COLUMN banner_cached TEXT NOT NULL DEFAULT '';"
+            ).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })?;
+        // Migration 6: events table + message migration (SKIPPED by max_applied bug)
+        run_atomic_migration_v030(conn, max_applied, 6, "events table", |tx| {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY, kind INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                    user_id INTEGER, content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]',
+                    reference_id TEXT, created_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+                    mine INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0, wrapper_event_id TEXT, npub TEXT
+                );"
+            ).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })?;
+
+        // Migrations 9+ have id > max_applied(8), so they DO run in v0.3.0.
+        // But m9 and m10 operate on events data — which is empty because m6 was skipped.
+        // They complete as no-ops and get recorded as "applied".
+        run_atomic_migration_v030(conn, max_applied, 9, "Fix DM participants", |tx| {
+            // No-op: events table is empty
+            tx.execute(
+                r#"UPDATE chats SET participants = '["' || chat_identifier || '"]'
+                   WHERE chat_type = 0 AND participants = '[]'"#, [],
+            ).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })?;
+        run_atomic_migration_v030(conn, max_applied, 10, "Backfill npub", |tx| {
+            // No-op: events table is empty
+            tx.execute(
+                r#"UPDATE events SET npub = (SELECT p.npub FROM profiles p WHERE p.id = events.user_id)
+                   WHERE npub IS NULL AND user_id IS NOT NULL"#, [],
+            ).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })?;
+        run_atomic_migration_v030(conn, max_applied, 11, "mls_processed_events", |tx| {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS mls_processed_events (
+                    event_id TEXT PRIMARY KEY, group_id TEXT NOT NULL, created_at INTEGER NOT NULL
+                );"
+            ).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })?;
+        run_atomic_migration_v030(conn, max_applied, 12, "MLS reset", |tx| {
+            tx.execute("DELETE FROM mls_groups", []).ok();
+            tx.execute("DROP TABLE IF EXISTS mls_keypackages", []).ok();
+            tx.execute_batch(
+                "CREATE TABLE mls_keypackages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_pubkey TEXT NOT NULL,
+                    device_id TEXT NOT NULL, keypackage_ref TEXT NOT NULL,
+                    created_at INTEGER, fetched_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+                );"
+            ).map_err(|e| format!("{}", e))?;
+            Ok(())
+        })?;
+        run_atomic_migration_v030(conn, max_applied, 13, "preview_metadata", |tx| {
+            // In real v0.3.0, SQL_SCHEMA didn't include preview_metadata in events.
+            // Our test uses current SQL_SCHEMA which does, so tolerate duplicate column.
+            let _ = tx.execute("ALTER TABLE events ADD COLUMN preview_metadata TEXT", []);
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Prove that v0.3.0's migration logic FAILS on a v0.2.3 database,
+    /// while v0.3.1's logic SUCCEEDS on the same schema.
+    #[test]
+    fn v0_3_0_fails_v0_3_1_succeeds() {
+        // ─── v0.3.0 path: buggy MAX(id) logic ───
+        let (_dir1, mut conn1) = create_v0_2_3_db();
+        conn1.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations_v0_3_0(&mut conn1).unwrap();
+
+        // v0.3.0 FAILS: avatar_cached was never added (migration 4 skipped by max_applied)
+        assert!(
+            !has_column(&conn1, "profiles", "avatar_cached"),
+            "v0.3.0 should FAIL to add avatar_cached (migration 4 skipped by max_applied bug)"
+        );
+
+        // v0.3.0 FAILS: the critical query that caused the "Decrypting Database..." hang
+        let query_result = conn1.prepare(
+            "SELECT npub, avatar_cached, banner_cached FROM profiles"
+        );
+        assert!(
+            query_result.is_err(),
+            "v0.3.0 should FAIL the profile query (no such column: avatar_cached)"
+        );
+
+        // ─── v0.3.1 path: per-migration checking ───
+        let (_dir2, mut conn2) = create_v0_2_3_db();
+        conn2.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn2).unwrap();
+
+        // v0.3.1 SUCCEEDS: migration 4 runs correctly
+        assert!(
+            has_column(&conn2, "profiles", "avatar_cached"),
+            "v0.3.1 should successfully add avatar_cached"
+        );
+
+        // v0.3.1 SUCCEEDS: the critical query works
+        let query_result = conn2.prepare(
+            "SELECT npub, avatar_cached, banner_cached FROM profiles"
+        );
+        assert!(
+            query_result.is_ok(),
+            "v0.3.1 should handle the profile query after upgrade"
+        );
+
+        // v0.3.1 SUCCEEDS: messages migrated to events
+        let events_count: i32 = conn2.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(events_count, 2, "v0.3.1 should migrate messages to events");
+
+        // v0.3.0 FAILS: events table exists but is empty (migration 6 was skipped)
+        let events_count_old: i32 = conn1.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(events_count_old, 0, "v0.3.0 should have empty events table (migration 6 skipped)");
+    }
+
+    /// Simulate a user who hit the v0.3.0 "stuck" bug, then upgrades to v0.3.1.
+    ///
+    /// Their database state after v0.3.0:
+    /// - schema_migrations has: 1, 2, 8, 9, 10, 11, 12, 13 (m3-m7 missing due to max_applied bug)
+    /// - profiles: missing avatar_cached/banner_cached
+    /// - events: empty (m6 skipped, messages never migrated)
+    /// - m9/m10: recorded as "applied" but were no-ops (events was empty)
+    ///
+    /// v0.3.1 must:
+    /// - Run m3, m4, m5, m6, m7 (fill the gaps)
+    /// - Detect that m9/m10 ran on empty data and re-run them
+    #[test]
+    fn stuck_v0_3_0_user_repaired_by_v0_3_1() {
+        // Step 1: Create v0.2.3 database
+        let (_dir, mut conn) = create_v0_2_3_db();
+
+        // Step 2: Simulate v0.3.0's buggy upgrade
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations_v0_3_0(&mut conn).unwrap();
+
+        // Verify the broken v0.3.0 state
+        assert!(!has_column(&conn, "profiles", "avatar_cached"), "v0.3.0 state: no avatar_cached");
+        let events_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(events_count, 0, "v0.3.0 state: events empty (m6 skipped)");
+        assert!(migration_applied(&conn, 9), "v0.3.0 state: m9 recorded (but was no-op)");
+        assert!(migration_applied(&conn, 10), "v0.3.0 state: m10 recorded (but was no-op)");
+
+        // Step 3: Run v0.3.1 migration system (the repair)
+        conn.execute_batch(SQL_SCHEMA).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        // Step 4: Verify the repair
+        // Schema gaps filled
+        assert!(has_column(&conn, "profiles", "avatar_cached"), "v0.3.1 should add avatar_cached");
+        assert!(has_column(&conn, "profiles", "banner_cached"), "v0.3.1 should add banner_cached");
+        assert!(has_table(&conn, "miniapp_permissions"), "v0.3.1 should create miniapp_permissions");
+        assert!(has_column(&conn, "miniapps_history", "installed_version"), "v0.3.1 should add installed_version");
+
+        // Messages migrated to events (m6 now runs)
+        let events_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM events", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(events_count, 2, "v0.3.1 should migrate messages to events");
+
+        // Critical profile query works (the exact query that caused the hang)
+        conn.prepare(
+            "SELECT npub, avatar_cached, banner_cached FROM profiles"
+        ).expect("Profile query should work after v0.3.1 repair");
+
+        // m10 data backfill: events should have npub populated
+        let null_npub_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE npub IS NULL AND user_id IS NOT NULL",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(null_npub_count, 0, "v0.3.1 should backfill npub on events (m10 re-ran or repair)");
+    }
 }

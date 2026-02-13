@@ -10484,6 +10484,13 @@ window.addEventListener("DOMContentLoaded", async () => {
         await executeDeepLinkAction(evt.payload);
     });
 
+    // Listen for critical loading errors from the backend (database, migrations, etc.)
+    // Registered early so it catches errors from login_from_stored_key and login
+    await listen('loading_error', (evt) => {
+        console.error('[Boot] Loading error:', evt.payload);
+        popupConfirm('Loading Error', evt.payload, true, '', 'vector_warning.svg');
+    });
+
     // Immediately load and apply theme settings (visual only, don't save)
     const strTheme = await invoke('get_theme');
     if (strTheme) {

@@ -111,3 +111,6 @@ tauri-plugin-window-state = "2.4.1"
 
 # MCP bridge for AI-assisted debugging (only included in debug builds via cfg)
 tauri-plugin-mcp-bridge = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

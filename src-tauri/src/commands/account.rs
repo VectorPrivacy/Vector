@@ -8,7 +8,7 @@
 //! - PIN encrypt/decrypt for account security
 
 use nostr_sdk::prelude::*;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE, TRUSTED_RELAYS};
 use crate::{Profile, account_manager, db, crypto, commands};
@@ -142,8 +142,10 @@ pub async fn login(import_key: String) -> Result<LoginResult, String> {
     if let Some(handle) = TAURI_APP.get() {
         if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
             eprintln!("[Login] Failed to initialize profile database: {}", e);
+            let _ = handle.emit("loading_error", &e);
         } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
             eprintln!("[Login] Failed to set current account: {}", e);
+            let _ = handle.emit("loading_error", &e);
         } else {
             println!("[Login] Database initialized and account set: {}", npub);
         }
@@ -469,8 +471,10 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // Initialize profile database
     if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
         eprintln!("[Login] Failed to initialize profile database: {}", e);
+        let _ = handle.emit("loading_error", &e);
     } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
         eprintln!("[Login] Failed to set current account: {}", e);
+        let _ = handle.emit("loading_error", &e);
     }
 
     // MLS keypackage bootstrap (non-blocking, same as decrypt command)
