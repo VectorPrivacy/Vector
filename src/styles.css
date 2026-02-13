@@ -2784,6 +2784,11 @@ body.chat-bg-disabled .chat-messages::before {
   aspect-ratio: 1;
 }
 
+/* Disabled/grayed-out state for hidden apps (e.g., removed PIVX shown in search) */
+.miniapps-grid .attachment-panel-item.miniapp-disabled {
+  opacity: 0.45;
+}
+
 /* Hidden state for search filtering */
 .miniapps-grid .attachment-panel-item.hidden-by-search {
   display: none;

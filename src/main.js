@@ -167,8 +167,6 @@ const domSettingsDonorsInfo = document.getElementById('donors-info');
 const domDonorPivx = document.getElementById('donor-pivx');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
-const domRestorePivxGroup = document.getElementById('restore-pivx-group');
-const domRestorePivxBtn = document.getElementById('restore-pivx-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
@@ -1724,10 +1722,10 @@ async function loadMiniAppsHistory() {
         const pivxLastUsedMs = parseInt(localStorage.getItem('pivx_last_used') || '0', 10);
         const pivxLastOpenedAt = Math.floor(pivxLastUsedMs / 1000);
 
-        // Create combined list of apps with PIVX as a virtual entry (if not hidden)
+        // Create combined list of apps with PIVX always included (hidden flag controls visibility)
         const allApps = [
-            // Add PIVX as a virtual app entry (only if not hidden)
-            ...(!pivxHidden ? [{ name: 'PIVX', isPivx: true, last_opened_at: pivxLastOpenedAt }] : []),
+            // Add PIVX as a virtual app entry (always present, hidden flag for grayed-out state)
+            { name: 'PIVX', isPivx: true, isHidden: pivxHidden, last_opened_at: pivxLastOpenedAt },
             // Add history apps with their timestamps (backend uses last_opened_at in seconds)
             ...history.map(app => ({ ...app, isPivx: false, last_opened_at: app.last_opened_at || 0 }))
         ];
@@ -1740,7 +1738,7 @@ async function loadMiniAppsHistory() {
             if (app.isPivx) {
                 // Create PIVX button
                 const pivxBtn = document.createElement('button');
-                pivxBtn.className = 'attachment-panel-item';
+                pivxBtn.className = 'attachment-panel-item' + (app.isHidden ? ' miniapp-disabled' : '');
                 pivxBtn.id = 'attachment-panel-pivx';
                 pivxBtn.draggable = false;
                 pivxBtn.innerHTML = `
@@ -1751,20 +1749,32 @@ async function loadMiniAppsHistory() {
                 `;
                 // Store app name for search filtering
                 pivxBtn.dataset.appName = 'pivx';
+                // Mark hidden state for search filter logic
+                if (app.isHidden) pivxBtn.dataset.appHidden = 'true';
+
+                // Hidden PIVX starts invisible (only revealed via search)
+                if (app.isHidden) pivxBtn.style.display = 'none';
 
                 // Add tooltip on hover
                 pivxBtn.addEventListener('mouseenter', () => {
-                    showGlobalTooltip('PIVX Wallet', pivxBtn);
+                    showGlobalTooltip(app.isHidden ? 'Restore PIVX Wallet' : 'PIVX Wallet', pivxBtn);
                 });
                 pivxBtn.addEventListener('mouseleave', () => {
                     hideGlobalTooltip();
                 });
 
-                pivxBtn.onclick = () => {
+                pivxBtn.onclick = async () => {
                     // Don't launch if in edit mode
                     if (miniAppsEditMode) return;
                     hideGlobalTooltip();
-                    showPivxWalletPanel();
+                    if (app.isHidden) {
+                        // Restore hidden PIVX
+                        localStorage.removeItem('pivx_hidden');
+                        await loadMiniAppsHistory();
+                        popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
+                    } else {
+                        showPivxWalletPanel();
+                    }
                 };
                 domMiniAppsGrid.appendChild(pivxBtn);
             } else {
@@ -1807,7 +1817,7 @@ async function loadMiniAppsHistory() {
         }
 
         // If no apps at all (only PIVX which is always there), show empty message
-        if (history.length === 0 && pivxLastOpenedAt === 0) {
+        if (history.length === 0 && (pivxHidden || pivxLastOpenedAt === 0)) {
             const emptyMsg = document.createElement('div');
             emptyMsg.className = 'attachment-panel-empty';
             emptyMsg.textContent = 'No recent Mini Apps';
@@ -1843,9 +1853,19 @@ function filterMiniApps(query) {
 
         // Filter all apps (including PIVX) by name
         if (appName) {
+            const isHiddenApp = item.dataset.appHidden === 'true';
             const matches = !isSearching || appName.includes(normalizedQuery);
-            item.classList.toggle('hidden-by-search', !matches);
-            if (matches) visibleCount++;
+
+            if (isHiddenApp) {
+                // Hidden apps: only show when searching and name matches
+                const show = isSearching && matches;
+                item.style.display = show ? '' : 'none';
+                item.classList.toggle('hidden-by-search', !show);
+                if (show) visibleCount++;
+            } else {
+                item.classList.toggle('hidden-by-search', !matches);
+                if (matches) visibleCount++;
+            }
         }
     });
 
@@ -10257,12 +10277,6 @@ function openSettings() {
     // Update the Storage Breakdown
     initStorageSection();
 
-    // Show/hide Restore PIVX Wallet button based on hidden state
-    const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
-    if (domRestorePivxGroup) {
-        domRestorePivxGroup.style.display = pivxHidden ? '' : 'none';
-    }
-
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
 
@@ -11373,19 +11387,6 @@ domChatMessageInput.oninput = async () => {
         openUrl('https://pivx.org');
     };
 
-    // Restore PIVX Wallet button - restores hidden PIVX app
-    if (domRestorePivxBtn) {
-        domRestorePivxBtn.onclick = async () => {
-            localStorage.removeItem('pivx_hidden');
-            // Hide the restore button
-            if (domRestorePivxGroup) {
-                domRestorePivxGroup.style.display = 'none';
-            }
-            // Refresh Mini Apps list if it's loaded
-            await loadMiniAppsHistory();
-            popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
-        };
-    }
 });
 
 // Listen for app-wide click interations
