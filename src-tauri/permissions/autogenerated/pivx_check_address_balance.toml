@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-check-address-balance"
+description = "Enables the pivx_check_address_balance command without any pre-configured scope."
+commands.allow = ["pivx_check_address_balance"]
+
+[[permission]]
+identifier = "deny-pivx-check-address-balance"
+description = "Denies the pivx_check_address_balance command without any pre-configured scope."
+commands.deny = ["pivx_check_address_balance"]

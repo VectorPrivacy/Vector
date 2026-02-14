@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-join-realtime-channel"
+description = "Enables the miniapp_join_realtime_channel command without any pre-configured scope."
+commands.allow = ["miniapp_join_realtime_channel"]
+
+[[permission]]
+identifier = "deny-miniapp-join-realtime-channel"
+description = "Denies the miniapp_join_realtime_channel command without any pre-configured scope."
+commands.deny = ["miniapp_join_realtime_channel"]

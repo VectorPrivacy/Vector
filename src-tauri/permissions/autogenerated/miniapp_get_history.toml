@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-get-history"
+description = "Enables the miniapp_get_history command without any pre-configured scope."
+commands.allow = ["miniapp_get_history"]
+
+[[permission]]
+identifier = "deny-miniapp-get-history"
+description = "Denies the miniapp_get_history command without any pre-configured scope."
+commands.deny = ["miniapp_get_history"]

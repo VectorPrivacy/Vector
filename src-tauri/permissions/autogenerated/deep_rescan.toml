@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-deep-rescan"
+description = "Enables the deep_rescan command without any pre-configured scope."
+commands.allow = ["deep_rescan"]
+
+[[permission]]
+identifier = "deny-deep-rescan"
+description = "Denies the deep_rescan command without any pre-configured scope."
+commands.deny = ["deep_rescan"]

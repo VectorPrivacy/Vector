@@ -16,6 +16,7 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.vector"
         android:usesCleartextTraffic="${usesCleartextTraffic}"
+        android:allowBackup="false"
         android:hardwareAccelerated="true">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"

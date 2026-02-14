@@ -4,9 +4,12 @@
   "mainBinaryName": "Vector",
   "identifier": "io.vectorapp",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../dist",
+    "beforeDevCommand": "node scripts/build-frontend.mjs --dev",
+    "beforeBuildCommand": "node scripts/build-frontend.mjs"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {
@@ -17,14 +20,17 @@
         "height": 650,
         "resizable": true,
         "backgroundThrottling": "throttle",
+        "backgroundColor": "#030303",
         "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: https: asset: http://asset.localhost; media-src 'self' https: asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' asset: http://asset.localhost",
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: https: asset: http://asset.localhost; media-src 'self' https: asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' https: asset: http://asset.localhost",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$DOWNLOAD/vector/*", "$DOCUMENT/vector/*"]
+        "scope": {
+          "allow": ["$DOWNLOAD/vector/**", "$DOCUMENT/vector/**", "$APPDATA/**"]
+        }
       }
     }
   },
@@ -65,7 +71,8 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": ["resources/sounds/*"]
   },
   "plugins": {
     "updater": {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-create-promo"
+description = "Enables the pivx_create_promo command without any pre-configured scope."
+commands.allow = ["pivx_create_promo"]
+
+[[permission]]
+identifier = "deny-pivx-create-promo"
+description = "Denies the pivx_create_promo command without any pre-configured scope."
+commands.deny = ["pivx_create_promo"]

@@ -1,22 +1,28 @@
 <!doctype html>
-<html lang="en" style="overflow-y: hidden;">
+<html lang="en" style="overflow-y: hidden; background: #030303;">
   <head>
     <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark">
     <link rel="stylesheet" href="styles.css" />
     <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
     <link rel="stylesheet" href="/highlight-github-dark.min.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vector</title>
     <script src="/main.js" defer></script>
-    <script src="/js/message-cache.js" defer></script>
+    <script src="/js/event-cache.js" defer></script>
     <script src="/js/chat-scroll.js" defer></script>
     <script src="/js/settings.js" defer></script>
     <script src="/js/misc.js" defer></script>
     <script src="/js/db.js" defer></script>
     <script src="/js/voice.js" defer></script>
+    <!-- TODO: Compile-out platform-specific JS modules per distro (e.g. exclude updater.js
+         from Android builds where the updater plugin isn't available, avoiding the
+         'window.__TAURI__.updater is undefined' error on every boot). -->
     <script src="/js/updater.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
+    <script src="/js/miniapps.js" defer></script>
+    <script src="/js/marketplace.js" defer></script>
     <!-- Soft-dependents (not required at app boot, thus can load beyond initial DOMContentLoaded) -->
     <!-- DOMPurify - HTML sanitization -->
     <script src="/js/dompurify.min.js"></script>
@@ -49,12 +55,81 @@
       </center>
     </div>
 
+    <!-- Edit History Popup -->
+    <div id="edit-history-popup" class="edit-history-popup" style="display: none;">
+      <div id="edit-history-content" class="edit-history-content"></div>
+    </div>
+
+    <!-- Credential Entry Modal (reusable for PIN/Password/Type selection) -->
+    <div id="credential-modal-overlay" class="encryption-migration-overlay">
+      <div class="encryption-migration-modal credential-modal">
+        <div class="encryption-migration-icon">
+          <span class="icon icon-locked"></span>
+        </div>
+        <h2 id="credential-modal-title"></h2>
+        <p id="credential-modal-subtitle" class="encryption-migration-phase"></p>
+        <!-- Security type selector -->
+        <div id="credential-modal-type-select" style="display: none;">
+          <div class="security-type-selector">
+            <button id="credential-modal-type-pin" class="security-type-btn active">PIN</button>
+            <button id="credential-modal-type-password" class="security-type-btn">Password</button>
+          </div>
+          <p id="credential-modal-type-desc" class="login-encrypt-description">A 6-digit code. Quick and convenient.</p>
+        </div>
+        <!-- PIN row -->
+        <div id="credential-modal-pin-row" class="row pin-row" style="display: none;">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+          <input type="password" inputmode="numeric" maxlength="1" class="cred-pin">
+        </div>
+        <!-- Password input -->
+        <div id="credential-modal-password" style="display: none;">
+          <input type="password" id="credential-modal-password-input" placeholder="Enter your password" autocomplete="off">
+        </div>
+        <!-- Buttons -->
+        <div id="credential-modal-buttons" class="credential-modal-buttons">
+          <button id="credential-modal-cancel" class="btn cancel-btn">Cancel</button>
+          <button id="credential-modal-confirm" class="btn">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Encryption Migration Progress Modal (non-dismissable) -->
+    <div id="encryption-migration-overlay" class="encryption-migration-overlay">
+      <div class="encryption-migration-modal">
+        <div class="encryption-migration-icon">
+          <span class="icon icon-locked"></span>
+        </div>
+        <h2 id="encryption-migration-title">Disabling Encryption</h2>
+        <p id="encryption-migration-phase" class="encryption-migration-phase">Preparing...</p>
+        <div class="progress-bar-track">
+          <div id="encryption-migration-progress-fill" class="progress-bar-fill">
+            <div class="progress-bar-glow"></div>
+          </div>
+          <span id="encryption-migration-progress-text" class="progress-text">0%</span>
+        </div>
+        <p class="encryption-migration-warning">
+          <span class="encryption-warning-icon"><span class="icon icon-info"></span></span>
+          Do not close the app during this process
+        </p>
+      </div>
+    </div>
+
     <main class="container">
-<!-- The Global emoji picker popup -->
+<!-- The Global emoji/GIF picker popup -->
 <div class="emoji-picker" tabindex="-1">
   <div class="emoji-search-container">
-    <input id="emoji-search-input" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-    <span class="emoji-search-icon icon icon-search"></span>
+    <div class="emoji-search-wrapper">
+      <input id="emoji-search-input" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <span class="emoji-search-icon icon icon-search"></span>
+    </div>
+    <div class="picker-mode-toggle">
+      <button class="picker-mode-btn active" data-mode="emoji">Emoji</button>
+      <button class="picker-mode-btn" data-mode="gif">GIF</button>
+    </div>
   </div>
   <div class="emoji-picker-content">
     <div class="emoji-sidebar">
@@ -95,6 +170,363 @@
       </div>
     </div>
   </div>
+  <!-- GIF Panel (hidden by default) -->
+  <div class="gif-picker-content" style="display: none;">
+    <div class="gif-grid" id="gif-grid"></div>
+    <div class="gif-loading" id="gif-loading" style="display: none;">
+      <span class="loading-spinner"></span>
+    </div>
+  </div>
+</div>
+
+<!-- The Attachment panel popup -->
+<div class="attachment-panel" id="attachment-panel" tabindex="-1">
+  <!-- Main attachment options view -->
+  <div class="attachment-panel-content" id="attachment-panel-main">
+    <button class="attachment-panel-item" id="attachment-panel-file">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-file"></span>
+      </div>
+      <span class="attachment-panel-label">File</span>
+    </button>
+    <button class="attachment-panel-item" id="attachment-panel-miniapps">
+      <div class="attachment-panel-btn">
+        <span class="icon icon-play"></span>
+      </div>
+      <span class="attachment-panel-label">Mini Apps</span>
+    </button>
+  </div>
+  <!-- Mini Apps list view (hidden by default) -->
+  <div class="attachment-panel-content" id="attachment-panel-miniapps-view" style="display: none;">
+    <!-- Fixed top bar with Back button and Search -->
+    <div class="miniapps-topbar">
+      <button class="miniapps-back-btn" id="attachment-panel-back">
+        <span class="icon icon-chevron-double-left"></span>
+        <span>Back</span>
+      </button>
+      <div class="miniapps-search-container">
+        <span class="icon icon-search"></span>
+        <input type="text" class="miniapps-search-input" id="miniapps-search" placeholder="Search">
+      </div>
+    </div>
+    <!-- Mini Apps grid -->
+    <div class="miniapps-grid" id="miniapps-grid">
+      <button class="attachment-panel-item" id="attachment-panel-marketplace" draggable="false">
+        <div class="attachment-panel-btn attachment-panel-marketplace-btn">
+          <span class="icon icon-nexus"></span>
+        </div>
+        <span class="attachment-panel-label">Nexus</span>
+      </button>
+      <!-- PIVX and Mini Apps will be dynamically inserted here based on usage history -->
+    </div>
+  </div>
+  <!-- PIVX Wallet view (hidden by default) -->
+  <div class="attachment-panel-content pivx-wallet-panel" id="attachment-panel-pivx-view" style="display: none;">
+    <div class="pivx-wallet-content">
+      <button class="pivx-close-btn" id="attachment-panel-pivx-back">
+        <span class="icon icon-x"></span>
+      </button>
+      <!-- Balance Display -->
+      <div class="pivx-balance-section">
+        <div class="pivx-balance-logo">
+          <img src="./icons/pivx.svg" alt="PIVX" />
+        </div>
+        <div class="pivx-balance-info">
+          <div class="pivx-balance-amount" id="pivx-balance-amount">0.00 PIV</div>
+          <div class="pivx-balance-fiat" id="pivx-balance-fiat" style="display: none;"></div>
+        </div>
+      </div>
+      <!-- Action Buttons (compact dock style) -->
+      <div class="pivx-actions-dock">
+        <button class="pivx-dock-btn pivx-dock-btn-primary" id="pivx-send-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-send"></span></div>
+          <span class="pivx-dock-label">Send</span>
+        </button>
+        <button class="pivx-dock-btn" id="pivx-deposit-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-plus-circle"></span></div>
+          <span class="pivx-dock-label">Deposit</span>
+        </button>
+        <button class="pivx-dock-btn" id="pivx-withdraw-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-withdraw"></span></div>
+          <span class="pivx-dock-label">Withdraw</span>
+        </button>
+        <button class="pivx-dock-btn" id="pivx-settings-btn">
+          <div class="pivx-dock-icon"><span class="icon icon-settings"></span></div>
+          <span class="pivx-dock-label">Settings</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Mini Apps Nexus Panel -->
+<div class="marketplace-panel" id="marketplace-panel" style="display: none;">
+  <div class="marketplace-header">
+    <div class="btn nav-back-btn marketplace-back-btn" id="marketplace-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <h2 class="marketplace-title">Nexus</h2>
+  </div>
+  <div class="marketplace-search-container">
+    <span class="marketplace-search-icon icon icon-search"></span>
+    <input type="text" id="marketplace-search-input" placeholder="Search apps..." autocomplete="off">
+  </div>
+  <div class="marketplace-filters" id="marketplace-filters" style="display: none;">
+    <div class="marketplace-active-filters" id="marketplace-active-filters">
+      <!-- Active filter tags will be inserted here -->
+    </div>
+  </div>
+  <div class="marketplace-scroll-container">
+    <div class="marketplace-featured" id="marketplace-featured">
+      <!-- Featured categories with card-spread previews will be inserted here -->
+    </div>
+    <div class="marketplace-content" id="marketplace-content">
+      <!-- Marketplace apps will be dynamically inserted here -->
+    </div>
+  </div>
+</div>
+
+<!-- App Details Panel -->
+<div class="app-details-panel" id="app-details-panel" style="display: none;">
+  <div class="app-details-header">
+    <div class="btn nav-back-btn app-details-back-btn" id="app-details-back-btn">
+      <span class="icon icon-chevron-double-left nav-icon"></span>
+    </div>
+    <h2 class="app-details-title">App Details</h2>
+    <div class="app-details-header-spacer"></div>
+  </div>
+  <div class="app-details-content" id="app-details-content">
+    <!-- App details will be dynamically inserted here -->
+  </div>
+</div>
+
+<!-- Mini App Launch Dialog -->
+<div class="miniapp-launch-overlay" id="miniapp-launch-overlay">
+  <div class="miniapp-launch-container">
+    <div class="miniapp-launch-inner">
+      <div class="miniapp-launch-icon-container" id="miniapp-launch-icon-container">
+        <!-- Icon will be inserted here -->
+      </div>
+      <div class="miniapp-launch-info">
+        <div class="miniapp-launch-name" id="miniapp-launch-name"></div>
+      </div>
+    </div>
+    <div class="file-preview-buttons">
+      <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-cancel">Cancel</button>
+      <button class="file-preview-btn file-preview-btn-cancel" id="miniapp-launch-solo">Play</button>
+      <button class="file-preview-btn file-preview-btn-send" id="miniapp-launch-invite">Play & Invite</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Deposit Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-deposit-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>Deposit PIVX</h3>
+      <button class="pivx-dialog-close" id="pivx-deposit-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <p class="pivx-deposit-instructions">Send PIVX to this address to deposit:</p>
+      <div class="pivx-address-display" id="pivx-deposit-address"></div>
+      <button class="pivx-copy-btn" id="pivx-copy-address">
+        <span class="icon icon-copy"></span>
+        Copy Address
+      </button>
+      <div class="pivx-deposit-status" id="pivx-deposit-status">
+        <div class="pivx-awaiting-deposit">
+          <div class="pivx-spinner"></div>
+          <span>Awaiting Deposit...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Send Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-send-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>Send PIVX</h3>
+      <button class="pivx-dialog-close" id="pivx-send-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <!-- Promo Selector (default view) -->
+      <div class="pivx-send-promo-section" id="pivx-send-promo-section">
+        <div class="pivx-send-promo-label">Select amount to send:</div>
+        <div class="pivx-send-promo-list" id="pivx-send-promo-list">
+          <div class="pivx-send-promo-loading">
+            <div class="pivx-spinner"></div>
+            <span>Loading...</span>
+          </div>
+        </div>
+        <div class="pivx-send-custom-toggle" id="pivx-send-custom-toggle">
+          Send Custom Amount
+        </div>
+      </div>
+
+      <!-- Custom Amount (hidden by default) -->
+      <div class="pivx-send-custom-section" id="pivx-send-custom-section" style="display: none;">
+        <div class="pivx-send-custom-warning">
+          <span class="icon icon-info"></span>
+            Custom amounts require on-chain confirmation and may take longer to send.
+        </div>
+        <div class="pivx-amount-input-container">
+          <input type="number" id="pivx-send-amount" placeholder="0.00" step="0.01" min="0">
+          <span class="pivx-amount-label">PIV</span>
+        </div>
+        <div class="pivx-send-available" id="pivx-send-available">
+          Available: <span id="pivx-send-available-amount">0.00</span> PIV
+          <span class="pivx-withdraw-max-btn" id="pivx-send-max">MAX</span>
+        </div>
+        <div class="pivx-send-back-toggle" id="pivx-send-back-toggle">
+          Back to Quick Send
+        </div>
+      </div>
+
+      <div class="pivx-send-info">
+        Sending to: <span id="pivx-send-recipient"></span>
+      </div>
+      <button class="pivx-send-confirm-btn" id="pivx-send-confirm">Send to Chat</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Withdraw Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-withdraw-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>Withdraw PIVX</h3>
+      <button class="pivx-dialog-close" id="pivx-withdraw-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <div class="pivx-withdraw-section">
+        <label class="pivx-settings-label">Destination Address</label>
+        <input type="text" id="pivx-withdraw-address" placeholder="D..." class="pivx-settings-input">
+      </div>
+      <div class="pivx-withdraw-section">
+        <label class="pivx-settings-label">Amount</label>
+        <div class="pivx-amount-input-container">
+          <input type="number" id="pivx-withdraw-amount" placeholder="0.00" step="0.01" min="0">
+          <span class="pivx-amount-label">PIV</span>
+        </div>
+        <div class="pivx-withdraw-available">
+          Available: <span id="pivx-withdraw-available-amount">0.00</span> PIV
+          <span class="pivx-withdraw-max-btn" id="pivx-withdraw-max">MAX</span>
+        </div>
+      </div>
+      <div class="pivx-withdraw-fee-info" id="pivx-withdraw-fee-info">
+        Network fee: ~0.0001 PIV
+      </div>
+      <button class="pivx-settings-save-btn" id="pivx-withdraw-confirm">Withdraw</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIVX Settings Dialog -->
+<div class="pivx-dialog-overlay" id="pivx-settings-overlay">
+  <div class="pivx-dialog">
+    <div class="pivx-dialog-header">
+      <h3>PIVX Wallet Settings</h3>
+      <button class="pivx-dialog-close" id="pivx-settings-close">&times;</button>
+    </div>
+    <div class="pivx-dialog-content">
+      <div class="pivx-settings-section">
+        <label class="pivx-settings-label">Auto Withdraw Address</label>
+        <input type="text" id="pivx-wallet-address-input" placeholder="D..." class="pivx-settings-input">
+        <p class="pivx-settings-hint">If set, claimed PIVX will be sent directly to this address. Leave empty to keep funds in your Vector wallet.</p>
+      </div>
+      <div class="pivx-settings-section">
+        <label class="pivx-settings-label">Display Currency</label>
+        <select id="pivx-currency-select" class="pivx-settings-select">
+          <option value="">Loading currencies...</option>
+        </select>
+        <p class="pivx-settings-hint">Choose your preferred fiat currency for balance display.</p>
+      </div>
+      <button class="pivx-settings-save-btn" id="pivx-settings-save">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Relay Dialog -->
+<div class="relay-dialog-overlay" id="add-relay-overlay">
+  <div class="relay-dialog">
+    <div class="relay-dialog-header">
+      <h3>Add Custom Relay</h3>
+      <button class="relay-dialog-close" id="add-relay-close">&times;</button>
+    </div>
+    <div class="relay-dialog-content">
+      <div class="relay-form-group">
+        <label class="relay-form-label">Relay URL</label>
+        <input type="text" id="add-relay-url" placeholder="relay.example.com" class="relay-form-input">
+        <p class="relay-form-hint">Enter the relay domain (wss:// is added automatically)</p>
+      </div>
+      <div class="relay-form-group">
+        <label class="relay-form-label">Mode</label>
+        <select id="add-relay-mode" class="relay-form-select" style="margin-bottom: 0;">
+          <option value="both">Read & Write</option>
+          <option value="read">Read Only</option>
+          <option value="write">Write Only</option>
+        </select>
+        <p class="relay-form-hint">Choose how Vector uses this relay.</p>
+      </div>
+      <div class="relay-dialog-buttons">
+        <button class="btn cancel-btn" id="add-relay-cancel">Cancel</button>
+        <button class="btn primary-btn" id="add-relay-confirm">Add Relay</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Relay Info Dialog -->
+<div class="relay-dialog-overlay" id="relay-info-overlay">
+  <div class="relay-dialog relay-info-dialog">
+    <div class="relay-dialog-header">
+      <h3 id="relay-info-url">Relay URL</h3>
+      <button class="relay-dialog-close" id="relay-info-close">&times;</button>
+    </div>
+    <div class="relay-dialog-content">
+      <div class="relay-form-group">
+        <label class="relay-form-label">Mode</label>
+        <select id="relay-info-mode" class="relay-form-select">
+          <option value="both">Read & Write</option>
+          <option value="read">Read Only</option>
+          <option value="write">Write Only</option>
+        </select>
+      </div>
+      <div class="relay-metrics-section">
+        <div class="relay-metrics-header">
+          <h4>Connection Info</h4>
+          <span class="relay-status relay-status-small" id="relay-info-status">connected</span>
+        </div>
+        <div class="relay-metrics-grid">
+          <div class="relay-metric">
+            <span class="relay-metric-value" id="relay-info-ping">--</span>
+            <span class="relay-metric-label">Ping</span>
+          </div>
+          <div class="relay-metric">
+            <span class="relay-metric-value" id="relay-info-last-check">--</span>
+            <span class="relay-metric-label">Last Check</span>
+          </div>
+        </div>
+      </div>
+      <div class="relay-logs-section">
+        <div class="relay-logs-header">
+          <h4>Recent Activity</h4>
+          <button class="relay-logs-copy-btn" id="relay-logs-copy" title="Copy logs to clipboard">
+            <span class="icon icon-copy"></span>
+          </button>
+        </div>
+        <ul class="relay-logs-list" id="relay-info-logs">
+          <li class="relay-log-empty">No activity recorded yet</li>
+        </ul>
+      </div>
+      <div class="relay-dialog-buttons">
+        <button class="btn danger-btn" id="relay-info-disable">Disable Relay</button>
+        <button class="btn primary-btn" id="relay-info-done">Done</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div id="profile" class="chats" style="display: none;">
@@ -126,23 +558,27 @@
   <div>
     <h3 id="profile-secondary-name" class="chat-contact-with-status btn"></h3>
     <span id="profile-secondary-status" class="cutoff chat-contact-status btn" style="width: 90%;"></span>
-    <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"><img id="profile-badge-fawkes" src="./icons/fawkes_mask.svg" class="btn" style="height: 30px; width: 30px; margin-left: 2px; display: none;"></div>
-    <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-    <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
+    <div id="profile-badges" style="margin-top: 5px;"><img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" class="btn" style="height: 30px; width: 30px; display: none;"><img id="profile-badge-fawkes" src="./icons/fawkes_mask.svg" class="btn" style="height: 30px; width: 30px; margin-left: 5px; display: none;"></div>
     <div id="profile-option-list" class="profile-options">
-      <div id="profile-option-mute" class="btn profile-option">
-        <span class="icon icon-volume-mute navbar-icon"></span>
-        <p class="navbar-text">Mute</p>
-      </div>
-      <div id="profile-option-message" class="btn profile-option">
+      <div id="profile-option-message" class="profile-option">
         <span class="icon icon-message navbar-icon"></span>
         <p class="navbar-text">Message</p>
       </div>
-      <div id="profile-option-nickname" class="btn profile-option">
-        <span class="icon icon-edit-user navbar-icon"></span>
+      <div id="profile-option-nickname" class="profile-option">
+        <span class="icon icon-edit navbar-icon" style="background-color: white;"></span>
         <p class="navbar-text">Rename</p>
       </div>
+      <div id="profile-option-mute" class="profile-option">
+        <span class="icon icon-volume-mute navbar-icon"></span>
+        <p class="navbar-text">Mute</p>
+      </div>
+      <div id="profile-option-share" class="profile-option">
+        <span class="icon icon-share navbar-icon"></span>
+        <p class="navbar-text">Share</p>
+      </div>
     </div>
+    <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
+    <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
     <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
       <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
     </div>
@@ -173,7 +609,7 @@
       <span id="group-overview-status" class="cutoff chat-contact-status btn"></span>
     </div>
   </div>
-  <div style="overflow-y: auto; height: -webkit-fill-available;">
+  <div style="overflow-y: auto; height: 100%;">
     <div style="position: relative; margin-top: 100px; text-align: center; width: 100px; height: 100px; margin-left: auto; margin-right: auto;">
       <span id="group-overview-avatar" class="icon icon-chat-circle" style="width: 100px; height: 100px; border-radius: initial; display: inline-block;"></span>
     </div>
@@ -186,13 +622,13 @@
             <span class="icon icon-add-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
             <span style="color: white;">Invite Member</span>
           </button>
-          <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="background-color: transparent; display: none; align-items: center; gap: 6px;">
-            <span class="icon icon-trash" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-danger);"></span>
-            <span style="color: var(--color-danger);">Leave Group</span>
+          <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="display: none; align-items: center; gap: 6px;">
+            <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: #ff2ea9;"></span>
+            <span style="color: white;">Leave Group</span>
           </button>
         </div>
         <div class="emoji-search-container" style="padding: 10px 0px;">
-          <span class="emoji-search-icon icon icon-search" style="margin-left: 8px; width: 25px !important; height: 25px !important;"></span>
+          <span class="emoji-search-icon icon icon-search" style="width: 25px !important; height: 25px !important;"></span>
           <input id="group-member-search-input" placeholder="Search members..." style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
         </div>
         <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
@@ -231,8 +667,9 @@
         </div>
         
         <div id="chat-list">
-          
+
         </div>
+        <div class="fadeout-bottom" style="position: fixed; bottom: 65px;"></div>
       </div>
 
       <div id="chat" class="chat" style="display: none;">
@@ -257,7 +694,7 @@
 
         <div class="row input-box" id="chat-box">
           <div class="row chat-input-container">
-            <button id="chat-input-file"><span class="icon icon-add-file"></span></button>
+            <button id="chat-input-file"><span class="icon icon-plus"></span></button>
             <input type="file" id="chat-input-file-hidden" style="display: none;" accept="*/*">
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
             <textarea id="chat-input" placeholder="Enter message..."></textarea>
@@ -282,31 +719,35 @@
             <span class="icon icon-chevron-double-left nav-icon"></span>
             <p class="chat-new-back-text">Back</p>
           </div>
-        </div>
-        <center class="chat-new-content" style="margin-top: 80px;">
-          <h2 class="chat-new-title">My nPub Key</h2>
-          <hr class="divider chat-new-divider">
-          <div class="profile-npub-container" style="justify-content: center; margin-top: 10px;">
-            <span class="chat-new-npub" id="share-npub"></span>
-            <button id="chat-new-npub-copy" class="btn profile-npub-copy">
-              <span class="icon icon-copy"></span>
-            </button>
-          </div>
-        </center>
+        </div>  
         <center class="chat-new-center-content">
-          <span class="icon icon-add-user chat-new-icon"></span>
-          <h2 class="chat-new-subtitle">Start a New Chat</h2>
+          <span class="icon icon-chat-bubble chat-new-icon"></span>
+          <h2 class="chat-new-subtitle">Create New Chat</h2>
           <hr class="divider chat-new-subtitle-divider">
           <div class="chat-new-content">
-            <span class="chat-new-description">Use your friend's 'nPub' key to begin a conversation with them. Enter it below and click the + button.</span>
+            <span class="chat-new-description">Enter your contact’s nPub Key below to begin a new chat with them.<br><br>This action will also add them as a contact.</span>
+          </div>
+          <div class="chat-new-help">
+            <a href="https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/features/add-contacts" target="_blank" class="chat-new-help-link">
+              <span class="icon icon-help chat-new-help-icon"></span>
+            </a>
+            <span class="chat-new-help-title">Need Help?</span>
+          </div>
+          <div class="chat-new-help-steps">
+            <span class="chat-new-help-step">Profile</span>
+            <span class="chat-new-help-arrow">›</span>
+            <span class="chat-new-help-step">nPub Key</span>
+            <span class="chat-new-help-arrow">›</span>
+            <span class="chat-new-help-step">Copy</span>
           </div>
         </center>
-        <div class="row input-box chat-new-input-box">
-          <input id="chat-new-input" placeholder="Enter npub..." class="chat-input-container chat-new-input">
-          <span id="chat-new-btn" class="icon icon-add-user btn chat-new-add-btn"></span>
+        <div class="row input-box" id="chat-new-box">
+          <div class="row chat-input-container">
+            <input id="chat-new-input" type="text" placeholder="Paste nPub Key...">
+            <button id="chat-new-btn" style="display: none; margin-right: 3px;"><span class="icon icon-add-user"></span></button>
+          </div>
         </div>
       </div>
-
       <div id="create-group" class="create-group-container" style="display: none;">
         <div class="chat-new-header">
           <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
@@ -328,7 +769,10 @@
             <h2 class="chat-new-subtitle">Select Members</h2>
             <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
             <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <input id="create-group-filter" placeholder="Search contacts..." class="chat-input-container chat-new-input" style="width: 75%" />
+              <div class="emoji-search-container" style="padding: 0; background: transparent; width: 75%;">
+                <span class="emoji-search-icon icon icon-search"></span>
+                <input id="create-group-filter" placeholder="Search contacts..." style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
+              </div>
               <div id="create-group-list" class="create-group-list"></div>
             </div>
           </center>
@@ -341,10 +785,13 @@
         </div>
       </div>
       <div id="settings" style="display: none;">
-        <h2 style="margin-top: 40px">Choose your Theme</h2>
+        <h2 style="margin-top: 40px">Choose Theme</h2>
         <select id="theme-select">
           <option value="vector">Vector</option>
+          <option value="satoshi">サトシ</option>
           <option value="chatstr">Chatstr</option>
+          <option value="gifverse">Cosmic</option>
+          <option value="pivx">Keep it Purple</option>
         </select>
 
         <!-- Voice Settings Section -->
@@ -423,6 +870,87 @@
           </div>
         </div>
 
+        <!-- Security Settings Section -->
+        <div id="settings-security" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Security</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
+              <input type="checkbox" id="security-encryption-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+          <button id="security-change-credential" class="btn cancel-btn" style="display: none;">Change PIN</button>
+        </div>
+
+        <!-- Display Settings Section -->
+        <div id="settings-display" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Display</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="display-image-types-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Display Image Types</span>
+              <input type="checkbox" id="display-image-types-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="chat-bg-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Background Wallpaper</span>
+              <input type="checkbox" id="chat-bg-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group" id="restore-pivx-group" style="display: none;">
+            <button id="restore-pivx-btn" class="btn cancel-btn">Restore PIVX Wallet</button>
+          </div>
+        </div>
+
+        <!-- Notification Settings Section -->
+        <div id="settings-notifications" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Notifications</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="notif-mute-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Mute All Notification Sounds</span>
+              <input type="checkbox" id="notif-mute-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label for="notif-sound-select">Notification Sound</label>
+            <div class="select-container" style="margin-top: 10px;">
+              <select id="notif-sound-select">
+                <option value="default">Prélude</option>
+                <option value="techno">Techno</option>
+                <option value="none">None</option>
+                <option value="custom">Custom...</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group" id="notif-custom-group" style="display: none;">
+            <div class="notif-custom-container">
+              <div class="notif-sound-chip" id="notif-custom-select-btn" title="Click to change sound">
+                <span class="notif-sound-chip-icon">♪</span>
+                <span class="notif-sound-chip-name" id="notif-custom-filename">No file selected</span>
+                <button class="notif-sound-chip-clear" id="notif-custom-clear" title="Remove custom sound">×</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <button id="notif-preview-btn" class="btn cancel-btn">Preview Sound</button>
+          </div>
+        </div>
+
         <!-- Network Settings Section -->
         <div id="settings-network" class="settings-section">
           <hr class="divider settings-divider">
@@ -479,19 +1007,6 @@
           </div>
         </div>
 
-        <!-- Donors & Contributors Section -->
-        <div id="settings-donors" class="settings-section" style="text-align: center;">
-          <hr class="divider settings-divider">
-          <h3 style="opacity: 0.6; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 5px;">Donors & Contributors
-            <span id="donors-info" class="icon icon-info btn" style="width: 16px; height: 16px; position: relative; display: inline-block; margin-left: 8px;"></span>
-          </h3>
-          <div class="donors-list" style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; padding: 15px 0;">
-            <div id="donor-pivx" class="btn" style="cursor: pointer;">
-              <img src="./icons/PIVX-White.svg" alt="PIVX" style="height: 40px; width: auto;">
-            </div>
-          </div>
-        </div>
-
         <div class="settings-section">
           <hr class="divider settings-divider">
           <img src="./icons/aggro-glitch.gif">
@@ -543,6 +1058,19 @@
                 <img src="./icons/warning_pink.png" class="danger-btn-icon" alt="">
                 Logout
               </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Donors & Contributors Section -->
+        <div id="settings-donors" class="settings-section" style="text-align: center;">
+          <hr class="divider settings-divider" style="background-color: #161616;">
+          <h3 style="opacity: 0.6; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 5px;">Donors & Contributors
+            <span id="donors-info" class="icon icon-info btn" style="width: 16px; height: 16px; position: relative; display: inline-block; margin-left: 8px;"></span>
+          </h3>
+          <div class="donors-list" style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; padding: 15px 0;">
+            <div id="donor-pivx" class="btn" style="cursor: pointer;">
+              <img src="./icons/PIVX-White.svg" alt="PIVX" style="height: 40px; width: auto;">
             </div>
           </div>
         </div>
@@ -602,6 +1130,12 @@
       </div>
 
       <div id="login-form" class="fadein-anim">
+        <div id="login-back-bar" class="chat-new-header" style="display: none;">
+            <div id="login-back-btn" class="btn chat-new-back-text-btn">
+                <span class="icon icon-chevron-double-left nav-icon"></span>
+                <p class="chat-new-back-text">Back</p>
+            </div>
+        </div>
         <img src="./icons/vector-logo.svg" class="login-logo">
         <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
         <div id="login-start">
@@ -613,12 +1147,14 @@
         </div>
         <div id="login-import" class="login-import-container" style="display: none;">
           <img src="./icons/by-formlesslabs.svg" class="login-credits">
-          <div class="row input-box login-input-container">
+            <div class="row input-box login-input-container">
+          <div class="row chat-input-container">
             <input type="password" class="login-input" id="login-input" placeholder="Enter nsec or Seed Phrase..." />
-            <svg id="login-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg id="login-btn" class="btn login-btn" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
+        </div>
         </div>
         <div id="login-invite" class="login-invite-container" style="display: none;">
           <div class="login-invite-header">
@@ -626,12 +1162,14 @@
           </div>
           <p class="login-invite-description">Enter your invite code to join Vector Beta</p>
           <div class="row input-box login-input-container">
-            <input type="text" class="login-input" id="invite-input" placeholder="Invite code..." />
-            <button id="invite-btn" class="btn login-btn">
-              <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
+            <div class="row chat-input-container">
+              <input type="text" class="login-input" id="invite-input" placeholder="Invite code..." />
+              <button id="invite-btn" class="btn login-btn">
+                <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
         <div id="login-welcome" class="login-welcome-container" style="display: none;">
@@ -648,6 +1186,17 @@
             <img src="./icons/lock.svg" class="login-lock-icon">
             <h3 id="login-encrypt-title" class="login-encrypt-title">Choose an Encryption Pin</h3>
           </div>
+          <!-- Security type selector (shown for new account setup) -->
+          <div id="login-encrypt-type-select" style="display: none;">
+            <div class="security-type-options">
+              <button id="security-type-skip" class="security-type-option-btn">Skip Encryption</button>
+              <button id="security-type-password" class="security-type-option-btn">Create Password</button>
+              <p class="security-type-recommended">*Recommended Option</p>
+              <button id="security-type-pin" class="security-type-option-btn accent">Create PIN</button>
+            </div>
+            <img src="./icons/by-formlesslabs.svg" class="login-credits">
+          </div>
+          <!-- PIN input (6-digit) -->
           <div id="login-encrypt-pins" class="row pin-row input-box">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-0">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-1">
@@ -656,9 +1205,21 @@
             <input type="password" inputmode="numeric" maxlength="1" id="pin-4">
             <input type="password" inputmode="numeric" maxlength="1" id="pin-5">
           </div>
+          <!-- Password input (text) -->
+          <div id="login-encrypt-password" class="login-encrypt-password" style="display: none;">
+            <div class="row input-box login-input-container">
+              <input type="password" id="login-password-input" class="login-input" placeholder="Enter your password" autocomplete="off">
+              <svg id="login-password-btn" class="btn login-btn" width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+          </div>
         </div>
       </div>
 
     </main>
+  
+  <!-- Global tooltip element -->
+  <div id="global-tooltip" class="global-tooltip"></div>
   </body>
 </html>

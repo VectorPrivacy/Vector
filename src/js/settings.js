@@ -211,7 +211,7 @@ class VoiceSettings {
             this.updateModelStatus();
         } catch (error) {
             console.error('Failed to delete model:', error);
-            await popupConfirm('Deletion Failed', `Could not delete model: ${error.message}`, true, '', 'vector_warning.svg');
+            await popupConfirm('Deletion Failed', `Could not delete model: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
         }
     }
 
@@ -433,15 +433,25 @@ async function askForUsername() {
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldName = cProfile.name;
     cProfile.name = strUsername;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: strUsername, avatar: "", banner: "", about: "" });
+        const success = await invoke("update_profile", { name: strUsername, avatar: "", banner: "", about: "" });
+        if (!success) {
+            cProfile.name = oldName;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            await popupConfirm('Username Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
-        await popupConfirm('Username Update Failed!', 'An error occurred while updating your Username, the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
+        cProfile.name = oldName;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        await popupConfirm('Username Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
@@ -475,25 +485,67 @@ async function askForAvatar() {
     });
     if (!file) return;
 
+    // Show upload progress spinner
+    const avatarEditBtn = document.querySelector('.profile-avatar-edit');
+    const avatarIcon = avatarEditBtn?.querySelector('.icon');
+    let unlisten = null;
+
+    if (avatarIcon) {
+        // Replace icon with progress spinner
+        avatarIcon.className = 'profile-upload-spinner';
+        avatarIcon.style.setProperty('--progress', '5%');
+
+        // Listen for progress events
+        unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+            if (event.payload.type === 'avatar') {
+                const progress = Math.max(5, event.payload.progress);
+                avatarIcon.style.setProperty('--progress', `${progress}%`);
+            }
+        });
+    }
+
     // Upload the avatar to a NIP-96 server
     let strUploadURL = '';
     try {
-        strUploadURL = await invoke("upload_avatar", { filepath: file });
+        strUploadURL = await invoke("upload_avatar", { filepath: file, uploadType: "avatar" });
     } catch (e) {
-        return await popupConfirm('Avatar Upload Failed!', e, true, '', 'vector_warning.svg');
+        // Restore icon on failure
+        if (avatarIcon) avatarIcon.className = 'icon icon-plus-circle';
+        if (unlisten) unlisten();
+        return await popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
+
+    // Restore icon on success
+    if (avatarIcon) avatarIcon.className = 'icon icon-plus-circle';
+    if (unlisten) unlisten();
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldAvatar = cProfile.avatar;
+    const oldAvatarCached = cProfile.avatar_cached;
     cProfile.avatar = strUploadURL;
+    cProfile.avatar_cached = ''; // Clear stale cached image so new URL is used
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
+        const success = await invoke("update_profile", { name: "", avatar: strUploadURL, banner: "", about: "" });
+        if (!success) {
+            // Revert local change since network update failed
+            cProfile.avatar = oldAvatar;
+            cProfile.avatar_cached = oldAvatarCached;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            return await popupConfirm('Avatar Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
-        return await popupConfirm('Avatar Update Failed!', e, true, '', 'vector_warning.svg');
+        // Revert local change on error
+        cProfile.avatar = oldAvatar;
+        cProfile.avatar_cached = oldAvatarCached;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        return await popupConfirm('Avatar Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
@@ -514,25 +566,67 @@ async function askForBanner() {
     });
     if (!file) return;
 
+    // Show upload progress spinner
+    const bannerEditBtn = document.querySelector('.profile-banner-edit');
+    const bannerIcon = bannerEditBtn?.querySelector('.icon');
+    let unlisten = null;
+
+    if (bannerIcon) {
+        // Replace icon with progress spinner
+        bannerIcon.className = 'profile-upload-spinner';
+        bannerIcon.style.setProperty('--progress', '5%');
+
+        // Listen for progress events
+        unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+            if (event.payload.type === 'banner') {
+                const progress = Math.max(5, event.payload.progress);
+                bannerIcon.style.setProperty('--progress', `${progress}%`);
+            }
+        });
+    }
+
     // Upload the banner to a NIP-96 server
     let strUploadURL = '';
     try {
-        strUploadURL = await invoke("upload_avatar", { filepath: file });
+        strUploadURL = await invoke("upload_avatar", { filepath: file, uploadType: "banner" });
     } catch (e) {
-        return await popupConfirm('Banner Upload Failed!', e, true, '', 'vector_warning.svg');
+        // Restore icon on failure
+        if (bannerIcon) bannerIcon.className = 'icon icon-edit';
+        if (unlisten) unlisten();
+        return await popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
+
+    // Restore icon on success
+    if (bannerIcon) bannerIcon.className = 'icon icon-edit';
+    if (unlisten) unlisten();
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldBanner = cProfile.banner;
+    const oldBannerCached = cProfile.banner_cached;
     cProfile.banner = strUploadURL;
+    cProfile.banner_cached = ''; // Clear stale cached image so new URL is used
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
-        await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL, about: "" });
+        const success = await invoke("update_profile", { name: "", avatar: "", banner: strUploadURL, about: "" });
+        if (!success) {
+            // Revert local change since network update failed
+            cProfile.banner = oldBanner;
+            cProfile.banner_cached = oldBannerCached;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            return await popupConfirm('Banner Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
-        return await popupConfirm('Banner Update Failed!', e, true, '', 'vector_warning.svg');
+        // Revert local change on error
+        cProfile.banner = oldBanner;
+        cProfile.banner_cached = oldBannerCached;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        return await popupConfirm('Banner Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
@@ -546,15 +640,25 @@ async function askForStatus() {
 
     // Display the change immediately
     const cProfile = arrProfiles.find(a => a.mine);
+    const oldStatus = cProfile.status.title;
     cProfile.status.title = strStatus;
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
-    // Send out the metadata update
+    // Send out the status update
     try {
-        await invoke("update_status", { status: strStatus });
+        const success = await invoke("update_status", { status: strStatus });
+        if (!success) {
+            cProfile.status.title = oldStatus;
+            renderCurrentProfile(cProfile);
+            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            await popupConfirm('Status Update Failed!', 'Failed to broadcast status update to the network.', true, '', 'vector_warning.svg');
+        }
     } catch (e) {
-        await popupConfirm('Status Update Failed!', 'An error occurred while updating your status, the change may not have committed to the network, you can re-try any time.', true, '', 'vector_warning.svg');
+        cProfile.status.title = oldStatus;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        await popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
@@ -576,7 +680,7 @@ async function selectFile() {
  * @param {string} mode - The theme mode, i.e: light, dark
  */
 function applyTheme(theme = 'vector', mode = 'dark') {
-  document.body.classList.remove('vector-theme', 'chatstr-theme');
+  document.body.classList.remove('vector-theme', 'satoshi-theme', 'chatstr-theme', 'gifverse-theme', 'pivx-theme');
   document.body.classList.add(`${theme}-theme`);
   
   domTheme.href = `/themes/${theme}/${mode}.css`;
@@ -619,19 +723,19 @@ async function checkPrimaryDeviceStatus() {
         } catch (error) {
             // Continue with local data if network fetch fails
         }
-        
+
         // Get all keypackages for the current account (now includes fresh network data)
         const keypackages = await invoke('load_mls_keypackages');
-        
+
         if (!keypackages || keypackages.length === 0) {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
         let userKeypackages = keypackages.filter(kp =>
             kp.owner_pubkey === strPubkey
         );
-        
+
         // Deduplicate entries with the same keypackage_ref (event ID)
         // Since device_id is purely local, we use keypackage_ref as the common identifier
         const deduped = new Map();
@@ -642,19 +746,13 @@ async function checkPrimaryDeviceStatus() {
             }
         }
         userKeypackages = Array.from(deduped.values());
-        
+
         if (userKeypackages.length === 0) {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
-        // Find the latest keypackage (highest fetched_at timestamp)
-        const latestKeypackage = userKeypackages.reduce((latest, current) => {
-            return (current.fetched_at > latest.fetched_at) ? current : latest;
-        });
-        
-        // Check if this device created the latest keypackage
-        // Get the local device_id to find keypackages created by this device
+
+        // Get the local device_id first
         let myDeviceId;
         try {
             myDeviceId = await invoke('load_mls_device_id');
@@ -662,25 +760,43 @@ async function checkPrimaryDeviceStatus() {
             updatePrimaryDeviceDot(false);
             return;
         }
-        
+
+        // If device_id isn't set yet (race with keypackage generation) and there's
+        // only one keypackage for this user, this device must be the primary
+        if (!myDeviceId) {
+            updatePrimaryDeviceDot(userKeypackages.length === 1);
+            return;
+        }
+
+        // Find the latest keypackage (highest created_at timestamp - when it was actually created, not fetched)
+        // Falls back to fetched_at for legacy entries without created_at
+        const latestKeypackage = userKeypackages.reduce((latest, current) => {
+            const currentTime = current.created_at || current.fetched_at;
+            const latestTime = latest.created_at || latest.fetched_at;
+            return (currentTime > latestTime) ? current : latest;
+        });
+
         // Find keypackages that have our device_id (created locally)
         const myKeypackages = userKeypackages.filter(kp =>
             kp.device_id === myDeviceId
         );
-        
+
         // Get the most recent keypackage created by this device
+        // Uses created_at (when actually created) with fallback to fetched_at for legacy entries
         const myLatestKeypackage = myKeypackages.length > 0
-            ? myKeypackages.reduce((latest, current) =>
-                (current.fetched_at > latest.fetched_at) ? current : latest
-              )
+            ? myKeypackages.reduce((latest, current) => {
+                const currentTime = current.created_at || current.fetched_at;
+                const latestTime = latest.created_at || latest.fetched_at;
+                return (currentTime > latestTime) ? current : latest;
+              })
             : null;
-        
+
         const myLatestKeypackageRef = myLatestKeypackage?.keypackage_ref;
-        
+
         // This device is primary if its latest keypackage matches the overall latest
         const isPrimary = myLatestKeypackageRef && latestKeypackage.keypackage_ref === myLatestKeypackageRef;
         updatePrimaryDeviceDot(isPrimary);
-        
+
     } catch (error) {
         console.error('Error checking primary device status:', error);
         updatePrimaryDeviceDot(false);
@@ -736,7 +852,7 @@ if (domRefreshKeypkg) {
             await popupConfirm('KeyPackages Refreshed', 'A new device KeyPackage has been generated.', true, '', 'vector-check.svg');
         } catch (error) {
             console.error('Refresh KeyPackages failed:', error);
-            await popupConfirm('Refresh Failed', error.toString(), true, '', 'vector_warning.svg');
+            await popupConfirm('Refresh Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
         } finally {
             // Re‑enable button regardless of success or failure
             domRefreshKeypkg.disabled = false;
@@ -764,7 +880,7 @@ domSettingsDeepRescan.onclick = async (evt) => {
         await popupConfirm('Deep Rescan Started', 'The deep rescan has been initiated. You can continue using the app while it runs in the background.', true, '', 'vector-check.svg');
     } catch (error) {
         console.error('Deep rescan failed:', error);
-        await popupConfirm('Deep Rescan Failed', error.toString(), true, '', 'vector_warning.svg');
+        await popupConfirm('Deep Rescan Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
     }
 };
 
@@ -794,7 +910,7 @@ domSettingsExport.onclick = async (evt) => {
         await popupConfirm('', exportContent, true, '', 'vector_warning.svg');
     } catch (error) {
         console.error('Export failed:', error);
-        await popupConfirm('Export Failed', error.toString(), true, '', 'vector_warning.svg');
+        await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
     }
 };
 
@@ -802,6 +918,18 @@ domSettingsExport.onclick = async (evt) => {
 let fWebPreviewsEnabled = true;
 let fStripTrackingEnabled = true;
 let fSendTypingIndicators = true;
+
+// Display Settings - Simple global variables
+let fDisplayImageTypes = false;
+
+// Security Settings - Encryption state
+let fEncryptionEnabled = true;
+let fSecurityType = 'pin';
+let fMigrationInProgress = false;
+let fMigrationEncrypting = false;
+let fMigrationRekeying = false;
+let unlistenMigrationProgress = null;
+let unlistenMigrationComplete = null;
 
 /**
  * Get storage information from the backend
@@ -845,7 +973,7 @@ async function clearStorage() {
         clearStorageBtn.textContent = strPrevText;
         clearStorageBtn.disabled = false;
         console.error('Failed to clear storage:', error);
-        await popupConfirm('Clear Failed', `Could not clear storage: ${error.message}`, true, '', 'vector_warning.svg');
+        await popupConfirm('Clear Failed', `Could not clear storage: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
         return false;
     }
 }
@@ -939,13 +1067,21 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
             size: typeDistribution['ai_models']
         });
     }
-    
-    // Calculate size for other files (excluding ai_models)
+
+    // Add Cache category if cache exists in type distribution (avatars, banners, icons)
+    if (typeDistribution['cache']) {
+        categorySizes.push({
+            name: 'Cache',
+            size: typeDistribution['cache']
+        });
+    }
+
+    // Calculate size for other files (excluding special categories)
     let otherSize = 0;
     for (const ext in typeDistribution) {
         let isCategorized = false;
-        // Skip ai_models as it's already handled
-        if (ext === 'ai_models') continue;
+        // Skip special categories as they're already handled
+        if (ext === 'ai_models' || ext === 'cache') continue;
         
         for (const category of categories) {
             if (category.extensions.includes(ext)) {
@@ -1162,6 +1298,148 @@ function renderFileTypeDistribution(typeDistribution, totalBytes) {
     }
 }
 
+// ============================================================================
+// Notification Sound Settings
+// ============================================================================
+
+/** @type {Object|null} Current notification settings */
+let currentNotificationSettings = null;
+
+/** @type {string|null} Path to custom sound file */
+let customSoundPath = null;
+
+/**
+ * Initialize notification sound settings UI
+ */
+async function initNotificationSettings() {
+    // Load current settings
+    try {
+        currentNotificationSettings = await loadNotificationSettings();
+    } catch (e) {
+        console.error('Failed to load notification settings:', e);
+        currentNotificationSettings = { global_mute: false, sound: { type: 'Default' } };
+    }
+
+    const muteToggle = document.getElementById('notif-mute-toggle');
+    const soundSelect = document.getElementById('notif-sound-select');
+    const customGroup = document.getElementById('notif-custom-group');
+    const customFilename = document.getElementById('notif-custom-filename');
+    const customSelectBtn = document.getElementById('notif-custom-select-btn');
+    const previewBtn = document.getElementById('notif-preview-btn');
+
+    // Set initial mute toggle state
+    muteToggle.checked = currentNotificationSettings.global_mute;
+
+    // Determine current sound selection
+    const sound = currentNotificationSettings.sound;
+    if (sound && sound.type === 'Custom' && sound.path) {
+        customSoundPath = sound.path;
+        soundSelect.value = 'custom';
+        customGroup.style.display = 'block';
+        updateCustomFilename(sound.path);
+    } else if (sound && sound.type === 'None') {
+        soundSelect.value = 'none';
+    } else if (sound && sound.type === 'Techno') {
+        soundSelect.value = 'techno';
+    } else {
+        soundSelect.value = 'default';
+    }
+
+    // Mute toggle handler
+    muteToggle.addEventListener('change', async (e) => {
+        currentNotificationSettings.global_mute = e.target.checked;
+        await saveCurrentNotificationSettings();
+    });
+
+    // Sound selection handler
+    soundSelect.addEventListener('change', async (e) => {
+        const value = e.target.value;
+
+        if (value === 'custom') {
+            customGroup.style.display = 'block';
+            if (customSoundPath) {
+                updateCustomFilename(customSoundPath);
+                currentNotificationSettings.sound = { type: 'Custom', path: customSoundPath };
+                await saveCurrentNotificationSettings();
+            } else {
+                // No custom path yet - show placeholder
+                customFilename.textContent = 'No file selected';
+            }
+        } else {
+            customGroup.style.display = 'none';
+            if (value === 'none') {
+                currentNotificationSettings.sound = { type: 'None' };
+            } else if (value === 'techno') {
+                currentNotificationSettings.sound = { type: 'Techno' };
+            } else {
+                currentNotificationSettings.sound = { type: 'Default' };
+            }
+            await saveCurrentNotificationSettings();
+        }
+    });
+
+    // Custom sound file selection handler
+    customSelectBtn.addEventListener('click', async () => {
+        try {
+            const path = await selectCustomNotificationSound();
+            customSoundPath = path;
+            currentNotificationSettings.sound = { type: 'Custom', path: path };
+            updateCustomFilename(path);
+            await saveCurrentNotificationSettings();
+        } catch (e) {
+            if (e === 'FILE_TOO_LARGE') {
+                popupConfirm('File Too Large', 'Notification sounds must be under 1MB. Please choose a shorter audio clip.', true);
+            } else if (e === 'AUDIO_TOO_LONG') {
+                popupConfirm('Audio Too Long', 'Notification sounds must be 10 seconds or less.', true);
+            } else if (e !== 'No file selected') {
+                console.error('Failed to select custom sound:', e);
+            }
+        }
+    });
+
+    // Clear custom sound handler
+    const clearBtn = document.getElementById('notif-custom-clear');
+    clearBtn.addEventListener('click', async (e) => {
+        e.stopPropagation(); // Prevent triggering the chip click (file picker)
+        customSoundPath = null;
+        currentNotificationSettings.sound = { type: 'Default' };
+        soundSelect.value = 'default';
+        customGroup.style.display = 'none';
+        await saveCurrentNotificationSettings();
+    });
+
+    // Preview button handler
+    previewBtn.addEventListener('click', async () => {
+        try {
+            await previewNotificationSound(currentNotificationSettings.sound);
+        } catch (e) {
+            console.error('Failed to preview sound:', e);
+        }
+    });
+}
+
+/**
+ * Update the custom filename display
+ * @param {string} path - Full path to the sound file (may be cache format: name_RATE.raw)
+ */
+function updateCustomFilename(path) {
+    const filename = path.split(/[/\\]/).pop() || 'Unknown file';
+    // Extract friendly name from cache format (e.g., "discord_ping_48000.raw" -> "discord_ping")
+    const friendlyName = filename.replace(/_\d+\.raw$/, '');
+    document.getElementById('notif-custom-filename').textContent = friendlyName;
+}
+
+/**
+ * Save current notification settings to backend
+ */
+async function saveCurrentNotificationSettings() {
+    try {
+        await saveNotificationSettings(currentNotificationSettings);
+    } catch (e) {
+        console.error('Failed to save notification settings:', e);
+    }
+}
+
 /**
  * Initialize settings on app start
  */
@@ -1194,6 +1472,44 @@ async function initSettings() {
         await saveSendTypingIndicators(e.target.checked);
     });
 
+    // Load and initialize display settings
+    fDisplayImageTypes = await loadDisplayImageTypes();
+    const displayImageTypesToggle = document.getElementById('display-image-types-toggle');
+    displayImageTypesToggle.checked = fDisplayImageTypes;
+    displayImageTypesToggle.addEventListener('change', async (e) => {
+        fDisplayImageTypes = e.target.checked;
+        await saveDisplayImageTypes(e.target.checked);
+    });
+
+    // Background Wallpaper toggle (Chat Background)
+    const chatBgToggle = document.getElementById('chat-bg-toggle');
+    if (chatBgToggle) {
+        // Load saved preference from database (default: enabled)
+        const chatBgEnabled = await loadChatBgEnabled();
+        chatBgToggle.checked = chatBgEnabled;
+        if (!chatBgEnabled) document.body.classList.add('chat-bg-disabled');
+
+        // Handle toggle changes
+        chatBgToggle.addEventListener('change', async () => {
+            if (chatBgToggle.checked) {
+                document.body.classList.remove('chat-bg-disabled');
+                await saveChatBgEnabled(true);
+            } else {
+                document.body.classList.add('chat-bg-disabled');
+                await saveChatBgEnabled(false);
+            }
+        });
+    }
+
+    // Initialize notification sound settings (desktop only)
+    if (platformFeatures.notification_sounds) {
+        await initNotificationSettings();
+    } else {
+        // Hide notification sounds section on mobile
+        const notifSection = document.getElementById('settings-notifications');
+        if (notifSection) notifSection.style.display = 'none';
+    }
+
     // Set up clear storage button
     const clearStorageBtn = document.getElementById('clear-storage-btn');
     clearStorageBtn.addEventListener('click', async () => {
@@ -1204,4 +1520,575 @@ async function initSettings() {
     // Add click handler for primary device status
     const primaryDeviceStatus = document.getElementById('primary-device-status');
     primaryDeviceStatus.onclick = showPrimaryDeviceInfo;
+
+    // Initialize encryption settings
+    await initEncryptionSettings();
 }
+
+// ============================================================================
+// Encryption Settings
+// ============================================================================
+
+/**
+ * Initialize encryption settings UI and event listeners
+ */
+async function initEncryptionSettings() {
+    const encryptionToggle = document.getElementById('security-encryption-toggle');
+    const encryptionInfoBtn = document.getElementById('security-encryption-info');
+    const changeCredentialBtn = document.getElementById('security-change-credential');
+
+    if (!encryptionToggle) return;
+
+    // Get current encryption status from backend
+    try {
+        const status = await invoke('get_encryption_status', { npub: null });
+        fEncryptionEnabled = status.enabled;
+        fSecurityType = status.security_type || 'pin';
+        encryptionToggle.checked = fEncryptionEnabled;
+    } catch (e) {
+        console.error('Failed to get encryption status:', e);
+        fEncryptionEnabled = true;
+        encryptionToggle.checked = true;
+    }
+
+    // Update change credential button
+    updateChangeCredentialButton();
+
+    // Set up toggle change handler
+    encryptionToggle.addEventListener('change', handleEncryptionToggleChange);
+
+    // Set up info button click handler (with stopPropagation to prevent toggle trigger)
+    if (encryptionInfoBtn) {
+        encryptionInfoBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            showEncryptionInfo();
+        });
+    }
+
+    // Set up change credential button handler
+    if (changeCredentialBtn) {
+        changeCredentialBtn.addEventListener('click', handleChangeCredential);
+    }
+
+    // Set up Tauri event listeners for migration progress
+    setupMigrationEventListeners();
+
+}
+
+/**
+ * Update change credential button visibility and text
+ */
+function updateChangeCredentialButton() {
+    const btn = document.getElementById('security-change-credential');
+    if (!btn) return;
+    if (fEncryptionEnabled) {
+        btn.style.display = '';
+        btn.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+/**
+ * Show info popup about local encryption
+ */
+async function showEncryptionInfo() {
+    await popupConfirm(
+        'Local Encryption',
+        'Protects your messages and keys if your device is lost or stolen.<br><br>' +
+        'Disabling speeds up app launch but stores data in plain text.',
+        true,
+        '',
+        'vector-check.svg'
+    );
+}
+
+/**
+ * Handle encryption toggle change
+ */
+async function handleEncryptionToggleChange(e) {
+    const newValue = e.target.checked;
+
+    // Block if migration running or a credential modal is already open
+    if (fMigrationInProgress || document.getElementById('credential-modal-overlay')?.classList.contains('active')) {
+        e.target.checked = fEncryptionEnabled;
+        return;
+    }
+
+    if (newValue) {
+        // Enabling encryption - requires PIN
+        await handleEnableEncryption(e.target);
+    } else {
+        // Disabling encryption - confirm and migrate
+        await handleDisableEncryption(e.target);
+    }
+}
+
+/**
+ * Handle enabling encryption
+ * @param {HTMLInputElement} toggle - The toggle element
+ */
+async function handleEnableEncryption(toggle) {
+    // Ask user to choose security type
+    const result = await promptSecurityCredential('Set Up Encryption', 'Choose how to protect your local data. There is no recovery if you forget!');
+
+    if (!result) {
+        toggle.checked = false;
+        return;
+    }
+
+    // Show migration modal and start encryption
+    showMigrationModal(true);
+
+    try {
+        await invoke('enable_encryption', { credential: result.credential, securityType: result.securityType });
+        fSecurityType = result.securityType;
+        updateChangeCredentialButton();
+    } catch (e) {
+        hideMigrationModal();
+        await popupConfirm(
+            'Encryption Failed',
+            `Failed to enable encryption: ${escapeHtml(String(e))}`,
+            true,
+            '',
+            'vector_warning.svg'
+        );
+        toggle.checked = false;
+    }
+}
+
+// ==========================================================================
+// Credential Modal API
+// ==========================================================================
+// A reusable modal matching the migration modal design, with proper PIN row
+// and password input. Modes: 'pin', 'password', 'type-select'.
+
+/**
+ * Show the credential modal in a specific mode.
+ * @param {Object} opts
+ * @param {'pin'|'password'|'type-select'} opts.mode - Which input to show
+ * @param {string} opts.title - Modal title
+ * @param {string} opts.subtitle - Subtitle / description text
+ * @param {string} [opts.confirmText='Confirm'] - Text for the action button
+ * @returns {Promise<string|null>} - credential string, type string, or null if cancelled
+ */
+function showCredentialModal({ mode, title, subtitle, confirmText = 'Confirm' }) {
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('credential-modal-overlay');
+        const titleEl = document.getElementById('credential-modal-title');
+        const subtitleEl = document.getElementById('credential-modal-subtitle');
+        const typeSelect = document.getElementById('credential-modal-type-select');
+        const pinRow = document.getElementById('credential-modal-pin-row');
+        const passwordDiv = document.getElementById('credential-modal-password');
+        const passwordInput = document.getElementById('credential-modal-password-input');
+        const confirmBtn = document.getElementById('credential-modal-confirm');
+        const cancelBtn = document.getElementById('credential-modal-cancel');
+
+        // Reset state
+        titleEl.textContent = title;
+        subtitleEl.textContent = subtitle;
+        typeSelect.style.display = 'none';
+        pinRow.style.display = 'none';
+        passwordDiv.style.display = 'none';
+        confirmBtn.textContent = confirmText;
+
+        // PIN inputs — fresh query each time
+        const pinInputs = pinRow.querySelectorAll('.cred-pin');
+        pinInputs.forEach(el => { el.value = ''; });
+
+        passwordInput.value = '';
+
+        let selectedType = 'pin';
+        let resolved = false;
+
+        function cleanup() {
+            if (resolved) return;
+            resolved = true;
+            overlay.classList.remove('active');
+            document.removeEventListener('keydown', onKeyDown);
+            // Remove PIN listeners
+            pinInputs.forEach(el => {
+                el.removeEventListener('input', onPinInput);
+                el.removeEventListener('keydown', onPinKeyDown);
+            });
+        }
+
+        function finish(value) {
+            cleanup();
+            resolve(value);
+        }
+
+        // --- Cancel ---
+        cancelBtn.onclick = () => finish(null);
+
+        function onKeyDown(e) {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                finish(null);
+            }
+        }
+        document.addEventListener('keydown', onKeyDown);
+
+        // --- PIN input handlers ---
+        function onPinKeyDown(e) {
+            const idx = Array.from(pinInputs).indexOf(e.target);
+            if (e.key === 'Backspace') {
+                e.preventDefault();
+                e.target.value = '';
+                if (idx > 0) pinInputs[idx - 1].focus();
+            } else if (e.key.length === 1 && !/^[0-9]$/.test(e.key)) {
+                e.preventDefault();
+            }
+        }
+
+        function onPinInput(e) {
+            const idx = Array.from(pinInputs).indexOf(e.target);
+            let val = e.target.value.replace(/[^0-9]/g, '');
+            if (val.length > 1) val = val.charAt(0);
+            e.target.value = val;
+            if (val && idx < pinInputs.length - 1) {
+                pinInputs[idx + 1].focus();
+            }
+            // Auto-submit when all 6 digits entered
+            const full = Array.from(pinInputs).every(el => /^[0-9]$/.test(el.value));
+            if (full) {
+                const pin = Array.from(pinInputs).map(el => el.value).join('');
+                finish(pin);
+            }
+        }
+
+        // --- Mode setup ---
+        if (mode === 'pin') {
+            pinRow.style.display = '';
+            // No confirm button for PIN (auto-submits on 6th digit)
+            confirmBtn.style.display = 'none';
+            pinInputs.forEach(el => {
+                el.addEventListener('keydown', onPinKeyDown);
+                el.addEventListener('input', onPinInput);
+            });
+            // Show and focus
+            overlay.classList.add('active');
+            requestAnimationFrame(() => pinInputs[0].focus());
+
+        } else if (mode === 'password') {
+            passwordDiv.style.display = '';
+            confirmBtn.style.display = '';
+            confirmBtn.onclick = () => {
+                const val = passwordInput.value;
+                if (val) finish(val);
+            };
+            // Enter key submits
+            passwordInput.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const val = passwordInput.value;
+                    if (val) finish(val);
+                }
+            };
+            overlay.classList.add('active');
+            requestAnimationFrame(() => passwordInput.focus());
+
+        } else if (mode === 'type-select') {
+            typeSelect.style.display = '';
+            confirmBtn.style.display = '';
+            confirmBtn.textContent = confirmText || 'Continue';
+
+            const btnPin = document.getElementById('credential-modal-type-pin');
+            const btnPwd = document.getElementById('credential-modal-type-password');
+            const descEl = document.getElementById('credential-modal-type-desc');
+
+            btnPin.classList.add('active');
+            btnPwd.classList.remove('active');
+            selectedType = 'pin';
+            descEl.textContent = 'A 6-digit code. Quick and convenient.';
+
+            btnPin.onclick = () => {
+                selectedType = 'pin';
+                btnPin.classList.add('active');
+                btnPwd.classList.remove('active');
+                descEl.textContent = 'A 6-digit code. Quick and convenient.';
+            };
+            btnPwd.onclick = () => {
+                selectedType = 'password';
+                btnPwd.classList.add('active');
+                btnPin.classList.remove('active');
+                descEl.textContent = 'A text password. More secure, but slower to enter.';
+            };
+            confirmBtn.onclick = () => finish(selectedType);
+            overlay.classList.add('active');
+        }
+    });
+}
+
+/**
+ * Prompt user to choose a security type and enter + confirm a credential.
+ * Uses the custom credential modal for all phases.
+ * @param {string} title - Overall flow title
+ * @param {string} message - Description for the type selection phase
+ * @returns {Promise<{credential: string, securityType: string}|null>}
+ */
+async function promptSecurityCredential(title, message) {
+    // Phase 1: Choose security type
+    const secType = await showCredentialModal({
+        mode: 'type-select',
+        title,
+        subtitle: message,
+        confirmText: 'Continue',
+    });
+    if (!secType) return null;
+
+    const label = secType === 'pin' ? 'PIN' : 'Password';
+    const defaultSubtitle = secType === 'pin' ? 'Enter a 6-digit PIN.' : 'Enter a password (4+ characters).';
+    let entrySubtitle = defaultSubtitle;
+
+    // Loop: enter + confirm, retry inline on mismatch or too-short
+    while (true) {
+        // Phase 2: Enter credential
+        const credential = await showCredentialModal({
+            mode: secType,
+            title: `Create ${label}`,
+            subtitle: entrySubtitle,
+        });
+        if (!credential) return null;
+
+        // Password length validation
+        if (secType === 'password' && credential.length < 4) {
+            entrySubtitle = 'Too short! Must be at least 4 characters.';
+            continue;
+        }
+
+        // Phase 3: Confirm credential
+        const confirmed = await showCredentialModal({
+            mode: secType,
+            title: `Confirm ${label}`,
+            subtitle: `Re-enter your ${label.toLowerCase()}.`,
+        });
+        if (!confirmed) return null;
+
+        if (confirmed !== credential) {
+            entrySubtitle = `${label}s didn't match. Try again.`;
+            continue;
+        }
+
+        return { credential, securityType: secType };
+    }
+}
+
+/**
+ * Handle changing PIN/Password (re-keying)
+ */
+async function handleChangeCredential() {
+    if (fMigrationInProgress || document.getElementById('credential-modal-overlay')?.classList.contains('active')) return;
+
+    // Step 1: Ask for current credential and verify it
+    const currentLabel = fSecurityType === 'password' ? 'Password' : 'PIN';
+    let oldCredential = null;
+    let subtitle = `Please enter your current ${currentLabel.toLowerCase()} to continue.`;
+    while (true) {
+        const entered = await showCredentialModal({
+            mode: fSecurityType,
+            title: `Enter Current ${currentLabel}`,
+            subtitle,
+        });
+        if (!entered) return;
+
+        // Show validating state while Argon2 hashes (keep modal visible)
+        const overlay = document.getElementById('credential-modal-overlay');
+        const titleEl = document.getElementById('credential-modal-title');
+        const subtitleEl = document.getElementById('credential-modal-subtitle');
+        const pinRow = document.getElementById('credential-modal-pin-row');
+        const passwordDiv = document.getElementById('credential-modal-password');
+        const buttonsDiv = document.getElementById('credential-modal-buttons');
+        titleEl.textContent = `Validating ${currentLabel}...`;
+        subtitleEl.textContent = 'Please wait';
+        subtitleEl.classList.add('startup-subtext-gradient');
+        pinRow.style.display = 'none';
+        passwordDiv.style.display = 'none';
+        buttonsDiv.style.display = 'none';
+        overlay.classList.add('active');
+
+        // Verify the credential without exposing key material over IPC
+        try {
+            await invoke('verify_credential', { credential: entered });
+            oldCredential = entered;
+            overlay.classList.remove('active');
+            subtitleEl.classList.remove('startup-subtext-gradient');
+            buttonsDiv.style.display = '';
+            break;
+        } catch (e) {
+            overlay.classList.remove('active');
+            subtitleEl.classList.remove('startup-subtext-gradient');
+            buttonsDiv.style.display = '';
+            subtitle = `Incorrect ${currentLabel.toLowerCase()}, try again.`;
+        }
+    }
+
+    // Step 2: Choose new security type + credential
+    const result = await promptSecurityCredential(
+        `Change ${currentLabel}`,
+        `Choose a new security type and credential.`
+    );
+    if (!result) return;
+
+    // Step 3: Re-key
+    fMigrationRekeying = true;
+    showMigrationModal(true);
+
+    try {
+        await invoke('rekey_encryption', {
+            oldCredential,
+            newCredential: result.credential,
+            securityType: result.securityType,
+        });
+        fSecurityType = result.securityType;
+        updateChangeCredentialButton();
+    } catch (e) {
+        hideMigrationModal();
+        fMigrationRekeying = false;
+        await popupConfirm(
+            'Re-keying Failed',
+            `Failed to change credential: ${escapeHtml(String(e))}`,
+            true,
+            '',
+            'vector_warning.svg'
+        );
+    }
+}
+
+/**
+ * Handle disabling encryption
+ * @param {HTMLInputElement} toggle - The toggle element
+ */
+async function handleDisableEncryption(toggle) {
+    // Confirm with user
+    const confirmed = await popupConfirm(
+        'Disable Encryption?',
+        'This will decrypt all your local data and remove PIN protection.<br><br>' +
+        '<b>Your messages and keys will be stored in plain text.</b><br><br>' +
+        'This is useful for faster app startup on personal devices, but reduces security if your device is lost or stolen.',
+        false,
+        '',
+        'vector_warning.svg'
+    );
+
+    if (!confirmed) {
+        // User cancelled - revert toggle
+        toggle.checked = true;
+        return;
+    }
+
+    // Show migration modal and start decryption
+    showMigrationModal(false);
+
+    try {
+        await invoke('disable_encryption');
+        // Success - migration complete event will hide modal
+    } catch (e) {
+        hideMigrationModal();
+        await popupConfirm(
+            'Decryption Failed',
+            `Failed to disable encryption: ${escapeHtml(String(e))}`,
+            true,
+            '',
+            'vector_warning.svg'
+        );
+        toggle.checked = true;
+    }
+}
+
+/**
+ * Set up Tauri event listeners for migration progress
+ */
+async function setupMigrationEventListeners() {
+    const { listen } = window.__TAURI__.event;
+
+    // Clean up previous listeners to prevent stacking on re-init
+    if (unlistenMigrationProgress) { unlistenMigrationProgress(); unlistenMigrationProgress = null; }
+    if (unlistenMigrationComplete) { unlistenMigrationComplete(); unlistenMigrationComplete = null; }
+
+    // Listen for migration progress updates
+    unlistenMigrationProgress = await listen('encryption_migration_progress', (event) => {
+        const { total, completed, phase } = event.payload;
+        updateMigrationProgress(total, completed, phase);
+    });
+
+    // Listen for migration completion
+    unlistenMigrationComplete = await listen('encryption_migration_complete', () => {
+        const wasEncrypting = fMigrationEncrypting;
+        const wasRekeying = fMigrationRekeying;
+        hideMigrationModal();
+        fMigrationRekeying = false;
+        // Update local state
+        fEncryptionEnabled = document.getElementById('security-encryption-toggle').checked;
+        updateChangeCredentialButton();
+        showToast(wasRekeying ? 'Credential changed' : wasEncrypting ? 'Encryption enabled' : 'Encryption disabled');
+    });
+}
+
+/**
+ * Show the migration progress modal
+ * @param {boolean} encrypting - True if encrypting, false if decrypting
+ */
+function showMigrationModal(encrypting) {
+    fMigrationInProgress = true;
+    fMigrationEncrypting = encrypting;
+
+    const overlay = document.getElementById('encryption-migration-overlay');
+    const title = document.getElementById('encryption-migration-title');
+    const phase = document.getElementById('encryption-migration-phase');
+    const progressFill = document.getElementById('encryption-migration-progress-fill');
+    const progressText = document.getElementById('encryption-migration-progress-text');
+
+    // Set title based on operation
+    title.textContent = fMigrationRekeying ? 'Changing Credential' : encrypting ? 'Enabling Encryption' : 'Disabling Encryption';
+    phase.textContent = 'Preparing...';
+    progressFill.style.width = '0%';
+    progressText.textContent = '0%';
+
+    // Show the overlay
+    overlay.classList.add('active');
+}
+
+/**
+ * Hide the migration progress modal
+ */
+function hideMigrationModal() {
+    fMigrationInProgress = false;
+
+    const overlay = document.getElementById('encryption-migration-overlay');
+    overlay.classList.remove('active');
+}
+
+/**
+ * Update the migration progress display
+ * @param {number} total - Total items to process
+ * @param {number} completed - Items completed
+ * @param {string} phase - Current phase description
+ */
+function updateMigrationProgress(total, completed, phase) {
+    const phaseEl = document.getElementById('encryption-migration-phase');
+    const progressFill = document.getElementById('encryption-migration-progress-fill');
+    const progressText = document.getElementById('encryption-migration-progress-text');
+
+    // Calculate percentage
+    const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    // Update phase description
+    let phaseText = phase;
+    if (phase === 'decrypting') {
+        phaseText = `Decrypting messages... ${completed.toLocaleString()} / ${total.toLocaleString()}`;
+    } else if (phase === 'encrypting') {
+        phaseText = `Encrypting messages... ${completed.toLocaleString()} / ${total.toLocaleString()}`;
+    } else if (phase === 'rekeying') {
+        phaseText = `Re-encrypting messages... ${completed.toLocaleString()} / ${total.toLocaleString()}`;
+    } else if (phase === 'finalizing') {
+        phaseText = 'Finalizing...';
+    }
+
+    phaseEl.textContent = phaseText;
+    progressFill.style.width = `${percentage}%`;
+    progressText.textContent = `${percentage}%`;
+}
+
+

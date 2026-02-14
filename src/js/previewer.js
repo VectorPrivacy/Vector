@@ -419,10 +419,10 @@ function updateZoomInfo() {
  */
 function attachImagePreview(imgElement) {
     if (!imgElement || imgElement.dataset.previewAttached) return;
-    
+
     // Add btn class for pointer cursor and hover effects
     imgElement.classList.add('btn');
-    
+
     imgElement.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -430,7 +430,71 @@ function attachImagePreview(imgElement) {
             openImageViewer(imgElement.src);
         }
     });
-    
+
     // Mark as attached to avoid duplicate handlers
     imgElement.dataset.previewAttached = 'true';
+}
+
+/**
+ * Create and attach a file extension badge to an image container
+ * The badge shows the file extension and auto-hides if it's too large relative to the image
+ * @param {HTMLImageElement} imgElement - The image element
+ * @param {HTMLElement} container - The container to append the badge to (must have position: relative)
+ * @param {string} extension - The file extension (without dot)
+ */
+function attachFileExtBadge(imgElement, container, extension) {
+    // Check if display image types setting is enabled
+    if (!fDisplayImageTypes) return null;
+    if (!imgElement || !container || !extension) return null;
+
+    const extBadge = document.createElement('span');
+    extBadge.className = 'file-ext-badge';
+    extBadge.textContent = extension.toUpperCase();
+    // Initially hide until we check dimensions
+    extBadge.style.display = 'none';
+
+    // Check badge size after image loads
+    imgElement.addEventListener('load', () => {
+        const imgWidth = imgElement.offsetWidth;
+        const imgHeight = imgElement.offsetHeight;
+
+        // Show badge to measure it
+        extBadge.style.display = '';
+        const badgeWidth = extBadge.offsetWidth;
+        const badgeHeight = extBadge.offsetHeight;
+
+        // Hide badge if it's > 25% of image width or height
+        const widthRatio = badgeWidth / imgWidth;
+        const heightRatio = badgeHeight / imgHeight;
+
+        if (widthRatio > 0.25 || heightRatio > 0.25) {
+            extBadge.style.display = 'none';
+            // Remove border radius from small images
+            imgElement.style.borderRadius = '0';
+        }
+    }, { once: true });
+
+    container.appendChild(extBadge);
+    return extBadge;
+}
+
+/**
+ * Extract file extension from a URL
+ * @param {string} url - The URL to extract extension from
+ * @returns {string|null} - The extension (without dot) or null
+ */
+function getExtensionFromUrl(url) {
+    if (!url) return null;
+    try {
+        const urlObj = new URL(url);
+        const path = urlObj.pathname.split('?')[0];
+        const lastDot = path.lastIndexOf('.');
+        if (lastDot === -1 || lastDot === path.length - 1) return null;
+        return path.substring(lastDot + 1).toLowerCase();
+    } catch {
+        // Fallback for non-URL strings
+        const lastDot = url.lastIndexOf('.');
+        if (lastDot === -1 || lastDot === url.length - 1) return null;
+        return url.substring(lastDot + 1).toLowerCase().split('?')[0];
+    }
 }

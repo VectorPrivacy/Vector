@@ -5,6 +5,13 @@ const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
 const { openUrl, revealItemInDir } = window.__TAURI__.opener;
 
+// System event types (matches Rust SystemEventType enum)
+const SystemEventType = {
+    MemberLeft: 0,
+    MemberJoined: 1,
+    MemberRemoved: 2,
+};
+
 const domTheme = document.getElementById('theme');
 
 const domLoginStart = document.getElementById('login-start');
@@ -15,6 +22,11 @@ const domLoginImport = document.getElementById('login-import');
 const domLoginInput = document.getElementById('login-input');
 const domLoginBtn = document.getElementById('login-btn');
 
+const domLoginImportError = document.getElementById('login-import-error');
+
+const domLoginBackBar = document.getElementById('login-back-bar');
+const domLoginBackBtn = document.getElementById('login-back-btn');
+
 const domLoginInvite = document.getElementById('login-invite');
 const domInviteInput = document.getElementById('invite-input');
 const domInviteBtn = document.getElementById('invite-btn');
@@ -24,6 +36,9 @@ const domLoginWelcome = document.getElementById('login-welcome');
 const domLoginEncrypt = document.getElementById('login-encrypt');
 const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
 const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
+const domLoginEncryptPassword = document.getElementById('login-encrypt-password');
+const domLoginPasswordInput = document.getElementById('login-password-input');
+const domLoginEncryptTypeSelect = document.getElementById('login-encrypt-type-select');
 
 const domProfile = document.getElementById('profile');
 const domProfileBackBtn = document.getElementById('profile-back-btn');
@@ -43,6 +58,7 @@ const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
+const domProfileOptionShare = document.getElementById('profile-option-share');
 const domProfileId = document.getElementById('profile-id');
 
 const domGroupOverview = document.getElementById('group-overview');
@@ -87,13 +103,40 @@ const domChatMessageInput = document.getElementById('chat-input');
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
+const domAttachmentPanel = document.getElementById('attachment-panel');
+const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
+const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
+const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
+const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
+const domMiniAppsGrid = document.getElementById('miniapps-grid');
+const domMiniAppsSearch = document.getElementById('miniapps-search');
+const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
+const domAttachmentPanelMarketplace = document.getElementById('attachment-panel-marketplace');
+const domAttachmentPanelPivx = document.getElementById('attachment-panel-pivx');
+const domAttachmentPanelPivxView = document.getElementById('attachment-panel-pivx-view');
+const domAttachmentPanelPivxBack = document.getElementById('attachment-panel-pivx-back');
+const domPivxBalanceAmount = document.getElementById('pivx-balance-amount');
+const domPivxDepositBtn = document.getElementById('pivx-deposit-btn');
+const domPivxSendBtn = document.getElementById('pivx-send-btn');
+const domPivxSettingsBtn = document.getElementById('pivx-settings-btn');
+const domPivxDepositOverlay = document.getElementById('pivx-deposit-overlay');
+const domPivxSendOverlay = document.getElementById('pivx-send-overlay');
+const domPivxSettingsOverlay = document.getElementById('pivx-settings-overlay');
+const domMarketplacePanel = document.getElementById('marketplace-panel');
+const domMarketplaceBackBtn = document.getElementById('marketplace-back-btn');
+const domMarketplaceContent = document.getElementById('marketplace-content');
+const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
+const domMiniAppLaunchIconContainer = document.getElementById('miniapp-launch-icon-container');
+const domMiniAppLaunchName = document.getElementById('miniapp-launch-name');
+const domMiniAppLaunchCancel = document.getElementById('miniapp-launch-cancel');
+const domMiniAppLaunchSolo = document.getElementById('miniapp-launch-solo');
+const domMiniAppLaunchInvite = document.getElementById('miniapp-launch-invite');
 const domChatMessageInputVoice = document.getElementById('chat-input-voice');
 const domChatMessageInputSend = document.getElementById('chat-input-send');
 const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
-const domShareNpub = document.getElementById('share-npub');
 const domChatNewInput = document.getElementById('chat-new-input');
 const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
@@ -114,6 +157,9 @@ const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-au
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
+const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
+const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
+const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
@@ -121,6 +167,8 @@ const domSettingsDonorsInfo = document.getElementById('donors-info');
 const domDonorPivx = document.getElementById('donor-pivx');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
+const domRestorePivxGroup = document.getElementById('restore-pivx-group');
+const domRestorePivxBtn = document.getElementById('restore-pivx-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
@@ -156,6 +204,11 @@ function openEmojiPanel(e) {
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
     if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
+        // Close attachment panel if open
+        if (domAttachmentPanel.classList.contains('visible')) {
+            closeAttachmentPanel();
+        }
+
         // Reset the emoji picker state first
         resetEmojiPicker();
 
@@ -196,6 +249,9 @@ function openEmojiPanel(e) {
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
             emojiSearch.focus();
         }
+
+        // Prefetch GIF data in background (non-blocking)
+        prefetchTrendingGifs();
     } else {
         // Hide and reset the UI - use class instead of inline style
         emojiSearch.value = '';
@@ -206,6 +262,2261 @@ function openEmojiPanel(e) {
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
     }
+}
+
+/**
+ * Opens or closes the Attachment Panel
+ *
+ * The panel slides up from behind the chat box, similar to the emoji panel.
+ */
+function toggleAttachmentPanel() {
+    if (!domAttachmentPanel.classList.contains('visible')) {
+        // Close emoji panel if open
+        if (picker.classList.contains('visible')) {
+            picker.classList.remove('visible');
+            picker.style.bottom = '';
+            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+        }
+
+        // Display the attachment panel
+        domAttachmentPanel.classList.add('visible');
+        domChatMessageInputFile.classList.add('open');
+
+        // Position attachment panel dynamically above the chat-box
+        const chatBox = document.getElementById('chat-box');
+        if (chatBox) {
+            const chatBoxHeight = chatBox.getBoundingClientRect().height;
+            domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
+        }
+        
+        // Animate items when panel opens
+        animateAttachmentPanelItems(domAttachmentPanelMain);
+    } else {
+        // Hide the attachment panel
+        closeAttachmentPanel();
+    }
+}
+
+/**
+ * Closes the Attachment Panel
+ */
+function closeAttachmentPanel() {
+    domAttachmentPanel.classList.remove('visible');
+    domAttachmentPanel.style.bottom = '';
+    domChatMessageInputFile.classList.remove('open');
+    // Deactivate edit mode if active
+    deactivateMiniAppsEditMode();
+    // Reset to main view when closing
+    showAttachmentPanelMain();
+}
+
+/**
+ * Shows a global tooltip above the target element
+ * @param {string} text - The tooltip text
+ * @param {HTMLElement} targetElement - The element to position the tooltip above
+ */
+function showGlobalTooltip(text, targetElement) {
+    const tooltip = document.getElementById('global-tooltip');
+    if (!tooltip) return;
+    
+    tooltip.textContent = text;
+    
+    // Get the target element's position
+    const rect = targetElement.getBoundingClientRect();
+    
+    // Position tooltip above the element, centered horizontally
+    tooltip.style.left = `${rect.left + rect.width / 2}px`;
+    tooltip.style.top = `${rect.top - 8}px`;
+    tooltip.style.transform = 'translate(-50%, -100%)';
+    
+    // Show the tooltip
+    tooltip.classList.add('visible');
+}
+
+/**
+ * Hides the global tooltip
+ */
+function hideGlobalTooltip() {
+    const tooltip = document.getElementById('global-tooltip');
+    if (!tooltip) return;
+    tooltip.classList.remove('visible');
+}
+
+/**
+ * Shows the main attachment panel view (File, Mini Apps buttons)
+ */
+function showAttachmentPanelMain() {
+    domAttachmentPanelMain.style.display = 'flex';
+    domAttachmentPanelMiniAppsView.style.display = 'none';
+    // Also hide PIVX wallet view if open
+    if (domAttachmentPanelPivxView) {
+        domAttachmentPanelPivxView.style.display = 'none';
+    }
+    // Remove PIVX-active border styling
+    if (domAttachmentPanel) {
+        domAttachmentPanel.classList.remove('pivx-active');
+    }
+
+    // Animate items with staggered delay
+    animateAttachmentPanelItems(domAttachmentPanelMain);
+}
+
+/**
+ * Shows the Mini Apps list view
+ */
+async function showAttachmentPanelMiniApps() {
+    domAttachmentPanelMain.style.display = 'none';
+    domAttachmentPanelMiniAppsView.style.display = 'flex';
+    // Also hide PIVX wallet view if open
+    if (domAttachmentPanelPivxView) {
+        domAttachmentPanelPivxView.style.display = 'none';
+    }
+
+    // Clear search input and reset filter
+    if (domMiniAppsSearch) {
+        domMiniAppsSearch.value = '';
+        filterMiniApps('');
+    }
+
+    // Load Mini Apps history from backend
+    await loadMiniAppsHistory();
+
+    // Animate items with staggered delay
+    animateAttachmentPanelItems(domMiniAppsGrid);
+}
+
+/**
+ * Shows the marketplace panel
+ */
+function showMarketplacePanel() {
+    if (domMarketplacePanel) {
+        domMarketplacePanel.style.display = 'flex';
+        // Initialize marketplace on first show
+        initMarketplace(domMarketplaceContent);
+    }
+}
+
+/**
+ * Hides the marketplace panel with fade out animation
+ * @returns {Promise<void>} Resolves when the animation completes
+ */
+function hideMarketplacePanel() {
+    return new Promise((resolve) => {
+        if (domMarketplacePanel && domMarketplacePanel.style.display !== 'none') {
+            domMarketplacePanel.classList.add('closing');
+            domMarketplacePanel.addEventListener('animationend', function handler() {
+                domMarketplacePanel.removeEventListener('animationend', handler);
+                domMarketplacePanel.style.display = 'none';
+                domMarketplacePanel.classList.remove('closing');
+                resolve();
+            });
+        } else {
+            resolve();
+        }
+    });
+}
+
+// ========== PIVX Wallet Functions ==========
+
+/**
+ * Shows a simple toast notification
+ * @param {string} message - The message to display
+ */
+function showToast(message) {
+    // Create toast element if it doesn't exist
+    let toast = document.getElementById('pivx-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'pivx-toast';
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--toast-border-color, #161616);
+            box-shadow: 
+            0 0 4px rgba(0, 0, 0, 0.8),
+            0 0 12px rgba(0, 0, 0, 0.6),
+            0 0 30px rgba(0, 0, 0, 0.4);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            z-index: 10000;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        `;
+        document.body.appendChild(toast);
+    }
+
+    let backdrop = document.getElementById('toast-backdrop');
+    if (!backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'toast-backdrop';
+    backdrop.style.cssText = `
+        position:fixed;
+        top:0;
+        left:0;
+        width:100%;
+        height:100%;
+        background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
+        opacity:0;
+        z-index:9999;pointer-events:none;
+        transition:opacity 0.3s ease;
+    `;
+    document.body.appendChild(backdrop);
+    }
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    backdrop.style.opacity = '1';
+
+    // Hide after 1 second
+    clearTimeout(toast._timeout);
+    toast._timeout = setTimeout(() => {
+        backdrop.style.opacity = '0';
+        toast.style.opacity = '0';
+    }, 1000);
+}
+
+/**
+ * Shows the PIVX wallet panel and hides the main Mini Apps view
+ */
+function showPivxWalletPanel() {
+    // Track PIVX usage for history-based positioning
+    localStorage.setItem('pivx_last_used', Date.now().toString());
+
+    if (domAttachmentPanelMiniAppsView) {
+        domAttachmentPanelMiniAppsView.style.display = 'none';
+    }
+    if (domAttachmentPanelPivxView) {
+        domAttachmentPanelPivxView.style.display = 'flex';
+        // Animate PIVX panel elements
+        animatePivxPanelOpen(domAttachmentPanelPivxView);
+    }
+    if (domAttachmentPanel) {
+        domAttachmentPanel.classList.add('pivx-active');
+    }
+    refreshPivxWallet();
+}
+
+/**
+ * Animates PIVX panel elements when opened
+ */
+function animatePivxPanelOpen(container) {
+    const balanceSection = container.querySelector('.pivx-balance-section');
+    const dockButtons = container.querySelectorAll('.pivx-dock-btn');
+    const staggerDelay = 0.06; // 60ms delay between each button
+
+    // Reset animations (elements are opacity:0 by default in CSS)
+    if (balanceSection) {
+        balanceSection.classList.remove('pivx-panel-animate');
+        void balanceSection.offsetWidth; // Force reflow
+        balanceSection.classList.add('pivx-panel-animate');
+    }
+
+    dockButtons.forEach((btn, index) => {
+        btn.classList.remove('pivx-panel-animate');
+        btn.style.animationDelay = '';
+        void btn.offsetWidth; // Force reflow
+        btn.style.animationDelay = `${(index + 1) * staggerDelay}s`;
+        btn.classList.add('pivx-panel-animate');
+    });
+}
+
+/**
+ * Hides the PIVX wallet panel and shows the main Mini Apps view
+ */
+function hidePivxWalletPanel() {
+    if (domAttachmentPanelPivxView) {
+        // Remove animation classes so elements revert to CSS default (opacity: 0)
+        const balanceSection = domAttachmentPanelPivxView.querySelector('.pivx-balance-section');
+        const dockButtons = domAttachmentPanelPivxView.querySelectorAll('.pivx-dock-btn');
+
+        if (balanceSection) {
+            balanceSection.classList.remove('pivx-panel-animate');
+        }
+        dockButtons.forEach((btn) => {
+            btn.classList.remove('pivx-panel-animate');
+            btn.style.animationDelay = '';
+        });
+
+        domAttachmentPanelPivxView.style.display = 'none';
+    }
+    if (domAttachmentPanelMiniAppsView) {
+        domAttachmentPanelMiniAppsView.style.display = 'flex';
+        animateAttachmentPanelItems(domMiniAppsGrid);
+    }
+    if (domAttachmentPanel) {
+        domAttachmentPanel.classList.remove('pivx-active');
+    }
+}
+
+/**
+ * Refreshes the PIVX wallet balance by fetching from backend
+ */
+async function refreshPivxWallet() {
+    const domPivxBalanceFiat = document.getElementById('pivx-balance-fiat');
+
+    // Show loading spinner and hide fiat during load
+    if (domPivxBalanceAmount) {
+        domPivxBalanceAmount.classList.remove('pivx-fade-in');
+        domPivxBalanceAmount.innerHTML = '<div class="pivx-balance-loading"><div class="pivx-spinner"></div></div>';
+    }
+    if (domPivxBalanceFiat) {
+        domPivxBalanceFiat.classList.remove('pivx-fade-in');
+        domPivxBalanceFiat.style.display = 'none';
+    }
+
+    try {
+        // Fetch balance and price in parallel
+        const [balance, priceInfo] = await Promise.all([
+            invoke('pivx_get_wallet_balance'),
+            fetchPivxPrice()
+        ]);
+
+        // Store current balance for deposit limit check
+        pivxCurrentWalletBalance = balance;
+
+        if (domPivxBalanceAmount) {
+            domPivxBalanceAmount.innerHTML = `${balance.toFixed(2)} <span style="color: #642D8F;">PIV</span>`;
+            // Trigger fade-in animation
+            void domPivxBalanceAmount.offsetWidth; // Force reflow
+            domPivxBalanceAmount.classList.add('pivx-fade-in');
+        }
+
+        // Update deposit button state based on balance
+        if (domPivxDepositBtn) {
+            if (balance >= PIVX_MAX_BALANCE_WARNING) {
+                domPivxDepositBtn.classList.add('disabled');
+                domPivxDepositBtn.title = 'Balance too high - please withdraw first';
+            } else {
+                domPivxDepositBtn.classList.remove('disabled');
+                domPivxDepositBtn.title = '';
+            }
+        }
+
+        // Show fiat value if we have price data
+        if (domPivxBalanceFiat && priceInfo && priceInfo.value > 0) {
+            const fiatValue = balance * priceInfo.value;
+            domPivxBalanceFiat.textContent = formatFiatValue(fiatValue, priceInfo.currency.toUpperCase());
+            domPivxBalanceFiat.style.display = '';
+            // Trigger fade-in animation with slight delay
+            void domPivxBalanceFiat.offsetWidth; // Force reflow
+            domPivxBalanceFiat.classList.add('pivx-fade-in');
+        } else if (domPivxBalanceFiat) {
+            domPivxBalanceFiat.style.display = 'none';
+        }
+    } catch (err) {
+        console.error('Failed to refresh PIVX wallet:', err);
+        if (domPivxBalanceAmount) {
+            domPivxBalanceAmount.innerHTML = `0.00 <span style="color: #642D8F;">PIV</span>`;
+            void domPivxBalanceAmount.offsetWidth;
+            domPivxBalanceAmount.classList.add('pivx-fade-in');
+        }
+        if (domPivxBalanceFiat) {
+            domPivxBalanceFiat.style.display = 'none';
+        }
+    }
+}
+
+// Track deposit polling state
+let pivxDepositPollingInterval = null;
+let pivxCurrentDepositAddress = null;
+let pivxCurrentWalletBalance = 0;
+const PIVX_MAX_BALANCE_WARNING = 1000;
+
+/**
+ * Shows the deposit dialog with a new promo code and address
+ */
+async function showPivxDepositDialog() {
+    // Security check: prevent deposits if balance is too high
+    if (pivxCurrentWalletBalance >= PIVX_MAX_BALANCE_WARNING) {
+        await popupConfirm(
+            'Balance Too High',
+            `Your wallet balance is <b>${pivxCurrentWalletBalance.toFixed(2)} PIV</b>, which exceeds the recommended limit of ${PIVX_MAX_BALANCE_WARNING} PIV.<br><br>Vector is not intended to replace a proper cryptocurrency wallet. Please <b>withdraw your funds</b> to a secure wallet before depositing more.`,
+            true,
+            '',
+            'vector_warning.svg'
+        );
+        return;
+    }
+
+    // Show loading state on deposit button
+    if (domPivxDepositBtn) {
+        domPivxDepositBtn.classList.add('loading');
+        domPivxDepositBtn.disabled = true;
+    }
+
+    try {
+        // Create a new promo code for deposit
+        const promo = await invoke('pivx_create_promo');
+        pivxCurrentDepositAddress = promo.address;
+
+        const addressEl = document.getElementById('pivx-deposit-address');
+        const statusEl = document.getElementById('pivx-deposit-status');
+
+        if (addressEl) addressEl.textContent = promo.address;
+        if (statusEl) {
+            statusEl.innerHTML = `
+                <div class="pivx-awaiting-deposit">
+                    <div class="pivx-spinner"></div>
+                    <span>Awaiting Deposit...</span>
+                </div>
+            `;
+        }
+
+        if (domPivxDepositOverlay) {
+            domPivxDepositOverlay.classList.add('active');
+        }
+
+        // Start polling for incoming deposit
+        startDepositPolling(promo.address);
+    } catch (err) {
+        console.error('Failed to create deposit promo:', err);
+        showToast('Failed to create deposit address');
+    } finally {
+        // Remove loading state from deposit button
+        if (domPivxDepositBtn) {
+            domPivxDepositBtn.classList.remove('loading');
+            domPivxDepositBtn.disabled = false;
+        }
+    }
+}
+
+/**
+ * Start polling for deposits on the given address
+ */
+function startDepositPolling(address) {
+    // Clear any existing polling
+    stopDepositPolling();
+    pivxCurrentDepositAddress = address;
+
+    // Poll every 5 seconds
+    pivxDepositPollingInterval = setInterval(() => {
+        checkForDeposit(address);
+    }, 5000);
+}
+
+/**
+ * Check if a deposit has arrived at the address
+ */
+async function checkForDeposit(address) {
+    if (!pivxCurrentDepositAddress || address !== pivxCurrentDepositAddress) return;
+
+    try {
+        // We need to check balance by address - use the wallet balance refresh
+        const promos = await invoke('pivx_refresh_balances');
+        const thisPromo = promos.find(p => p.address === address);
+
+        if (thisPromo && thisPromo.balance_piv > 0) {
+            // Deposit detected!
+            stopDepositPolling();
+
+            const statusEl = document.getElementById('pivx-deposit-status');
+            if (statusEl) {
+                statusEl.innerHTML = `
+                    <div class="pivx-deposit-received">
+                        <span class="icon icon-check"></span>
+                        <span>Received ${thisPromo.balance_piv.toFixed(8)} PIV!</span>
+                    </div>
+                `;
+            }
+
+            showToast(`Received ${thisPromo.balance_piv.toFixed(8)} PIV!`);
+
+            // Close dialog after a short delay and refresh wallet
+            setTimeout(() => {
+                closePivxDepositDialog();
+                refreshPivxWallet();
+            }, 1500);
+        }
+    } catch (err) {
+        console.error('Check deposit error:', err);
+    }
+}
+
+/**
+ * Stop polling for deposits
+ */
+function stopDepositPolling() {
+    if (pivxDepositPollingInterval) {
+        clearInterval(pivxDepositPollingInterval);
+        pivxDepositPollingInterval = null;
+    }
+    pivxCurrentDepositAddress = null;
+}
+
+/**
+ * Closes the deposit dialog
+ */
+function closePivxDepositDialog() {
+    stopDepositPolling();
+    if (domPivxDepositOverlay) {
+        domPivxDepositOverlay.classList.remove('active');
+    }
+}
+
+// Track send dialog state
+let pivxSendAvailableBalance = 0;
+let pivxSendSelectedPromo = null;
+let pivxSendPromos = [];
+let pivxSendMode = 'quick'; // 'quick' or 'custom'
+
+// Currency/price tracking (session-cached)
+let pivxCurrencyList = null; // Cached currency list (fetched once per session)
+let pivxCurrentPrice = null; // Current price in preferred currency
+let pivxPreferredCurrency = null; // User's preferred currency code
+
+/**
+ * Detects the user's default currency based on their locale
+ * @returns {string} Currency code (e.g., 'USD', 'EUR', 'GBP')
+ */
+function detectDefaultCurrency() {
+    try {
+        // Get locale from browser
+        const locale = navigator.language || navigator.languages?.[0] || 'en-US';
+
+        // Map common locale regions to currencies
+        const localeCurrencyMap = {
+            'US': 'USD', 'CA': 'CAD', 'AU': 'AUD', 'NZ': 'NZD', 'GB': 'GBP', 'UK': 'GBP',
+            'IE': 'EUR', 'DE': 'EUR', 'FR': 'EUR', 'ES': 'EUR', 'IT': 'EUR', 'NL': 'EUR',
+            'BE': 'EUR', 'AT': 'EUR', 'PT': 'EUR', 'FI': 'EUR', 'GR': 'EUR', 'SK': 'EUR',
+            'SI': 'EUR', 'EE': 'EUR', 'LV': 'EUR', 'LT': 'EUR', 'MT': 'EUR', 'CY': 'EUR',
+            'LU': 'EUR', 'MC': 'EUR', 'SM': 'EUR', 'VA': 'EUR', 'AD': 'EUR', 'ME': 'EUR',
+            'XK': 'EUR', 'JP': 'JPY', 'CN': 'CNY', 'HK': 'HKD', 'TW': 'TWD', 'KR': 'KRW',
+            'IN': 'INR', 'SG': 'SGD', 'MY': 'MYR', 'TH': 'THB', 'ID': 'IDR', 'PH': 'PHP',
+            'VN': 'VND', 'PK': 'PKR', 'BD': 'BDT', 'RU': 'RUB', 'UA': 'UAH', 'PL': 'PLN',
+            'CZ': 'CZK', 'HU': 'HUF', 'RO': 'RON', 'BG': 'BGN', 'HR': 'HRK', 'RS': 'RSD',
+            'CH': 'CHF', 'SE': 'SEK', 'NO': 'NOK', 'DK': 'DKK', 'IS': 'ISK', 'TR': 'TRY',
+            'IL': 'ILS', 'AE': 'AED', 'SA': 'SAR', 'QA': 'QAR', 'KW': 'KWD', 'BH': 'BHD',
+            'OM': 'OMR', 'EG': 'EGP', 'ZA': 'ZAR', 'NG': 'NGN', 'KE': 'KES', 'GH': 'GHS',
+            'MX': 'MXN', 'BR': 'BRL', 'AR': 'ARS', 'CL': 'CLP', 'CO': 'COP', 'PE': 'PEN',
+            'VE': 'VES', 'NI': 'NIO', 'CR': 'CRC', 'PA': 'PAB', 'DO': 'DOP', 'GT': 'GTQ',
+        };
+
+        // Extract region code from locale (e.g., 'en-US' -> 'US', 'de-DE' -> 'DE')
+        const parts = locale.split('-');
+        const region = parts.length > 1 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+
+        return localeCurrencyMap[region] || 'USD';
+    } catch (err) {
+        console.error('Failed to detect default currency:', err);
+        return 'USD';
+    }
+}
+
+/**
+ * Fetches the currency list from the PIVX Oracle API (cached per session)
+ * @returns {Promise<Array>} Array of currency info objects
+ */
+async function fetchPivxCurrencies() {
+    // Return cached list if available
+    if (pivxCurrencyList) {
+        return pivxCurrencyList;
+    }
+
+    try {
+        const currencies = await invoke('pivx_get_currencies');
+        // Filter to common fiat currencies for the dropdown
+        const fiatCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'CNY',
+            'INR', 'RUB', 'BRL', 'MXN', 'KRW', 'SGD', 'HKD', 'SEK', 'NOK', 'DKK',
+            'PLN', 'CZK', 'HUF', 'TRY', 'ZAR', 'AED', 'SAR', 'THB', 'MYR', 'IDR',
+            'PHP', 'VND', 'NZD', 'ILS', 'ARS', 'CLP', 'COP', 'PEN', 'NGN', 'KES',
+            'EGP', 'PKR', 'BDT', 'TWD', 'RON', 'BGN', 'HRK', 'ISK', 'UAH'];
+
+        pivxCurrencyList = currencies.filter(c =>
+            fiatCurrencies.includes(c.currency.toUpperCase())
+        ).sort((a, b) => a.currency.localeCompare(b.currency));
+
+        return pivxCurrencyList;
+    } catch (err) {
+        console.error('Failed to fetch currencies:', err);
+        return [];
+    }
+}
+
+/**
+ * Fetches the current PIVX price in the preferred currency
+ * @returns {Promise<Object|null>} Price info or null
+ */
+async function fetchPivxPrice() {
+    if (!pivxPreferredCurrency) {
+        // Load preference from DB or use locale default
+        try {
+            const saved = await invoke('pivx_get_preferred_currency');
+            pivxPreferredCurrency = saved || detectDefaultCurrency();
+        } catch {
+            pivxPreferredCurrency = detectDefaultCurrency();
+        }
+    }
+
+    try {
+        pivxCurrentPrice = await invoke('pivx_get_price', { currency: pivxPreferredCurrency });
+        return pivxCurrentPrice;
+    } catch (err) {
+        console.error('Failed to fetch PIVX price:', err);
+        return null;
+    }
+}
+
+/**
+ * Formats a fiat value with currency symbol
+ * @param {number} value - The fiat value
+ * @param {string} currency - Currency code
+ * @returns {string} Formatted value (e.g., "$1.23", "€1.23")
+ */
+function formatFiatValue(value, currency) {
+    try {
+        return new Intl.NumberFormat(navigator.language || 'en-US', {
+            style: 'currency',
+            currency: currency,
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }).format(value);
+    } catch {
+        // Fallback if currency not supported
+        return `${value.toFixed(2)} ${currency}`;
+    }
+}
+
+/**
+ * Shows the send dialog for sending PIVX to the current chat
+ */
+async function showPivxSendDialog() {
+    if (!strOpenChat) {
+        showToast('Open a chat first to send PIVX');
+        return;
+    }
+
+    const recipientEl = document.getElementById('pivx-send-recipient');
+    const amountEl = document.getElementById('pivx-send-amount');
+    const availableEl = document.getElementById('pivx-send-available-amount');
+    const promoListEl = document.getElementById('pivx-send-promo-list');
+    const promoSectionEl = document.getElementById('pivx-send-promo-section');
+    const customSectionEl = document.getElementById('pivx-send-custom-section');
+    const confirmBtn = document.getElementById('pivx-send-confirm');
+
+    // Get the chat name for display
+    const chatName = getChatDisplayName(strOpenChat);
+    if (recipientEl) recipientEl.textContent = chatName || 'this chat';
+
+    // Reset state
+    pivxSendSelectedPromo = null;
+    pivxSendMode = 'quick';
+    if (amountEl) amountEl.value = '';
+
+    // Show promo section, hide custom section
+    if (promoSectionEl) promoSectionEl.style.display = '';
+    if (customSectionEl) customSectionEl.style.display = 'none';
+
+    // Disable send button while loading
+    if (confirmBtn) {
+        confirmBtn.classList.add('loading');
+        confirmBtn.disabled = true;
+    }
+
+    // Show loading in promo list
+    if (promoListEl) {
+        promoListEl.innerHTML = `
+            <div class="pivx-send-promo-loading">
+                <div class="pivx-spinner"></div>
+                <span>Loading...</span>
+            </div>
+        `;
+    }
+
+    if (domPivxSendOverlay) {
+        domPivxSendOverlay.classList.add('active');
+    }
+
+    // Fetch promos with balances
+    try {
+        pivxSendPromos = await invoke('pivx_refresh_balances');
+        // Filter to only promos with balance, sort by amount descending
+        const promosWithBalance = pivxSendPromos
+            .filter(p => p.balance_piv > 0)
+            .sort((a, b) => b.balance_piv - a.balance_piv);
+
+        pivxSendAvailableBalance = promosWithBalance.reduce((sum, p) => sum + p.balance_piv, 0);
+        if (availableEl) availableEl.textContent = pivxSendAvailableBalance.toFixed(2);
+
+        if (promoListEl) {
+            if (promosWithBalance.length === 0) {
+                promoListEl.innerHTML = `
+                    <div class="pivx-send-promo-empty">
+                        No funds available to send.<br>
+                        Deposit PIVX first.
+                    </div>
+                `;
+            } else {
+                promoListEl.innerHTML = promosWithBalance.map(promo => `
+                    <div class="pivx-send-promo-item" data-code="${promo.gift_code}" data-amount="${promo.balance_piv}">
+                        <span class="pivx-send-promo-item-amount">${promo.balance_piv.toFixed(2)} PIV</span>
+                        <span class="pivx-send-promo-item-code">${promo.gift_code}</span>
+                    </div>
+                `).join('');
+
+                // Add click handlers and staggered animation
+                const items = promoListEl.querySelectorAll('.pivx-send-promo-item');
+                const totalAnimTime = 0.3;
+                const maxDelay = 0.06;
+                const staggerDelay = items.length > 1 ? Math.min(maxDelay, totalAnimTime / (items.length - 1)) : 0;
+
+                items.forEach((item, index) => {
+                    item.onclick = () => selectPivxSendPromo(item);
+                    item.style.animationDelay = `${index * staggerDelay}s`;
+                    item.classList.add('animate-in');
+                });
+            }
+        }
+    } catch (err) {
+        console.error('Failed to fetch promos for send:', err);
+        pivxSendAvailableBalance = 0;
+        pivxSendPromos = [];
+        if (availableEl) availableEl.textContent = '0.00';
+        if (promoListEl) {
+            promoListEl.innerHTML = `
+                <div class="pivx-send-promo-empty">
+                    Failed to load wallet.
+                </div>
+            `;
+        }
+    } finally {
+        // Re-enable send button after loading
+        if (confirmBtn) {
+            confirmBtn.classList.remove('loading');
+            confirmBtn.disabled = false;
+        }
+    }
+}
+
+/**
+ * Select a promo for quick send
+ */
+function selectPivxSendPromo(itemEl) {
+    // Deselect others
+    document.querySelectorAll('.pivx-send-promo-item').forEach(el => {
+        el.classList.remove('selected');
+    });
+
+    // Select this one
+    itemEl.classList.add('selected');
+    pivxSendSelectedPromo = {
+        gift_code: itemEl.dataset.code,
+        amount: parseFloat(itemEl.dataset.amount)
+    };
+}
+
+/**
+ * Toggle to custom amount mode
+ */
+function showPivxSendCustomMode() {
+    pivxSendMode = 'custom';
+    pivxSendSelectedPromo = null;
+
+    const promoSectionEl = document.getElementById('pivx-send-promo-section');
+    const customSectionEl = document.getElementById('pivx-send-custom-section');
+
+    if (promoSectionEl) promoSectionEl.style.display = 'none';
+    if (customSectionEl) customSectionEl.style.display = '';
+}
+
+/**
+ * Toggle back to quick send mode
+ */
+function showPivxSendQuickMode() {
+    pivxSendMode = 'quick';
+
+    const promoSectionEl = document.getElementById('pivx-send-promo-section');
+    const customSectionEl = document.getElementById('pivx-send-custom-section');
+    const amountEl = document.getElementById('pivx-send-amount');
+
+    if (promoSectionEl) promoSectionEl.style.display = '';
+    if (customSectionEl) customSectionEl.style.display = 'none';
+    if (amountEl) amountEl.value = '';
+}
+
+/**
+ * Closes the send dialog
+ */
+function closePivxSendDialog() {
+    if (domPivxSendOverlay) {
+        domPivxSendOverlay.classList.remove('active');
+    }
+}
+
+/**
+ * Shows the settings dialog with current wallet address and currency selector
+ */
+async function showPivxSettingsDialog() {
+    // Show dialog immediately
+    if (domPivxSettingsOverlay) {
+        domPivxSettingsOverlay.classList.add('active');
+    }
+
+    // Load wallet address (fast local query)
+    invoke('pivx_get_wallet_address').then(address => {
+        const addressInput = document.getElementById('pivx-wallet-address-input');
+        if (addressInput) {
+            addressInput.value = address || '';
+        }
+    }).catch(err => {
+        console.error('Failed to get wallet address:', err);
+    });
+
+    // Load currency selector (may be slow, API call)
+    const currencySelect = document.getElementById('pivx-currency-select');
+    if (currencySelect) {
+        // Show loading state
+        currencySelect.innerHTML = '<option value="">Loading...</option>';
+        currencySelect.disabled = true;
+
+        Promise.all([
+            fetchPivxCurrencies(),
+            invoke('pivx_get_preferred_currency').catch(() => null)
+        ]).then(([currencies, savedCurrency]) => {
+            const currentCurrency = savedCurrency || pivxPreferredCurrency || detectDefaultCurrency();
+            pivxPreferredCurrency = currentCurrency;
+
+            currencySelect.innerHTML = '';
+            for (const curr of currencies) {
+                const option = document.createElement('option');
+                option.value = curr.currency.toUpperCase();
+                option.textContent = curr.currency.toUpperCase();
+                if (curr.currency.toUpperCase() === currentCurrency.toUpperCase()) {
+                    option.selected = true;
+                }
+                currencySelect.appendChild(option);
+            }
+            currencySelect.disabled = false;
+        }).catch(err => {
+            console.error('Failed to load currencies:', err);
+            currencySelect.innerHTML = '<option value="USD">USD</option>';
+            currencySelect.disabled = false;
+        });
+    }
+}
+
+/**
+ * Closes the settings dialog
+ */
+function closePivxSettingsDialog() {
+    if (domPivxSettingsOverlay) {
+        domPivxSettingsOverlay.classList.remove('active');
+    }
+}
+
+// Withdraw dialog state
+let pivxWithdrawAvailableBalance = 0;
+
+/**
+ * Shows the withdraw dialog
+ */
+async function showPivxWithdrawDialog() {
+    const withdrawOverlay = document.getElementById('pivx-withdraw-overlay');
+    const addressInput = document.getElementById('pivx-withdraw-address');
+    const amountInput = document.getElementById('pivx-withdraw-amount');
+    const availableEl = document.getElementById('pivx-withdraw-available-amount');
+    const confirmBtn = document.getElementById('pivx-withdraw-confirm');
+
+    // Reset inputs
+    if (addressInput) addressInput.value = '';
+    if (amountInput) amountInput.value = '';
+    if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Withdraw';
+    }
+
+    // Get available balance
+    try {
+        pivxWithdrawAvailableBalance = await invoke('pivx_get_wallet_balance');
+        if (availableEl) {
+            availableEl.textContent = pivxWithdrawAvailableBalance.toFixed(2);
+        }
+    } catch (err) {
+        console.error('Failed to get balance:', err);
+        pivxWithdrawAvailableBalance = 0;
+        if (availableEl) availableEl.textContent = '0.00';
+    }
+
+    if (withdrawOverlay) {
+        withdrawOverlay.classList.add('active');
+    }
+}
+
+/**
+ * Closes the withdraw dialog
+ */
+function closePivxWithdrawDialog() {
+    const withdrawOverlay = document.getElementById('pivx-withdraw-overlay');
+    if (withdrawOverlay) {
+        withdrawOverlay.classList.remove('active');
+    }
+}
+
+/**
+ * Executes a PIVX withdrawal
+ */
+async function executePivxWithdraw() {
+    const addressInput = document.getElementById('pivx-withdraw-address');
+    const amountInput = document.getElementById('pivx-withdraw-amount');
+    const confirmBtn = document.getElementById('pivx-withdraw-confirm');
+
+    const address = addressInput?.value?.trim() || '';
+    const amount = parseFloat(amountInput?.value || '0');
+
+    // Validate address
+    if (!address || !address.startsWith('D') || address.length < 30 || address.length > 36) {
+        showToast('Invalid PIVX address');
+        return;
+    }
+
+    // Validate amount
+    if (amount <= 0) {
+        showToast('Enter a valid amount');
+        return;
+    }
+
+    if (amount > pivxWithdrawAvailableBalance) {
+        showToast('Insufficient balance');
+        return;
+    }
+
+    // Disable button during withdraw
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Withdrawing...';
+    }
+
+    try {
+        const result = await invoke('pivx_withdraw', {
+            destAddress: address,
+            amountPiv: amount
+        });
+
+        closePivxWithdrawDialog();
+        showToast(`Withdrawn ${amount.toFixed(2)} PIV`);
+        refreshPivxWallet();
+
+        // Log change if any
+        if (result.change_piv > 0) {
+            console.log(`Withdrawal change: ${result.change_piv} PIV saved to new promo`);
+        }
+    } catch (err) {
+        console.error('Withdrawal failed:', err);
+        showToast('Withdrawal failed: ' + (err.message || err));
+    } finally {
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Withdraw';
+        }
+    }
+}
+
+/**
+ * Sends a PIVX payment to the current chat
+ */
+async function sendPivxPayment() {
+    const confirmBtn = document.getElementById('pivx-send-confirm');
+
+    if (!strOpenChat) {
+        showToast('No chat selected');
+        return;
+    }
+
+    // Disable button during send
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Sending...';
+    }
+
+    try {
+        if (pivxSendMode === 'quick') {
+            // Quick send mode - send an existing whole promo
+            if (!pivxSendSelectedPromo) {
+                showToast('Select an amount to send');
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
+            }
+
+            await invoke('pivx_send_existing_promo', {
+                receiver: strOpenChat,
+                giftCode: pivxSendSelectedPromo.gift_code
+            });
+
+            closePivxSendDialog();
+            showToast(`Sent ${pivxSendSelectedPromo.amount.toFixed(2)} PIV`);
+            refreshPivxWallet();
+        } else {
+            // Custom amount mode
+            const amountEl = document.getElementById('pivx-send-amount');
+            const amount = parseFloat(amountEl?.value || '0');
+
+            if (amount <= 0) {
+                showToast('Enter a valid amount');
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
+            }
+
+            if (amount > pivxSendAvailableBalance) {
+                showToast(`Insufficient funds (max: ${pivxSendAvailableBalance.toFixed(2)} PIV)`);
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Send to Chat';
+                }
+                return;
+            }
+
+            // Send custom amount via coin selection
+            await invoke('pivx_send_payment', {
+                receiver: strOpenChat,
+                amountPiv: amount
+            });
+
+            closePivxSendDialog();
+            showToast(`Sent ${amount.toFixed(2)} PIV`);
+            refreshPivxWallet();
+        }
+    } catch (err) {
+        console.error('Failed to send PIVX payment:', err);
+        showToast('Failed to send: ' + (err.message || err));
+    } finally {
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Send to Chat';
+        }
+    }
+}
+
+/**
+ * Saves the PIVX wallet settings
+ */
+async function savePivxSettings() {
+    const addressInput = document.getElementById('pivx-wallet-address-input');
+    const currencySelect = document.getElementById('pivx-currency-select');
+    const address = addressInput?.value?.trim() || '';
+    const currency = currencySelect?.value || '';
+
+    // Basic validation for PIVX address (starts with D, proper length)
+    if (address && (!address.startsWith('D') || address.length < 30 || address.length > 36)) {
+        showToast('Invalid PIVX address format');
+        return;
+    }
+
+    try {
+        // Save address (empty string clears the setting)
+        await invoke('pivx_set_wallet_address', { address });
+
+        if (currency) {
+            await invoke('pivx_set_preferred_currency', { currency });
+            // Update cached preference and refresh price
+            const oldCurrency = pivxPreferredCurrency;
+            pivxPreferredCurrency = currency;
+            // Re-fetch price if currency changed
+            if (oldCurrency !== currency) {
+                pivxCurrentPrice = null;
+                fetchPivxPrice();
+            }
+        }
+
+        closePivxSettingsDialog();
+        showToast('Wallet settings saved');
+
+        // Refresh wallet to show updated fiat value
+        refreshPivxWallet();
+    } catch (err) {
+        console.error('Failed to save settings:', err);
+        showToast('Failed to save settings');
+    }
+}
+
+/**
+ * Claims a PIVX payment from a received message
+ * @param {string} giftCode - The promo code to claim
+ * @param {HTMLElement} bubbleEl - The payment bubble element
+ */
+async function claimPivxPayment(giftCode, bubbleEl) {
+    if (!giftCode) return;
+    if (bubbleEl?.classList.contains('claimed')) return;
+    if (bubbleEl?.classList.contains('claiming')) return; // Prevent double-click
+
+    // Mark as claiming to prevent multiple clicks
+    if (bubbleEl) {
+        bubbleEl.classList.add('claiming');
+    }
+
+    // Update hint to show progress
+    const hint = bubbleEl?.querySelector('.msg-pivx-payment-hint');
+    if (hint) {
+        hint.textContent = 'Claiming...';
+    }
+
+    try {
+        const result = await invoke('pivx_claim_from_message', { giftCode });
+
+        if (bubbleEl) {
+            bubbleEl.classList.remove('claiming');
+            bubbleEl.classList.add('claimed');
+        }
+        if (hint) {
+            hint.textContent = 'Claimed!';
+        }
+
+        showToast(`Claimed ${result.amount_piv?.toFixed(2) || ''} PIV`);
+        refreshPivxWallet();
+    } catch (err) {
+        console.error('Failed to claim PIVX:', err);
+        if (bubbleEl) {
+            bubbleEl.classList.remove('claiming');
+        }
+        if (hint) {
+            hint.textContent = 'Claim failed - tap to retry';
+        }
+        showToast('Failed to claim: ' + (err.message || err));
+    }
+}
+
+/**
+ * Renders a PIVX payment bubble for a message
+ * @param {string} giftCode - The promo code
+ * @param {number} amountPiv - Amount in PIV
+ * @param {boolean} isMine - Whether this is my payment (sent by me)
+ * @param {string} address - Optional PIVX address for balance checking
+ * @returns {HTMLElement} The payment bubble element
+ */
+function renderPivxPaymentBubble(giftCode, amountPiv, isMine, address) {
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-pivx-payment';
+    bubble.dataset.giftCode = giftCode;
+    if (address) bubble.dataset.address = address;
+
+    // PIVX logo image
+    const img = document.createElement('img');
+    img.src = './icons/pivx.svg';
+    bubble.appendChild(img);
+
+    // Amount and hint on the right
+    const info = document.createElement('div');
+    info.className = 'msg-pivx-payment-info';
+
+    const amountDiv = document.createElement('div');
+    amountDiv.className = 'msg-pivx-payment-amount';
+    amountDiv.textContent = `${amountPiv.toFixed(2)} PIV`;
+    info.appendChild(amountDiv);
+
+    // Show fiat equivalent if we have a cached price
+    if (pivxCurrentPrice?.value && pivxPreferredCurrency) {
+        const fiatValue = amountPiv * pivxCurrentPrice.value;
+        const fiatDiv = document.createElement('div');
+        fiatDiv.className = 'msg-pivx-payment-fiat';
+        fiatDiv.textContent = `~${fiatValue.toFixed(2)} ${pivxPreferredCurrency}`;
+        info.appendChild(fiatDiv);
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'msg-pivx-payment-hint';
+
+    // If address is available, start in syncing state while we check balance
+    if (address) {
+        bubble.classList.add('syncing');
+        hint.textContent = 'Syncing...';
+    } else {
+        hint.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+    }
+    info.appendChild(hint);
+
+    bubble.appendChild(info);
+
+    // Make the whole bubble clickable (disabled if claimed/syncing)
+    bubble.onclick = () => {
+        if (!bubble.classList.contains('claimed') && !bubble.classList.contains('syncing')) {
+            claimPivxPayment(giftCode, bubble);
+        }
+    };
+
+    // If address is available, check balance to determine claimed state
+    if (address) {
+        checkPivxPaymentClaimedState(bubble, address, hint, isMine);
+    }
+
+    return bubble;
+}
+
+/**
+ * Check if a PIVX payment has been claimed by checking the address balance
+ * @param {HTMLElement} bubble - The payment bubble element
+ * @param {string} address - PIVX address to check
+ * @param {HTMLElement} hintEl - The hint element to update
+ * @param {boolean} isMine - Whether this is my payment
+ * @param {number} retryCount - Number of retries attempted (for unconfirmed tx propagation)
+ */
+async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount = 0) {
+    try {
+        // Use force=true on retries to bypass cache
+        const force = retryCount > 0;
+        const balance = await __TAURI__.core.invoke('pivx_check_address_balance', { address, force });
+        bubble.classList.remove('syncing');
+        if (balance <= 0) {
+            // Balance is 0 - could be claimed OR unconfirmed tx not yet visible
+            // Retry a few times with delay to handle tx propagation delay
+            if (retryCount < 3) {
+                bubble.classList.add('syncing');
+                hintEl.textContent = 'Confirming...';
+                setTimeout(() => {
+                    checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount + 1);
+                }, 3000); // Retry after 3 seconds
+                return;
+            }
+            // After retries, mark as claimed
+            bubble.classList.add('claimed');
+            hintEl.textContent = 'Claimed';
+        } else {
+            // Has balance - show claim option
+            hintEl.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+        }
+    } catch (err) {
+        // If balance check fails, allow claiming anyway
+        console.warn('Failed to check PIVX payment balance:', err);
+        bubble.classList.remove('syncing');
+        hintEl.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+    }
+}
+
+/**
+ * Gets the display name for a chat
+ * @param {string} chatId - The chat ID
+ * @returns {string} The display name
+ */
+function getChatDisplayName(chatId) {
+    // Check if it's a group chat
+    const chat = arrChats.find(c => c.id === chatId);
+    if (chat && chat.chat_type === 'MlsGroup') {
+        return chat.metadata?.custom_fields?.name || `Group ${chatId.substring(0, 8)}...`;
+    }
+
+    // Otherwise it's a DM - get profile name
+    const profile = getProfile(chatId);
+    if (profile?.nickname) return profile.nickname;
+    if (profile?.name) return profile.name;
+
+    // Fallback to truncated pubkey
+    return chatId.substring(0, 8) + '...';
+}
+
+// ========== End PIVX Wallet Functions ==========
+
+/**
+ * Animate attachment panel items with staggered fade-in effect
+ */
+function animateAttachmentPanelItems(container) {
+    const items = container.querySelectorAll('.attachment-panel-item');
+    const totalAnimTime = 0.35; // Total stagger duration in seconds
+    const maxDelay = 0.08; // Cap at 80ms per item for small counts
+    const staggerDelay = items.length > 1 ? Math.min(maxDelay, totalAnimTime / (items.length - 1)) : 0;
+
+    items.forEach((item, index) => {
+        // Remove any existing animation
+        item.classList.remove('animate-in');
+        item.style.animationDelay = '';
+
+        // Force reflow to restart animation
+        void item.offsetWidth;
+
+        // Add animation with staggered delay
+        item.style.animationDelay = `${index * staggerDelay}s`;
+        item.classList.add('animate-in');
+
+        // Remove animate-in class when animation finishes to avoid conflicts with other animations
+        item.addEventListener('animationend', () => {
+            item.classList.remove('animate-in');
+            item.style.animationDelay = '';
+        }, { once: true });
+    });
+}
+
+/**
+ * Loads and renders the Mini Apps history in the panel
+ * PIVX is treated as a virtual app and positioned based on usage history
+ */
+async function loadMiniAppsHistory() {
+    try {
+        let history = await invoke('miniapp_get_history', { limit: null });
+
+        // Pre-install default apps for new users (empty history)
+        const preInstallDone = localStorage.getItem('miniapps_preinstall_done') === 'true';
+        if (history.length === 0 && !preInstallDone) {
+            // Mark as done first to prevent re-triggering
+            localStorage.setItem('miniapps_preinstall_done', 'true');
+
+            // Clear any existing items first (except Marketplace button)
+            const existingItems = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace), .attachment-panel-empty');
+            existingItems.forEach(item => item.remove());
+
+            // Default apps to pre-install (by app ID with display names)
+            const defaultApps = [
+                { id: 'vectify', name: 'Vectify' },
+                { id: 'deadlock', name: 'State of Surveillance' }
+            ];
+
+            // IMMEDIATELY show placeholder UI before fetching marketplace data
+            const staggerDelay = 0.03; // Same delay used for regular mini apps
+            let animIndex = 0;
+
+            for (const { id: appId, name: displayName } of defaultApps) {
+                const item = document.createElement('button');
+                item.className = 'attachment-panel-item attachment-panel-miniapp animate-in';
+                item.id = `miniapp-downloading-${appId}`;
+                item.draggable = false;
+                item.style.position = 'relative';
+                item.style.animationDelay = `${animIndex * staggerDelay}s`;
+
+                // Show generic loading state initially
+                item.innerHTML = `
+                    <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                        <span class="icon icon-play"></span>
+                        <div class="miniapp-downloading-overlay">
+                            <div class="miniapp-downloading-spinner" data-app-id="${escapeHtml(appId)}"></div>
+                        </div>
+                    </div>
+                    <span class="attachment-panel-label cutoff">${escapeHtml(displayName)}</span>
+                `;
+                item.dataset.appName = displayName.toLowerCase();
+                item.addEventListener('animationend', () => {
+                    item.classList.remove('animate-in');
+                    item.style.animationDelay = '';
+                }, { once: true });
+                domMiniAppsGrid.appendChild(item);
+                animIndex++;
+            }
+
+            // Add PIVX after the downloading apps
+            const pivxBtn = document.createElement('button');
+            pivxBtn.className = 'attachment-panel-item animate-in';
+            pivxBtn.id = 'attachment-panel-pivx';
+            pivxBtn.draggable = false;
+            pivxBtn.style.animationDelay = `${animIndex * staggerDelay}s`;
+            pivxBtn.innerHTML = `
+                <div class="attachment-panel-btn attachment-panel-pivx-btn">
+                    <span class="icon icon-pivx"></span>
+                </div>
+                <span class="attachment-panel-label">PIVX</span>
+            `;
+            pivxBtn.dataset.appName = 'pivx';
+            pivxBtn.addEventListener('mouseenter', () => showGlobalTooltip('PIVX Wallet', pivxBtn));
+            pivxBtn.addEventListener('mouseleave', () => hideGlobalTooltip());
+            pivxBtn.addEventListener('animationend', () => {
+                pivxBtn.classList.remove('animate-in');
+                pivxBtn.style.animationDelay = '';
+            }, { once: true });
+            pivxBtn.onclick = () => {
+                if (miniAppsEditMode) return;
+                hideGlobalTooltip();
+                showPivxWalletPanel();
+            };
+            domMiniAppsGrid.appendChild(pivxBtn);
+
+            // Now fetch marketplace data and start downloads in background
+            try {
+                await fetchMarketplaceApps(true);
+
+                const appsToInstall = [];
+
+                // Update placeholders with actual app metadata and start downloads
+                for (const { id: appId } of defaultApps) {
+                    const app = marketplaceApps.find(a => a.id === appId);
+                    const placeholder = document.getElementById(`miniapp-downloading-${appId}`);
+
+                    if (app && placeholder) {
+                        appsToInstall.push(app);
+
+                        // Update with actual icon and name
+                        const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
+                        const iconHtml = iconSrc
+                            ? `<img src="${escapeHtml(iconSrc)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit;" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`
+                            : '<span class="icon icon-play"></span>';
+
+                        placeholder.innerHTML = `
+                            <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                                ${iconHtml}
+                                <div class="miniapp-downloading-overlay">
+                                    <div class="miniapp-downloading-spinner" data-app-id="${escapeHtml(appId)}"></div>
+                                </div>
+                            </div>
+                            <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
+                        `;
+                        placeholder.dataset.appName = app.name.toLowerCase();
+                    } else if (!app && placeholder) {
+                        console.warn(`[Mini Apps] Default app "${appId}" not found in marketplace`);
+                        placeholder.remove();
+                    }
+                }
+
+                // Start all downloads in parallel - transform placeholders when complete
+                const installPromises = appsToInstall.map(async (app) => {
+                    try {
+                        await installMarketplaceApp(app.id);
+
+                        // Transform the downloading placeholder into a normal clickable app
+                        const placeholder = document.getElementById(`miniapp-downloading-${app.id}`);
+                        if (placeholder) {
+                            // Remove the downloading overlay
+                            const overlay = placeholder.querySelector('.miniapp-downloading-overlay');
+                            if (overlay) overlay.remove();
+
+                            // Remove the temporary ID
+                            placeholder.removeAttribute('id');
+
+                            // Add click handler to open the app
+                            placeholder.onclick = async () => {
+                                if (miniAppsEditMode) return;
+                                hideGlobalTooltip();
+                                // Fetch the updated app info from history
+                                const historyApps = await invoke('miniapp_get_history', { limit: null });
+                                const historyApp = historyApps.find(h => h.marketplace_id === app.id || h.name === app.name);
+                                if (historyApp) {
+                                    await openMiniAppFromHistory(historyApp);
+                                }
+                            };
+
+                            // Add tooltip
+                            placeholder.addEventListener('mouseenter', () => showGlobalTooltip(app.name, placeholder));
+                            placeholder.addEventListener('mouseleave', () => hideGlobalTooltip());
+                        }
+
+                        return { success: true, app };
+                    } catch (installErr) {
+                        console.error(`[Mini Apps] Failed to pre-install ${app.id}:`, installErr);
+                        // Remove failed placeholder
+                        const placeholder = document.getElementById(`miniapp-downloading-${app.id}`);
+                        if (placeholder) placeholder.remove();
+                        return { success: false, app, error: installErr };
+                    }
+                });
+
+                // Wait for all installs to complete (UI updates happen individually above)
+                await Promise.all(installPromises);
+
+                // Return early - don't do the normal render since we already set up the UI
+                return;
+            } catch (preInstallErr) {
+                console.error('[Mini Apps] Pre-install failed:', preInstallErr);
+            }
+        }
+
+        // Clear existing Mini App items (keep only Marketplace)
+        const existingItems = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace), .attachment-panel-empty');
+        existingItems.forEach(item => item.remove());
+
+        // Check if PIVX is hidden by user
+        const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
+
+        // Get PIVX last used timestamp from localStorage (stored in ms, convert to seconds)
+        const pivxLastUsedMs = parseInt(localStorage.getItem('pivx_last_used') || '0', 10);
+        const pivxLastOpenedAt = Math.floor(pivxLastUsedMs / 1000);
+
+        // Create combined list of apps with PIVX as a virtual entry (if not hidden)
+        const allApps = [
+            // Add PIVX as a virtual app entry (only if not hidden)
+            ...(!pivxHidden ? [{ name: 'PIVX', isPivx: true, last_opened_at: pivxLastOpenedAt }] : []),
+            // Add history apps with their timestamps (backend uses last_opened_at in seconds)
+            ...history.map(app => ({ ...app, isPivx: false, last_opened_at: app.last_opened_at || 0 }))
+        ];
+
+        // Sort by last_opened_at timestamp (most recent first)
+        allApps.sort((a, b) => b.last_opened_at - a.last_opened_at);
+
+        // Add all app items in sorted order
+        for (const app of allApps) {
+            if (app.isPivx) {
+                // Create PIVX button
+                const pivxBtn = document.createElement('button');
+                pivxBtn.className = 'attachment-panel-item';
+                pivxBtn.id = 'attachment-panel-pivx';
+                pivxBtn.draggable = false;
+                pivxBtn.innerHTML = `
+                    <div class="attachment-panel-btn attachment-panel-pivx-btn">
+                        <span class="icon icon-pivx"></span>
+                    </div>
+                    <span class="attachment-panel-label">PIVX</span>
+                `;
+                // Store app name for search filtering
+                pivxBtn.dataset.appName = 'pivx';
+
+                // Add tooltip on hover
+                pivxBtn.addEventListener('mouseenter', () => {
+                    showGlobalTooltip('PIVX Wallet', pivxBtn);
+                });
+                pivxBtn.addEventListener('mouseleave', () => {
+                    hideGlobalTooltip();
+                });
+
+                pivxBtn.onclick = () => {
+                    // Don't launch if in edit mode
+                    if (miniAppsEditMode) return;
+                    hideGlobalTooltip();
+                    showPivxWalletPanel();
+                };
+                domMiniAppsGrid.appendChild(pivxBtn);
+            } else {
+                // Create Mini App button
+                const item = document.createElement('button');
+                item.className = 'attachment-panel-item attachment-panel-miniapp';
+                item.draggable = false;
+
+                // Start with a placeholder icon, then load the actual icon
+                item.innerHTML = `
+                    <div class="attachment-panel-btn attachment-panel-miniapp-btn">
+                        <span class="icon icon-play"></span>
+                    </div>
+                    <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
+                `;
+
+                // Store the app name for search filtering
+                item.dataset.appName = app.name.toLowerCase();
+
+                // Add tooltip on hover for the entire item
+                item.addEventListener('mouseenter', () => {
+                    showGlobalTooltip(app.name, item);
+                });
+                item.addEventListener('mouseleave', () => {
+                    hideGlobalTooltip();
+                });
+
+                item.onclick = async () => {
+                    // Don't launch if in edit mode
+                    if (miniAppsEditMode) return;
+                    hideGlobalTooltip();
+                    // Open the Mini App using the stored attachment reference
+                    await openMiniAppFromHistory(app);
+                };
+                domMiniAppsGrid.appendChild(item);
+
+                // Load the Mini App icon asynchronously
+                loadMiniAppIcon(app, item.querySelector('.attachment-panel-btn'));
+            }
+        }
+
+        // If no apps at all (only PIVX which is always there), show empty message
+        if (history.length === 0 && pivxLastOpenedAt === 0) {
+            const emptyMsg = document.createElement('div');
+            emptyMsg.className = 'attachment-panel-empty';
+            emptyMsg.textContent = 'No recent Mini Apps';
+            domMiniAppsGrid.appendChild(emptyMsg);
+        }
+    } catch (e) {
+        console.error('Failed to load Mini Apps history:', e);
+    }
+}
+
+/**
+ * Filters the Mini Apps grid based on search query
+ * Hides Marketplace when search is active
+ * @param {string} query - The search query
+ */
+function filterMiniApps(query) {
+    const normalizedQuery = query.toLowerCase().trim();
+    const isSearching = normalizedQuery.length > 0;
+
+    // Get all items in the grid
+    const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item');
+    let visibleCount = 0;
+
+    items.forEach(item => {
+        const appName = item.dataset.appName;
+
+        // Always hide Marketplace when searching
+        if (item.id === 'attachment-panel-marketplace') {
+            item.classList.toggle('hidden-by-search', isSearching);
+            if (!isSearching) visibleCount++;
+            return;
+        }
+
+        // Filter all apps (including PIVX) by name
+        if (appName) {
+            const matches = !isSearching || appName.includes(normalizedQuery);
+            item.classList.toggle('hidden-by-search', !matches);
+            if (matches) visibleCount++;
+        }
+    });
+
+    // Also hide/show empty message based on visible items
+    const emptyMsg = domMiniAppsGrid.querySelector('.attachment-panel-empty');
+    if (emptyMsg) {
+        emptyMsg.classList.toggle('hidden-by-search', isSearching);
+    }
+
+    // Show/hide "no results" message
+    let noResultsMsg = domMiniAppsGrid.querySelector('.miniapps-no-results');
+    if (isSearching && visibleCount === 0) {
+        if (!noResultsMsg) {
+            noResultsMsg = document.createElement('div');
+            noResultsMsg.className = 'miniapps-no-results';
+            noResultsMsg.innerHTML = `
+                <p>No Mini Apps found</p>
+                <p class="miniapps-no-results-hint">Try a different search, or check out the Nexus!</p>
+            `;
+            domMiniAppsGrid.appendChild(noResultsMsg);
+        }
+        noResultsMsg.style.display = '';
+    } else if (noResultsMsg) {
+        noResultsMsg.style.display = 'none';
+    }
+}
+
+// ========== Mini Apps Edit Mode ==========
+
+let miniAppsEditMode = false;
+let miniAppsHoldTimer = null;
+let miniAppsEditModeJustActivated = false;
+
+/**
+ * Activates edit mode for the Mini Apps grid
+ * Shows red X badges on all apps (except Marketplace) for removal
+ */
+function activateMiniAppsEditMode() {
+    if (miniAppsEditMode) return;
+    miniAppsEditMode = true;
+    miniAppsEditModeJustActivated = true;
+
+    // Add edit-mode class for wobble animation
+    domMiniAppsGrid.classList.add('edit-mode');
+
+    // Add delete badges to all apps except Marketplace
+    const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace)');
+    items.forEach(item => {
+        // Don't add badge if already exists
+        if (item.querySelector('.miniapp-delete-badge')) return;
+
+        const badge = document.createElement('div');
+        badge.className = 'miniapp-delete-badge';
+        badge.innerHTML = '<span class="icon icon-x"></span>';
+
+        // Get app info for deletion
+        const appName = item.dataset.appName;
+        const isPivx = item.id === 'attachment-panel-pivx';
+
+        badge.onclick = async (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+
+            // Hide tooltip before showing confirm dialog
+            hideGlobalTooltip();
+
+            const displayName = isPivx ? 'PIVX Wallet' : item.querySelector('.attachment-panel-label')?.textContent || appName;
+
+            const confirmed = await popupConfirm(
+                'Remove App?',
+                `Are you sure you want to remove <b>${escapeHtml(displayName)}</b> from your recent Mini Apps?`,
+                false
+            );
+
+            if (confirmed) {
+                if (isPivx) {
+                    // For PIVX, set hidden flag (can be restored in Settings)
+                    localStorage.setItem('pivx_hidden', 'true');
+                } else {
+                    // For regular apps, remove from backend history
+                    try {
+                        await invoke('miniapp_remove_from_history', { name: displayName });
+                    } catch (err) {
+                        console.error('Failed to remove Mini App from history:', err);
+                    }
+                }
+
+                // Deactivate edit mode and refresh the list
+                deactivateMiniAppsEditMode();
+                await loadMiniAppsHistory();
+                animateAttachmentPanelItems(domMiniAppsGrid);
+            }
+        };
+
+        item.appendChild(badge);
+    });
+
+    // Add global click listener to exit edit mode
+    // Remove any existing listener first to prevent duplicates
+    document.removeEventListener('click', handleEditModeClickOutside, true);
+    // Add with a small delay so the mouseup click from hold doesn't immediately trigger it
+    setTimeout(() => {
+        if (miniAppsEditMode) {
+            document.addEventListener('click', handleEditModeClickOutside, true);
+        }
+    }, 50);
+}
+
+/**
+ * Deactivates edit mode for the Mini Apps grid
+ */
+function deactivateMiniAppsEditMode() {
+    if (!miniAppsEditMode) return;
+    miniAppsEditMode = false;
+    miniAppsEditModeJustActivated = false;
+
+    // Remove edit-mode class
+    domMiniAppsGrid.classList.remove('edit-mode');
+
+    // Remove all delete badges
+    const badges = domMiniAppsGrid.querySelectorAll('.miniapp-delete-badge');
+    badges.forEach(badge => badge.remove());
+
+    // Remove global click listener
+    document.removeEventListener('click', handleEditModeClickOutside, true);
+}
+
+/**
+ * Handles clicks outside of delete badges to exit edit mode
+ */
+function handleEditModeClickOutside(e) {
+    // If clicking on a delete badge, let it handle itself (check FIRST, before other guards)
+    if (e.target.closest('.miniapp-delete-badge')) {
+        // Reset the just-activated flag since user is interacting with edit mode
+        miniAppsEditModeJustActivated = false;
+        return;
+    }
+
+    // If clicking on a popup, let it handle itself (don't exit edit mode)
+    if (e.target.closest('#popup-container')) return;
+
+    // If we just activated edit mode, ignore this click (it's from the hold release)
+    if (miniAppsEditModeJustActivated) {
+        miniAppsEditModeJustActivated = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
+
+    // Otherwise, deactivate edit mode
+    e.preventDefault();
+    e.stopPropagation();
+    deactivateMiniAppsEditMode();
+}
+
+/**
+ * Starts the hold timer for entering edit mode
+ * @param {Event} e - The mousedown/touchstart event
+ */
+function startMiniAppHold(e) {
+    // Don't start hold on Marketplace or if already in edit mode
+    if (miniAppsEditMode) return;
+    const item = e.target.closest('.attachment-panel-item');
+    if (!item || item.id === 'attachment-panel-marketplace') return;
+
+    // Clear any existing timer
+    if (miniAppsHoldTimer) {
+        clearTimeout(miniAppsHoldTimer);
+    }
+
+    miniAppsHoldTimer = setTimeout(() => {
+        miniAppsHoldTimer = null;
+        activateMiniAppsEditMode();
+    }, 500); // 0.5 second hold
+}
+
+/**
+ * Cancels the hold timer
+ */
+function cancelMiniAppHold() {
+    if (miniAppsHoldTimer) {
+        clearTimeout(miniAppsHoldTimer);
+        miniAppsHoldTimer = null;
+    }
+}
+
+/**
+ * Suppresses click events right after edit mode activation
+ */
+function suppressClickAfterEditMode(e) {
+    if (miniAppsEditModeJustActivated) {
+        miniAppsEditModeJustActivated = false; // Reset flag so future clicks work
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+    }
+}
+
+/**
+ * Sets up hold-to-edit event listeners on the Mini Apps grid
+ */
+function setupMiniAppsEditMode() {
+    if (!domMiniAppsGrid) return;
+
+    // Prevent any drag behavior on the grid items
+    domMiniAppsGrid.addEventListener('dragstart', (e) => {
+        e.preventDefault();
+        return false;
+    });
+
+    // Mouse events
+    domMiniAppsGrid.addEventListener('mousedown', startMiniAppHold);
+    domMiniAppsGrid.addEventListener('mouseup', cancelMiniAppHold);
+    domMiniAppsGrid.addEventListener('mouseleave', cancelMiniAppHold);
+
+    // Suppress clicks immediately after edit mode activation
+    domMiniAppsGrid.addEventListener('click', suppressClickAfterEditMode, true);
+
+    // Touch events for mobile
+    domMiniAppsGrid.addEventListener('touchstart', startMiniAppHold, { passive: false });
+    domMiniAppsGrid.addEventListener('touchend', cancelMiniAppHold);
+    domMiniAppsGrid.addEventListener('touchcancel', cancelMiniAppHold);
+    domMiniAppsGrid.addEventListener('touchmove', cancelMiniAppHold);
+}
+
+/**
+ * Load Mini App icon asynchronously and update the button
+ */
+async function loadMiniAppIcon(app, btnElement) {
+    try {
+        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
+        if (info && info.icon_data) {
+            // Replace the placeholder icon with the actual Mini App icon
+            btnElement.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}" class="attachment-panel-miniapp-icon">`;
+        }
+    } catch (e) {
+        // Keep the placeholder icon if loading fails
+        console.debug('Failed to load Mini App icon:', e);
+    }
+}
+
+/**
+ * Opens a Mini App from history
+ */
+// Store the pending Mini App for the launch dialog
+let pendingMiniAppLaunch = null;
+
+/**
+ * Check if a Mini App is a game based on its categories
+ * @param {Object} app - The app object with categories field
+ * @returns {boolean} True if the app is a game
+ */
+function isMiniAppGame(app) {
+    // If no categories, default to game
+    if (!app.categories) {
+        return true;
+    }
+    
+    // Categories can be a comma-separated string or an array
+    let cats = app.categories;
+    if (typeof cats === 'string') {
+        cats = cats.split(',').map(c => c.trim().toLowerCase()).filter(c => c);
+    } else if (Array.isArray(cats)) {
+        cats = cats.map(c => c.toLowerCase());
+    } else {
+        return true; // Default to game
+    }
+    
+    // It's a game if it has "game" tag OR doesn't have "app" tag
+    return cats.includes('game') || !cats.includes('app');
+}
+
+/**
+ * Show the Mini App launch dialog
+ */
+async function showMiniAppLaunchDialog(app) {
+    pendingMiniAppLaunch = app;
+    
+    // Set the app name
+    domMiniAppLaunchName.textContent = app.name;
+    
+    // Determine if this is a game or app and update button text accordingly
+    const isGame = isMiniAppGame(app);
+    const actionText = isGame ? 'Play' : 'Open';
+    domMiniAppLaunchSolo.textContent = actionText;
+    domMiniAppLaunchInvite.textContent = `${actionText} & Invite`;
+    
+    // Try to load the Mini App icon
+    try {
+        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
+        if (info && info.icon_data) {
+            domMiniAppLaunchIconContainer.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}">`;
+        } else {
+            domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+        }
+    } catch (e) {
+        // Fallback to generic icon
+        domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+    }
+    
+    // Show the overlay
+    domMiniAppLaunchOverlay.classList.add('active');
+}
+
+/**
+ * Close the Mini App launch dialog
+ */
+function closeMiniAppLaunchDialog() {
+    domMiniAppLaunchOverlay.classList.remove('active');
+    pendingMiniAppLaunch = null;
+}
+
+/**
+ * Play Mini App solo (from original attachment)
+ */
+async function playMiniAppSolo() {
+    if (!pendingMiniAppLaunch) return;
+
+    const app = pendingMiniAppLaunch;
+    closeMiniAppLaunchDialog();
+
+    // Check permissions for marketplace apps
+    const shouldContinue = await checkMiniAppPermissions(app);
+    if (!shouldContinue) {
+        return; // User cancelled
+    }
+
+    try {
+        // Open the Mini App directly using the cached file path
+        // Use a placeholder chat_id and message_id for solo play
+        await invoke('miniapp_open', {
+            filePath: app.src_url,
+            chatId: 'solo',
+            messageId: `solo_${Date.now()}`,
+            href: null,
+            topicId: null,
+        });
+    } catch (e) {
+        console.error('Failed to open Mini App:', e);
+    }
+}
+
+/**
+ * Play Mini App and invite (send to current chat, then open from the new message)
+ */
+async function playMiniAppAndInvite() {
+    if (!pendingMiniAppLaunch) return;
+
+    const app = pendingMiniAppLaunch;
+    const targetChatId = strOpenChat;
+
+    // Check if we have an active chat
+    if (!targetChatId) {
+        console.error('No active chat to send Mini App to');
+        closeMiniAppLaunchDialog();
+        // Fallback to solo play
+        await playMiniAppSoloInternal(app);
+        return;
+    }
+
+    // Check permissions for marketplace apps before doing anything
+    const shouldContinue = await checkMiniAppPermissions(app);
+    if (!shouldContinue) {
+        closeMiniAppLaunchDialog();
+        return; // User cancelled
+    }
+
+    // Show loading state on the invite button
+    const inviteBtn = domMiniAppLaunchInvite;
+    const originalText = inviteBtn.textContent;
+    inviteBtn.disabled = true;
+    inviteBtn.innerHTML = '<span class="icon icon-loading"></span>';
+    
+    // Helper to reset button and close dialog
+    const finishAndClose = () => {
+        inviteBtn.disabled = false;
+        inviteBtn.textContent = originalText;
+        closeMiniAppLaunchDialog();
+    };
+    
+    // Determine if this is a group chat (MLS) or DM
+    const chat = arrChats.find(c => c.id === targetChatId);
+    const isGroupChat = chat && chat.chat_type === 'MlsGroup';
+    const eventName = isGroupChat ? 'mls_message_new' : 'message_new';
+    
+    // Set up a one-time listener to catch the new message and open the Mini App
+    let unlisten = null;
+    const timeoutId = setTimeout(() => {
+        // Timeout after 30 seconds - just in case the message doesn't arrive
+        if (unlisten) unlisten();
+        console.warn('Timeout waiting for Mini App message to be sent');
+        finishAndClose();
+    }, 30000);
+    
+    unlisten = await listen(eventName, async (evt) => {
+        const message = isGroupChat ? evt.payload?.message : evt.payload?.message;
+        const chatId = isGroupChat ? evt.payload?.group_id : evt.payload?.chat_id;
+        
+        console.log('Play & Invite: Received message event', { chatId, targetChatId, messageId: message?.id, attachments: message?.attachments });
+        
+        // Log full attachment details for debugging
+        if (message?.attachments) {
+            message.attachments.forEach((a, i) => {
+                console.log(`Play & Invite: Attachment ${i}:`, { name: a.name, filename: a.filename, path: a.path, mime: a.mime, ext: a.ext });
+            });
+        }
+        
+        // Check if this is our message in the target chat with a .miniapp or .xdc attachment
+        if (chatId === targetChatId && message && message.attachments) {
+            const miniAppAttachment = message.attachments.find(a => {
+                const filename = a.name || a.filename || '';
+                const path = a.path || '';
+                const ext = a.ext || '';
+                // Check for .xdc extensions
+                const isMiniApp = filename.toLowerCase().endsWith('.xdc') ||
+                                  path.toLowerCase().endsWith('.xdc') ||
+                                  ext.toLowerCase() === 'xdc';
+                return isMiniApp;
+            });
+            
+            console.log('Play & Invite: Found miniapp attachment?', miniAppAttachment);
+            
+            if (miniAppAttachment) {
+                // Found our Mini App message - clean up the message listener
+                clearTimeout(timeoutId);
+                if (unlisten) unlisten();
+                
+                const filePath = miniAppAttachment.path || app.src_url;
+                
+                // Check if this is a pending message - if so, wait for the real ID
+                if (message.id.startsWith('pending')) {
+                    console.log('Play & Invite: Message is pending, waiting for real ID...');
+                    
+                    // Track if we've already handled the update
+                    let updateHandled = false;
+                    let updateTimeoutId = null;
+                    
+                    // Set up a listener for the message_update event to get the real ID
+                    const updateUnlisten = await listen('message_update', async (updateEvt) => {
+                        if (updateHandled) return;
+                        if (updateEvt.payload.old_id === message.id && updateEvt.payload.chat_id === targetChatId) {
+                            updateHandled = true;
+                            const realMessage = updateEvt.payload.message;
+                            console.log('Play & Invite: Got real message ID:', realMessage.id);
+                            
+                            // Clear timeout and unlisten
+                            if (updateTimeoutId) clearTimeout(updateTimeoutId);
+                            updateUnlisten();
+                            
+                            // Get the topic ID from the real message's attachment
+                            let topicId = null;
+                            if (realMessage.attachments && realMessage.attachments.length > 0) {
+                                const miniappAttachment = realMessage.attachments.find(a =>
+                                    a.extension === 'xdc' || a.path?.endsWith('.xdc')
+                                );
+                                if (miniappAttachment) {
+                                    topicId = miniappAttachment.webxdc_topic;
+                                    console.log('Play & Invite: Got topic ID from attachment:', topicId);
+                                }
+                            }
+                            
+                            // Open the Mini App with the real message ID and topic
+                            try {
+                                await invoke('miniapp_open', {
+                                    filePath: filePath,
+                                    chatId: targetChatId,
+                                    messageId: realMessage.id,
+                                    href: null,
+                                    topicId: topicId,
+                                });
+                            } catch (e) {
+                                console.error('Failed to open Mini App from forwarded message:', e);
+                            }
+                            
+                            finishAndClose();
+                        }
+                    });
+                    
+                    // Set a timeout for the update listener too
+                    updateTimeoutId = setTimeout(() => {
+                        if (updateHandled) return;
+                        updateUnlisten();
+                        console.warn('Timeout waiting for message update');
+                        finishAndClose();
+                    }, 30000);
+                } else {
+                    // Message already has a real ID, open immediately
+                    console.log('Opening Mini App from forwarded message:', message.id, 'path:', filePath);
+                    
+                    // Get the topic ID from the message's attachment
+                    let topicId = null;
+                    if (message.attachments && message.attachments.length > 0) {
+                        const miniappAttachment = message.attachments.find(a =>
+                            a.extension === 'xdc' || a.path?.endsWith('.xdc')
+                        );
+                        if (miniappAttachment) {
+                            topicId = miniappAttachment.webxdc_topic;
+                            console.log('Play & Invite: Got topic ID from attachment:', topicId);
+                        }
+                    }
+                    
+                    try {
+                        await invoke('miniapp_open', {
+                            filePath: filePath,
+                            chatId: targetChatId,
+                            messageId: message.id,
+                            href: null,
+                            topicId: topicId,
+                        });
+                    } catch (e) {
+                        console.error('Failed to open Mini App from forwarded message:', e);
+                    }
+                    
+                    finishAndClose();
+                }
+            }
+        }
+    });
+    
+    try {
+        // Send the Mini App file to the current chat
+        const result = await invoke('file_message', {
+            receiver: targetChatId,
+            repliedTo: '',
+            filePath: app.src_url,
+        });
+
+        // Finalize the pending message
+        if (result && result.event_id) {
+            finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+        }
+
+        console.log('Mini App sent to chat successfully');
+    } catch (e) {
+        console.error('Failed to send Mini App to chat:', e);
+        // Clean up listener
+        clearTimeout(timeoutId);
+        if (unlisten) unlisten();
+        // Close dialog and reset button
+        finishAndClose();
+        // Fallback to solo play if sending fails
+        await playMiniAppSoloInternal(app);
+    }
+}
+
+/**
+ * Check and show permission prompt for a Mini App from history
+ * @param {Object} app - The app from history (MiniAppHistoryEntry)
+ * @returns {Promise<boolean>} True if we should continue opening, false if cancelled
+ */
+async function checkMiniAppPermissions(app) {
+    // Only marketplace apps have permissions
+    if (!app.marketplace_id) {
+        return true;
+    }
+
+    try {
+        // Get the marketplace app info to check for requested permissions and blossom_hash
+        const marketplaceApp = await invoke('marketplace_get_app', { appId: app.marketplace_id });
+
+        if (!marketplaceApp || !marketplaceApp.requested_permissions || marketplaceApp.requested_permissions.length === 0) {
+            return true; // No permissions requested
+        }
+
+        // Use blossom_hash as the permission identifier (content-based security)
+        if (!marketplaceApp.blossom_hash) {
+            return true; // No hash available, continue
+        }
+
+        // Check if we've already prompted for permissions using the file hash
+        const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash: marketplaceApp.blossom_hash });
+
+        if (hasBeenPrompted) {
+            return true; // Already prompted, continue
+        }
+
+        // Show the permission prompt (using the function from marketplace.js)
+        const userGranted = await showPermissionPrompt(marketplaceApp);
+        return userGranted;
+    } catch (e) {
+        console.error('Failed to check Mini App permissions:', e);
+        return true; // Continue on error
+    }
+}
+
+/**
+ * Check and show permission prompt for a Mini App opened from a chat attachment
+ * Uses the file hash to look up if there's a matching marketplace app with permissions
+ * @param {string} filePath - Path to the .xdc file
+ * @returns {Promise<boolean>} True if we should continue opening, false if cancelled
+ */
+async function checkChatMiniAppPermissions(filePath) {
+    try {
+        // Load the Mini App info to get the file hash
+        const miniAppInfo = await invoke('miniapp_load_info', { filePath });
+        if (!miniAppInfo || !miniAppInfo.file_hash) {
+            return true; // No hash available, continue
+        }
+
+        const fileHash = miniAppInfo.file_hash;
+
+        // Check if we've already prompted for permissions using this file hash
+        const hasBeenPrompted = await invoke('miniapp_has_permission_prompt', { fileHash });
+        if (hasBeenPrompted) {
+            return true; // Already prompted, continue
+        }
+
+        // Look up if there's a marketplace app with this hash
+        const marketplaceApp = await invoke('marketplace_get_app_by_hash', { fileHash });
+        if (!marketplaceApp || !marketplaceApp.requested_permissions || marketplaceApp.requested_permissions.length === 0) {
+            return true; // No matching marketplace app or no permissions requested
+        }
+
+        // Show the permission prompt (using the function from marketplace.js)
+        const userGranted = await showPermissionPrompt(marketplaceApp);
+        return userGranted;
+    } catch (e) {
+        console.error('Failed to check chat Mini App permissions:', e);
+        return true; // Continue on error
+    }
+}
+
+/**
+ * Internal function to play Mini App solo
+ */
+async function playMiniAppSoloInternal(app) {
+    try {
+        // Check permissions for marketplace apps
+        const shouldContinue = await checkMiniAppPermissions(app);
+        if (!shouldContinue) {
+            return; // User cancelled
+        }
+
+        // Open the Mini App directly using the cached file path
+        await invoke('miniapp_open', {
+            filePath: app.src_url,
+            chatId: 'solo',
+            messageId: `solo_${Date.now()}`,
+            href: null,
+            topicId: null,
+        });
+    } catch (e) {
+        console.error('Failed to open Mini App:', e);
+    }
+}
+
+/**
+ * Open Mini App from history - shows the launch dialog
+ */
+async function openMiniAppFromHistory(app) {
+    await showMiniAppLaunchDialog(app);
+}
+
+/**
+ * Helper function to escape HTML
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Truncates a string to a maximum number of grapheme clusters (visual characters).
+ * Unlike substring(), this properly handles emojis and other multi-byte characters.
+ */
+function truncateGraphemes(text, maxLength) {
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+    const segments = [...segmenter.segment(text)];
+    if (segments.length <= maxLength) return text;
+    return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
 }
 
 /**
@@ -332,15 +2643,18 @@ function resetEmojiPicker() {
 
 // Update the emoji search event listener
 emojiSearch.addEventListener('input', (e) => {
+    // Skip emoji search if in GIF mode (GIF search is handled separately)
+    if (pickerMode === PICKER_MODE_GIF) return;
+
     const search = e.target.value.toLowerCase();
-    
+
     if (search) {
          if (emojiSearchIcon) emojiSearchIcon.style.opacity = '0';
         // Hide all sections and show search results
         document.querySelectorAll('.emoji-section').forEach(section => {
             section.style.display = 'none';
         });
-        
+
         const results = searchEmojis(search);
         const resultsContainer = document.createElement('div');
         resultsContainer.className = 'emoji-section';
@@ -351,29 +2665,29 @@ emojiSearch.addEventListener('input', (e) => {
             </div>
             <div class="emoji-grid" id="emoji-search-results"></div>
         `;
-        
+
         const existingResults = document.getElementById('emoji-search-results-container');
         if (existingResults) {
             existingResults.remove();
         }
-        
+
         document.querySelector('.emoji-main').prepend(resultsContainer);
-        
+
         const resultsGrid = document.getElementById('emoji-search-results');
         resultsGrid.innerHTML = '';
-        
+
         // STRICT FILTERING: Only show emojis that contain the search term in their name
-        const filteredResults = results.filter(emoji => 
+        const filteredResults = results.filter(emoji =>
             emoji.name.toLowerCase().includes(search)
         );
-        
+
         filteredResults.slice(0, 48).forEach(emoji => {
             const span = document.createElement('span');
             span.textContent = emoji.emoji;
             span.title = emoji.name;
             resultsGrid.appendChild(span);
         });
-        
+
         twemojify(resultsGrid);
     } else {
         if (emojiSearchIcon) emojiSearchIcon.style.opacity = ''; // Restore opacity when cleared
@@ -397,6 +2711,39 @@ document.querySelectorAll('.emoji-category-btn').forEach(btn => {
         section.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
 });
+
+/**
+ * Insert text at the cursor position in the chat input
+ * If no selection, inserts at cursor. If text is selected, replaces it.
+ * @param {string} text - The text to insert
+ * @param {boolean} autoSpace - If true, adds spaces around inserted text when adjacent to non-whitespace
+ */
+function insertAtCursor(text, autoSpace = false) {
+    const input = domChatMessageInput;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const value = input.value;
+
+    // Auto-space: add spaces if inserting next to non-whitespace characters
+    let prefix = '';
+    let suffix = '';
+    if (autoSpace) {
+        const charBefore = start > 0 ? value[start - 1] : '';
+        const charAfter = end < value.length ? value[end] : '';
+        if (charBefore && !/\s/.test(charBefore)) prefix = ' ';
+        if (charAfter && !/\s/.test(charAfter)) suffix = ' ';
+    }
+
+    const before = value.substring(0, start);
+    const after = value.substring(end);
+    const insertText = prefix + text + suffix;
+    input.value = before + insertText + after;
+    // Move cursor to end of inserted text
+    const newPos = start + insertText.length;
+    input.setSelectionRange(newPos, newPos);
+    // Trigger input event to update send/mic button state
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 // Emoji selection handler
 picker.addEventListener('click', (e) => {
@@ -427,12 +2774,10 @@ picker.addEventListener('click', (e) => {
                     invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
                 }
             } else {
-                // Add to message input
-                domChatMessageInput.value += cEmoji.emoji;
-                // Manually trigger the oninput event to update the send/mic button state
-                domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+                // Add to message input at cursor position (with auto-spacing)
+                insertAtCursor(cEmoji.emoji, true);
             }
-            
+
             // Close the picker - use class instead of inline style
             picker.classList.remove('visible');
             // Focus chat input (desktop only - mobile keyboards are disruptive)
@@ -443,10 +2788,19 @@ picker.addEventListener('click', (e) => {
     }
 });
 
-// When hitting Enter on the emoji search - choose the first emoji
+// When hitting Enter on the emoji search - choose the first emoji/GIF
 emojiSearch.onkeydown = async (e) => {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter')) {
         e.preventDefault();
+
+        // Handle GIF mode - select first GIF
+        if (pickerMode === PICKER_MODE_GIF) {
+            const firstGif = document.querySelector('#gif-grid .gif-item');
+            if (firstGif && firstGif.dataset.gifId) {
+                selectGif(firstGif.dataset.gifId);
+            }
+            return;
+        }
 
         // Find the first emoji in search results or recent emojis
         let emojiElement;
@@ -490,10 +2844,8 @@ emojiSearch.onkeydown = async (e) => {
                 invoke('react_to_message', { referenceId: strCurrentReactionReference, chatId: strReceiverPubkey, emoji: cEmoji.emoji });
             }
         } else {
-            // Add to message input
-            domChatMessageInput.value += cEmoji.emoji;
-            // Manually trigger the oninput event to update the send/mic button state
-            domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+            // Add to message input at cursor position (with auto-spacing)
+            insertAtCursor(cEmoji.emoji, true);
         }
 
         // Reset the UI state - use class instead of inline style
@@ -509,13 +2861,24 @@ emojiSearch.onkeydown = async (e) => {
             domChatMessageInput.focus();
         }
     } else if (e.code === 'Escape') {
-        // Close the dialog - use class instead of inline style
+        // Close the Mini App launch dialog if open
+        if (domMiniAppLaunchOverlay.classList.contains('active')) {
+            closeMiniAppLaunchDialog();
+            return;
+        }
+
+        // Close the emoji dialog - use class instead of inline style
         emojiSearch.value = '';
         picker.classList.remove('visible');
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
         domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+
+        // Close the attachment panel if open
+        if (domAttachmentPanel.classList.contains('visible')) {
+            closeAttachmentPanel();
+        }
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -580,6 +2943,658 @@ picker.addEventListener('click', (e) => {
         }
     }
 });
+
+// ==================== GIF PICKER ====================
+
+const gifPickerContent = document.querySelector('.gif-picker-content');
+const emojiPickerContent = document.querySelector('.emoji-picker-content');
+const gifGrid = document.getElementById('gif-grid');
+const gifLoading = document.getElementById('gif-loading');
+const pickerModeButtons = document.querySelectorAll('.picker-mode-btn');
+
+/** Picker mode enum for fast comparison */
+const PICKER_MODE_EMOJI = 0;
+const PICKER_MODE_GIF = 1;
+
+/** Current picker mode */
+let pickerMode = PICKER_MODE_EMOJI;
+
+/** GIF search debounce timer */
+let gifSearchTimeout = null;
+
+/** Track if trending GIFs have been loaded */
+let trendingGifsLoaded = false;
+
+/** IntersectionObserver for lazy loading GIF previews */
+let gifLazyLoadObserver = null;
+
+/** Cached trending GIFs data and timestamp */
+let cachedTrendingGifs = null;
+let cachedTrendingTimestamp = 0;
+const GIF_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/** Maximum number of cached search queries (LRU eviction) */
+const GIF_SEARCH_CACHE_MAX_SIZE = 10;
+
+/** Cached search results (LRU-style) */
+const gifSearchCache = new Map();
+
+/** GIFGalaxy API base URL */
+const GIF_API_BASE = 'https://gifverse.net';
+
+/** Preconnect link element for GIFGalaxy */
+let gifPreconnectLink = null;
+
+/** Pagination state for GIFs */
+// Use smaller page size on macOS (WebKit) due to autoplay limitations
+const gifPageSize = navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Firefox') ? 6 : 12;
+let gifCurrentOffset = 0;
+let gifHasMore = true;
+let gifIsLoadingMore = false;
+let gifCurrentMode = 'trending'; // 'trending' or 'search'
+let gifCurrentQuery = '';
+
+/**
+ * Shows skeleton/ghost placeholders in the GIF grid while loading
+ * @param {number} count - Number of skeleton items to show
+ */
+function showGifSkeletons(count) {
+    gifGrid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < count; i++) {
+        const skeleton = document.createElement('div');
+        skeleton.className = 'gif-item gif-skeleton';
+        fragment.appendChild(skeleton);
+    }
+    gifGrid.appendChild(fragment);
+}
+
+/**
+ * Establish early connection to GIF API server
+ * Called when opening a chat to warm up connection before user needs GIFs
+ */
+function preconnectGifServer() {
+    if (gifPreconnectLink) return; // Already connected
+    gifPreconnectLink = document.createElement('link');
+    gifPreconnectLink.rel = 'preconnect';
+    gifPreconnectLink.href = 'https://gifverse.net';
+    gifPreconnectLink.crossOrigin = 'anonymous';
+    document.head.appendChild(gifPreconnectLink);
+}
+
+/**
+ * Prefetch trending GIFs in background when emoji panel opens
+ * Caches the API response for instant display
+ */
+function prefetchTrendingGifs() {
+    // Skip if cache is still fresh
+    if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
+        return;
+    }
+
+    // Prefetch trending in background (use dynamic page size)
+    fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.results && data.results.length > 0) {
+                cachedTrendingGifs = data.results;
+                cachedTrendingTimestamp = Date.now();
+            }
+        })
+        .catch(() => {}); // Silently fail - this is just an optimization
+}
+
+// ===== Blurhash Decoder (Rust Backend) =====
+// Uses efficient Rust-based decoder with LRU caching
+/** @type {Map<string, string>} Cache of decoded blurhash -> data URL */
+const blurhashCache = new Map();
+/** Maximum cached blurhash entries */
+const BLURHASH_CACHE_MAX_SIZE = 200;
+
+/**
+ * Get a decoded blurhash data URL from cache, or decode via Rust backend
+ * Returns cached value synchronously if available, otherwise triggers async decode
+ * @param {string} blurhash - The blurhash string
+ * @returns {string|null} - Cached data URL or null (will be decoded async)
+ */
+function getCachedBlurhash(blurhash) {
+    if (!blurhash || blurhash.length < 6) return null;
+    return blurhashCache.get(blurhash) || null;
+}
+
+/**
+ * Pre-decode blurhashes for a batch of GIFs using the Rust backend
+ * Results are cached for synchronous access during rendering
+ * @param {Array<{b?: string}>} gifs - Array of GIF objects with optional blurhash field 'b'
+ */
+async function predecodeBlurhashes(gifs) {
+    const uncached = gifs.filter(g => g.b && !blurhashCache.has(g.b));
+    if (uncached.length === 0) return;
+
+    // Decode in parallel (Rust backend is efficient)
+    const decodePromises = uncached.map(async (gif) => {
+        try {
+            const dataUrl = await invoke('decode_blurhash', {
+                blurhash: gif.b,
+                width: 32,
+                height: 32
+            });
+            if (dataUrl && dataUrl.startsWith('data:')) {
+                // LRU eviction if cache is full
+                if (blurhashCache.size >= BLURHASH_CACHE_MAX_SIZE) {
+                    const firstKey = blurhashCache.keys().next().value;
+                    blurhashCache.delete(firstKey);
+                }
+                blurhashCache.set(gif.b, dataUrl);
+            }
+        } catch {
+            // Silently fail - blurhash is just for placeholder
+        }
+    });
+
+    await Promise.all(decodePromises);
+}
+
+// ===== Video Format Detection =====
+// Detect best supported video format for GIF previews (AV1 > WebM > MP4 > GIF)
+// Also builds a fallback chain starting from the best supported format
+const gifFormatFallbackChain = (() => {
+    const video = document.createElement('video');
+    const allFormats = [
+        { ext: 'video.av1', type: 'video', test: 'video/mp4; codecs="av01.0.05M.08"' },
+        { ext: 'video.webm', type: 'video', test: 'video/webm; codecs="vp9"' },
+        { ext: 'video.mp4', type: 'video', test: 'video/mp4; codecs="avc1.42E01E"' },
+        { ext: 'original.gif', type: 'image', test: null } // Always supported
+    ];
+
+    // Find the first supported format and build chain from there
+    let startIndex = allFormats.findIndex(f =>
+        f.test === null || video.canPlayType(f.test) === 'probably' || video.canPlayType(f.test) === 'maybe'
+    );
+    if (startIndex === -1) startIndex = allFormats.length - 1; // Fallback to GIF
+
+    return allFormats.slice(startIndex);
+})();
+const gifPreviewFormat = gifFormatFallbackChain[0];
+
+/**
+ * Switches between emoji and GIF picker modes
+ * @param {number} mode - PICKER_MODE_EMOJI or PICKER_MODE_GIF
+ */
+function setPickerMode(mode) {
+    pickerMode = mode;
+
+    // Update button states (data-mode uses strings for readability)
+    const modeStr = mode === PICKER_MODE_GIF ? 'gif' : 'emoji';
+    pickerModeButtons.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === modeStr);
+    });
+
+    if (mode === PICKER_MODE_EMOJI) {
+        emojiPickerContent.style.display = '';
+        gifPickerContent.style.display = 'none';
+        emojiSearch.placeholder = 'Search Emojis...';
+    } else {
+        emojiPickerContent.style.display = 'none';
+        gifPickerContent.style.display = 'flex';
+        emojiSearch.placeholder = 'Search GIFs...';
+
+        // Load trending GIFs if not already loaded
+        if (!trendingGifsLoaded) {
+            loadTrendingGifs();
+        }
+    }
+
+    // Auto-focus search box on desktop only (mobile keyboards are intrusive)
+    // Only focus if the picker is actually visible to avoid stealing focus
+    if (!platformFeatures.is_mobile && picker.classList.contains('visible')) {
+        emojiSearch.focus();
+    }
+}
+
+/**
+ * Fetches trending GIFs from GIFGalaxy API
+ * Uses cached data if available and fresh
+ */
+async function loadTrendingGifs() {
+    // Reset pagination state
+    gifCurrentOffset = 0;
+    gifHasMore = true;
+    gifIsLoadingMore = false;
+    gifCurrentMode = 'trending';
+    gifCurrentQuery = '';
+
+    // Use cached data if fresh (only for first page)
+    if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
+        gifGrid.innerHTML = '';
+        // Blurhashes should already be cached, but ensure they are
+        await predecodeBlurhashes(cachedTrendingGifs);
+        renderGifs(cachedTrendingGifs, false);
+        gifCurrentOffset = cachedTrendingGifs.length;
+        gifHasMore = cachedTrendingGifs.length >= gifPageSize;
+        trendingGifsLoaded = true;
+        gifLoading.style.display = 'none';
+        return;
+    }
+
+    // Show skeleton placeholders while fetching
+    showGifSkeletons(gifPageSize);
+
+    try {
+        const response = await fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`);
+        const data = await response.json();
+
+        if (data.results && data.results.length > 0) {
+            // Cache the results
+            cachedTrendingGifs = data.results;
+            cachedTrendingTimestamp = Date.now();
+            // Pre-decode blurhashes before rendering
+            await predecodeBlurhashes(data.results);
+            renderGifs(data.results, false);
+            gifCurrentOffset = data.results.length;
+            gifHasMore = data.results.length >= gifPageSize;
+            trendingGifsLoaded = true;
+        } else {
+            showGifEmptyState('No trending GIFs found');
+            gifHasMore = false;
+        }
+    } catch (error) {
+        console.error('[GIF] Failed to load trending:', error);
+        showGifEmptyState('Failed to load GIFs');
+        gifHasMore = false;
+    } finally {
+        gifLoading.style.display = 'none';
+    }
+}
+
+/**
+ * Searches GIFs using the GIFGalaxy API
+ * @param {string} query - The search query
+ */
+async function searchGifs(query) {
+    if (!query.trim()) {
+        // Reset to trending when search is cleared
+        trendingGifsLoaded = false;
+        return loadTrendingGifs();
+    }
+
+    // Reset pagination state for new search
+    gifCurrentOffset = 0;
+    gifHasMore = true;
+    gifIsLoadingMore = false;
+    gifCurrentMode = 'search';
+    gifCurrentQuery = query.trim();
+
+    const cacheKey = gifCurrentQuery.toLowerCase();
+
+    // Check cache first (only for first page)
+    if (gifSearchCache.has(cacheKey)) {
+        const cached = gifSearchCache.get(cacheKey);
+        // Move to end (most recently used)
+        gifSearchCache.delete(cacheKey);
+        gifSearchCache.set(cacheKey, cached);
+        gifGrid.innerHTML = '';
+        // Blurhashes should already be cached, but ensure they are
+        await predecodeBlurhashes(cached);
+        renderGifs(cached, false);
+        gifCurrentOffset = cached.length;
+        gifHasMore = cached.length >= gifPageSize;
+        return;
+    }
+
+    // Show skeleton placeholders while fetching
+    showGifSkeletons(gifPageSize);
+
+    try {
+        const encodedQuery = encodeURIComponent(gifCurrentQuery);
+        const response = await fetch(`${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`);
+        const data = await response.json();
+
+        if (data.results && data.results.length > 0) {
+            // Cache the results (LRU eviction if > 10 entries)
+            if (gifSearchCache.size >= GIF_SEARCH_CACHE_MAX_SIZE) {
+                // Delete oldest entry (first key)
+                const oldestKey = gifSearchCache.keys().next().value;
+                gifSearchCache.delete(oldestKey);
+            }
+            gifSearchCache.set(cacheKey, data.results);
+
+            // Pre-decode blurhashes before rendering
+            await predecodeBlurhashes(data.results);
+            renderGifs(data.results, false);
+            gifCurrentOffset = data.results.length;
+            gifHasMore = data.results.length >= gifPageSize;
+        } else {
+            showGifEmptyState(`No GIFs found for "${query}"`);
+            gifHasMore = false;
+        }
+    } catch (error) {
+        console.error('[GIF] Search failed:', error);
+        showGifEmptyState('Search failed');
+        gifHasMore = false;
+    } finally {
+        gifLoading.style.display = 'none';
+    }
+}
+
+/**
+ * Loads more GIFs for infinite scroll pagination
+ * Appends additional results to the existing grid
+ */
+async function loadMoreGifs() {
+    if (gifIsLoadingMore || !gifHasMore) return;
+    gifIsLoadingMore = true;
+
+    // Show skeleton placeholders for the new batch
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < gifPageSize; i++) {
+        const skeleton = document.createElement('div');
+        skeleton.className = 'gif-item gif-skeleton gif-loading-more';
+        fragment.appendChild(skeleton);
+    }
+    gifGrid.appendChild(fragment);
+
+    try {
+        let url;
+        if (gifCurrentMode === 'trending') {
+            url = `${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=popular`;
+        } else {
+            const encodedQuery = encodeURIComponent(gifCurrentQuery);
+            url = `${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=relevant`;
+        }
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        // Remove skeleton placeholders
+        gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
+
+        if (data.results && data.results.length > 0) {
+            // Pre-decode blurhashes before rendering
+            await predecodeBlurhashes(data.results);
+            renderGifs(data.results, true); // Append mode
+            gifCurrentOffset += data.results.length;
+            gifHasMore = data.results.length >= gifPageSize;
+        } else {
+            gifHasMore = false;
+        }
+    } catch (error) {
+        console.error('[GIF] Failed to load more:', error);
+        // Remove skeleton placeholders on error
+        gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
+        gifHasMore = false;
+    } finally {
+        gifIsLoadingMore = false;
+    }
+}
+
+/**
+ * Renders GIF items to the grid with lazy loading
+ * Uses IntersectionObserver to only load visible items + one row ahead
+ * @param {Array} gifs - Array of GIF data from API
+ * @param {boolean} append - If true, append to existing grid instead of replacing
+ */
+function renderGifs(gifs, append = false) {
+    const mediaUrl = `${GIF_API_BASE}/media`;
+
+    if (!append) {
+        // Clean up previous observer when replacing content
+        if (gifLazyLoadObserver) {
+            gifLazyLoadObserver.disconnect();
+        }
+
+        gifGrid.innerHTML = '';
+
+        // Create IntersectionObserver for lazy loading AND play/pause management
+        // Keep observing to handle play/pause when items scroll in/out of view
+        gifLazyLoadObserver = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                const gifItem = entry.target;
+
+                // Load media if visible and not yet loaded
+                if (entry.isIntersecting && !gifItem.dataset.mediaLoaded) {
+                    loadGifMedia(gifItem, mediaUrl);
+                }
+
+                // Play/pause video based on visibility
+                // Only manage videos that have already initialized (data-ready set by canplay)
+                const video = gifItem.querySelector('video');
+                if (video && video.dataset.ready) {
+                    if (entry.isIntersecting) {
+                        video.play().catch(() => {});
+                    } else {
+                        video.pause();
+                    }
+                }
+            }
+        }, {
+            root: gifGrid,
+            rootMargin: '0px 0px 200px 0px',
+            threshold: 0.1
+        });
+    }
+
+    const fragment = document.createDocumentFragment();
+
+    for (const gif of gifs) {
+        const gifItem = document.createElement('div');
+        gifItem.className = 'gif-item';
+        gifItem.dataset.gifId = gif.i;
+        gifItem.dataset.gifTitle = gif.ti || '';
+
+        // Create placeholder with blurhash background
+        const placeholder = document.createElement('div');
+        placeholder.className = 'gif-placeholder';
+
+        // Apply cached blurhash as background (pre-decoded via Rust backend)
+        if (gif.b) {
+            const cachedBlurhash = getCachedBlurhash(gif.b);
+            if (cachedBlurhash) {
+                placeholder.style.backgroundImage = `url(${cachedBlurhash})`;
+                placeholder.style.backgroundSize = 'cover';
+            }
+        }
+        placeholder.innerHTML = '<span class="loading-spinner"></span>';
+        gifItem.appendChild(placeholder);
+
+        fragment.appendChild(gifItem);
+
+        // Observe for lazy loading (after appending to fragment)
+        gifLazyLoadObserver.observe(gifItem);
+    }
+
+    gifGrid.appendChild(fragment);
+}
+
+/**
+ * Loads the media (video or image) for a GIF item when it becomes visible
+ * @param {HTMLElement} gifItem - The GIF item container
+ * @param {string} mediaUrl - Base URL for media
+ */
+function loadGifMedia(gifItem, mediaUrl) {
+    // Mark as loaded to prevent re-loading
+    gifItem.dataset.mediaLoaded = 'true';
+
+    const gifId = gifItem.dataset.gifId;
+    const gifTitle = gifItem.dataset.gifTitle;
+    const placeholder = gifItem.querySelector('.gif-placeholder');
+
+    // Try loading with fallback chain
+    loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, 0);
+}
+
+/**
+ * Attempts to load a GIF using the format at the given index in the fallback chain
+ * On error, tries the next format in the chain
+ */
+function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex) {
+    if (formatIndex >= gifFormatFallbackChain.length) {
+        // All formats failed - show error icon
+        if (placeholder) placeholder.innerHTML = '<span class="icon icon-image"></span>';
+        return;
+    }
+
+    const format = gifFormatFallbackChain[formatIndex];
+
+    if (format.type === 'video') {
+        // Use video element for efficient formats
+        // Use setAttribute for WebKit/Safari compatibility (properties may not work)
+        const video = document.createElement('video');
+        video.setAttribute('autoplay', '');
+        video.setAttribute('loop', '');
+        video.setAttribute('muted', '');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('preload', 'auto');
+        // Also set properties for browsers that need them
+        video.muted = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.loop = true;
+
+        // Use canplay event - fires when enough data to start playing
+        video.addEventListener('canplay', () => {
+            if (placeholder) placeholder.remove();
+            video.dataset.ready = 'true'; // Mark as ready for observer to manage
+            // Only auto-play if video is actually visible (not just preloaded in margin)
+            // Check if element is in the visible viewport
+            const rect = gifItem.getBoundingClientRect();
+            const gridRect = gifGrid.getBoundingClientRect();
+            const isVisible = rect.top < gridRect.bottom && rect.bottom > gridRect.top;
+            if (isVisible) {
+                video.play().catch(() => {});
+            }
+        }, { once: true });
+
+        video.onerror = () => {
+            // Try next format in the fallback chain
+            video.remove();
+            loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
+        };
+
+        // Set src and explicitly call load() for WebKit
+        video.src = `${mediaUrl}/${gifId}/${format.ext}`;
+        gifItem.appendChild(video);
+        video.load();
+    } else {
+        // Image format (GIF)
+        const img = document.createElement('img');
+        img.alt = gifTitle || 'GIF';
+        img.src = `${mediaUrl}/${gifId}/${format.ext}`;
+
+        img.onload = () => {
+            if (placeholder) placeholder.remove();
+        };
+
+        img.onerror = () => {
+            // Try next format in the fallback chain (if any)
+            img.remove();
+            loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
+        };
+
+        gifItem.appendChild(img);
+    }
+}
+
+/**
+ * Shows an empty state message in the GIF grid
+ * @param {string} message - The message to display
+ */
+function showGifEmptyState(message) {
+    gifGrid.innerHTML = `
+        <div class="gif-empty-state" style="grid-column: 1 / -1;">
+            <span class="icon icon-image"></span>
+            <span>${message}</span>
+        </div>
+    `;
+}
+
+/**
+ * Handles GIF selection - inserts GIF URL at cursor position
+ * If input is empty, auto-sends the GIF. Otherwise, just inserts the URL.
+ * @param {string} gifId - The GIF ID
+ */
+function selectGif(gifId) {
+    const gifUrl = `${GIF_API_BASE}/media/${gifId}/original.gif`;
+    const wasEmpty = !domChatMessageInput.value.trim();
+
+    // Insert the GIF URL at cursor position (with auto-spacing)
+    insertAtCursor(gifUrl, true);
+
+    // Close the picker
+    picker.classList.remove('visible');
+    picker.style.bottom = '';
+    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+
+    // Reset picker state
+    emojiSearch.value = '';
+    setPickerMode(PICKER_MODE_EMOJI);
+    trendingGifsLoaded = false;
+
+    // Focus the input (desktop only)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
+
+    // Auto-send only if input was empty (just the GIF)
+    if (wasEmpty) {
+        domChatMessageInputSend.click();
+    }
+}
+
+// Mode toggle button click handlers
+pickerModeButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setPickerMode(btn.dataset.mode === 'gif' ? PICKER_MODE_GIF : PICKER_MODE_EMOJI);
+    });
+});
+
+// GIF grid click handler
+gifGrid.addEventListener('click', (e) => {
+    e.stopPropagation(); // Prevent bubbling to emoji picker handler
+    const gifItem = e.target.closest('.gif-item');
+    if (gifItem && gifItem.dataset.gifId) {
+        selectGif(gifItem.dataset.gifId);
+    }
+});
+
+// GIF grid scroll handler for infinite scroll
+gifGrid.addEventListener('scroll', () => {
+    // Check if scrolled near bottom (within 100px)
+    const scrollBottom = gifGrid.scrollHeight - gifGrid.scrollTop - gifGrid.clientHeight;
+    if (scrollBottom < 100 && gifHasMore && !gifIsLoadingMore) {
+        loadMoreGifs();
+    }
+});
+
+// Modify the emoji search input to handle GIF search
+const originalEmojiSearchHandler = emojiSearch.oninput;
+emojiSearch.addEventListener('input', (e) => {
+    if (pickerMode === PICKER_MODE_GIF) {
+        // Debounce GIF search
+        clearTimeout(gifSearchTimeout);
+        gifSearchTimeout = setTimeout(() => {
+            searchGifs(e.target.value);
+        }, 300);
+    }
+    // Emoji search is handled by the existing handler
+});
+
+// Reset picker mode when panel closes
+const originalCloseObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+        if (mutation.attributeName === 'class') {
+            if (!picker.classList.contains('visible')) {
+                // Reset to emoji mode when panel closes
+                setPickerMode(PICKER_MODE_EMOJI);
+                trendingGifsLoaded = false;
+            }
+        }
+    }
+});
+originalCloseObserver.observe(picker, { attributes: true });
+
+// ==================== END GIF PICKER ====================
 
 /**
  * Represents a user profile.
@@ -720,6 +3735,11 @@ let strOpenChat = "";
 let previousChatBeforeProfile = "";
 
 /**
+ * Interval ID for periodic profile refresh while viewing profile tab
+ */
+let profileRefreshInterval = null;
+
+/**
  * Get a DM chat for a user
  * @param {string} npub - The user's npub
  * @returns {Chat|undefined} - The chat if it exists
@@ -777,6 +3797,48 @@ function getOrCreateChat(id, chatType = 'DirectMessage') {
  */
 function getOrCreateDMChat(npub) {
     return getOrCreateChat(npub, 'DirectMessage');
+}
+
+/**
+ * Finalize a pending message after successful send.
+ * Updates the message ID and clears the pending state.
+ * @param {string} chatId - The chat ID
+ * @param {string} pendingId - The temporary pending ID
+ * @param {string} eventId - The real event ID from the backend
+ */
+function finalizePendingMessage(chatId, pendingId, eventId) {
+    const chat = getChat(chatId);
+    if (!chat) return;
+
+    const msgIdx = chat.messages.findIndex(m => m.id === pendingId);
+    if (msgIdx === -1) return;
+
+    const msg = chat.messages[msgIdx];
+    const oldId = msg.id;
+    msg.id = eventId;
+    msg.pending = false;
+
+    // Update event cache
+    if (eventCache.has(chatId)) {
+        const cachedEvents = eventCache.getEvents(chatId);
+        if (cachedEvents) {
+            const cacheIdx = cachedEvents.findIndex(m => m.id === oldId);
+            if (cacheIdx !== -1) {
+                cachedEvents[cacheIdx] = msg;
+            }
+        }
+    }
+
+    // Re-render if this chat is open
+    if (strOpenChat === chatId) {
+        const domMsg = document.getElementById(oldId);
+        if (domMsg) {
+            const profile = getProfile(chatId);
+            domMsg.replaceWith(renderMessage(msg, profile, oldId));
+        }
+        strLastMsgID = eventId;
+        softChatScroll();
+    }
 }
 
 /**
@@ -875,6 +3937,68 @@ function getProfile(npub) {
 }
 
 /**
+ * Get the best avatar URL for a profile
+ * Prefers cached local file (for offline support), falls back to remote URL
+ * @param {Profile} profile - The profile object
+ * @returns {string|null} - The avatar URL to use, or null if none available
+ */
+function getProfileAvatarSrc(profile) {
+    if (!profile) return null;
+    // Prefer cached local path for offline support
+    if (profile.avatar_cached) {
+        return convertFileSrc(profile.avatar_cached);
+    }
+    // Fall back to remote URL
+    return profile.avatar || null;
+}
+
+/**
+ * Get the best banner URL for a profile
+ * Prefers cached local file (for offline support), falls back to remote URL
+ * @param {Profile} profile - The profile object
+ * @returns {string|null} - The banner URL to use, or null if none available
+ */
+function getProfileBannerSrc(profile) {
+    if (!profile) return null;
+    // Prefer cached local path for offline support
+    if (profile.banner_cached) {
+        return convertFileSrc(profile.banner_cached);
+    }
+    // Fall back to remote URL
+    return profile.banner || null;
+}
+
+/**
+ * Create an avatar image element with automatic fallback to placeholder on error
+ * @param {string} src - The image source URL
+ * @param {number} size - The size of the avatar in pixels
+ * @param {boolean} isGroup - Whether this is a group avatar (affects placeholder)
+ * @returns {HTMLElement} - Either an img element or a placeholder div
+ */
+function createAvatarImg(src, size, isGroup = false) {
+    if (!src) {
+        return createPlaceholderAvatar(isGroup, size);
+    }
+
+    const img = document.createElement('img');
+    img.src = src;
+    img.style.width = size + 'px';
+    img.style.height = size + 'px';
+    img.style.objectFit = 'cover';
+    img.style.borderRadius = '50%';
+
+    // On error, replace with placeholder
+    img.onerror = function() {
+        const placeholder = createPlaceholderAvatar(isGroup, size);
+        // Copy over any classes from the failed img
+        placeholder.className = img.className;
+        img.replaceWith(placeholder);
+    };
+
+    return img;
+}
+
+/**
  * Tracks if we're in the initial chat open period for auto-scrolling
  */
 let chatOpenAutoScrollTimer = null;
@@ -887,16 +4011,51 @@ let chatOpenTimestamp = 0;
 /**
  * Synchronise all messages from the backend
  */
-async function init() {
-    // Check if account is selected
-    try {
-        await invoke("get_current_account");
-    } catch (e) {
-        console.log('[Init] No account selected, triggering fetch_messages');
-        await invoke("fetch_messages", { init: true });
-        return;
+async function init(skipAccountCheck = false) {
+    // Check if account is selected (skip during boot — we just logged in)
+    if (!skipAccountCheck) {
+        try {
+            await invoke("get_current_account");
+        } catch (e) {
+            console.log('[Init] No account selected, triggering fetch_messages');
+            await invoke("fetch_messages", { init: true });
+            return;
+        }
     }
-    
+
+    // Set up UI maintenance interval first (before any async calls that might fail)
+    // Runs every 5 seconds to clear expired typing indicators and update timestamps
+    let maintenanceTick = 0;
+    setInterval(() => {
+        maintenanceTick++;
+
+        // Clear expired typing indicators (every tick)
+        const now = Date.now() / 1000;
+        arrChats.forEach(chat => {
+            if (chat.active_typers && chat.active_typers.length > 0) {
+                // Clear the array if we haven't received an update in 30 seconds
+                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
+                    chat.active_typers = [];
+
+                    // If this is the open chat, refresh the display
+                    if (strOpenChat === chat.id) {
+                        updateChatHeaderSubtext(chat);
+                    }
+
+                    // Refresh chat list
+                    if (domChats.style.display !== 'none') {
+                        renderChatlist();
+                    }
+                }
+            }
+        });
+
+        // Update chatlist timestamps every 6th tick (~30 seconds)
+        if (maintenanceTick % 6 === 0 && domChats.style.display !== 'none') {
+            updateChatlistTimestamps();
+        }
+    }, 5000);
+
     // Proceed to load and decrypt the database, and begin iterative Nostr synchronisation
     await invoke("fetch_messages", { init: true });
 
@@ -907,38 +4066,6 @@ async function init() {
 
     // Display Invites (MLS Welcomes)
     await loadMLSInvites();
-
-    // Run a very slow loop to update dynamic elements, like "last message time"
-    setInterval(() => {
-        // If the chatlist is open: update timestamps
-        if (domChats.style.display !== 'none') {
-            updateChatlistTimestamps();
-        }
-    }, 30000);
-
-    // Run a faster loop to clear expired typing indicators (every 5 seconds)
-    setInterval(() => {
-        // Check all chats for expired typing indicators
-        const now = Date.now() / 1000;
-        arrChats.forEach(chat => {
-            if (chat.active_typers && chat.active_typers.length > 0) {
-                // Clear the array if we haven't received an update in 30 seconds
-                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
-                    chat.active_typers = [];
-                    
-                    // If this is the open chat, refresh the display
-                    if (strOpenChat === chat.id) {
-                        updateChatHeaderSubtext(chat);
-                    }
-                    
-                    // Refresh chat list
-                    if (domChats.style.display !== 'none') {
-                        renderChatlist();
-                    }
-                }
-            }
-        });
-    }, 5000);
 }
 
 /**
@@ -1005,7 +4132,7 @@ async function acceptMLSInvite(welcomeEventId) {
         }
     } catch (e) {
         console.error('Failed to accept invite:', e);
-        popupConfirm('Error', 'Failed to join group: ' + e, true, '', 'vector_warning.svg');
+        popupConfirm('Error', 'Failed to join group: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
 
@@ -1026,10 +4153,14 @@ function declineMLSInvite(welcomeEventId) {
 
 /**
  * A "thread" function dedicated to refreshing Profile data in the background
+ * Also runs periodic maintenance tasks (cache cleanup, etc.)
  */
 async function fetchProfiles() {
     // Use the new profile sync system
     await invoke("sync_all_profiles");
+
+    // Run periodic maintenance (cache cleanup, memory optimization)
+    invoke("run_maintenance").catch(() => {});
 }
 
 // Track pending status hide timeout
@@ -1041,78 +4172,44 @@ let statusHideTimeout = null;
  */
 function updateChatHeaderSubtext(chat) {
     if (!chat) return;
-    
+
     // Clear any pending hide timeout
     if (statusHideTimeout) {
         clearTimeout(statusHideTimeout);
         statusHideTimeout = null;
     }
-    
+
     let newStatusText = '';
     let shouldAddGradient = false;
-    
+
     const isGroup = chat.chat_type === 'MlsGroup';
     const fNotes = chat.id === strPubkey;
+
+    // Check for typing indicators first (shared logic)
+    const typingText = generateTypingText(chat);
+
     if (fNotes) {
         newStatusText = 'Encrypted Notes to Self';
         shouldAddGradient = false;
+    } else if (typingText) {
+        // Someone is typing - use shared helper
+        newStatusText = typingText;
+        shouldAddGradient = true;
     } else if (isGroup) {
-        // Check for typing indicators in groups
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        
-        if (fIsTyping) {
-            // Display typing indicator with Discord-style multi-user support
-            if (activeTypers.length === 1) {
-                const typer = getProfile(activeTypers[0]);
-                const name = typer?.nickname || typer?.name || 'Someone';
-                newStatusText = `${name} is typing...`;
-            } else if (activeTypers.length === 2) {
-                const typer1 = getProfile(activeTypers[0]);
-                const typer2 = getProfile(activeTypers[1]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                newStatusText = `${name1} and ${name2} are typing...`;
-            } else if (activeTypers.length === 3) {
-                const typer1 = getProfile(activeTypers[0]);
-                const typer2 = getProfile(activeTypers[1]);
-                const typer3 = getProfile(activeTypers[2]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                const name3 = typer3?.nickname || typer3?.name || 'Someone';
-                newStatusText = `${name1}, ${name2}, and ${name3} are typing...`;
-            } else {
-                // 4+ people typing
-                newStatusText = `Several people are typing...`;
-            }
-            shouldAddGradient = true;
+        // Not typing - show member count
+        const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+        if (typeof memberCount === 'number') {
+            const label = memberCount === 1 ? 'member' : 'members';
+            newStatusText = `${memberCount} ${label}`;
         } else {
-            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-            if (typeof memberCount === 'number') {
-                const label = memberCount === 1 ? 'member' : 'members';
-                newStatusText = `${memberCount} ${label}`;
-            } else {
-                // Avoid misleading "0 members" before first count refresh
-                newStatusText = 'Members syncing...';
-            }
-            shouldAddGradient = false;
+            newStatusText = 'Members syncing...';
         }
+        shouldAddGradient = false;
     } else {
-        // Check for typing indicators in DMs (using chat.active_typers)
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        
-        if (fIsTyping) {
-            // For DMs, there should only be one typer (the other person)
-            const typer = getProfile(activeTypers[0]);
-            const name = typer?.nickname || typer?.name || 'User';
-            newStatusText = `${name} is typing...`;
-            shouldAddGradient = true;
-        } else {
-            const profile = getProfile(chat.id);
-            newStatusText = profile?.status?.title || '';
-            shouldAddGradient = false;
-        }
+        // DM - not typing, show profile status
+        const profile = getProfile(chat.id);
+        newStatusText = profile?.status?.title || '';
+        shouldAddGradient = false;
     }
     
     const currentHasStatus = !!domChatContactStatus.textContent && !domChatContactStatus.classList.contains('status-hidden');
@@ -1154,12 +4251,12 @@ let lastChatlistStateHash = '';
 function generateChatlistStateHash() {
     // Build a simple array of state values (faster than creating objects)
     const states = [];
-    
+
     // Add invite IDs first
     for (const inv of arrMLSInvites) {
         states.push(inv.id || inv.welcome_event_id || inv.group_id);
     }
-    
+
     // Add chat states (including chat ID to capture order changes)
     for (const chat of arrChats) {
         const isGroup = chat.chat_type === 'MlsGroup';
@@ -1167,7 +4264,7 @@ function generateChatlistStateHash() {
         const cLastMsg = chat.messages[chat.messages.length - 1];
         const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
         const activeTypers = chat.active_typers || [];
-        
+
         // Push values directly (faster than creating object)
         // Include chat.id to ensure order changes are detected
         states.push(
@@ -1178,10 +4275,11 @@ function generateChatlistStateHash() {
             cLastMsg?.pending,
             profile?.nickname || profile?.name,
             profile?.avatar,
+            profile?.avatar_cached,
             chat.muted
         );
     }
-    
+
     return JSON.stringify(states);
 }
 
@@ -1198,12 +4296,15 @@ function renderChatlist() {
     if (currentStateHash === lastChatlistStateHash) return;
     lastChatlistStateHash = currentStateHash;
 
+    // Cache the accent color once (getComputedStyle is expensive per-call)
+    const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+
     // Prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
-    
+
     // Render invites first (at the top of the chat list)
     for (const invite of arrMLSInvites) {
-        const divInvite = renderInviteItem(invite);
+        const divInvite = renderInviteItem(invite, primaryColor);
         fragment.appendChild(divInvite);
     }
 
@@ -1216,27 +4317,16 @@ function renderChatlist() {
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
 
-        const divContact = renderChat(chat);
+        const divContact = renderChat(chat, primaryColor);
         fragment.appendChild(divContact);
     }
 
     // Give the final element a bottom-margin boost to allow scrolling past the fadeout
     if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
 
-    // Nuke the existing list
-    while (domChatList.firstChild) {
-        domChatList.removeChild(domChatList.firstChild);
-    }
-    
-    // Append our new fragment
-    domChatList.appendChild(fragment);
+    // Replace the existing list in one native call
+    domChatList.replaceChildren(fragment);
 
-    // Add a fade-in
-    const divFade = document.createElement('div');
-    divFade.classList.add(`fadeout-bottom`);
-    divFade.style.bottom = `65px`;
-    domChatList.appendChild(divFade);
-    
     // Update the back button notification
     updateChatBackNotification();
 }
@@ -1245,7 +4335,7 @@ function renderChatlist() {
  * Render an MLS invite as a chat-like item
  * @param {MLSWelcome} invite - The invite we're rendering
  */
-function renderInviteItem(invite) {
+function renderInviteItem(invite, primaryColor) {
     const groupId = invite.group_id || invite.id || '';
     const groupName =
         invite.group_name ||
@@ -1260,7 +4350,7 @@ function renderInviteItem(invite) {
     const divInvite = document.createElement('div');
     divInvite.classList.add('chatlist-contact', 'chatlist-invite');
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
-    divInvite.style.borderColor = '#59fcb3';
+    divInvite.style.borderColor = primaryColor;
 
     // Avatar container with group placeholder
     const divAvatarContainer = document.createElement('div');
@@ -1328,21 +4418,126 @@ function renderInviteItem(invite) {
 }
 
 /**
+ * Generate typing indicator text for a chat
+ * @param {Chat} chat - The chat object
+ * @returns {string|null} - The typing text, or null if no one is typing
+ */
+function generateTypingText(chat) {
+    const activeTypers = chat.active_typers || [];
+    if (activeTypers.length === 0) return null;
+
+    const isGroup = chat.chat_type === 'MlsGroup';
+
+    // DMs just show "Typing..." since we already know who it is
+    if (!isGroup) return 'Typing...';
+
+    // Groups show names
+    if (activeTypers.length === 1) {
+        const typer = getProfile(activeTypers[0]);
+        const name = typer?.nickname || typer?.name || 'Someone';
+        return `${name} is typing...`;
+    } else if (activeTypers.length === 2) {
+        const typer1 = getProfile(activeTypers[0]);
+        const typer2 = getProfile(activeTypers[1]);
+        const name1 = typer1?.nickname || typer1?.name || 'Someone';
+        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        return `${name1} and ${name2} are typing...`;
+    } else if (activeTypers.length === 3) {
+        const typer1 = getProfile(activeTypers[0]);
+        const typer2 = getProfile(activeTypers[1]);
+        const typer3 = getProfile(activeTypers[2]);
+        const name1 = typer1?.nickname || typer1?.name || 'Someone';
+        const name2 = typer2?.nickname || typer2?.name || 'Someone';
+        const name3 = typer3?.nickname || typer3?.name || 'Someone';
+        return `${name1}, ${name2}, and ${name3} are typing...`;
+    } else {
+        return 'Several people are typing...';
+    }
+}
+
+/**
+ * Generate chat preview text for the chatlist
+ * @param {Chat} chat - The chat object
+ * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
+ */
+function generateChatPreviewText(chat) {
+    const isGroup = chat.chat_type === 'MlsGroup';
+    const cLastMsg = chat.messages[chat.messages.length - 1];
+
+    // Handle typing indicators
+    const typingText = generateTypingText(chat);
+    if (typingText) {
+        return { text: typingText, isTyping: true, needsTwemoji: false };
+    }
+
+    // No messages
+    if (!cLastMsg) {
+        if (isGroup) {
+            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
+            return {
+                text: (memberCount != null) ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}` : 'No messages yet',
+                isTyping: false,
+                needsTwemoji: false
+            };
+        } else {
+            return { text: 'Start a conversation', isTyping: false, needsTwemoji: false };
+        }
+    }
+
+    // Pending message
+    if (cLastMsg.pending) {
+        return { text: 'Sending...', isTyping: false, needsTwemoji: false };
+    }
+
+    // Build sender prefix for groups
+    let senderPrefix = '';
+    if (cLastMsg.mine) {
+        senderPrefix = 'You: ';
+    } else if (isGroup && cLastMsg.npub) {
+        const senderProfile = getProfile(cLastMsg.npub);
+        const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
+        senderPrefix = `${senderName}: `;
+    }
+
+    // Attachment message
+    if (!cLastMsg.content && cLastMsg.attachments?.length) {
+        return {
+            text: senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description,
+            isTyping: false,
+            needsTwemoji: false
+        };
+    }
+
+    // PIVX payment message
+    if (cLastMsg.pivx_payment) {
+        return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false };
+    }
+
+    // System event (member joined/left, etc.)
+    if (cLastMsg.system_event) {
+        return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
+    }
+
+    // Regular text message
+    return { text: senderPrefix + cLastMsg.content, isTyping: false, needsTwemoji: true };
+}
+
+/**
  * Render a Chat Preview for the Chat List
  * @param {Chat} chat - The profile we're rendering
  */
-function renderChat(chat) {
+function renderChat(chat, primaryColor) {
     // For groups, we don't have a profile, for DMs we do
     const isGroup = chat.chat_type === 'MlsGroup';
     const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
-    
+
     // Collect the Unread Message count for 'Unread' emphasis and badging
     // Ensure muted chats OR muted profiles do not show unread glow
     const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
 
     // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
-    if (nUnread) divContact.style.borderColor = '#59fcb3';
+    if (nUnread) divContact.style.borderColor = primaryColor;
     divContact.classList.add('chatlist-contact');
     divContact.id = `chatlist-${chat.id}`;
 
@@ -1357,13 +4552,20 @@ function renderChat(chat) {
     if (isGroup) {
         // For groups, show the group placeholder SVG
         divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
-    } else if (profile?.avatar) {
-        const imgAvatar = document.createElement('img');
-        imgAvatar.src = profile?.avatar;
-        divAvatarContainer.appendChild(imgAvatar);
     } else {
-        // Otherwise, generate a placeholder avatar
-        divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        const avatarSrc = getProfileAvatarSrc(profile);
+        if (avatarSrc) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = avatarSrc;
+            // Fallback to placeholder if image fails to load
+            imgAvatar.onerror = () => {
+                imgAvatar.replaceWith(createPlaceholderAvatar(false, 50));
+            };
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            // Otherwise, generate a placeholder avatar
+            divAvatarContainer.appendChild(createPlaceholderAvatar(false, 50));
+        }
     }
 
     // Add the "Status Icon" to the avatar, then plug-in the avatar container
@@ -1404,7 +4606,7 @@ function renderChat(chat) {
     } else {
         h4ContactName.textContent = profile?.nickname || profile?.name || chat.id;
         if (profile?.nickname || profile?.name) twemojify(h4ContactName);
-        
+
         // Add bot icon if this is a bot profile
         if (profile?.bot) {
             const botIconContainer = document.createElement('span');
@@ -1426,88 +4628,12 @@ function renderChat(chat) {
     const cLastMsg = chat.messages[chat.messages.length - 1];
     const pChatPreview = document.createElement('p');
     pChatPreview.classList.add('cutoff');
-    
-    if (isGroup) {
-        // Check for typing indicators in groups
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        pChatPreview.classList.toggle('text-gradient', fIsTyping);
-        
-        if (fIsTyping) {
-            // Display typing indicator with Discord-style multi-user support
-            if (activeTypers.length === 1) {
-                const typer = getProfile(activeTypers[0]);
-                const name = typer?.nickname || typer?.name || 'Someone';
-                pChatPreview.textContent = `${name} is typing...`;
-            } else if (activeTypers.length === 2) {
-                const typer1 = getProfile(activeTypers[0]);
-                const typer2 = getProfile(activeTypers[1]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                const name2 = typer2?.nickname || typer2?.name || 'Someone';
-                pChatPreview.textContent = `${name1} and ${name2} are typing...`;
-            } else {
-                // 3+ people typing
-                const typer1 = getProfile(activeTypers[0]);
-                const name1 = typer1?.nickname || typer1?.name || 'Someone';
-                pChatPreview.textContent = `${name1} and ${activeTypers.length - 1} others are typing...`;
-            }
-        } else {
-            const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
-            if (!cLastMsg) {
-                pChatPreview.textContent = (memberCount != null)
-                    ? `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`
-                    : 'No messages yet';
-            } else if (cLastMsg.pending) {
-                pChatPreview.textContent = `Sending...`;
-            } else if (!cLastMsg.content && cLastMsg.attachments?.length) {
-                // No text content but has attachments; display as an attachment
-                let senderPrefix = '';
-                if (cLastMsg.mine) {
-                    senderPrefix = 'You: ';
-                } else if (cLastMsg.npub) {
-                    // Get sender's display name (nickname > name > npub prefix)
-                    const senderProfile = getProfile(cLastMsg.npub);
-                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
-                    senderPrefix = `${senderName}: `;
-                }
-                pChatPreview.textContent = senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
-            } else {
-                let senderPrefix = '';
-                if (cLastMsg.mine) {
-                    senderPrefix = 'You: ';
-                } else if (cLastMsg.npub) {
-                    // Get sender's display name (nickname > name > npub prefix)
-                    const senderProfile = getProfile(cLastMsg.npub);
-                    const senderName = senderProfile?.nickname || senderProfile?.name || cLastMsg.npub.substring(0, 16);
-                    senderPrefix = `${senderName}: `;
-                }
-                pChatPreview.textContent = senderPrefix + cLastMsg.content;
-                twemojify(pChatPreview);
-            }
-        }
-    } else {
-        // Check for typing indicators in DMs (using chat.active_typers)
-        const activeTypers = chat.active_typers || [];
-        const fIsTyping = activeTypers.length > 0;
-        pChatPreview.classList.toggle('text-gradient', fIsTyping);
-        
-        if (fIsTyping) {
-            // Typing; display the glowy indicator!
-            pChatPreview.textContent = `Typing...`;
-        } else if (!cLastMsg) {
-            pChatPreview.textContent = 'Start a conversation';
-        } else if (!cLastMsg.content && cLastMsg.attachments?.length && !cLastMsg.pending) {
-            // Not typing, and no text; display as an attachment
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description;
-        } else if (cLastMsg.pending) {
-            // A message is pending: thus, we're still sending one
-            pChatPreview.textContent = `Sending...`;
-        } else {
-            // Not typing; display their last message
-            pChatPreview.textContent = (cLastMsg.mine ? 'You: ' : '') + cLastMsg.content;
-            twemojify(pChatPreview);
-        }
-    }
+
+    const preview = generateChatPreviewText(chat);
+    pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+    pChatPreview.textContent = preview.text;
+    if (preview.needsTwemoji) twemojify(pChatPreview);
+
     divPreviewContainer.appendChild(pChatPreview);
 
     // Add the Chat Preview to the contact UI
@@ -1521,7 +4647,7 @@ function renderChat(chat) {
     }
     // Apply 'Unread' final styling
     if (nUnread) {
-        pTimeAgo.style.color = '#59fcb3';
+        pTimeAgo.style.color = primaryColor;
     } else {
         // Add 'read' class for smaller font size when no unread messages
         pTimeAgo.classList.add('read');
@@ -1529,6 +4655,43 @@ function renderChat(chat) {
     divContact.appendChild(pTimeAgo);
 
     return divContact;
+}
+
+/**
+ * Update only the preview text and timestamp for a specific chat in the chatlist
+ * This is more efficient than re-rendering the entire chatlist for a single message edit
+ * @param {string} chatId - The chat ID to update
+ */
+function updateChatlistPreview(chatId) {
+    const chatElement = document.getElementById(`chatlist-${chatId}`);
+    if (!chatElement) {
+        // Chat not in DOM - fallback to full render
+        renderChatlist();
+        return;
+    }
+
+    const cChat = getChat(chatId);
+    if (!cChat) return;
+
+    // Find the preview text element (p.cutoff inside the preview container)
+    const previewContainer = chatElement.querySelector('.chatlist-contact-preview');
+    if (!previewContainer) return;
+
+    const pChatPreview = previewContainer.querySelector('p.cutoff');
+    const pTimeAgo = chatElement.querySelector('.chatlist-contact-timestamp');
+
+    if (pChatPreview) {
+        const preview = generateChatPreviewText(cChat);
+        pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+        pChatPreview.textContent = preview.text;
+        if (preview.needsTwemoji) twemojify(pChatPreview);
+    }
+
+    // Update timestamp
+    const cLastMsg = cChat.messages[cChat.messages.length - 1];
+    if (pTimeAgo && cLastMsg) {
+        pTimeAgo.textContent = timeAgo(cLastMsg.at);
+    }
 }
 
 /**
@@ -1694,7 +4857,10 @@ function markAsRead(chat, message) {
  * @param {string?} replied_to - The reference of the message, if any
  */
 async function message(pubkey, content, replied_to) {
-    await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
+    const result = await invoke("message", { receiver: pubkey, content: content, repliedTo: replied_to });
+    if (result && result.event_id) {
+        finalizePendingMessage(pubkey, result.pending_id, result.event_id);
+    }
 }
 
 /**
@@ -1706,7 +4872,10 @@ async function message(pubkey, content, replied_to) {
 async function sendFile(pubkey, replied_to, filepath) {
     try {
         // Use the protocol-agnostic file_message command for both DMs and MLS groups
-        await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
+        const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
+        if (result && result.event_id) {
+            finalizePendingMessage(pubkey, result.pending_id, result.event_id);
+        }
     } catch (e) {
         // Notify of an attachment send failure
         popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -1718,8 +4887,12 @@ async function sendFile(pubkey, replied_to, filepath) {
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
  */
 async function setupRustListeners() {
+    // Fire all listener registrations in parallel (each await listen() is an IPC round-trip)
+    const _p = [];
+    const _on = (event, handler) => _p.push(listen(event, handler));
+
     // Listen for MLS message events
-    await listen('mls_message_new', async (evt) => {
+    _on('mls_message_new', async (evt) => {
         const { group_id, message } = evt.payload;
         console.log('MLS message received for group:', group_id, 'pending:', message?.pending, 'attachments:', message?.attachments?.length);
         
@@ -1738,12 +4911,12 @@ async function setupRustListeners() {
             return;
         }
         
-        // Add to message cache
+        // Add to event cache
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
         const shouldAddToCache = fSyncComplete || group_id === strOpenChat;
         if (shouldAddToCache) {
-            const added = messageCache.addNewMessage(group_id, message);
+            const added = eventCache.addEvent(group_id, message);
             if (!added) return;
         }
         
@@ -1794,17 +4967,32 @@ async function setupRustListeners() {
             proceduralScrollState.totalMessageCount++;
         } else {
             console.log('Group chat not open, message added to background chat');
+            // Own message synced from another device — mark chat as read
+            // since we clearly saw the conversation before replying
+            if (message.mine) {
+                let lastContactMsg = null;
+                for (let i = chat.messages.length - 1; i >= 0; i--) {
+                    if (!chat.messages[i].mine) {
+                        lastContactMsg = chat.messages[i];
+                        break;
+                    }
+                }
+                if (lastContactMsg) markAsRead(chat, lastContactMsg);
+            }
         }
         
         // Resort chat list order so recent groups bubble up (fallback to metadata)
         arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-        
+
         // Re-render chat list
         renderChatlist();
+
+        // Update the back button notification dot (for unread messages in other chats)
+        updateChatBackNotification();
     });
 
     // Listen for MLS invite received events (real-time)
-    await listen('mls_invite_received', async (evt) => {
+    _on('mls_invite_received', async (evt) => {
         console.log('MLS invite received in real-time, refreshing invites list');
         // Reload invites list to show the new invite
         await loadMLSInvites();
@@ -1813,7 +5001,7 @@ async function setupRustListeners() {
     });
 
     // Listen for MLS group metadata updates
-    await listen('mls_group_metadata', async (evt) => {
+    _on('mls_group_metadata', async (evt) => {
         try {
             const metadata = evt.payload?.metadata;
             const { chat, changed } = applyMlsGroupMetadata(metadata);
@@ -1837,14 +5025,14 @@ async function setupRustListeners() {
     });
 
     // Listen for MLS welcome accepted events
-    await listen('mls_welcome_accepted', async (evt) => {
+    _on('mls_welcome_accepted', async (evt) => {
         console.log('MLS welcome accepted, refreshing groups and invites');
         // Reload invites
         await loadMLSInvites();
     });
 
     // Listen for MLS group updates (member additions, removals, etc.)
-    await listen('mls_group_updated', async (evt) => {
+    _on('mls_group_updated', async (evt) => {
         try {
             const { group_id } = evt.payload || {};
             console.log('MLS group updated:', group_id);
@@ -1872,7 +5060,7 @@ async function setupRustListeners() {
     });
     
     // Listen for MLS group left events
-    await listen('mls_group_left', async (evt) => {
+    _on('mls_group_left', async (evt) => {
         try {
             const { group_id } = evt.payload || {};
             console.log('[MLS][Frontend] Received mls_group_left event for group:', group_id?.substring(0, 16));
@@ -1906,7 +5094,7 @@ async function setupRustListeners() {
     });
     
     // Listen for MLS initial sync completion after joining a group
-    await listen('mls_group_initial_sync', async (evt) => {
+    _on('mls_group_initial_sync', async (evt) => {
         try {
             const { group_id, processed, new: newCount } = evt.payload || {};
             console.log('MLS initial group sync complete:', group_id, 'processed:', processed, 'new:', newCount);
@@ -1925,8 +5113,69 @@ async function setupRustListeners() {
         }
     });
 
+    // Listen for system events (member joined/left, etc.)
+    _on('system_event', async (evt) => {
+        try {
+            const { conversation_id, event_id, event_type, member_pubkey, member_name } = evt.payload || {};
+            console.log('[System Event] Received:', event_id, event_type);
+
+            // Deduplication by event_id
+            const chat = arrChats.find(c => c.id === conversation_id);
+            if (chat && chat.messages.some(msg => msg.id === event_id)) {
+                console.log('[System Event] Skipping duplicate:', event_id);
+                return;
+            }
+
+            // Build display content
+            const displayName = member_name || member_pubkey?.substring(0, 12) + '...';
+            let content;
+            switch (event_type) {
+                case SystemEventType.MemberLeft:
+                    content = `${displayName} has left`;
+                    break;
+                case SystemEventType.MemberJoined:
+                    content = `${displayName} has joined`;
+                    break;
+                case SystemEventType.MemberRemoved:
+                    content = `${displayName} was removed`;
+                    break;
+                default:
+                    content = `System event ${event_type}: ${displayName}`;
+            }
+
+            // Create system event message using the event_id
+            const systemMsg = {
+                id: event_id,
+                at: Date.now(),
+                content: content,
+                mine: false,
+                attachments: [],
+                system_event: {
+                    event_type: event_type,
+                    member_npub: member_pubkey,
+                }
+            };
+
+            // Add to chat messages via cache (handles deduplication)
+            // Note: chat.messages and cache share the same array reference, so only use cache
+            eventCache.addEvent(conversation_id, systemMsg);
+
+            // If this chat is currently open, render the system event
+            if (strOpenChat === conversation_id && domChatMessages) {
+                const systemElement = insertSystemEvent(content);
+                domChatMessages.appendChild(systemElement);
+                softChatScroll();
+            }
+
+            // Re-render chatlist
+            renderChatlist();
+        } catch (e) {
+            console.error('Error handling system_event:', e);
+        }
+    });
+
     // Listen for Synchronisation Finish updates
-    await listen('sync_finished', async (_) => {
+    _on('sync_finished', async (_) => {
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
         
@@ -1942,13 +5191,13 @@ async function setupRustListeners() {
     });
 
     // Listen for Synchronisation Slice updates
-    await listen('sync_slice_finished', (_) => {
+    _on('sync_slice_finished', (_) => {
         // Continue synchronising until event `sync_finished` is emitted
         invoke("fetch_messages", { init: false });
     });
 
     // Listen for Synchronisation Progress updates
-    await listen('sync_progress', (evt) => {
+    _on('sync_progress', (evt) => {
         // Show and activate the sync line when syncing is in progress
         // Only add 'active' if it's not already active to avoid restarting the animation
         if (!fInit && !domSyncLine.classList.contains('active')) {
@@ -1959,7 +5208,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Upload Progress events
-    await listen('attachment_upload_progress', async (evt) => {
+    _on('attachment_upload_progress', async (evt) => {
         if (strOpenChat) {
             let divUpload = document.getElementById(evt.payload.id + '_file');
             if (divUpload) {
@@ -1970,7 +5219,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Download Progress events
-    await listen('attachment_download_progress', async (evt) => {
+    _on('attachment_download_progress', async (evt) => {
         // Update the in-memory attachment
         if (strOpenChat) {
             let divDownload = document.getElementById(evt.payload.id);
@@ -2023,7 +5272,7 @@ async function setupRustListeners() {
     });
 
     // Listen for Attachment Download Results
-    await listen('attachment_download_result', async (evt) => {
+    _on('attachment_download_result', async (evt) => {
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
@@ -2068,10 +5317,14 @@ async function setupRustListeners() {
     });
 
     // Listen for profile updates
-    await listen('profile_update', (evt) => {
+    _on('profile_update', (evt) => {
         // Check if the frontend is already aware
         const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
+        let avatarCacheChanged = false;
         if (nProfileIdx >= 0) {
+            // Check if avatar cache changed (for triggering chatlist re-render)
+            avatarCacheChanged = arrProfiles[nProfileIdx].avatar_cached !== evt.payload.avatar_cached;
+
             // Update our frontend memory
             arrProfiles[nProfileIdx] = evt.payload;
 
@@ -2082,8 +5335,9 @@ async function setupRustListeners() {
         } else {
             // Add the new profile
             arrProfiles.push(evt.payload);
+            avatarCacheChanged = !!evt.payload.avatar_cached;
         }
-        
+
         // If this user has an open chat, then soft-update the chat header
         if (strOpenChat === evt.payload.id) {
             const chat = getDMChat(evt.payload.id);
@@ -2091,6 +5345,11 @@ async function setupRustListeners() {
             if (chat && profile) {
                 updateChat(chat, [], profile);
             }
+        }
+
+        // Re-render chatlist if avatar cache changed (so cached images show up)
+        if (avatarCacheChanged && !strOpenChat) {
+            renderChatlist();
         }
         
         // Update any profile previews in the chat messages for this npub (regardless of which chat is open)
@@ -2100,8 +5359,7 @@ async function setupRustListeners() {
         });
         
         // If this user is being viewed in the Expanded Profile View, update it
-        // Note: no need to update our own, it makes editing very weird
-        if (!evt.payload.mine && domProfileId.textContent === evt.payload.id) {
+        if (domProfileId.textContent === evt.payload.id) {
             renderProfileTab(evt.payload);
         }
         
@@ -2109,7 +5367,7 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
-    await listen('profile_muted', (evt) => {
+    _on('profile_muted', (evt) => {
         // Update the chat's muted status
         const cChat = getDMChat(evt.payload.profile_id);
         if (cChat) {
@@ -2132,12 +5390,12 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
-    await listen('profile_nick_changed', (evt) => {
+    _on('profile_nick_changed', (evt) => {
         // Update the profile's nickname
         const cProfile = getProfile(evt.payload.profile_id);
         if (cProfile) {
             cProfile.nickname = evt.payload.value;
-            
+
             // If this profile is Expanded, update the UI
             if (domProfileId.textContent === evt.payload.profile_id) {
                 renderProfileTab(cProfile);
@@ -2145,8 +5403,77 @@ async function setupRustListeners() {
         }
     });
 
+    // Listen for PIVX payment events
+    _on('pivx_payment_received', (evt) => {
+        const { conversation_id, gift_code, amount_piv, address, message_id, sender, is_mine } = evt.payload;
+
+        // Find the chat
+        const chat = arrChats.find(c => c.id === conversation_id);
+        if (!chat) {
+            console.warn('PIVX payment: chat not found for', conversation_id);
+            return;
+        }
+
+        // Check if this payment message already exists in chat
+        const existingMsg = chat.messages?.find(m => m.id === message_id);
+        if (existingMsg) {
+            return;
+        }
+
+        // Create a synthetic message object for the PIVX payment
+        const pivxMsg = {
+            id: message_id,
+            at: evt.payload.at || Date.now(),
+            content: '',
+            mine: is_mine,
+            attachments: [],
+            npub: sender,
+            pivx_payment: {
+                gift_code,
+                amount_piv,
+                address
+            }
+        };
+
+        // Add to chat messages in sorted order by timestamp
+        if (!chat.messages) chat.messages = [];
+
+        // Add to event cache so procedural scroll includes it
+        eventCache.addEvent(conversation_id, pivxMsg);
+
+        // Check if this is the newest message (should be appended at end)
+        const isNewest = chat.messages.length === 0 || pivxMsg.at >= chat.messages[chat.messages.length - 1].at;
+
+        if (isNewest) {
+            // Newest message - append to end
+            chat.messages.push(pivxMsg);
+
+            // If this chat is currently open, append to DOM and scroll
+            if (strOpenChat === conversation_id) {
+                const profile = chat.chat_type === 'MlsGroup' ? null : getProfile(conversation_id);
+                const msgEl = renderMessage(pivxMsg, profile);
+                domChatMessages.appendChild(msgEl);
+                softChatScroll();
+            }
+        } else {
+            // Historical message during resync - insert at correct position in array
+            // but don't manipulate DOM (user will see it on scroll/reopen)
+            let insertIdx = 0;
+            for (let i = chat.messages.length - 1; i >= 0; i--) {
+                if (chat.messages[i].at <= pivxMsg.at) {
+                    insertIdx = i + 1;
+                    break;
+                }
+            }
+            chat.messages.splice(insertIdx, 0, pivxMsg);
+        }
+
+        // Update chatlist
+        renderChatlist();
+    });
+
     // Listen for typing indicator updates (both DMs and Groups)
-    await listen('typing-update', (evt) => {
+    _on('typing-update', (evt) => {
         const { conversation_id, typers } = evt.payload;
 
         // Find the chat (could be DM or group)
@@ -2167,19 +5494,19 @@ async function setupRustListeners() {
     });
 
     // Listen for incoming DM messages
-    await listen('message_new', (evt) => {
+    _on('message_new', (evt) => {
         // Get the chat for this message (chat_id is the npub for DMs)
         let chat = getOrCreateDMChat(evt.payload.chat_id);
         
         // Get the new message
         const newMessage = evt.payload.message;
         
-        // Add to message cache
+        // Add to event cache
         // During sync, only add if this chat is currently open (to avoid cache flooding)
         // After sync complete, always add to cache
         const shouldAddToCache = fSyncComplete || chat.id === strOpenChat;
         if (shouldAddToCache) {
-            const added = messageCache.addNewMessage(chat.id, newMessage);
+            const added = eventCache.addEvent(chat.id, newMessage);
             if (!added) return;
         }
 
@@ -2231,31 +5558,46 @@ async function setupRustListeners() {
             // Increment rendered count since we're adding a new message
             proceduralScrollState.renderedMessageCount++;
             proceduralScrollState.totalMessageCount++;
+        } else if (newMessage.mine) {
+            // Own message synced from another device — mark chat as read
+            // since we clearly saw the conversation before replying
+            let lastContactMsg = null;
+            for (let i = chat.messages.length - 1; i >= 0; i--) {
+                if (!chat.messages[i].mine) {
+                    lastContactMsg = chat.messages[i];
+                    break;
+                }
+            }
+            if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
         // Render the Chat List (only when user is viewing it)
         if (!strOpenChat) renderChatlist();
+
+        // Update the back button notification dot (for unread messages in other chats)
+        updateChatBackNotification();
     });
 
-    // Listen for existing message updates
-    await listen('message_update', (evt) => {
-        // Find the message we're updating - works for both DMs and groups
+    // Listen for existing message updates (works for both DMs and MLS groups)
+    _on('message_update', (evt) => {
+        // Find the message we're updating
         const cChat = getChat(evt.payload.chat_id);
         if (!cChat) return;
+
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
 
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
         
-        // Also update the message cache
+        // Also update the event cache
         // This is important for pending->sent transitions where the ID changes
-        if (messageCache.has(evt.payload.chat_id)) {
-            const cachedMessages = messageCache.getMessages(evt.payload.chat_id);
-            if (cachedMessages) {
-                const cacheIdx = cachedMessages.findIndex(m => m.id === evt.payload.old_id);
+        if (eventCache.has(evt.payload.chat_id)) {
+            const cachedEvents = eventCache.getEvents(evt.payload.chat_id);
+            if (cachedEvents) {
+                const cacheIdx = cachedEvents.findIndex(m => m.id === evt.payload.old_id);
                 if (cacheIdx !== -1) {
-                    cachedMessages[cacheIdx] = evt.payload.message;
+                    cachedEvents[cacheIdx] = evt.payload.message;
                 }
             }
         }
@@ -2264,7 +5606,7 @@ async function setupRustListeners() {
         if (strOpenChat === evt.payload.chat_id) {
             // TODO: is there a slight possibility of a race condition here? i.e: `message_update` calls before `message_new` and thus domMsg isn't found?
             const domMsg = document.getElementById(evt.payload.old_id);
-            
+
             // For DMs, get the profile; for groups, profile will be null
             const profile = getProfile(evt.payload.chat_id);
             domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
@@ -2274,14 +5616,65 @@ async function setupRustListeners() {
                 strLastMsgID = evt.payload.message.id;
                 softChatScroll();
             }
+
+            // Update any reply contexts that quote this edited message
+            const editedMsgId = evt.payload.message.id;
+            const newContent = evt.payload.message.content;
+
+            // Find all messages that reply to this edited message and update their reply preview
+            const replyElements = document.querySelectorAll(`[id="r-${editedMsgId}"]`);
+            for (const replyEl of replyElements) {
+                const replyTextSpan = replyEl.querySelector('.msg-reply-text');
+                if (replyTextSpan && newContent) {
+                    // Truncate using same method as renderMessage
+                    replyTextSpan.textContent = truncateGraphemes(newContent, 50);
+                    twemojify(replyTextSpan);
+                }
+            }
+
+            // Also update the replied_to_content in cached message data
+            for (const msg of cChat.messages) {
+                if (msg.replied_to === editedMsgId) {
+                    msg.replied_to_content = newContent;
+                }
+            }
         }
 
-        // Render the Chat List
-        if (!strOpenChat) renderChatlist();
+        // Update chatlist preview if the edited message is the last message in the chat
+        // This efficiently updates just the preview text instead of re-rendering the entire chatlist
+        const isLastMessage = nMsgIdx === cChat.messages.length - 1;
+        if (isLastMessage) {
+            updateChatlistPreview(evt.payload.chat_id);
+        }
+    });
+
+    // Listen for attachment URL updates (for file uploads and reuse)
+    _on('attachment_update', (evt) => {
+        const { chat_id, message_id, attachment_id, url } = evt.payload;
+        const cChat = getChat(chat_id);
+        if (!cChat) return;
+
+        // Find the message
+        const msg = cChat.messages.find(m => m.id === message_id);
+        if (!msg || !msg.attachments) return;
+
+        // Find and update the attachment
+        const att = msg.attachments.find(a => a.id === attachment_id);
+        if (att) {
+            att.url = url;
+            // Re-render if this chat is open
+            if (strOpenChat === chat_id) {
+                const domMsg = document.getElementById(message_id);
+                if (domMsg) {
+                    const profile = getProfile(chat_id);
+                    domMsg.replaceWith(renderMessage(msg, profile, message_id));
+                }
+            }
+        }
     });
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
-    await listen('whisper_download_progress', async (evt) => {
+    _on('whisper_download_progress', async (evt) => {
         // Update the progression UI
         const spanProgression = document.getElementById('voice-model-download-progression');
         if (spanProgression) spanProgression.textContent = `(${evt.payload.progress}%)`;
@@ -2289,27 +5682,56 @@ async function setupRustListeners() {
 
     // Listen for Windows-specific Overlay Icon update requests
     // Note: this API seems unavailable in Tauri's Rust backend, so we're using the JS API as a workaround
-    await listen('update_overlay_icon', async (evt) => {
+    _on('update_overlay_icon', async (evt) => {
         // Enable or Disable our notification badge Overlay Icon
         await getCurrentWindow().setOverlayIcon(evt.payload.enable ? "./icons/icon_badge_notification.png" : undefined);
     });
 
     // Listen for relay status changes
-    await listen('relay_status_change', (evt) => {
+    _on('relay_status_change', (evt) => {
         // Update the relay status in the network list
         const relayItem = document.querySelector(`[data-relay-url="${evt.payload.url}"]`);
         if (relayItem) {
             const statusElement = relayItem.querySelector('.relay-status');
             if (statusElement) {
                 // Remove all status classes
-                statusElement.classList.remove('connected', 'connecting', 'disconnected', 'pending', 'initialized', 'terminated', 'banned');
+                statusElement.classList.remove('connected', 'connecting', 'disconnected', 'pending', 'initialized', 'terminated', 'banned', 'sleeping');
                 // Add the new status class
                 statusElement.classList.add(evt.payload.status);
                 // Update the text
                 statusElement.textContent = evt.payload.status;
             }
         }
+
+        // Also update the info dialog if it's open for this relay
+        if (currentRelayInfo && currentRelayInfo.url.toLowerCase() === evt.payload.url.toLowerCase()) {
+            const dialogStatus = document.getElementById('relay-info-status');
+            if (dialogStatus) {
+                dialogStatus.textContent = evt.payload.status;
+                dialogStatus.className = `relay-status ${evt.payload.status}`;
+            }
+            currentRelayInfo.status = evt.payload.status;
+        }
     });
+
+    // Listen for Mini App realtime status updates (peer count changes)
+    _on('miniapp_realtime_status', (evt) => {
+        const { topic, peer_count, is_active, has_pending_peers } = evt.payload;
+        console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'pending:', has_pending_peers);
+        
+        // Find all Mini App attachments with this topic and update their status
+        const attachments = document.querySelectorAll(`.miniapp-attachment[data-webxdc-topic="${topic}"]`);
+        console.log('[MINIAPP] Found', attachments.length, 'attachments for topic', topic);
+        
+        attachments.forEach(attachment => {
+            // Use the stored update function if available
+            if (attachment._updateMiniAppStatus) {
+                attachment._updateMiniAppStatus(is_active, peer_count);
+            }
+        });
+    });
+
+    await Promise.all(_p);
 
     // Note: Deep link listener is set up early in DOMContentLoaded, before login flow
     // This ensures deep links work even when the app is opened from a closed state
@@ -2359,20 +5781,20 @@ async function renderRelayList() {
         const relays = await invoke('get_relays');
         const mediaServers = await invoke('get_media_servers');
         const networkList = document.getElementById('network-list');
-        
+
         // Clear existing content
         networkList.innerHTML = '';
-        
-        // Add Nostr Relays subtitle with info button - wrap in container for centering
+
+        // Add Nostr Relays header with info and add buttons
         const relaysTitleContainer = document.createElement('div');
-        relaysTitleContainer.style.textAlign = 'center';
-        
+        relaysTitleContainer.className = 'relay-section-header';
+
         const relaysTitle = document.createElement('h3');
         relaysTitle.className = 'network-section-title';
         relaysTitle.style.display = 'inline-flex';
         relaysTitle.style.alignItems = 'center';
         relaysTitle.textContent = 'Nostr Relays';
-        
+
         const relaysInfoBtn = document.createElement('span');
         relaysInfoBtn.className = 'icon icon-info btn';
         relaysInfoBtn.style.width = '16px';
@@ -2385,27 +5807,105 @@ async function renderRelayList() {
             e.stopPropagation();
             popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true);
         };
-        
+
+        const addRelayBtn = document.createElement('button');
+        addRelayBtn.className = 'relay-add-btn';
+        addRelayBtn.textContent = '+';
+        addRelayBtn.title = 'Add Custom Relay';
+        addRelayBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openAddRelayDialog();
+        };
+
         relaysTitle.appendChild(relaysInfoBtn);
         relaysTitleContainer.appendChild(relaysTitle);
+        relaysTitleContainer.appendChild(addRelayBtn);
         networkList.appendChild(relaysTitleContainer);
-        
+
         // Create relay items
         relays.forEach(relay => {
             const relayItem = document.createElement('div');
-            relayItem.className = 'relay-item';
+            relayItem.className = 'relay-item' + (relay.enabled ? '' : ' disabled');
             relayItem.setAttribute('data-relay-url', relay.url);
-            
+            relayItem.setAttribute('data-relay-is-default', relay.is_default);
+            relayItem.setAttribute('data-relay-is-custom', relay.is_custom);
+
+            // Content container (clickable area)
+            const relayContent = document.createElement('div');
+            relayContent.className = 'relay-item-content';
+            relayContent.onclick = () => openRelayInfoDialog(relay);
+
             const relayUrl = document.createElement('span');
             relayUrl.className = 'relay-url';
-            relayUrl.textContent = relay.url;
-            
+            relayUrl.textContent = relay.url.replace(/^wss?:\/\//, '');
+
+            // Mode badge (only for custom relays or non-default modes)
+            if (relay.is_custom && relay.mode !== 'both') {
+                const modeBadge = document.createElement('span');
+                modeBadge.className = 'relay-mode-badge';
+                modeBadge.textContent = relay.mode === 'read' ? 'R' : 'W';
+                relayContent.appendChild(modeBadge);
+            }
+
+            // Default badge
+            if (relay.is_default) {
+                const defaultBadge = document.createElement('span');
+                defaultBadge.className = 'relay-default-badge';
+                defaultBadge.textContent = 'default';
+                relayContent.appendChild(defaultBadge);
+            }
+
+            relayContent.appendChild(relayUrl);
+
+            // Status badge
             const relayStatus = document.createElement('span');
             relayStatus.className = `relay-status ${relay.status}`;
             relayStatus.textContent = relay.status;
-            
-            relayItem.appendChild(relayUrl);
-            relayItem.appendChild(relayStatus);
+
+            // Actions container
+            const actionsContainer = document.createElement('div');
+            actionsContainer.className = 'relay-item-actions';
+
+            // Toggle switch
+            const toggle = document.createElement('input');
+            toggle.type = 'checkbox';
+            toggle.className = 'relay-toggle';
+            toggle.checked = relay.enabled;
+            toggle.onclick = (e) => e.stopPropagation();
+            toggle.onchange = async (e) => {
+                const enabled = e.target.checked;
+                try {
+                    if (relay.is_default) {
+                        // Show warning for default relays
+                        if (!enabled) {
+                            const confirmed = await popupConfirm(
+                                'Disable Default Relay?',
+                                'This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?',
+                                false
+                            );
+                            if (!confirmed) {
+                                e.target.checked = true;
+                                return;
+                            }
+                        }
+                        await invoke('toggle_default_relay', { url: relay.url, enabled });
+                    } else {
+                        await invoke('toggle_custom_relay', { url: relay.url, enabled });
+                    }
+                    // Refresh the list
+                    renderRelayList();
+                } catch (err) {
+                    console.error('Failed to toggle relay:', err);
+                    e.target.checked = !enabled; // Revert on error
+                }
+            };
+
+            actionsContainer.appendChild(relayStatus);
+            actionsContainer.appendChild(toggle);
+
+            relayItem.appendChild(relayContent);
+            relayItem.appendChild(actionsContainer);
             networkList.appendChild(relayItem);
         });
         
@@ -2460,19 +5960,353 @@ async function renderRelayList() {
     }
 }
 
+// =============================================================================
+// Relay Dialog Management
+// =============================================================================
+
+/** Currently selected relay for info dialog */
+let currentRelayInfo = null;
+/** Interval for refreshing relay info dialog data */
+let relayInfoRefreshInterval = null;
+
+/**
+ * Opens the Add Relay dialog
+ */
+function openAddRelayDialog() {
+    const overlay = document.getElementById('add-relay-overlay');
+    const urlInput = document.getElementById('add-relay-url');
+    const modeSelect = document.getElementById('add-relay-mode');
+
+    // Reset form
+    urlInput.value = '';
+    modeSelect.value = 'both';
+
+    // Show dialog
+    overlay.classList.add('active');
+    urlInput.focus();
+}
+
+/**
+ * Closes the Add Relay dialog
+ */
+function closeAddRelayDialog() {
+    const overlay = document.getElementById('add-relay-overlay');
+    overlay.classList.remove('active');
+}
+
+/**
+ * Handles adding a new relay from the dialog
+ */
+async function handleAddRelay() {
+    const urlInput = document.getElementById('add-relay-url');
+    const modeSelect = document.getElementById('add-relay-mode');
+    let url = urlInput.value.trim();
+    const mode = modeSelect.value;
+
+    if (!url) {
+        popupConfirm('Invalid URL', 'Please enter a relay URL.', true);
+        return;
+    }
+
+    // Normalize URL: strip protocol if present and add wss://
+    url = url.replace(/^wss?:\/\//i, '');
+    url = 'wss://' + url;
+
+    try {
+        await invoke('add_custom_relay', { url, mode });
+        closeAddRelayDialog();
+        renderRelayList();
+    } catch (err) {
+        popupConfirm('Failed to Add Relay', escapeHtml(err.toString()), true);
+    }
+}
+
+/**
+ * Refreshes the data displayed in the Relay Info dialog
+ */
+async function refreshRelayInfoDialog() {
+    if (!currentRelayInfo) return;
+
+    const url = currentRelayInfo.url;
+
+    // Fetch fresh relay data
+    try {
+        const relays = await invoke('get_relays');
+        const freshRelay = relays.find(r => r.url.toLowerCase() === url.toLowerCase());
+        if (freshRelay) {
+            currentRelayInfo = freshRelay;
+
+            // Update status
+            const statusEl = document.getElementById('relay-info-status');
+            statusEl.textContent = freshRelay.status;
+            statusEl.className = `relay-status ${freshRelay.status}`;
+
+            // Update disable button text
+            const disableBtn = document.getElementById('relay-info-disable');
+            if (freshRelay.is_default) {
+                disableBtn.textContent = freshRelay.enabled ? 'Disable Relay' : 'Enable Relay';
+            }
+        }
+    } catch (err) {
+        console.error('Failed to refresh relay data:', err);
+    }
+
+    // Refresh metrics
+    try {
+        const metrics = await invoke('get_relay_metrics', { url });
+        document.getElementById('relay-info-ping').textContent = metrics.ping_ms ? `${metrics.ping_ms}ms` : '--';
+        if (metrics.last_check) {
+            const lastCheck = new Date(metrics.last_check * 1000);
+            const now = new Date();
+            const diffSecs = Math.floor((now - lastCheck) / 1000);
+            let lastCheckText;
+            if (diffSecs < 60) {
+                lastCheckText = `${diffSecs}s ago`;
+            } else if (diffSecs < 3600) {
+                lastCheckText = `${Math.floor(diffSecs / 60)}m ago`;
+            } else {
+                lastCheckText = lastCheck.toLocaleTimeString();
+            }
+            document.getElementById('relay-info-last-check').textContent = lastCheckText;
+        } else {
+            document.getElementById('relay-info-last-check').textContent = '--';
+        }
+    } catch (err) {
+        console.error('Failed to load relay metrics:', err);
+    }
+
+    // Refresh logs
+    try {
+        const logs = await invoke('get_relay_logs', { url });
+        const logsList = document.getElementById('relay-info-logs');
+        logsList.innerHTML = '';
+
+        if (logs.length === 0) {
+            const emptyLi = document.createElement('li');
+            emptyLi.className = 'relay-log-empty';
+            emptyLi.textContent = 'No activity recorded yet';
+            logsList.appendChild(emptyLi);
+        } else {
+            logs.forEach(log => {
+                const li = document.createElement('li');
+                const time = new Date(log.timestamp * 1000).toLocaleTimeString();
+                li.innerHTML = `<span class="relay-log-time">${escapeHtml(time)}</span><span class="relay-log-message ${escapeHtml(log.level)}">${escapeHtml(log.message)}</span>`;
+                logsList.appendChild(li);
+            });
+        }
+    } catch (err) {
+        console.error('Failed to load relay logs:', err);
+    }
+}
+
+/**
+ * Opens the Relay Info dialog
+ * @param {Object} relay - The relay object
+ */
+async function openRelayInfoDialog(relay) {
+    // Clear any existing interval
+    if (relayInfoRefreshInterval) {
+        clearInterval(relayInfoRefreshInterval);
+        relayInfoRefreshInterval = null;
+    }
+
+    currentRelayInfo = relay;
+    const overlay = document.getElementById('relay-info-overlay');
+    const urlEl = document.getElementById('relay-info-url');
+    const modeSelect = document.getElementById('relay-info-mode');
+
+    // Set static info (URL doesn't change)
+    urlEl.textContent = relay.url.replace(/^wss?:\/\//, '');
+
+    // Set mode (only editable for custom relays)
+    modeSelect.value = relay.mode || 'both';
+    modeSelect.disabled = relay.is_default;
+
+    // Initial data load
+    await refreshRelayInfoDialog();
+
+    // Start refresh interval (every 1 second)
+    relayInfoRefreshInterval = setInterval(refreshRelayInfoDialog, 1000);
+
+    // Show dialog
+    overlay.classList.add('active');
+}
+
+/**
+ * Closes the Relay Info dialog
+ */
+function closeRelayInfoDialog() {
+    // Clear the refresh interval
+    if (relayInfoRefreshInterval) {
+        clearInterval(relayInfoRefreshInterval);
+        relayInfoRefreshInterval = null;
+    }
+
+    const overlay = document.getElementById('relay-info-overlay');
+    overlay.classList.remove('active');
+    currentRelayInfo = null;
+}
+
+/**
+ * Handles mode change from the info dialog
+ */
+async function handleRelayModeChange() {
+    if (!currentRelayInfo || currentRelayInfo.is_default) return;
+
+    const modeSelect = document.getElementById('relay-info-mode');
+    const newMode = modeSelect.value;
+
+    try {
+        await invoke('update_relay_mode', { url: currentRelayInfo.url, mode: newMode });
+        currentRelayInfo.mode = newMode;
+        renderRelayList();
+    } catch (err) {
+        console.error('Failed to update relay mode:', err);
+        popupConfirm('Error', 'Failed to update relay mode: ' + err.toString(), true);
+    }
+}
+
+/**
+ * Handles disable/remove button from info dialog
+ */
+async function handleRelayDisable() {
+    if (!currentRelayInfo) return;
+
+    const relay = currentRelayInfo;
+
+    if (relay.is_default) {
+        // Toggle default relay
+        const newEnabled = !relay.enabled;
+        if (!newEnabled) {
+            // Show warning before disabling default relay
+            const confirmed = await popupConfirm(
+                'Disable Default Relay?',
+                'This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?',
+                false
+            );
+            if (confirmed) {
+                try {
+                    await invoke('toggle_default_relay', { url: relay.url, enabled: false });
+                    closeRelayInfoDialog();
+                    renderRelayList();
+                } catch (err) {
+                    popupConfirm('Error', 'Failed to disable relay: ' + err.toString(), true);
+                }
+            }
+        } else {
+            // Re-enable without warning
+            try {
+                await invoke('toggle_default_relay', { url: relay.url, enabled: true });
+                closeRelayInfoDialog();
+                renderRelayList();
+            } catch (err) {
+                popupConfirm('Error', 'Failed to enable relay: ' + err.toString(), true);
+            }
+        }
+    } else {
+        // Remove custom relay
+        const confirmed = await popupConfirm(
+            'Remove Relay?',
+            `Are you sure you want to remove <b>${relay.url.replace(/^wss?:\/\//, '')}</b>?`,
+            false
+        );
+        if (confirmed) {
+            try {
+                await invoke('remove_custom_relay', { url: relay.url });
+                closeRelayInfoDialog();
+                renderRelayList();
+            } catch (err) {
+                popupConfirm('Error', 'Failed to remove relay: ' + err.toString(), true);
+            }
+        }
+    }
+}
+
+/**
+ * Initialize relay dialog event listeners
+ */
+function initRelayDialogs() {
+    // Add Relay Dialog
+    document.getElementById('add-relay-close').onclick = closeAddRelayDialog;
+    document.getElementById('add-relay-cancel').onclick = closeAddRelayDialog;
+    document.getElementById('add-relay-confirm').onclick = handleAddRelay;
+    document.getElementById('add-relay-overlay').onclick = (e) => {
+        if (e.target.id === 'add-relay-overlay') closeAddRelayDialog();
+    };
+
+    // Allow Enter key to submit
+    document.getElementById('add-relay-url').onkeydown = (e) => {
+        if (e.key === 'Enter') handleAddRelay();
+    };
+
+    // Relay Info Dialog
+    document.getElementById('relay-info-close').onclick = closeRelayInfoDialog;
+    document.getElementById('relay-info-done').onclick = closeRelayInfoDialog;
+    document.getElementById('relay-info-disable').onclick = handleRelayDisable;
+    document.getElementById('relay-info-mode').onchange = handleRelayModeChange;
+    document.getElementById('relay-info-overlay').onclick = (e) => {
+        if (e.target.id === 'relay-info-overlay') closeRelayInfoDialog();
+    };
+
+    // Copy logs button
+    document.getElementById('relay-logs-copy').onclick = copyRelayLogs;
+}
+
+/**
+ * Copies relay logs to clipboard in a formatted way
+ */
+function copyRelayLogs() {
+    if (!currentRelayInfo) return;
+
+    // Read logs from the displayed DOM to avoid async clipboard permission issues
+    const logsList = document.getElementById('relay-info-logs');
+    const logItems = logsList.querySelectorAll('li:not(.relay-log-empty)');
+
+    let text;
+    if (logItems.length === 0) {
+        text = 'No activity recorded yet';
+    } else {
+        const header = `Relay Logs: ${currentRelayInfo.url.replace(/^wss?:\/\//, '')}\n${'='.repeat(50)}\n`;
+        const logs = Array.from(logItems).map(li => {
+            const time = li.querySelector('.relay-log-time')?.textContent || '';
+            const msg = li.querySelector('.relay-log-message')?.textContent || '';
+            const level = li.querySelector('.relay-log-message')?.classList.contains('error') ? 'ERROR' :
+                          li.querySelector('.relay-log-message')?.classList.contains('warn') ? 'WARN' : 'INFO';
+            return `[${time}] [${level}] ${msg}`;
+        }).join('\n');
+        text = header + logs;
+    }
+
+    navigator.clipboard.writeText(text).then(() => {
+        // Visual feedback - change icon briefly
+        const copyBtn = document.getElementById('relay-logs-copy');
+        const icon = copyBtn.querySelector('.icon');
+        icon.classList.remove('icon-copy');
+        icon.classList.add('icon-check');
+        setTimeout(() => {
+            icon.classList.remove('icon-check');
+            icon.classList.add('icon-copy');
+        }, 1500);
+    }).catch(err => {
+        console.error('Failed to copy relay logs:', err);
+    });
+}
+
+// =============================================================================
+
 /**
  * Login to the Nostr network
+ * @param {boolean} skipAnimations - Skip intro animations (for instant login without PIN)
  */
-async function login() {
+async function login(skipAnimations = false) {
     if (strPubkey) {
-        // Connect to Nostr
-        await invoke("connect");
-
-        // Setup our Rust Event listeners for efficient back<-->front sync
-        await setupRustListeners();
+        // Fire connect + all listener registrations in parallel (no sequential IPC waits)
+        console.time('[Boot] connect + listeners');
+        const _connectP = invoke("connect");
+        const _listenersP = setupRustListeners();
 
         // Setup unified progress operation event listener
-        await listen('progress_operation', (evt) => {
+        const _progressP = listen('progress_operation', (evt) => {
             const { type, current, total, message } = evt.payload;
             
             switch (type) {
@@ -2506,105 +6340,169 @@ async function login() {
 
 
         // Setup a Rust Listener for the backend's init finish
-        await listen('init_finished', async (evt) => {
+        const _initFinishedP = listen('init_finished', async (evt) => {
+            console.timeEnd('[Boot] login() total');
+            console.time('[Boot] init_finished handler');
             // The backend now sends both profiles (without messages) and chats (with messages)
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
 
-            await hydrateMLSGroupMetadata();
+            // Fire metadata hydration in background — completes after first render,
+            // then re-renders chatlist if any group metadata changed
+            console.time('[Boot] hydrateMLSGroupMetadata (bg)');
+            hydrateMLSGroupMetadata().then(() => console.timeEnd('[Boot] hydrateMLSGroupMetadata (bg)'));
 
-            // Load the file hash index for attachment deduplication
-            // This is done asynchronously and doesn't block the UI
-            messageCache.loadFileHashIndex().catch(() => {});
-
-            // Fadeout the login and encryption UI
-            domLogin.classList.add('fadeout-anim');
-            domLogin.addEventListener('animationend', async () => {
-                domLogin.classList.remove('fadeout-anim');
+            // Helper to show the main UI after login
+            const showMainUI = async () => {
+                console.time('[Boot] showMainUI:dom');
                 domLoginInput.value = "";
                 domLogin.style.display = 'none';
                 domLoginEncrypt.style.display = 'none';
 
-                // Fade-in the navbar
+                // Show navbar and bookmarks
                 domNavbar.style.display = '';
-                domNavbar.classList.add('fadein-anim');
-                domNavbar.addEventListener('animationend', () => {
-                    domNavbar.classList.remove('fadein-anim');
+                domChatBookmarksBtn.style.display = 'flex';
 
-                    // Fade-in the bookmarks icon
-                    domChatBookmarksBtn.style.display = 'flex';
-                    domChatBookmarksBtn.classList.add('fadein-anim');
-                    domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
-                }, { once: true });
-
-                // Render our profile with an intro animation
+                // Render our profile
                 const cProfile = arrProfiles.find(p => p.mine);
                 renderCurrentProfile(cProfile);
-                domAccount.style.display = ``;
-                domAccount.classList.add('fadein-anim');
-                domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+                domAccount.style.display = '';
+                console.timeEnd('[Boot] showMainUI:dom');
+
+                // Refresh our own profile from the network
+                if (cProfile?.id) {
+                    invoke("queue_profile_sync", {
+                        npub: cProfile.id,
+                        priority: "critical",
+                        forceRefresh: true
+                    });
+                }
 
                 // Finished boot!
                 fInit = false;
 
-                // Render the chatlist with an intro animation
-                domChatList.classList.add('intro-anim');
+                // Render the chatlist
+                console.time('[Boot] showMainUI:renderChatlist');
                 renderChatlist();
-                domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+                console.timeEnd('[Boot] showMainUI:renderChatlist');
 
-                // Show and animate the New Chat buttons
+                // Show the New Chat buttons
                 if (domChatNewDM) {
                     domChatNewDM.style.display = '';
-                    domChatNewDM.classList.add('intro-anim');
                     domChatNewDM.onclick = openNewChat;
-                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
                 }
                 if (domChatNewGroup) {
                     domChatNewGroup.style.display = '';
-                    domChatNewGroup.classList.add('intro-anim');
                     domChatNewGroup.onclick = openCreateGroup;
-                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
                 }
 
-                // Adjust the Chat List sizes to prevent mismatches
-                adjustSize();
+                // Adjust the Chat List sizes (deferred — layout reflows don't block first paint)
+                requestAnimationFrame(() => adjustSize());
+            };
 
-                // Setup a subscription for new websocket messages
-                invoke("notifs");
+            if (skipAnimations) {
+                console.time('[Boot] showMainUI');
+                await showMainUI();
+                console.timeEnd('[Boot] showMainUI');
+                console.timeEnd('[Boot] init_finished handler');
+                console.log('[Boot] UI visible - instant login complete');
 
-                // Setup our Unread Counters
-                await invoke("update_unread_counter");
+                // Apply the same intro animations as the encryption flow
+                domChatBookmarksBtn.style.opacity = '0';
+                domNavbar.classList.add('fadein-anim');
+                domNavbar.addEventListener('animationend', () => {
+                    domNavbar.classList.remove('fadein-anim');
+                    domChatBookmarksBtn.style.opacity = '';
+                    domChatBookmarksBtn.classList.add('fadein-anim');
+                    domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
+                }, { once: true });
 
-                // Monitor relay connections
-                invoke("monitor_relay_connections");
+                domAccount.classList.add('fadein-anim');
+                domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
 
-                // Render the initial relay list
-                renderRelayList();
-                
-                // Initialize the updater
-                initializeUpdater();
-                
-                // Execute any pending deep link action that was received before login
-                // The Rust backend stores deep links received before the frontend was ready
-                setTimeout(async () => {
-                    try {
-                        const pendingAction = await invoke('get_pending_deep_link');
-                        if (pendingAction) {
-                            console.log('Executing pending deep link action:', pendingAction);
-                            await executeDeepLinkAction(pendingAction);
-                        }
-                    } catch (e) {
-                        console.error('Failed to check for pending deep link:', e);
+                domChatList.classList.add('intro-anim');
+                domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+
+                if (domChatNewDM) {
+                    domChatNewDM.classList.add('intro-anim');
+                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
+                }
+                if (domChatNewGroup) {
+                    domChatNewGroup.classList.add('intro-anim');
+                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
+                }
+            } else {
+                // Fadeout the login and encryption UI with animation
+                domLogin.classList.add('fadeout-anim');
+                domLogin.addEventListener('animationend', async () => {
+                    domLogin.classList.remove('fadeout-anim');
+                    await showMainUI();
+
+                    // Add fade-in animations
+                    domChatBookmarksBtn.style.opacity = '0';
+                    domNavbar.classList.add('fadein-anim');
+                    domNavbar.addEventListener('animationend', () => {
+                        domNavbar.classList.remove('fadein-anim');
+                        domChatBookmarksBtn.style.opacity = '';
+                        domChatBookmarksBtn.classList.add('fadein-anim');
+                        domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
+                    }, { once: true });
+
+                    domAccount.classList.add('fadein-anim');
+                    domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+
+                    domChatList.classList.add('intro-anim');
+                    domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
+
+                    if (domChatNewDM) {
+                        domChatNewDM.classList.add('intro-anim');
+                        domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
                     }
-                }, 1000);
-            }, { once: true });
+                    if (domChatNewGroup) {
+                        domChatNewGroup.classList.add('intro-anim');
+                        domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
+                    }
+                }, { once: true });
+            }
+
+            // Setup a subscription for new websocket messages (runs in both animation modes)
+            invoke("notifs");
+
+            // Setup our Unread Counters
+            await invoke("update_unread_counter");
+
+            // Monitor relay connections
+            invoke("monitor_relay_connections");
+
+            // Render the initial relay list
+            renderRelayList();
+
+            // Initialize the updater
+            initializeUpdater();
+
+            // Execute any pending deep link action that was received before login
+            setTimeout(async () => {
+                try {
+                    const pendingAction = await invoke('get_pending_deep_link');
+                    if (pendingAction) {
+                        console.log('Executing pending deep link action:', pendingAction);
+                        await executeDeepLinkAction(pendingAction);
+                    }
+                } catch (e) {
+                    console.error('Failed to check for pending deep link:', e);
+                }
+            }, 1000);
         });
+
+        // Wait for connect + all listener registrations to complete
+        await Promise.all([_connectP, _listenersP, _progressP, _initFinishedP]);
+        console.timeEnd('[Boot] connect + listeners');
 
         // Load and Decrypt our database; fetching the full chat state from disk for immediate bootup
         domLoginEncryptTitle.textContent = `Decrypting Database...`;
 
         // Note: this also begins the Rust backend's iterative sync, thus, init should ONLY be called once, to initiate it
-        init();
+        init(true);
     }
 }
 
@@ -2617,14 +6515,8 @@ function renderCurrentProfile(cProfile) {
 
     // Clear and render avatar
     domAccountAvatarContainer.innerHTML = '';
-    let domAvatar;
-    if (cProfile?.avatar) {
-        domAvatar = document.createElement('img');
-        domAvatar.src = cProfile.avatar;
-    } else {
-        // Display our placeholder avatar
-        domAvatar = createPlaceholderAvatar(false, 22);
-    }
+    const accountAvatarSrc = getProfileAvatarSrc(cProfile);
+    const domAvatar = createAvatarImg(accountAvatarSrc, 22, false);
     domAvatar.classList.add('btn');
     domAvatar.onclick = () => openProfile();
     domAccountAvatarContainer.appendChild(domAvatar);
@@ -2639,9 +6531,6 @@ function renderCurrentProfile(cProfile) {
     domAccountStatus.onclick = askForStatus;
     twemojify(domAccountStatus);
 
-    /* Start Chat Tab */
-    // Render our Share npub
-    domShareNpub.textContent = strPubkey;
 }
 
 /**
@@ -2651,13 +6540,8 @@ function renderCurrentProfile(cProfile) {
 function renderProfileTab(cProfile) {
     // Header Mini Avatar
     domProfileHeaderAvatarContainer.innerHTML = '';
-    let domHeaderAvatar;
-    if (cProfile?.avatar) {
-        domHeaderAvatar = document.createElement('img');
-        domHeaderAvatar.src = cProfile.avatar;
-    } else {
-        domHeaderAvatar = createPlaceholderAvatar(false, 22);
-    }
+    const headerAvatarSrc = getProfileAvatarSrc(cProfile);
+    const domHeaderAvatar = createAvatarImg(headerAvatarSrc, 22, false);
     domHeaderAvatar.classList.add('btn');
     domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
 
@@ -2675,13 +6559,26 @@ function renderProfileTab(cProfile) {
     domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
 
     // Banner - keep original structure but add click handler
-    if (cProfile.banner) {
+    const bannerSrc = getProfileBannerSrc(cProfile);
+    if (bannerSrc) {
         if (domProfileBanner.tagName === 'DIV') {
             const newBanner = document.createElement('img');
             domProfileBanner.replaceWith(newBanner);
             domProfileBanner = newBanner;
         }
-        domProfileBanner.src = cProfile.banner;
+        domProfileBanner.src = bannerSrc;
+        // On error, replace with solid color placeholder
+        domProfileBanner.onerror = function() {
+            const placeholder = document.createElement('div');
+            placeholder.style.backgroundColor = 'rgb(27, 27, 27)';
+            placeholder.classList.add('profile-banner');
+            if (cProfile.mine) {
+                placeholder.classList.add('btn');
+                placeholder.onclick = askForBanner;
+            }
+            domProfileBanner.replaceWith(placeholder);
+            domProfileBanner = placeholder;
+        };
     } else {
         if (domProfileBanner.tagName === 'IMG') {
             const newBanner = document.createElement('div');
@@ -2695,13 +6592,25 @@ function renderProfileTab(cProfile) {
     if (cProfile.mine) domProfileBanner.classList.add('btn');
 
     // Avatar - keep original structure but add click handler
-    if (cProfile.avatar) {
+    const profileAvatarSrc = getProfileAvatarSrc(cProfile);
+    if (profileAvatarSrc) {
         if (domProfileAvatar.tagName === 'DIV') {
             const newAvatar = document.createElement('img');
             domProfileAvatar.replaceWith(newAvatar);
             domProfileAvatar = newAvatar;
         }
-        domProfileAvatar.src = cProfile.avatar;
+        domProfileAvatar.src = profileAvatarSrc;
+        // On error, replace with placeholder
+        domProfileAvatar.onerror = function() {
+            const placeholder = createPlaceholderAvatar(false, 175);
+            placeholder.classList.add('profile-avatar');
+            if (cProfile.mine) {
+                placeholder.classList.add('btn');
+                placeholder.onclick = askForAvatar;
+            }
+            domProfileAvatar.replaceWith(placeholder);
+            domProfileAvatar = placeholder;
+        };
     } else {
         const newAvatar = createPlaceholderAvatar(false, 175);
         domProfileAvatar.replaceWith(newAvatar);
@@ -2756,13 +6665,15 @@ function renderProfileTab(cProfile) {
     domProfileId.textContent = cProfile.id;
 
     // Add npub copy functionality
-    document.getElementById('profile-npub-copy')?.addEventListener('click', (e) => {
+    document.getElementById('profile-npub-copy').onclick = (e) => {
         const npub = document.getElementById('profile-npub')?.textContent;
         if (npub) {
             // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
+            navigator.clipboard.writeText(npub).then(() => {
+                showToast('Copied!');
+            }).catch(() => {
+                showToast('Failed to copy');
+                const copyBtn = e.target.closest('#profile-npub-copy');
                 if (copyBtn) {
                     copyBtn.innerHTML = '<span class="icon icon-check"></span>';
                     setTimeout(() => {
@@ -2771,7 +6682,7 @@ function renderProfileTab(cProfile) {
                 }
             });
         }
-    });
+    };
 
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
@@ -2829,6 +6740,23 @@ function renderProfileTab(cProfile) {
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         }
 
+        // Setup Share option
+        domProfileOptionShare.onclick = () => {
+            const npub = document.getElementById('profile-npub')?.textContent;
+            if (npub) {
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                navigator.clipboard.writeText(profileUrl).then(() => {
+                    // Brief visual feedback
+                    const icon = domProfileOptionShare.querySelector('span');
+                    showToast('Profile Link Copied');
+                    icon.classList.replace('icon-share', 'icon-check');
+                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+                    }).catch(() => {
+                    showToast('Failed to copy profile link');
+                });
+            }
+        };
+
         // Hide edit buttons
         document.querySelector('.profile-avatar-edit').style.display = 'none';
         document.querySelector('.profile-banner-edit').style.display = 'none';
@@ -2879,9 +6807,8 @@ function renderProfileTab(cProfile) {
 
 /**
  * Display the Invite code input flow.
- * @param {string} pkey - A private key to encrypt.
  */
-function openInviteFlow(pkey) {
+function openInviteFlow() {
     domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
     domLoginInvite.style.display = '';
@@ -2902,7 +6829,7 @@ function openInviteFlow(pkey) {
             
             // Hide invite screen and show welcome screen
             domLoginInvite.style.display = 'none';
-            showWelcomeScreen(pkey);
+            showWelcomeScreen();
         } catch (e) {
             // Display the specific error from the backend
             const errorMessage = e.toString() || 'Please check your invite code and try again.';
@@ -2929,210 +6856,342 @@ function openInviteFlow(pkey) {
 
 /**
  * Display the welcome screen after successful invite code acceptance
- * @param {string} pkey - A private key to encrypt after the welcome screen
  */
-function showWelcomeScreen(pkey) {
+function showWelcomeScreen() {
     // Hide the logo and subtext
     const domLogo = document.querySelector('.login-logo');
     const domSubtext = document.querySelector('.login-subtext');
     domLogo.style.display = 'none';
     domSubtext.style.display = 'none';
-    
+
     // Show the welcome screen
     domLoginWelcome.style.display = '';
-    
+
     // After 5 seconds, transition to the encryption flow
     setTimeout(() => {
         domLoginWelcome.style.display = 'none';
         // Restore the logo and subtext
         domLogo.style.display = '';
         domSubtext.style.display = '';
-        openEncryptionFlow(pkey, false);
+        openEncryptionFlow(false);
     }, 5000);
 }
 
 /**
  * Display the Encryption/Decryption flow.
- * @param {string} pkey - A private key to encrypt.
- * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting the given one.
+ * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting a new one.
+ * @param {string} securityType - "pin" or "password" (determines which UI to show)
  */
-function openEncryptionFlow(pkey, fUnlock = false) {
+function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     domLoginStart.style.display = 'none';
     domLoginImport.style.display = 'none';
     domLoginInvite.style.display = 'none';
     domLoginEncrypt.style.display = '';
 
-    let strPinLast = []; // Stores the first entered PIN for confirmation
-    let strPinCurrent = Array(6).fill('-'); // Current PIN being entered, '-' represents an empty digit
+    // Hide all input variants initially
+    domLoginEncryptPinRow.style.display = 'none';
+    domLoginEncryptPassword.style.display = 'none';
+    domLoginEncryptTypeSelect.style.display = 'none';
 
-    // Reusable Message Constants
-    const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
-    const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
-    const RE_ENTER_PROMPT = `Re-enter your Pin`;
-    const DECRYPTING_MSG = `Decrypting your keys...`;
-    const ENCRYPTING_MSG = `Encrypting your keys...`;
-    const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
-    const MISMATCH_PIN_MSG = `Pin doesn't match, re-try`;
+    // Track chosen security type
+    let chosenSecurityType = securityType;
 
-    const arrPinDOMs = document.querySelectorAll('.pin-row input');
-    const pinContainer = arrPinDOMs[0].closest('.pin-row');
+    // AbortControllers for listener cleanup (avoids cloning DOM — mobile WebViews
+    // don't reliably handle cloned inputs)
+    let pinAbortController = null;
+    let passwordAbortController = null;
 
-    /** Updates the status message displayed to the user. */
-    function updateStatusMessage(message, isProcessing = false) {
-        domLoginEncryptTitle.textContent = message;
-        if (isProcessing) {
+    // If unlocking, go straight to the appropriate input
+    if (fUnlock) {
+        startCredentialEntry(chosenSecurityType);
+    } else {
+        // New account setup — show security type selection first
+        showSecurityTypeSelector();
+    }
+
+    /** Show the security type selection phase */
+    function showSecurityTypeSelector() {
+        // Hide lock icon header — the type selector uses the login logo above instead
+        document.querySelector('.login-encrypt-header').style.display = 'none';
+        domLoginEncryptPinRow.style.display = 'none';
+        domLoginEncryptPassword.style.display = 'none';
+        domLoginEncryptTypeSelect.style.display = '';
+
+        const btnPin = document.getElementById('security-type-pin');
+        const btnPassword = document.getElementById('security-type-password');
+        const btnSkip = document.getElementById('security-type-skip');
+
+        btnPin.onclick = () => {
+            chosenSecurityType = 'pin';
+            domLoginEncryptTypeSelect.style.display = 'none';
+            startCredentialEntry('pin');
+        };
+
+        btnPassword.onclick = () => {
+            chosenSecurityType = 'password';
+            domLoginEncryptTypeSelect.style.display = 'none';
+            startCredentialEntry('password');
+        };
+
+        btnSkip.onclick = async () => {
+            // Skip encryption — backend stores the key in plaintext (key never crosses IPC)
+            domLoginEncryptTypeSelect.style.display = 'none';
+            document.querySelector('.login-encrypt-header').style.display = '';
+            document.querySelector('.login-lock-icon').style.display = 'none';
+            domLoginEncryptTitle.textContent = 'Setting up your account...';
             domLoginEncryptTitle.classList.add('startup-subtext-gradient');
-            domLoginEncryptPinRow.style.display = 'none'; // Hide PIN inputs during processing
+            await invoke('skip_encryption');
+            login();
+        };
+    }
+
+    /** Start the credential entry phase for the chosen type */
+    function startCredentialEntry(type) {
+        // Re-show lock icon header (hidden during type selector phase)
+        document.querySelector('.login-encrypt-header').style.display = '';
+        if (type === 'password') {
+            startPasswordFlow();
         } else {
-            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
-            domLoginEncryptPinRow.style.display = ''; // Ensure PIN inputs are visible
+            startPinFlow();
         }
     }
 
-    /** Resets the PIN input fields and optionally reverts the title from an error state. */
-    function resetPinDisplay(focusFirst = true, revertTitleFromErrorState = true) {
-        strPinCurrent = Array(6).fill('-');
-        arrPinDOMs.forEach(input => input.value = '');
+    // ========================================================================
+    // PIN Flow (existing 6-digit input logic)
+    // ========================================================================
+    function startPinFlow() {
+        // Abort previous listeners if startPinFlow is called again
+        if (pinAbortController) pinAbortController.abort();
+        pinAbortController = new AbortController();
+        const signal = pinAbortController.signal;
 
-        if (revertTitleFromErrorState) {
-            const currentTitle = domLoginEncryptTitle.textContent;
-            // If an error message is shown, change it back to the appropriate prompt
-            if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
-                const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-                updateStatusMessage(newTitle);
+        let strPinLast = [];
+        let strPinCurrent = Array(6).fill('-');
+
+        const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
+        const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
+        const RE_ENTER_PROMPT = `Re-enter your Pin`;
+        const DECRYPTING_MSG = `Decrypting your keys...`;
+        const ENCRYPTING_MSG = `Encrypting your keys...`;
+        const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
+        const MISMATCH_PIN_MSG = `Pin doesn't match, re-try`;
+
+        // Always query fresh from the live DOM
+        const pinRow = document.getElementById('login-encrypt-pins');
+        const arrPinDOMs = pinRow.querySelectorAll('input');
+
+        function updateStatusMessage(message, isProcessing = false) {
+            domLoginEncryptTitle.textContent = message;
+            if (isProcessing) {
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                pinRow.style.display = 'none';
+            } else {
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                pinRow.style.display = '';
+            }
+            domLoginEncryptPassword.style.display = 'none';
+        }
+
+        function resetPinDisplay(focusFirst = true, revertTitleFromErrorState = true) {
+            strPinCurrent = Array(6).fill('-');
+            arrPinDOMs.forEach(input => input.value = '');
+            if (revertTitleFromErrorState) {
+                const currentTitle = domLoginEncryptTitle.textContent;
+                if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
+                    const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+                    updateStatusMessage(newTitle);
+                }
+            }
+            if (focusFirst && arrPinDOMs.length > 0) {
+                arrPinDOMs[0].focus();
             }
         }
-        if (focusFirst && arrPinDOMs.length > 0) {
-            arrPinDOMs[0].focus();
+
+        let pinProcessing = false;
+
+        async function handleFullPinEntered() {
+            if (pinProcessing) return;
+            pinProcessing = true;
+            const currentPinString = strPinCurrent.join('');
+
+            if (strPinLast.length === 0) {
+                if (fUnlock) {
+                    updateStatusMessage(DECRYPTING_MSG, true);
+                    try {
+                        // Decrypt and login entirely in backend (key never crosses IPC)
+                        const npub = await invoke("login_from_stored_key", { password: currentPinString });
+                        strPubkey = npub;
+                        login();
+                    } catch (e) {
+                        updateStatusMessage(INCORRECT_PIN_MSG);
+                        resetPinDisplay(true, false);
+                        pinProcessing = false;
+                    }
+                } else {
+                    strPinLast = [...strPinCurrent];
+                    updateStatusMessage(RE_ENTER_PROMPT);
+                    resetPinDisplay(true, false);
+                    pinProcessing = false;
+                }
+            } else {
+                const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
+                if (isMatching) {
+                    updateStatusMessage(ENCRYPTING_MSG, true);
+                    // Encrypt and store key entirely in backend (key never crosses IPC)
+                    await invoke('setup_encryption', { password: strPinLast.join(''), securityType: chosenSecurityType });
+                    login();
+                } else {
+                    updateStatusMessage(MISMATCH_PIN_MSG);
+                    strPinLast = [];
+                    resetPinDisplay(true, true);
+                    pinProcessing = false;
+                }
+            }
         }
+
+        // Attach listeners directly to each original input with AbortController signal
+        arrPinDOMs.forEach((input, nIndex) => {
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Backspace') {
+                    event.preventDefault();
+                    const currentTitle = domLoginEncryptTitle.textContent;
+                    if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
+                        const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+                        updateStatusMessage(newTitle);
+                    }
+                    input.value = '';
+                    strPinCurrent[nIndex] = '-';
+                    if (nIndex > 0) arrPinDOMs[nIndex - 1].focus();
+                } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
+                    event.preventDefault();
+                }
+            }, { signal });
+
+            input.addEventListener('input', async () => {
+                let sanitizedValue = input.value.replace(/[^0-9]/g, '');
+                if (sanitizedValue.length > 1) sanitizedValue = sanitizedValue.charAt(0);
+                input.value = sanitizedValue;
+
+                if (sanitizedValue) {
+                    strPinCurrent[nIndex] = sanitizedValue;
+                    if (nIndex + 1 < arrPinDOMs.length) arrPinDOMs[nIndex + 1].focus();
+                } else {
+                    strPinCurrent[nIndex] = '-';
+                }
+
+                if (!strPinCurrent.includes('-')) {
+                    await handleFullPinEntered();
+                }
+            }, { signal });
+
+            input.value = '';
+        });
+
+        updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
+        if (arrPinDOMs.length > 0) arrPinDOMs[0].focus();
     }
 
-    /** Focuses the PIN input at the specified index. */
-    function focusPinInput(index) {
-        if (index >= 0 && index < arrPinDOMs.length) {
-            arrPinDOMs[index].focus();
-        } else if (index >= arrPinDOMs.length && arrPinDOMs.length > 0) { // Wrap to first on last input
-            arrPinDOMs[0].focus(); // Reached end, focus first (or handle submission if all filled)
+    // ========================================================================
+    // Password Flow (text input)
+    // ========================================================================
+    function startPasswordFlow() {
+        let lastPassword = '';
+        let passwordProcessing = false;
+
+        const DECRYPTION_PROMPT = `Enter your Password`;
+        const INITIAL_ENCRYPTION_PROMPT = `Choose a Password`;
+        const RE_ENTER_PROMPT = `Re-enter your Password`;
+        const DECRYPTING_MSG = `Decrypting your keys...`;
+        const ENCRYPTING_MSG = `Encrypting your keys...`;
+        const INCORRECT_MSG = `Incorrect password, try again`;
+        const MISMATCH_MSG = `Passwords don't match, re-try`;
+        const TOO_SHORT_MSG = `Password must be at least 4 characters`;
+
+        function updateStatusMessage(message, isProcessing = false) {
+            domLoginEncryptTitle.textContent = message;
+            if (isProcessing) {
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                domLoginEncryptPassword.style.display = 'none';
+            } else {
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                domLoginEncryptPassword.style.display = '';
+            }
+            domLoginEncryptPinRow.style.display = 'none';
         }
-        // If index < 0 (e.g., backspace from the first input), focus remains on the current (first) input.
-    }
 
-    /** Flag to prevent multiple PIN submissions */
-    let pinProcessing = false;
+        updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
 
-    /** Handles the logic once all PIN digits have been entered. */
-    async function handleFullPinEntered() {
-        // Prevent multiple submissions
-        if (pinProcessing) {
-            return;
-        }
-        pinProcessing = true;
-        
-        const currentPinString = strPinCurrent.join('');
+        // Abort previous password listeners if startPasswordFlow is called again
+        if (passwordAbortController) passwordAbortController.abort();
+        passwordAbortController = new AbortController();
+        const signal = passwordAbortController.signal;
 
-        if (strPinLast.length === 0) { // Initial PIN entry (for decryption or first step of new encryption)
+        const newInput = document.getElementById('login-password-input');
+        newInput.value = '';
+        newInput.focus();
+
+        // Login button
+        const loginBtn = document.getElementById('login-password-btn');
+
+        async function handlePasswordSubmit() {
+            if (passwordProcessing) return;
+
+            const password = newInput.value;
+
             if (fUnlock) {
+                // Unlock flow — single password entry
+                if (!password) return;
+                passwordProcessing = true;
                 updateStatusMessage(DECRYPTING_MSG, true);
                 try {
-                    const decryptedPkey = await loadAndDecryptPrivateKey(currentPinString);
-                    const { public: pubKey /*, _private: privKey */ } = await invoke("login", { importKey: decryptedPkey });
-                    strPubkey = pubKey; // Store public key
-                    login(); // Proceed to login
+                    // Decrypt and login entirely in backend (key never crosses IPC)
+                    const npub = await invoke("login_from_stored_key", { password });
+                    strPubkey = npub;
+                    login();
                 } catch (e) {
-                    updateStatusMessage(INCORRECT_PIN_MSG);
-                    resetPinDisplay(true, false); // Keep error message, reset input fields
-                    pinProcessing = false; // Reset flag on error to allow retry
+                    updateStatusMessage(INCORRECT_MSG);
+                    newInput.value = '';
+                    newInput.focus();
+                    passwordProcessing = false;
                 }
-            } else { // First PIN entry for new encryption
-                strPinLast = [...strPinCurrent]; // Store the entered PIN
+            } else if (!lastPassword) {
+                // First entry — set password
+                if (password.length < 4) {
+                    updateStatusMessage(TOO_SHORT_MSG);
+                    return;
+                }
+                lastPassword = password;
                 updateStatusMessage(RE_ENTER_PROMPT);
-                resetPinDisplay(true, false); // Keep "Re-enter" message, reset input fields
-                pinProcessing = false; // Reset flag to allow second PIN entry
-            }
-        } else { // Second PIN entry (confirmation for new encryption)
-            const isMatching = strPinLast.every((char, idx) => char === strPinCurrent[idx]);
-            if (isMatching) {
-                updateStatusMessage(ENCRYPTING_MSG, true);
-                await saveAndEncryptPrivateKey(pkey, strPinLast.join(''));
-                login(); // Proceed to login
+                newInput.value = '';
+                newInput.focus();
             } else {
-                updateStatusMessage(MISMATCH_PIN_MSG);
-                strPinLast = []; // Clear the stored first PIN, requiring user to start over
-                resetPinDisplay(true, true); // Reset inputs and revert title from error to the initial prompt
-                pinProcessing = false; // Reset flag on mismatch to allow retry
+                // Confirmation entry
+                if (password === lastPassword) {
+                    passwordProcessing = true;
+                    updateStatusMessage(ENCRYPTING_MSG, true);
+                    // Encrypt and store key entirely in backend (key never crosses IPC)
+                    await invoke('setup_encryption', { password: lastPassword, securityType: chosenSecurityType });
+                    login();
+                } else {
+                    updateStatusMessage(MISMATCH_MSG);
+                    lastPassword = '';
+                    newInput.value = '';
+                    newInput.focus();
+                }
             }
         }
-    }
 
-    // --- Event Handlers (Delegated to pinContainer) ---
-
-    /** Handles keydown events, primarily for Backspace and preventing non-numeric input. */
-    function handleKeyDown(event) {
-        const targetInput = event.target;
-        // Ensure the event target is one of our designated PIN input fields
-        if (!Array.from(arrPinDOMs).includes(targetInput)) {
-            return;
-        }
-
-        const nIndex = Array.from(arrPinDOMs).indexOf(targetInput);
-
-        if (event.key === 'Backspace') {
-            event.preventDefault(); // Prevent default browser backspace behavior (e.g., navigation)
-
-            // If an error message is currently displayed, revert it to the relevant prompt for clarity
-            const currentTitle = domLoginEncryptTitle.textContent;
-            if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
-                const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-                updateStatusMessage(newTitle);
+        newInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                handlePasswordSubmit();
             }
+        }, { signal });
 
-            targetInput.value = ''; // Clear the input field's value
-            strPinCurrent[nIndex] = '-'; // Update the current PIN state
-            if (nIndex > 0) {
-                focusPinInput(nIndex - 1); // Move focus to the previous input field
-            }
-        } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
-            // Prevent single character non-numeric keys (allows Tab, Shift, Ctrl, Meta, etc.)
-            event.preventDefault();
-        }
+        if (loginBtn) loginBtn.addEventListener('click', handlePasswordSubmit, { signal });
+
+        newInput.focus();
     }
-
-    /** Handles input events for digit entry, sanitization, and moving focus forward. */
-    async function handleInput(event) {
-        const targetInput = event.target;
-        if (!Array.from(arrPinDOMs).includes(targetInput)) {
-            return;
-        }
-
-        const nIndex = Array.from(arrPinDOMs).indexOf(targetInput);
-        let sanitizedValue = targetInput.value.replace(/[^0-9]/g, ''); // Keep only digits
-
-        if (sanitizedValue.length > 1) { // If multiple digits were pasted, use only the first
-            sanitizedValue = sanitizedValue.charAt(0);
-        }
-        targetInput.value = sanitizedValue; // Update the input field with the sanitized value
-
-        if (sanitizedValue) { // If there's a digit
-            strPinCurrent[nIndex] = sanitizedValue;
-            focusPinInput(nIndex + 1); // Move focus to the next input field or wrap around
-        } else {
-            // If input became empty (e.g., via 'Delete' key or invalid paste), update state
-            strPinCurrent[nIndex] = '-';
-        }
-
-        // Check if all PIN digits have been entered
-        if (!strPinCurrent.includes('-')) {
-            await handleFullPinEntered();
-        }
-    }
-
-    // --- Initial Setup ---
-    updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-    resetPinDisplay(true, false); // Ensure inputs are clear, set focus, keep initial message
-
-    // Attach the event listeners to the common parent container
-    pinContainer.addEventListener('keydown', handleKeyDown);
-    pinContainer.addEventListener('input', handleInput);
 }
 
 
@@ -3146,6 +7205,16 @@ let strLastMsgID = "";
  * The current Message ID being replied to
  */
 let strCurrentReplyReference = "";
+
+/**
+ * The current Message ID being edited (if in edit mode)
+ */
+let strCurrentEditMessageId = "";
+
+/**
+ * The original content of the message being edited (for cancel restoration)
+ */
+let strCurrentEditOriginalContent = "";
 
 /**
  * Updates the current chat (to display incoming and outgoing messages)
@@ -3192,12 +7261,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             };
         } else {
             // DM: use profile avatar or placeholder
-            if (profile?.avatar) {
-                domChatAvatar = document.createElement('img');
-                domChatAvatar.src = profile.avatar;
-            } else {
-                domChatAvatar = createPlaceholderAvatar(false, 22);
-            }
+            const chatAvatarSrc = getProfileAvatarSrc(profile);
+            domChatAvatar = createAvatarImg(chatAvatarSrc, 22, false);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 previousChatBeforeProfile = strOpenChat;
@@ -3262,12 +7327,18 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
         if (!arrMessages.length) return;
 
+        // Sort messages by timestamp (oldest first) to ensure correct insertion order
+        // This is critical for timestamp insertion logic - without this, newer messages
+        // get inserted first and older messages compare gaps against distant ancestors
+        // instead of their actual chronological neighbors
+        const sortedMessages = [...arrMessages].sort((a, b) => a.at - b.at);
+
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
         /* Dedup guard: skip any message already present in the DOM by ID */
          // Process each message for insertion
-        for (const msg of arrMessages) {
+        for (const msg of sortedMessages) {
             // Guard against duplicate insertions if the DOM already contains this message ID
             if (document.getElementById(msg.id)) {
                 continue;
@@ -3333,6 +7404,17 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     // Pass oldestMsgElement as context so renderMessage knows what comes after
                     const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
                     domChatMessages.insertBefore(domMsg, oldestMsgElement);
+
+                    // Update the next message's top corner if same sender (since new message is now before it)
+                    if (oldestMsgElement.getAttribute('sender') === domMsg.getAttribute('sender')) {
+                        const nextP = oldestMsgElement.querySelector('p');
+                        if (nextP) {
+                            const cornerProp = msg.mine ? 'borderTopRightRadius' : 'borderTopLeftRadius';
+                            nextP.style[cornerProp] = '0px';
+                            const audioPlayer = nextP.querySelector('.custom-audio-player');
+                            if (audioPlayer) audioPlayer.style[cornerProp] = '0px';
+                        }
+                    }
                     continue;
                 }
             }
@@ -3373,6 +7455,17 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                     // Pass nextNode.element as context so renderMessage knows what comes after
                     const domMsg = renderMessage(msg, profile, '', nextNode.element);
                     domChatMessages.insertBefore(domMsg, nextNode.element);
+
+                    // Update the next message's top corner if same sender (since new message is now before it)
+                    if (nextNode.element.getAttribute('sender') === domMsg.getAttribute('sender')) {
+                        const nextP = nextNode.element.querySelector('p');
+                        if (nextP) {
+                            const cornerProp = msg.mine ? 'borderTopRightRadius' : 'borderTopLeftRadius';
+                            nextP.style[cornerProp] = '0px';
+                            const audioPlayer = nextP.querySelector('.custom-audio-player');
+                            if (audioPlayer) audioPlayer.style[cornerProp] = '0px';
+                        }
+                    }
                     inserted = true;
                     break;
                 }
@@ -3427,12 +7520,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             };
         } else {
             // DM: use profile avatar or placeholder
-            if (profile?.avatar) {
-                domChatAvatar = document.createElement('img');
-                domChatAvatar.src = profile.avatar;
-            } else {
-                domChatAvatar = createPlaceholderAvatar(false, 22);
-            }
+            const dmAvatarSrc = getProfileAvatarSrc(profile);
+            domChatAvatar = createAvatarImg(dmAvatarSrc, 22, false);
         }
         if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
 
@@ -3481,14 +7570,16 @@ function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
     pTimestamp.classList.add('msg-inline-timestamp');
     const messageDate = new Date(timestamp);
+    const timeStr = messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
 
-    // Render the time contextually
+    // Render the time contextually (day/date in bold)
     if (isToday(messageDate)) {
-        pTimestamp.textContent = messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+        pTimestamp.innerHTML = `<strong>Today</strong>, ${timeStr}`;
     } else if (isYesterday(messageDate)) {
-        pTimestamp.textContent = `Yesterday, ${messageDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}`;
+        pTimestamp.innerHTML = `<strong>Yesterday</strong>, ${timeStr}`;
     } else {
-        pTimestamp.textContent = messageDate.toLocaleString();
+        const dateStr = messageDate.toLocaleDateString();
+        pTimestamp.innerHTML = `<strong>${dateStr}</strong>, ${timeStr}`;
     }
 
     if (parent) {
@@ -3499,6 +7590,25 @@ function insertTimestamp(timestamp, parent = null) {
 }
 
 /**
+ * Helper function to create and insert a system event (member joined/left, etc.)
+ * Uses the same styling as timestamps (centered, lower opacity)
+ * @param {string} content - The system event text (e.g., "John has left")
+ * @param {HTMLElement} parent - Optional parent to append to
+ * @returns {HTMLElement} - The created system event element
+ */
+function insertSystemEvent(content, parent = null) {
+    const pSystemEvent = document.createElement('p');
+    pSystemEvent.classList.add('msg-inline-timestamp'); // Reuse timestamp styling
+    pSystemEvent.textContent = content;
+
+    if (parent) {
+        parent.appendChild(pSystemEvent);
+    }
+
+    return pSystemEvent;
+}
+
+/**
  * Convert a Message in to a rendered HTML Element
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
@@ -3506,6 +7616,14 @@ function insertTimestamp(timestamp, parent = null) {
  * @param {HTMLElement?} contextElement - the DOM element to use for context (for prepending)
  */
 function renderMessage(msg, sender, editID = '', contextElement = null) {
+    // Helper to apply border radius to both p element and any custom-audio-player inside
+    const applyBorderRadius = (pEl, property, value) => {
+        if (!pEl) return;
+        pEl.style[property] = value;
+        const audioPlayer = pEl.querySelector('.custom-audio-player');
+        if (audioPlayer) audioPlayer.style[property] = value;
+    };
+
     // Construct the message container (the DOM ID is the HEX Nostr Event ID)
     const divMessage = document.createElement('div');
     divMessage.id = msg.id;
@@ -3515,7 +7633,25 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     const otherId = sender?.id || msg.npub || '';
     const strShortSenderID = (msg.mine ? strPubkey : otherId).substring(0, 8);
     divMessage.setAttribute('sender', strShortSenderID);
-    
+
+    // Check for PIVX payment - render special bubble
+    if (msg.pivx_payment) {
+        divMessage.classList.add('msg-' + (msg.mine ? 'me' : 'them'));
+        const pivxBubble = renderPivxPaymentBubble(
+            msg.pivx_payment.gift_code,
+            msg.pivx_payment.amount_piv,
+            msg.mine,
+            msg.pivx_payment.address
+        );
+        divMessage.appendChild(pivxBubble);
+        return divMessage;
+    }
+
+    // Check for system event - render like a timestamp (centered, lower opacity)
+    if (msg.system_event) {
+        return insertSystemEvent(msg.content);
+    }
+
     // Check if we're in a group chat
     const currentChat = arrChats.find(c => c.id === strOpenChat);
     const isGroupChat = currentChat?.chat_type === 'MlsGroup';
@@ -3539,7 +7675,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
     
     // Check if this is truly a new streak (different sender from last actual message)
-    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID;
+    // Also treat as new streak if there's a timestamp between (fIsMsg is false when immediate previous element isn't a message)
+    const isNewStreak = !lastActualMessage || lastActualMessage.getAttribute('sender') != strShortSenderID || !fIsMsg;
     
     if (isNewStreak) {
         // Add an avatar if this is not OUR message
@@ -3559,31 +7696,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 });
             }
             
-            if (authorProfile?.avatar) {
-                const imgAvatar = document.createElement('img');
-                imgAvatar.classList.add('avatar', 'btn');
-                imgAvatar.onclick = () => {
-                    // Store the current chat so we can return to it
+            const msgAvatarSrc = getProfileAvatarSrc(authorProfile);
+            avatarEl = createAvatarImg(msgAvatarSrc, 35, false);
+            avatarEl.classList.add('avatar', 'btn');
+            // Wire profile click if we have an identifiable user
+            if (otherFullId) {
+                avatarEl.onclick = () => {
+                    const prof = getProfile(otherFullId) || authorProfile;
                     previousChatBeforeProfile = strOpenChat;
-                    openProfile(authorProfile);
+                    openProfile(prof || { id: otherFullId });
                 };
-                imgAvatar.src = authorProfile.avatar;
-                avatarEl = imgAvatar;
-            } else {
-                // Provide a deterministic placeholder when no avatar URL is available
-                const placeholder = createPlaceholderAvatar(false, 35);
-                // Ensure visual sizing and interactivity match real avatars
-                placeholder.classList.add('avatar', 'btn');
-                // Only wire profile click if we have an identifiable user
-                if (otherFullId) {
-                    placeholder.onclick = () => {
-                        const prof = getProfile(otherFullId) || authorProfile;
-                        // Store the current chat so we can return to it
-                        previousChatBeforeProfile = strOpenChat;
-                        openProfile(prof || { id: otherFullId });
-                    };
-                }
-                avatarEl = placeholder;
             }
             
             // Create a container for avatar and username
@@ -3626,24 +7748,43 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // Check if the previous message was from the contact (!mine)
             const prevSenderID = lastActualMessage.getAttribute('sender');
             const wasPrevMsgFromContact = prevSenderID !== strPubkey.substring(0, 8);
-            
-            // Only curve the previous message's bottom-left border if it was from the user (mine)
-            // If it was from the contact, we need to check if it should have a rounded corner (last in streak)
+
+            // Curve the previous message's bottom border since a new sender is starting
+            // For "mine" messages: bottom-RIGHT corner; for "them" messages: bottom-LEFT corner
             if (!wasPrevMsgFromContact) {
-                const pMsg = lastActualMessage.querySelector('p');
-                if (pMsg) {
-                    pMsg.style.borderBottomLeftRadius = `15px`;
-                }
-            } else {
-                // The previous message was from the contact - check if it needs rounding as last in streak
-                // Look back to see if it had previous messages from same sender
-                let prevPrevMsg = lastActualMessage.previousElementSibling;
-                // Skip non-messages
+                // Previous was from "me" - check if it needs rounding as last in streak
+                // Look back to see if it had previous messages from same sender (with no timestamp between)
+                const prevPrevElement = lastActualMessage.previousElementSibling;
+                const hasTimestampBefore = prevPrevElement && !prevPrevElement.getAttribute('sender');
+
+                let prevPrevMsg = prevPrevElement;
                 while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
                     prevPrevMsg = prevPrevMsg.previousElementSibling;
                 }
-                const hadPreviousFromSameSender = prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
-                
+                // Only round if it's part of a multi-message streak (no timestamp before)
+                const hadPreviousFromSameSender = !hasTimestampBefore && prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
+
+                if (hadPreviousFromSameSender) {
+                    const pMsg = lastActualMessage.querySelector('p');
+                    if (pMsg) {
+                        applyBorderRadius(pMsg, 'borderBottomRightRadius', '15px');
+                    }
+                }
+            } else {
+                // The previous message was from the contact - check if it needs rounding as last in streak
+                // Look back to see if it had previous messages from same sender (with no timestamp between)
+                const prevPrevElement = lastActualMessage.previousElementSibling;
+                // Check if there's a timestamp immediately before (which would break the streak visually)
+                const hasTimestampBefore = prevPrevElement && !prevPrevElement.getAttribute('sender');
+
+                let prevPrevMsg = prevPrevElement;
+                // Skip non-messages to find actual previous message
+                while (prevPrevMsg && !prevPrevMsg.getAttribute('sender')) {
+                    prevPrevMsg = prevPrevMsg.previousElementSibling;
+                }
+                // Only consider it part of same streak if NO timestamp between them
+                const hadPreviousFromSameSender = !hasTimestampBefore && prevPrevMsg && prevPrevMsg.getAttribute('sender') === prevSenderID;
+
                 // Look forward to see if there are more messages from same sender after this one
                 // (which would make this a middle message, not the last)
                 let prevNextMsg = lastActualMessage.nextElementSibling;
@@ -3652,12 +7793,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     prevNextMsg = prevNextMsg.nextElementSibling;
                 }
                 const hasNextFromSameSender = prevNextMsg && prevNextMsg.getAttribute('sender') === prevSenderID;
-                
+
                 // Only round if it had previous messages AND no next messages from same sender (making it the last)
                 if (hadPreviousFromSameSender && !hasNextFromSameSender) {
                     const pMsg = lastActualMessage.querySelector('p');
                     if (pMsg && !pMsg.classList.contains('no-background')) {
-                        pMsg.style.borderBottomLeftRadius = `15px`;
+                        applyBorderRadius(pMsg, 'borderBottomLeftRadius', '15px');
                     }
                 }
             }
@@ -3670,14 +7811,21 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         if (isGroupChat) {
             pMessage.style.marginTop = !msg.mine ? `25px` : `10px`;
         } else if (msg.mine) pMessage.style.marginTop = `10px`;
-        
+
+        // Flatten bottom corner like a "new first message" (anticipating more messages may follow)
+        if (msg.mine) {
+            pMessage.style.borderBottomRightRadius = `0`;
+        } else {
+            pMessage.style.borderBottomLeftRadius = `0`;
+        }
+
         // Check if this is a singular message (no next message from same sender)
         // This check happens after the message is rendered (at the end of the function)
     } else {
         // Add additional margin to simulate avatar space
         // We always reserve space for non-mine messages since we render an avatar or placeholder for the first in a streak
         if (!msg.mine) {
-            pMessage.style.marginLeft = `45px`;
+            pMessage.style.marginLeft = `44px`;
         }
 
         // Flatten the top border to act as a visual continuation
@@ -3697,49 +7845,86 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     const fEmojiOnly = isEmojiOnly(strEmojiCleaned) && strEmojiCleaned.length <= 6;
     if (fReplying) {
         // Only display if replying
-        pMessage.style.borderColor = `#ffffff`;
+        pMessage.style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--reply-highlight-border').trim();
     }
 
-    // If it's a reply: inject a preview of the replied-to message, if we have knowledge of it
+    // If it's a reply: inject a preview of the replied-to message
+    // Uses backend-provided reply context (works for old messages not in cache)
+    // Falls back to in-memory search for pending messages or backwards compatibility
     if (msg.replied_to) {
-        // Try to find the referenced message in the current chat
-        // For DMs, use sender profile; for groups, use the currently open chat
+        // Check if we have reply context from the backend (preferred - always available)
+        const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
+
+        // Try to find the referenced message in the current chat (fallback for pending messages)
         const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
         const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
-        if (cMsg) {
+
+        // Use backend context if available, otherwise fall back to in-memory message
+        if (hasBackendContext || cMsg) {
             // Render the reply in a quote-like fashion
             const divRef = document.createElement('div');
             divRef.classList.add('msg-reply', 'btn');
-            divRef.id = `r-${cMsg.id}`;
+
+            // Add theme-based styling when replying to the other person's message
+            // Use cMsg.mine if available, otherwise check backend-provided npub
+            const repliedToMine = cMsg?.mine ?? (msg.replied_to_npub === strPubkey);
+            if (!repliedToMine) {
+                divRef.classList.add('msg-reply-them');
+            }
+            divRef.id = `r-${msg.replied_to}`;
 
             // Name + Message
             const spanName = document.createElement('span');
             spanName.style.color = `rgba(255, 255, 255, 0.7)`;
 
-            // Name - for group chats, use cMsg.npub; for DMs, use sender
-            const cSenderProfile = !cMsg.mine
-                ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
-                : getProfile(strPubkey);
+            // Determine the sender of the replied-to message
+            let cSenderProfile;
+            if (hasBackendContext) {
+                // Use backend-provided npub
+                if (msg.replied_to_npub) {
+                    cSenderProfile = getProfile(msg.replied_to_npub);
+                    // Check if it's our own message
+                    if (msg.replied_to_npub === strPubkey) {
+                        cSenderProfile = getProfile(strPubkey);
+                    }
+                } else {
+                    // DM without npub - it's from the other participant
+                    cSenderProfile = sender;
+                }
+            } else if (cMsg) {
+                // Fallback to in-memory message data
+                cSenderProfile = !cMsg.mine
+                    ? (cMsg.npub ? getProfile(cMsg.npub) : sender)
+                    : getProfile(strPubkey);
+            }
+
             if (cSenderProfile?.nickname || cSenderProfile?.name) {
                 spanName.textContent = cSenderProfile.nickname || cSenderProfile.name;
                 twemojify(spanName);
             } else {
-                const fallbackId = cMsg.npub || cSenderProfile?.id || '';
+                const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || cSenderProfile?.id || '';
                 spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
             }
 
             // Replied-to content (Text or Attachment)
             let spanRef;
-            if (cMsg.content) {
+            const replyContent = hasBackendContext ? msg.replied_to_content : cMsg?.content;
+            const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
+
+            if (replyContent) {
                 spanRef = document.createElement('span');
+                spanRef.classList.add('msg-reply-text');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanRef.textContent = cMsg.content.length < 50 ? cMsg.content : cMsg.content.substring(0, 50) + '…';
+                spanRef.textContent = truncateGraphemes(replyContent, 50);
                 twemojify(spanRef);
-            } else if (cMsg.attachments.length) {
+            } else if (hasAttachment) {
                 // For Attachments, we display an additional icon for quickly inferring the replied-to content
                 spanRef = document.createElement('div');
                 spanRef.style.display = `flex`;
-                const cFileType = getFileTypeInfo(cMsg.attachments[0].extension);
+
+                // Use in-memory message for detailed attachment info if available, otherwise show generic
+                const attachmentExt = cMsg?.attachments?.[0]?.extension;
+                const cFileType = attachmentExt ? getFileTypeInfo(attachmentExt) : { icon: 'attachment', description: 'Attachment' };
 
                 // Icon
                 const spanIcon = document.createElement('span');
@@ -3762,7 +7947,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             divRef.appendChild(spanName);
             divRef.appendChild(document.createElement('br'));
-            divRef.appendChild(spanRef);
+            if (spanRef) {
+                divRef.appendChild(spanRef);
+            }
             pMessage.appendChild(divRef);
         }
     }
@@ -3789,9 +7976,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     } else {
         // Render their text content (using our custom Markdown renderer)
         spanMessage.innerHTML = parseMarkdown(displayContent.trim());
-        
+
         // Make URLs clickable (after markdown parsing, before twemojify)
         linkifyUrls(spanMessage);
+
+        // Process inline image URLs (async - will load images in background)
+        processInlineImages(spanMessage);
     }
 
     // Only process Text Content if any exists
@@ -3837,15 +8027,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 imgPreview.style.height = `auto`;
                 imgPreview.style.borderRadius = `8px`;
                 imgPreview.src = assetUrl;
-                
-                // Add file extension badge
-                const extBadge = document.createElement('span');
-                extBadge.className = 'file-ext-badge';
-                extBadge.textContent = cAttachment.extension.toUpperCase();
-                // Initially hide the badge until we check image dimensions
-                extBadge.style.display = 'none';
-                
-                // Add event listener for auto-scrolling and badge size check
+
+                // Add event listener for auto-scrolling
                 imgPreview.addEventListener('load', () => {
                     // Auto-scroll if within 100ms of chat opening
                     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
@@ -3857,33 +8040,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         // Normal soft scroll for layout adjustments
                         softChatScroll();
                     }
-                    
-                    // Check badge size relative to image
-                    const imgWidth = imgPreview.offsetWidth;
-                    const imgHeight = imgPreview.offsetHeight;
-                    
-                    // Temporarily show badge to measure it
-                    extBadge.style.display = '';
-                    const badgeWidth = extBadge.offsetWidth;
-                    const badgeHeight = extBadge.offsetHeight;
-                    
-                    // Check if badge would be more than 25% of image width or height
-                    const widthRatio = badgeWidth / imgWidth;
-                    const heightRatio = badgeHeight / imgHeight;
-                    
-                    if (widthRatio > 0.25 || heightRatio > 0.25) {
-                        // Hide badge if it's too large relative to the image
-                        extBadge.style.display = 'none';
-                        // Remove border radius from small images
-                        imgPreview.style.borderRadius = '0';
-                    }
                 }, { once: true });
-                
+
                 // Attach image preview handler
                 attachImagePreview(imgPreview);
-                
+
                 imgContainer.appendChild(imgPreview);
-                imgContainer.appendChild(extBadge);
+
+                // Add file extension badge (handles size checking automatically)
+                attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
+
                 pMessage.appendChild(imgContainer);
                 } else if (platformFeatures.os !== 'linux' && ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
@@ -3936,9 +8102,13 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // File Attachment
                 const ext = cAttachment.extension.toLowerCase();
                 const fileTypeInfo = getFileTypeInfo(ext);
+                const isMiniApp = fileTypeInfo.isMiniApp === true;
                 
                 const fileDiv = document.createElement('div');
                 fileDiv.setAttribute('filepath', cAttachment.path);
+                if (isMiniApp) {
+                    fileDiv.classList.add('miniapp-attachment');
+                }
 
                 // Create the main container
                 const btnDiv = document.createElement('div');
@@ -3948,17 +8118,31 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 btnDiv.style.padding = '10px';
                 btnDiv.style.paddingRight = '15px';
 
-                // Create the icon span
-                const iconSpan = document.createElement('span');
-                iconSpan.className = `icon icon-${fileTypeInfo.icon}`;
-                iconSpan.style.marginLeft = '5px';
-                iconSpan.style.width = '50px';
-                iconSpan.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+                // Create the icon element (span for regular files, img for Mini Apps with icons)
+                let iconElement;
+                if (isMiniApp) {
+                    // For Mini Apps, create an img element that will be populated with the icon
+                    iconElement = document.createElement('img');
+                    iconElement.style.marginLeft = '5px';
+                    iconElement.style.width = '40px';
+                    iconElement.style.height = '40px';
+                    iconElement.style.borderRadius = '8px';
+                    iconElement.style.objectFit = 'cover';
+                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+                    // Set a placeholder initially
+                    iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+                } else {
+                    iconElement = document.createElement('span');
+                    iconElement.className = `icon icon-${fileTypeInfo.icon}`;
+                    iconElement.style.marginLeft = '5px';
+                    iconElement.style.width = '50px';
+                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+                }
 
                 // Create the text container span
                 const textContainerSpan = document.createElement('span');
                 textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-                textContainerSpan.style.marginLeft = '50px';
+                textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
                 textContainerSpan.style.lineHeight = '1.2';
 
                 // Create the description span
@@ -3971,29 +8155,192 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // Create the small element for file details
                 const smallElement = document.createElement('small');
 
-                // Create the extension span
-                const extSpan = document.createElement('span');
-                extSpan.style.color = 'white';
-                extSpan.style.fontWeight = '400';
-                extSpan.innerText = `.${ext}`;
+                if (isMiniApp) {
+                    // Mini App: show status and optionally peer count
+                    // Make smallElement a flex container for proper alignment
+                    smallElement.style.display = 'flex';
+                    smallElement.style.alignItems = 'center';
+                    smallElement.style.gap = '10px';
+                    
+                    const playSpan = document.createElement('span');
+                    playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                    playSpan.style.fontWeight = '400';
+                    playSpan.innerText = 'Click to Play';
+                    smallElement.appendChild(playSpan);
+                    
+                    // Create peer count badge (hidden by default)
+                    const peerBadge = document.createElement('span');
+                    peerBadge.style.padding = '2px 8px';
+                    peerBadge.style.borderRadius = '10px';
+                    peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.3)';
+                    peerBadge.style.color = '#2ed573';
+                    peerBadge.style.fontSize = '0.85em';
+                    peerBadge.style.fontWeight = '500';
+                    peerBadge.style.display = 'none';
+                    smallElement.appendChild(peerBadge);
+                    
+                    // Store topic for event updates
+                    const topicId = cAttachment.webxdc_topic;
+                    if (topicId) {
+                        fileDiv.setAttribute('data-webxdc-topic', topicId);
+                    }
+                    
+                    // Helper function to update the peer badge
+                    const updatePeerBadge = (peerCount, isPlaying) => {
+                        const totalPlayers = isPlaying ? peerCount + 1 : peerCount;
+                        if (totalPlayers > 0) {
+                            // Create inline icon
+                            const groupIcon = document.createElement('img');
+                            groupIcon.src = 'icons/group-placeholder.svg';
+                            groupIcon.style.width = '14px';
+                            groupIcon.style.height = '14px';
+                            groupIcon.style.verticalAlign = 'middle';
+                            groupIcon.style.marginRight = '4px';
+                            
+                            // Clear and rebuild badge content
+                            peerBadge.innerHTML = '';
+                            peerBadge.appendChild(groupIcon);
+                            peerBadge.appendChild(document.createTextNode(`${totalPlayers} online`));
+                            peerBadge.style.display = 'inline-flex';
+                            peerBadge.style.alignItems = 'center';
+                        } else {
+                            peerBadge.style.display = 'none';
+                        }
+                    };
+                    
+                    // Helper function to update the UI based on status
+                    const updateMiniAppStatus = (isPlaying, peerCount) => {
+                        if (isPlaying) {
+                            // We're playing - show "Playing" and make unclickable
+                            playSpan.innerText = 'Playing';
+                            playSpan.style.color = '#2ed573';
+                            fileDiv.style.cursor = 'default';
+                            fileDiv.style.opacity = '0.9';
+                            fileDiv.setAttribute('data-playing', 'true');
+                        } else if (peerCount > 0) {
+                            // Others are playing - show "Click to Join"
+                            playSpan.innerText = 'Click to Join';
+                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                            fileDiv.style.cursor = 'pointer';
+                            fileDiv.style.opacity = '1';
+                            fileDiv.removeAttribute('data-playing');
+                        } else {
+                            // No one playing - show "Click to Play"
+                            playSpan.innerText = 'Click to Play';
+                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                            fileDiv.style.cursor = 'pointer';
+                            fileDiv.style.opacity = '1';
+                            fileDiv.removeAttribute('data-playing');
+                        }
+                        updatePeerBadge(peerCount, isPlaying);
+                    };
+                    
+                    // Load Mini App info asynchronously to get name and icon
+                    loadMiniAppInfo(cAttachment.path).then(info => {
+                        if (info) {
+                            // Update the name
+                            descriptionSpan.innerText = info.name || 'Mini App';
+                            
+                            // Update the icon if available
+                            if (info.icon_data) {
+                                iconElement.src = info.icon_data;
+                            }
+                        }
+                    }).catch(err => {
+                        console.warn('Failed to load Mini App info:', err);
+                    });
+                    
+                    // Check for realtime channel status if we have a topic
+                    if (topicId) {
+                        invoke('miniapp_get_realtime_status', { topicId })
+                            .then(status => {
+                                console.log('[MiniApp] Realtime status:', status);
+                                // Use peer_count if we have a channel, otherwise use pending_peer_count
+                                // peer_count is from active Iroh channel, pending_peer_count is from advertisements
+                                const peerCount = (status?.peer_count || 0) > 0
+                                    ? status.peer_count
+                                    : (status?.pending_peer_count || 0);
+                                updateMiniAppStatus(status?.active || false, peerCount);
+                            })
+                            .catch(err => {
+                                // Silently ignore - realtime status is optional
+                                console.debug('Could not get realtime status:', err);
+                            });
+                        
+                        // Listen for realtime events to update the UI
+                        // Store the update function on the element for event handler access
+                        fileDiv._updateMiniAppStatus = updateMiniAppStatus;
+                    }
+                } else {
+                    // Regular file: show extension and size
+                    const extSpan = document.createElement('span');
+                    extSpan.style.color = 'white';
+                    extSpan.style.fontWeight = '400';
+                    extSpan.innerText = `.${ext}`;
 
-                // Create the size span
-                const sizeSpan = document.createElement('span');
-                sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+                    const sizeSpan = document.createElement('span');
+                    sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+
+                    smallElement.appendChild(extSpan);
+                    smallElement.appendChild(sizeSpan);
+                }
 
                 // Assemble the structure
-                smallElement.appendChild(extSpan);
-                smallElement.appendChild(sizeSpan);
                 textContainerSpan.appendChild(descriptionSpan);
                 textContainerSpan.appendChild(smallElement);
-                btnDiv.appendChild(iconSpan);
+                btnDiv.appendChild(iconElement);
                 btnDiv.appendChild(textContainerSpan);
                 fileDiv.appendChild(btnDiv);
 
-                // Click to reveal in explorer
-                fileDiv.addEventListener('click', (e) => {
+                // Click handler
+                fileDiv.addEventListener('click', async (e) => {
                     const path = e.currentTarget.getAttribute('filepath');
-                    if (path) revealItemInDir(path);
+                    if (!path) return;
+
+                    if (isMiniApp) {
+                        // Check if we're already playing
+                        if (e.currentTarget.getAttribute('data-playing') === 'true') {
+                            console.log('[MiniApp] Already playing, ignoring click');
+                            return;
+                        }
+
+                        // Open Mini App in a new window
+                        try {
+                            // Find the attachment to get the webxdc_topic
+                            const attachment = msg.attachments.find(a => a.path === path);
+                            const topicId = attachment?.webxdc_topic || null;
+
+                            // Check permissions before opening
+                            const shouldOpen = await checkChatMiniAppPermissions(path);
+                            if (!shouldOpen) {
+                                return; // User cancelled the permission prompt
+                            }
+
+                            await openMiniApp(path, strOpenChat, msg.id, null, topicId);
+                            
+                            // Update UI to show "Playing" after opening
+                            // Safety check: e.currentTarget may be null when called from non-click context
+                            if (e.currentTarget && e.currentTarget._updateMiniAppStatus) {
+                                // Get current peer count and update status
+                                if (topicId) {
+                                    invoke('miniapp_get_realtime_status', { topicId })
+                                        .then(status => {
+                                            e.currentTarget._updateMiniAppStatus(true, status?.peer_count || 0);
+                                        })
+                                        .catch(() => {
+                                            e.currentTarget._updateMiniAppStatus(true, 0);
+                                        });
+                                } else {
+                                    e.currentTarget._updateMiniAppStatus(true, 0);
+                                }
+                            }
+                        } catch (err) {
+                            console.error('Failed to open Mini App:', err);
+                        }
+                    } else {
+                        // Regular file: reveal in explorer
+                        revealItemInDir(path);
+                    }
                 });
 
                 pMessage.appendChild(fileDiv);
@@ -4213,6 +8560,23 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             }
     }
 
+    // Sync border radius from pMessage to any custom-audio-player inside (for streak continuation)
+    const audioPlayer = pMessage.querySelector('.custom-audio-player');
+    if (audioPlayer) {
+        if (pMessage.style.borderTopLeftRadius) {
+            audioPlayer.style.borderTopLeftRadius = pMessage.style.borderTopLeftRadius;
+        }
+        if (pMessage.style.borderTopRightRadius) {
+            audioPlayer.style.borderTopRightRadius = pMessage.style.borderTopRightRadius;
+        }
+        if (pMessage.style.borderBottomLeftRadius) {
+            audioPlayer.style.borderBottomLeftRadius = pMessage.style.borderBottomLeftRadius;
+        }
+        if (pMessage.style.borderBottomRightRadius) {
+            audioPlayer.style.borderBottomRightRadius = pMessage.style.borderBottomRightRadius;
+        }
+    }
+
     // Append Payment Shortcuts (i.e: Bitcoin Payment URIs, etc)
     const cAddress = detectCryptoAddress(msg.content);
     if (cAddress) {
@@ -4377,9 +8741,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             // Render the Preview
             pMessage.appendChild(divPrevContainer);
-        } else if (!msg.preview_metadata) {
+        } else if (!msg.preview_metadata && msg.content) {
             // Grab the message's metadata (currently, only URLs can have extracted metadata)
-            if (msg.content && msg.content.includes('https')) {
+            // Skip fetching metadata for direct image URLs (they render inline instead)
+            if (msg.content.includes('https') && !isImageUrl(msg.content)) {
                 // Pass the chat ID so backend can find both DMs and group chats
                 invoke("fetch_msg_metadata", { chatId: strOpenChat, msgId: msg.id });
             }
@@ -4392,6 +8757,20 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
     if (msg.failed) {
         pMessage.style.color = 'red';
+    }
+
+    // If the message has been edited, show an indicator
+    if (msg.edited) {
+        const spanEdited = document.createElement('span');
+        spanEdited.classList.add('msg-edited-indicator');
+        spanEdited.textContent = '(edited)';
+        // If there's edit history, make it clickable to show history
+        if (msg.edit_history && msg.edit_history.length > 0) {
+            spanEdited.classList.add('btn');
+            spanEdited.setAttribute('data-msg-id', msg.id);
+            spanEdited.title = 'Click to view edit history';
+        }
+        pMessage.appendChild(spanEdited);
     }
 
     // Add message reactions
@@ -4445,6 +8824,15 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             divExtras.append(spanReply);
         }
 
+        // Edit Icon (only for my own text messages)
+        if (msg.mine && msg.content && !msg.attachments.length) {
+            const spanEdit = document.createElement('span');
+            spanEdit.classList.add('edit-btn', 'hideable', 'icon', 'icon-edit');
+            spanEdit.setAttribute('data-msg-id', msg.id);
+            spanEdit.setAttribute('data-msg-content', msg.content);
+            divExtras.append(spanEdit);
+        }
+
         // File Reveal Icon (if a file was attached)
         if (strRevealAttachmentPath) {
             const spanReveal = document.createElement('span');
@@ -4455,52 +8843,84 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
 
     // Depending on who it is: render the extras appropriately
-    if (msg.mine) divMessage.append(divExtras, pMessage);
-    else divMessage.append(pMessage, divExtras);
+    if (msg.mine) {
+        // Wrap message and status in a container for proper stacking
+        const msgWrapper = document.createElement('div');
+        msgWrapper.classList.add('msg-wrapper');
+        msgWrapper.appendChild(pMessage);
 
-    // After rendering, check message corner styling for received messages
+        // Add status indicator for outgoing messages
+        const statusEl = document.createElement('span');
+        statusEl.classList.add('msg-status');
+        if (msg.failed) {
+            statusEl.classList.add('msg-status-failed');
+            statusEl.textContent = 'Failed';
+        } else if (msg.pending) {
+            statusEl.textContent = 'Sending...';
+        } else {
+            // Show "Sent" status - will be hidden on previous messages in setTimeout
+            statusEl.innerHTML = 'Sent <span class="icon icon-check-circle"></span>';
+        }
+        msgWrapper.appendChild(statusEl);
+
+        divMessage.append(divExtras, msgWrapper);
+    } else {
+        divMessage.append(pMessage, divExtras);
+    }
+
+    // After rendering, check message corner styling
     // This needs to be done post-render when the message is in the DOM
     setTimeout(() => {
-        if (!msg.mine && domChatMessages.contains(divMessage)) {
+        if (domChatMessages.contains(divMessage)) {
             const nextMsg = divMessage.nextElementSibling;
             const prevMsg = divMessage.previousElementSibling;
-            
+
             // Check if previous message exists and is from a different sender
             const isFirstFromSender = !prevMsg || prevMsg.getAttribute('sender') !== strShortSenderID;
-            
+
             // Check if next message exists and is from the same sender
             const hasNextFromSameSender = nextMsg && nextMsg.getAttribute('sender') === strShortSenderID;
-            
+
+            // Determine which corner to use based on sender (mine = right, them = left)
+            const cornerProperty = msg.mine ? 'borderBottomRightRadius' : 'borderBottomLeftRadius';
+
             // If we're continuing a message streak (not first from sender), we need to update the previous message
             if (!isFirstFromSender && prevMsg) {
-                // The previous message is no longer the last in the streak, so remove its rounded corner
+                // The previous message is no longer the last in the streak, so flatten its bottom corner
                 const prevPMsg = prevMsg.querySelector('p');
-                if (prevPMsg && !prevPMsg.classList.contains('no-background')) {
-                    // Check if the previous message was styled as last (had rounded corner)
-                    if (prevPMsg.style.borderBottomLeftRadius === '15px') {
-                        // Remove the rounded corner since it's no longer the last
-                        prevPMsg.style.borderBottomLeftRadius = '';
-                    }
+                if (prevPMsg) {
+                    // Flatten the corner (0px) - this handles both CSS defaults and explicitly rounded corners
+                    applyBorderRadius(prevPMsg, cornerProperty, '0px');
                 }
             }
-            
+
             // Now style the current message appropriately
-            if (isFirstFromSender && !hasNextFromSameSender) {
-                // This is a singular message - apply sharp bottom-left corner
+            // Singular messages (first AND last) keep CSS default corners - no modification needed
+            // Only modify corners for multi-message streaks
+            if (!isFirstFromSender && !hasNextFromSameSender) {
+                // This is the last message in a multi-message streak - apply rounded corner to close the bubble group
                 const pMsg = divMessage.querySelector('p');
-                if (pMsg && !pMsg.classList.contains('no-background')) {
-                    // Make the bottom-left corner sharp (0px radius)
-                    pMsg.style.borderBottomLeftRadius = '0px';
+                if (pMsg) {
+                    applyBorderRadius(pMsg, cornerProperty, '15px');
                 }
             }
-            // If this is the last message in a multi-message streak (has previous from same sender, but no next from same sender)
-            else if (!isFirstFromSender && !hasNextFromSameSender) {
-                // This is the last message in a streak - apply rounded bottom-left corner
-                const pMsg = divMessage.querySelector('p');
-                if (pMsg && !pMsg.classList.contains('no-background')) {
-                    // Make the bottom-left corner rounded (15px radius) to close the bubble group
-                    pMsg.style.borderBottomLeftRadius = '15px';
-                }
+
+            // Update message status visibility for outgoing messages
+            // Only the last msg-me should show "Sent" status
+            if (msg.mine) {
+                // Hide status on all other msg-me messages (keep only last visible)
+                const allMsgMe = domChatMessages.querySelectorAll('.msg-me');
+                allMsgMe.forEach((msgEl, index) => {
+                    const isLast = index === allMsgMe.length - 1;
+                    const statusEl = msgEl.querySelector('.msg-status:not(.msg-status-failed)');
+                    if (statusEl && !statusEl.textContent.includes('Sending')) {
+                        if (isLast) {
+                            statusEl.classList.remove('msg-status-hidden');
+                        } else {
+                            statusEl.classList.add('msg-status-hidden');
+                        }
+                    }
+                });
             }
         }
     }, 0);
@@ -4529,7 +8949,7 @@ function selectReplyingMessage(e) {
         domChatMessageInput.focus();
     }
     // Add a reply-focus
-    e.target.parentElement.parentElement.querySelector('p').style.borderColor = `#ffffff`;
+    e.target.parentElement.parentElement.querySelector('p').style.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--reply-highlight-border').trim();
 }
 
 /**
@@ -4569,6 +8989,234 @@ function cancelReply() {
 }
 
 /**
+ * Start editing a message
+ * @param {string} messageId - The ID of the message to edit
+ * @param {string} content - The current content of the message
+ */
+function startEditMessage(messageId, content) {
+    // Cancel any existing reply first
+    if (strCurrentReplyReference) {
+        cancelReply();
+    }
+
+    // Cancel any existing edit
+    if (strCurrentEditMessageId) {
+        cancelEdit();
+    }
+
+    // Store the edit state
+    strCurrentEditMessageId = messageId;
+    strCurrentEditOriginalContent = content;
+
+    // Populate the input with the message content
+    domChatMessageInput.value = content;
+
+    // Show the cancel button, hide file button
+    domChatMessageInputFile.style.display = 'none';
+    domChatMessageInputCancel.style.display = '';
+
+    // Update placeholder
+    domChatMessageInput.setAttribute('placeholder', 'Editing message...');
+
+    // Highlight the message being edited
+    const msgElement = document.getElementById(messageId);
+    if (msgElement) {
+        const pElement = msgElement.querySelector('p');
+        if (pElement) {
+            pElement.style.borderColor = '#ffa500'; // Orange border for editing
+        }
+    }
+
+    // Show the send button (since we have text)
+    domChatMessageInputSend.classList.add('active');
+    domChatMessageInputSend.style.display = '';
+    domChatMessageInputVoice.style.display = 'none';
+
+    // Focus the input and move cursor to end
+    domChatMessageInput.focus();
+    domChatMessageInput.setSelectionRange(content.length, content.length);
+
+    // Auto-resize the input
+    autoResizeChatInput();
+}
+
+/**
+ * Cancel editing and restore the input to normal state
+ */
+function cancelEdit() {
+    // Remove the highlight from the message being edited
+    if (strCurrentEditMessageId) {
+        const msgElement = document.getElementById(strCurrentEditMessageId);
+        if (msgElement) {
+            const pElement = msgElement.querySelector('p');
+            if (pElement) {
+                pElement.style.borderColor = '';
+            }
+        }
+    }
+
+    // Clear the edit state
+    strCurrentEditMessageId = '';
+    strCurrentEditOriginalContent = '';
+
+    // Clear the input
+    domChatMessageInput.value = '';
+
+    // Reset the message UI
+    domChatMessageInputFile.style.display = '';
+    domChatMessageInputCancel.style.display = 'none';
+    domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
+
+    // Reset send button state
+    domChatMessageInputSend.classList.remove('active');
+    domChatMessageInputSend.style.display = 'none';
+    domChatMessageInputVoice.style.display = '';
+
+    // Focus the input (desktop only)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
+
+    // Auto-resize the input back to normal
+    autoResizeChatInput();
+}
+
+/**
+ * Show the edit history popup for a message
+ * @param {string} messageId - The ID of the message to show history for
+ * @param {HTMLElement} targetElement - The element that was clicked (for positioning)
+ */
+let strCurrentEditHistoryMsgId = '';
+
+function showEditHistory(messageId, targetElement) {
+    const popup = document.getElementById('edit-history-popup');
+    const content = document.getElementById('edit-history-content');
+    if (!popup || !content) return;
+
+    // If clicking the same message that's already open, ignore
+    if (strCurrentEditHistoryMsgId === messageId && popup.style.display !== 'none') {
+        return;
+    }
+
+    // Find the message in the current chat
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat) return;
+
+    const msg = chat.messages.find(m => m.id === messageId);
+    if (!msg || !msg.edit_history || msg.edit_history.length === 0) {
+        return;
+    }
+
+    // Track which message's history is open
+    strCurrentEditHistoryMsgId = messageId;
+
+    // Clear previous content
+    content.innerHTML = '';
+
+    // Format date/time
+    const formatTime = (timestamp) => {
+        const date = new Date(timestamp);
+        return date.toLocaleString(undefined, {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    };
+
+    // Build edit history entries (oldest to newest)
+    const totalEntries = msg.edit_history.length;
+    const entryElements = [];
+    msg.edit_history.forEach((entry, index) => {
+        const div = document.createElement('div');
+        div.classList.add('edit-history-entry');
+
+        // Mark original and current
+        const isOriginal = index === 0;
+        const isCurrent = index === totalEntries - 1;
+        if (isOriginal) div.classList.add('original');
+        if (isCurrent) div.classList.add('current');
+
+        // Time and label
+        const timeDiv = document.createElement('div');
+        timeDiv.classList.add('edit-history-time');
+        timeDiv.textContent = formatTime(entry.edited_at);
+        if (isOriginal) {
+            const label = document.createElement('span');
+            label.classList.add('edit-history-label');
+            label.textContent = 'Original';
+            timeDiv.appendChild(label);
+        } else if (isCurrent) {
+            const label = document.createElement('span');
+            label.classList.add('edit-history-label');
+            label.textContent = 'Current';
+            timeDiv.appendChild(label);
+        }
+
+        // Content
+        const textDiv = document.createElement('div');
+        textDiv.classList.add('edit-history-text');
+        textDiv.textContent = entry.content;
+
+        div.appendChild(timeDiv);
+        div.appendChild(textDiv);
+        content.appendChild(div);
+        entryElements.push(div);
+    });
+
+    // Find the message bubble (p element) for positioning
+    const msgBubble = targetElement.closest('p');
+    const rect = msgBubble ? msgBubble.getBoundingClientRect() : targetElement.getBoundingClientRect();
+
+    // Reset position and show popup to measure its actual dimensions
+    popup.style.top = '0';
+    popup.style.left = '0';
+    popup.style.visibility = 'hidden';
+    popup.style.display = 'block';
+
+    // Force layout recalculation then measure
+    const popupHeight = popup.getBoundingClientRect().height;
+    const popupWidth = popup.getBoundingClientRect().width;
+
+    // Position above or below the bubble depending on space
+    let top = rect.top - popupHeight - 4;
+    const showBelow = top < 10;
+    if (showBelow) {
+        top = rect.bottom + 4;
+    }
+
+    // Apply staggered animation delays based on position
+    // Above: latest (bottom) fades first, oldest (top) last
+    // Below: oldest (top) fades first, latest (bottom) last
+    entryElements.forEach((el, index) => {
+        const delay = showBelow ? index * 50 : (totalEntries - 1 - index) * 50;
+        el.style.animationDelay = `${delay}ms`;
+    });
+
+    // Align horizontally with the bubble edge, keep within viewport
+    let left = rect.left;
+    left = Math.max(10, Math.min(left, window.innerWidth - popupWidth - 10));
+
+    popup.style.left = `${left}px`;
+    popup.style.top = `${top}px`;
+    popup.style.visibility = 'visible';
+
+    // Scroll to show the current (latest) entry
+    content.scrollTop = content.scrollHeight;
+}
+
+/**
+ * Hide the edit history popup
+ */
+function hideEditHistory() {
+    const popup = document.getElementById('edit-history-popup');
+    if (popup) {
+        popup.style.display = 'none';
+    }
+    strCurrentEditHistoryMsgId = '';
+}
+
+/**
  * Open a chat with a particular contact
  * @param {string} contact
  */
@@ -4584,6 +9232,9 @@ async function openChat(contact) {
 
     // Hide the Navbar
     domNavbar.style.display = `none`;
+
+    // Warm up GIF server connection early (non-blocking)
+    preconnectGifServer();
 
     // Get the chat (could be DM or Group)
     const chat = arrChats.find(c => c.id === contact);
@@ -4617,18 +9268,82 @@ async function openChat(contact) {
         chatOpenAutoScrollTimer = null;
     }, 100);
 
-    // Load messages from cache (on-demand loading)
-    // This uses the LRU message cache for efficient memory management
-    // Load messages from cache (will fetch from DB if not cached)
-    const initialMessages = await messageCache.loadInitialMessages(
+    // Load events from cache (on-demand loading)
+    // This uses the LRU event cache for efficient memory management
+    // Load events from cache (will fetch from DB if not cached)
+    const initialMessages = await eventCache.loadInitialEvents(
         contact,
         proceduralScrollState.messagesPerBatch
     );
-    
+
+    // Load PIVX payments for this chat and merge them into messages
+    try {
+        const pivxPayments = await invoke('pivx_get_chat_payments', { conversationId: contact });
+        if (pivxPayments && pivxPayments.length > 0) {
+            // Convert PIVX payments to message format with pivx_payment property
+            for (const payment of pivxPayments) {
+                // Check if this payment already exists in messages
+                const existing = initialMessages.find(m => m.id === payment.message_id);
+                if (!existing) {
+                    const paymentMsg = {
+                        id: payment.message_id,
+                        at: payment.at,
+                        content: '',
+                        mine: payment.is_mine,
+                        attachments: [],
+                        npub: payment.sender,
+                        pivx_payment: {
+                            gift_code: payment.gift_code,
+                            amount_piv: payment.amount_piv,
+                            address: payment.address,
+                            message: payment.message
+                        }
+                    };
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
+                    eventCache.addEvent(contact, paymentMsg);
+                }
+            }
+            // Re-sort by timestamp after adding PIVX payments
+            initialMessages.sort((a, b) => a.at - b.at);
+        }
+    } catch (e) {
+        console.warn('Failed to load PIVX payments:', e);
+    }
+
+    // Load system events (member joined/left, etc.) for this chat and merge them
+    try {
+        const systemEvents = await invoke('get_system_events', { conversationId: contact });
+        if (systemEvents && systemEvents.length > 0) {
+            for (const event of systemEvents) {
+                // Check if this event already exists in messages
+                const existing = initialMessages.find(m => m.id === event.id);
+                if (!existing) {
+                    const systemMsg = {
+                        id: event.id,
+                        at: event.at,
+                        content: event.content,
+                        mine: false,
+                        attachments: [],
+                        system_event: {
+                            event_type: event.event_type,
+                            member_npub: event.member_npub,
+                        }
+                    };
+                    // Add to cache (which also adds to initialMessages since they share the same array reference)
+                    eventCache.addEvent(contact, systemMsg);
+                }
+            }
+            // Re-sort by timestamp after adding system events
+            initialMessages.sort((a, b) => a.at - b.at);
+        }
+    } catch (e) {
+        console.warn('Failed to load system events:', e);
+    }
+
     // Get cache stats for procedural scroll
-    const cacheStats = messageCache.getStats(contact);
+    const cacheStats = eventCache.getStats(contact);
     const totalMessages = cacheStats?.totalInDb || initialMessages.length;
-    
+
     // Update the chat object's messages array for compatibility
     // (Some parts of the code still reference chat.messages)
     if (chat) {
@@ -4640,14 +9355,28 @@ async function openChat(contact) {
     
     updateChat(chat, initialMessages, profile, true);
 
-    // If the opened chat has messages, mark them as read (last message)
-    if (initialMessages) {
-        const lastMsg = initialMessages[initialMessages.length - 1];
-        markAsRead(chat, lastMsg);
+    // Mark as read on open (needed for Windows where is_focused may not work)
+    // Only mark the last contact message, not our own messages
+    if (initialMessages?.length) {
+        let lastContactMsg = null;
+        for (let i = initialMessages.length - 1; i >= 0; i--) {
+            if (!initialMessages[i].mine) {
+                lastContactMsg = initialMessages[i];
+                break;
+            }
+        }
+        if (lastContactMsg) {
+            markAsRead(chat, lastContactMsg);
+        }
     }
-    
+
     // Update the back button notification dot
     updateChatBackNotification();
+
+    // Focus chat input on desktop (mobile keyboards are intrusive)
+    if (!platformFeatures.is_mobile) {
+        domChatMessageInput.focus();
+    }
 }
 
 /**
@@ -4706,19 +9435,28 @@ async function closeChat() {
         domChild.remove();
     }
 
-    // If the chat had any messages, mark them as read before leaving
+    // If the chat had any messages, mark the last contact message as read before leaving
     if (strOpenChat) {
         const closedChat = arrChats.find(c => c.id === strOpenChat);
         if (closedChat?.messages?.length) {
-            const lastMsg = closedChat.messages[closedChat.messages.length - 1];
-            markAsRead(closedChat, lastMsg);
+            // Find the last non-mine message (same logic as updateChat)
+            let lastContactMsg = null;
+            for (let i = closedChat.messages.length - 1; i >= 0; i--) {
+                if (!closedChat.messages[i].mine) {
+                    lastContactMsg = closedChat.messages[i];
+                    break;
+                }
+            }
+            if (lastContactMsg) {
+                markAsRead(closedChat, lastContactMsg);
+            }
         }
     }
 
-    // Trim the message cache for this chat to free memory
-    // (keeps max 100 messages, removes older ones loaded during scroll)
+    // Trim the event cache for this chat to free memory
+    // (keeps max 100 events, removes older ones loaded during scroll)
     if (strOpenChat) {
-        messageCache.trimChat(strOpenChat);
+        eventCache.trimConversation(strOpenChat);
     }
 
     // Reset the chat UI
@@ -4767,17 +9505,13 @@ async function closeChat() {
  * @param {Profile} cProfile - An optional profile to render
  */
 async function openProfile(cProfile) {
-    // Force immediate refresh when user views profile
-    if (cProfile && cProfile.id) {
-        await invoke("refresh_profile_now", { npub: cProfile.id });
-    }
-    
     navbarSelect('profile-btn');
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
     domGroupOverview.style.display = 'none';
     domChat.style.display = 'none'; // Hide the chat view when opening profile
+    domSettingsBtn.style.display = ''; // Ensure settings button is visible (may have been hidden by openChat)
 
     // Render our own profile by default, but otherwise; the given one
     if (!cProfile) {
@@ -4785,6 +9519,25 @@ async function openProfile(cProfile) {
         // Clear previous chat when opening our own profile from navbar
         previousChatBeforeProfile = '';
     }
+
+    // Force immediate refresh when user views profile
+    if (cProfile && cProfile.id) {
+        invoke("refresh_profile_now", { npub: cProfile.id });
+
+        // Start periodic refresh while viewing this profile (every 30 seconds)
+        clearInterval(profileRefreshInterval);
+        profileRefreshInterval = setInterval(() => {
+            // Only refresh if profile tab is still open
+            if (domProfile.style.display === '') {
+                invoke("refresh_profile_now", { npub: cProfile.id });
+            } else {
+                // Profile tab closed, stop refreshing
+                clearInterval(profileRefreshInterval);
+                profileRefreshInterval = null;
+            }
+        }, 30000);
+    }
+
     renderProfileTab(cProfile);
 
     if (domProfile.style.display !== '') {
@@ -4985,16 +9738,8 @@ async function renderGroupOverview(chat) {
             
             // Member avatar
             let avatar;
-            if (memberProfile?.avatar) {
-                avatar = document.createElement('img');
-                avatar.src = memberProfile.avatar;
-                avatar.style.width = '25px';
-                avatar.style.height = '25px';
-                avatar.style.borderRadius = '50%';
-                avatar.style.objectFit = 'cover';
-            } else {
-                avatar = createPlaceholderAvatar(false, 25);
-            }
+            const memberAvatarSrc = getProfileAvatarSrc(memberProfile);
+            avatar = createAvatarImg(memberAvatarSrc, 25, false);
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
             avatar.style.zIndex = '1';
@@ -5117,37 +9862,53 @@ async function renderGroupOverview(chat) {
         domGroupInviteMemberBtn.style.display = 'none';
     }
     
-    // Leave Group button - TEMPORARILY HIDDEN until fully tested
-    // domGroupLeaveBtn.style.display = 'flex';
-    // domGroupLeaveBtn.onclick = async () => {
-    //     // Confirm before leaving using popupConfirm
-    //     const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
-    //     const confirmed = await popupConfirm(
-    //         'Leave Group',
-    //         `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
-    //         false, // Not a notice, show cancel button
-    //         '', // No input
-    //         'vector_warning.svg'
-    //     );
-    //
-    //     if (!confirmed) return;
-    //
-    //     try {
-    //         await invoke('leave_mls_group', { groupId: chat.id });
-    //
-    //         // Close the group overview
-    //         domGroupOverview.style.display = 'none';
-    //         domGroupOverview.removeAttribute('data-group-id');
-    //
-    //         // Open the chat list
-    //         openChatlist();
-    //
-    //         // The group will be removed from the chat list via the mls_group_left event
-    //     } catch (error) {
-    //         console.error('Failed to leave group:', error);
-    //         await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
-    //     }
-    // };
+    // Leave Group button
+    domGroupLeaveBtn.style.display = 'flex';
+    domGroupLeaveBtn.onclick = async () => {
+        const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
+
+        // Check if user is the group creator
+        const isCreator = myProfile && myProfile.id === chat.metadata?.creator_pubkey;
+
+        // Creators cannot leave unless they are the only member
+        if (isCreator && memberCount > 1) {
+            await popupConfirm(
+                'Cannot Leave Group',
+                'You are the creator of this group. You must remove all other members before you can leave.<br><br>Please kick all members first, then you can leave the group.',
+                true, // Notice only, no cancel button
+                '', // No input
+                'vector_warning.svg'
+            );
+            return;
+        }
+
+        // Confirm before leaving using popupConfirm
+        const confirmed = await popupConfirm(
+            'Leave Group',
+            `Are you sure you want to leave "<b>${groupName}</b>"?<br><br>You will need to be re-invited to rejoin.`,
+            false, // Not a notice, show cancel button
+            '', // No input
+            'vector_warning.svg'
+        );
+
+        if (!confirmed) return;
+
+        try {
+            await invoke('leave_mls_group', { groupId: chat.id });
+
+            // Close the group overview
+            domGroupOverview.style.display = 'none';
+            domGroupOverview.removeAttribute('data-group-id');
+
+            // Open the chat list
+            openChatlist();
+
+            // The group will be removed from the chat list via the mls_group_left event
+        } catch (error) {
+            console.error('Failed to leave group:', error);
+            await popupConfirm('Failed to Leave Group', error.toString(), true, '', 'vector_warning.svg');
+        }
+    };
     
     // Back button - return to the group chat
     domGroupOverviewBackBtn.onclick = () => {
@@ -5224,11 +9985,12 @@ async function openInviteMemberToGroup(chat) {
     // Search input
     const searchContainer = document.createElement('div');
     searchContainer.className = 'emoji-search-container';
+    searchContainer.style.padding = '10px 0px';
     searchContainer.style.marginBottom = '16px';
+    searchContainer.style.background = 'transparent';
     
     const searchIcon = document.createElement('span');
     searchIcon.className = 'emoji-search-icon icon icon-search';
-    searchIcon.style.setProperty('margin-left', '20px', 'important');
     searchIcon.style.setProperty('width', '25px', 'important');
     searchIcon.style.setProperty('height', '25px', 'important');
     searchContainer.appendChild(searchIcon);
@@ -5343,16 +10105,8 @@ async function openInviteMemberToGroup(chat) {
             
             // Avatar (compact size like member list)
             let avatar;
-            if (contactProfile?.avatar) {
-                avatar = document.createElement('img');
-                avatar.src = contactProfile.avatar;
-                avatar.style.width = '25px';
-                avatar.style.height = '25px';
-                avatar.style.borderRadius = '50%';
-                avatar.style.objectFit = 'cover';
-            } else {
-                avatar = createPlaceholderAvatar(false, 25);
-            }
+            const contactAvatarSrc = getProfileAvatarSrc(contactProfile);
+            avatar = createAvatarImg(contactAvatarSrc, 25, false);
             avatar.style.marginRight = '10px';
             avatar.style.position = 'relative';
             avatar.style.zIndex = '1';
@@ -5484,6 +10238,9 @@ async function openChatlist() {
     adjustSize();
     await loadMLSInvites();
     adjustSize();
+
+    // Refresh timestamps immediately so they're not stale after viewing a chat
+    updateChatlistTimestamps();
 }
 
 function openSettings() {
@@ -5499,6 +10256,12 @@ function openSettings() {
 
     // Update the Storage Breakdown
     initStorageSection();
+
+    // Show/hide Restore PIVX Wallet button based on hidden state
+    const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
+    if (domRestorePivxGroup) {
+        domRestorePivxGroup.style.display = pivxHidden ? '' : 'none';
+    }
 
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
@@ -5704,6 +10467,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
+    // Initialize relay dialog event listeners
+    initRelayDialogs();
+
     // Set up early deep link listener BEFORE login flow
     // This handles deep link events that arrive while the app is running
     // Note: Deep links received before JS loads are stored in Rust and retrieved after login
@@ -5718,6 +10484,13 @@ window.addEventListener("DOMContentLoaded", async () => {
         await executeDeepLinkAction(evt.payload);
     });
 
+    // Listen for critical loading errors from the backend (database, migrations, etc.)
+    // Registered early so it catches errors from login_from_stored_key and login
+    await listen('loading_error', (evt) => {
+        console.error('[Boot] Loading error:', evt.payload);
+        popupConfirm('Loading Error', evt.payload, true, '', 'vector_warning.svg');
+    });
+
     // Immediately load and apply theme settings (visual only, don't save)
     const strTheme = await invoke('get_theme');
     if (strTheme) {
@@ -5726,6 +10499,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Show the main window now that content is ready (prevents white flash on startup)
     // The window starts hidden via tauri.conf.json and Rust setup hides it explicitly
+    // The WKWebView background is set to dark natively in lib.rs so no delay is needed
     // Only needed on desktop - mobile doesn't have this issue
     if (!platformFeatures.is_mobile) {
         try {
@@ -5806,10 +10580,35 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     }
 
-    // If a local account exists, boot up the decryption UI (skip if hot-reloaded)
-    if (!fDebugHotReloaded && await hasAccount()) {
-        // Account is available, login screen!
-        openEncryptionFlow(null, true);
+    // Single IPC call: account existence + encryption status
+    // (auto_select_account already ran at Tauri startup, so this is just a static read + 1 DB query)
+    if (!fDebugHotReloaded) {
+        console.time('[Boot] getBootStatus');
+        const { account_exists, enabled, security_type } = await invoke('get_encryption_and_key');
+        console.timeEnd('[Boot] getBootStatus');
+        if (account_exists) {
+            if (enabled) {
+                // Encryption enabled - show PIN or password screen for decryption
+                openEncryptionFlow(true, security_type || 'pin');
+            } else {
+                // Encryption disabled - login directly from stored key (key never crosses IPC)
+                domLogin.style.display = 'none';
+                try {
+                    console.time('[Boot] login_from_stored_key');
+                    const npub = await invoke("login_from_stored_key", { password: null });
+                    console.timeEnd('[Boot] login_from_stored_key');
+
+                    strPubkey = npub;
+                    console.time('[Boot] login() total');
+                    login(true); // skipAnimations = true
+                } catch (e) {
+                    console.error('Direct login failed:', e);
+                    // Fallback to PIN screen in case of error
+                    domLogin.style.display = '';
+                    openEncryptionFlow(true);
+                }
+            }
+        }
     }
 
     // Hook up our static buttons
@@ -5819,14 +10618,14 @@ window.addEventListener("DOMContentLoaded", async () => {
     domSettingsBtn.onclick = openSettings;
     domLoginAccountCreationBtn.onclick = async () => {
         try {
-            const { public: pubKey, private: privKey } = await invoke("create_account");
+            const { public: pubKey } = await invoke("create_account");
             strPubkey = pubKey;
-            
+
             // Connect to Nostr network
             await invoke("connect");
-            
-            // Skip invite flow - go directly to encryption
-            openEncryptionFlow(privKey, false);
+
+            // Skip invite flow - go directly to encryption (key stays backend-only)
+            openEncryptionFlow(false);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -5835,18 +10634,28 @@ window.addEventListener("DOMContentLoaded", async () => {
     domLoginAccountBtn.onclick = () => {
         domLoginImport.style.display = '';
         domLoginStart.style.display = 'none';
+        domLoginBackBar.style.display = '';
+        document.getElementById('login-form').classList.add('has-back-bar');
+    };
+    domLoginBackBtn.onclick = () => {
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginBackBar.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginInput.value = '';
+        document.getElementById('login-form').classList.remove('has-back-bar');
     };
     domLoginBtn.onclick = async () => {
         // Import and derive our keys
         try {
-            const { public: pubKey, private: privKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            const { public: pubKey } = await invoke("login", { importKey: domLoginInput.value.trim() });
             strPubkey = pubKey;
 
             // Connect to Nostr
             await invoke("connect");
 
-            // Skip invite flow - go directly to encryption
-            openEncryptionFlow(privKey);
+            // Skip invite flow - go directly to encryption (key stays backend-only)
+            openEncryptionFlow(false);
         } catch (e) {
             // Display the backend error
             popupConfirm(e, '', true, '', 'vector_warning.svg');
@@ -5883,7 +10692,24 @@ window.addEventListener("DOMContentLoaded", async () => {
             domChatNewStartBtn.click();
         }
     };
-    domChatMessageInputCancel.onclick = cancelReply;
+    domChatNewInput.addEventListener('input', function() {
+        domChatNewStartBtn.style.display = this.value.length > 0 ? '' : 'none';
+    });
+
+    // Tooltip for help icon
+    document.querySelector('.chat-new-help-link').addEventListener('mouseenter', function() {
+    showGlobalTooltip('Visit the Vector Privacy Docs', this);
+    });
+    document.querySelector('.chat-new-help-link').addEventListener('mouseleave', hideGlobalTooltip);
+
+    domChatMessageInputCancel.onclick = () => {
+        // Cancel edit mode if active, otherwise cancel reply
+        if (strCurrentEditMessageId) {
+            cancelEdit();
+        } else {
+            cancelReply();
+        }
+    };
 
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, { threshold: 500 })
@@ -5917,12 +10743,25 @@ window.addEventListener("DOMContentLoaded", async () => {
             androidFileInput.value = '';
         };
         
+        // Toggle attachment panel when clicking the add-file button
         domChatMessageInputFile.onclick = () => {
+            toggleAttachmentPanel();
+        };
+
+        // Handle File button in attachment panel (Android)
+        domAttachmentPanelFile.onclick = () => {
+            closeAttachmentPanel();
             androidFileInput.click();
         };
     } else {
-        // On desktop, use Tauri dialog
-        domChatMessageInputFile.onclick = async () => {
+        // Toggle attachment panel when clicking the add-file button
+        domChatMessageInputFile.onclick = () => {
+            toggleAttachmentPanel();
+        };
+
+        // Handle File button in attachment panel (Desktop - use Tauri dialog)
+        domAttachmentPanelFile.onclick = async () => {
+            closeAttachmentPanel();
             let filepath = await selectFile();
             if (filepath) {
                 // Reset reply selection while passing a copy of the reference to the backend
@@ -5933,6 +10772,154 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
         };
     }
+
+    // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
+    domAttachmentPanelMiniApps.onclick = async () => {
+        await showAttachmentPanelMiniApps();
+    };
+
+    // Handle Back button in Mini Apps view - returns to main attachment panel
+    domAttachmentPanelBack.onclick = () => {
+        showAttachmentPanelMain();
+    };
+
+    // Handle search input in Mini Apps view
+    if (domMiniAppsSearch) {
+        domMiniAppsSearch.addEventListener('input', (e) => {
+            filterMiniApps(e.target.value);
+        });
+    }
+
+    // Setup hold-to-edit mode for Mini Apps
+    setupMiniAppsEditMode();
+
+    // Mini App Launch Dialog event handlers
+    domMiniAppLaunchCancel.onclick = closeMiniAppLaunchDialog;
+    domMiniAppLaunchSolo.onclick = playMiniAppSolo;
+    domMiniAppLaunchInvite.onclick = playMiniAppAndInvite;
+    
+    // Close dialog when clicking outside
+    domMiniAppLaunchOverlay.onclick = (e) => {
+        if (e.target === domMiniAppLaunchOverlay) {
+            closeMiniAppLaunchDialog();
+        }
+    };
+
+    // Marketplace event handlers
+    if (domAttachmentPanelMarketplace) {
+        domAttachmentPanelMarketplace.onclick = async () => {
+            closeAttachmentPanel();
+            showMarketplacePanel();
+        };
+    }
+
+    if (domMarketplaceBackBtn) {
+        domMarketplaceBackBtn.onclick = () => {
+            hideMarketplacePanel();
+        };
+    }
+
+    // PIVX Wallet event handlers
+    if (domAttachmentPanelPivx) {
+        domAttachmentPanelPivx.onclick = () => {
+            showPivxWalletPanel();
+        };
+    }
+
+    if (domAttachmentPanelPivxBack) {
+        domAttachmentPanelPivxBack.onclick = () => {
+            hidePivxWalletPanel();
+        };
+    }
+
+    if (domPivxDepositBtn) {
+        domPivxDepositBtn.onclick = () => {
+            showPivxDepositDialog();
+        };
+    }
+
+    if (domPivxSendBtn) {
+        domPivxSendBtn.onclick = () => {
+            showPivxSendDialog();
+        };
+    }
+
+    if (domPivxSettingsBtn) {
+        domPivxSettingsBtn.onclick = () => {
+            showPivxSettingsDialog();
+        };
+    }
+
+    // PIVX Withdraw button
+    const domPivxWithdrawBtn = document.getElementById('pivx-withdraw-btn');
+    if (domPivxWithdrawBtn) {
+        domPivxWithdrawBtn.onclick = () => {
+            showPivxWithdrawDialog();
+        };
+    }
+
+    // PIVX Dialog close buttons
+    document.getElementById('pivx-deposit-close')?.addEventListener('click', closePivxDepositDialog);
+    document.getElementById('pivx-send-close')?.addEventListener('click', closePivxSendDialog);
+    document.getElementById('pivx-withdraw-close')?.addEventListener('click', closePivxWithdrawDialog);
+    document.getElementById('pivx-settings-close')?.addEventListener('click', closePivxSettingsDialog);
+
+    // PIVX copy buttons
+    document.getElementById('pivx-copy-address')?.addEventListener('click', () => {
+        const address = document.getElementById('pivx-deposit-address')?.textContent;
+        if (address) {
+            navigator.clipboard.writeText(address);
+            showToast('Address copied!');
+        }
+    });
+
+    // PIVX send confirm
+    document.getElementById('pivx-send-confirm')?.addEventListener('click', sendPivxPayment);
+
+    // PIVX available balance click to prefill
+    document.getElementById('pivx-send-available')?.addEventListener('click', () => {
+        const amountEl = document.getElementById('pivx-send-amount');
+        if (amountEl && pivxSendAvailableBalance > 0) {
+            amountEl.value = pivxSendAvailableBalance.toFixed(2);
+        }
+    });
+
+    // PIVX send mode toggles
+    document.getElementById('pivx-send-custom-toggle')?.addEventListener('click', showPivxSendCustomMode);
+    document.getElementById('pivx-send-back-toggle')?.addEventListener('click', showPivxSendQuickMode);
+    document.getElementById('pivx-send-max')?.addEventListener('click', () => {
+        const amountEl = document.getElementById('pivx-send-amount');
+        if (amountEl && pivxSendAvailableBalance > 0) {
+            amountEl.value = pivxSendAvailableBalance.toFixed(2);
+        }
+    });
+
+    // PIVX withdraw handlers
+    document.getElementById('pivx-withdraw-confirm')?.addEventListener('click', executePivxWithdraw);
+    document.getElementById('pivx-withdraw-max')?.addEventListener('click', () => {
+        const amountEl = document.getElementById('pivx-withdraw-amount');
+        if (amountEl && pivxWithdrawAvailableBalance > 0) {
+            amountEl.value = pivxWithdrawAvailableBalance.toFixed(2);
+        }
+    });
+
+    // PIVX settings save
+    document.getElementById('pivx-settings-save')?.addEventListener('click', savePivxSettings);
+
+    // PIVX dialog overlay click to close
+    domPivxDepositOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxDepositOverlay) closePivxDepositDialog();
+    });
+    domPivxSendOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxSendOverlay) closePivxSendDialog();
+    });
+    const domPivxWithdrawOverlay = document.getElementById('pivx-withdraw-overlay');
+    domPivxWithdrawOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxWithdrawOverlay) closePivxWithdrawDialog();
+    });
+    domPivxSettingsOverlay?.addEventListener('click', (e) => {
+        if (e.target === domPivxSettingsOverlay) closePivxSettingsDialog();
+    });
 
     // Hook up an in-chat File Paste listener
     document.onpaste = async (evt) => {
@@ -6001,8 +10988,92 @@ async function sendMessage(messageText) {
         });
     }
 
+    // Check if we're in edit mode
+    if (strCurrentEditMessageId) {
+        // Don't send if content hasn't changed
+        if (cleanedText === strCurrentEditOriginalContent) {
+            cancelEdit();
+            return;
+        }
+
+        // Clear input and show editing state
+        domChatMessageInput.value = '';
+        resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
+        domChatMessageInput.style.height = '';
+        domChatMessageInput.style.overflowY = 'hidden';
+        domChatMessageInput.setAttribute('placeholder', 'Saving edit...');
+
+        try {
+            const editMsgId = strCurrentEditMessageId;
+            const originalContent = strCurrentEditOriginalContent;
+            cancelEdit();
+
+            // Instantly update the message in the DOM for responsive UX
+            const msgElement = document.getElementById(editMsgId);
+            if (msgElement) {
+                const spanMessage = msgElement.querySelector('p > span:not(.msg-edited-indicator):not(.msg-reply)');
+                if (spanMessage) {
+                    spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
+                    linkifyUrls(spanMessage);
+                    processInlineImages(spanMessage);
+                    twemojify(spanMessage);
+                }
+                // Add edited indicator if not already present
+                const pMessage = msgElement.querySelector('p');
+                if (pMessage && !pMessage.querySelector('.msg-edited-indicator')) {
+                    const spanEdited = document.createElement('span');
+                    spanEdited.classList.add('msg-edited-indicator', 'btn');
+                    spanEdited.textContent = '(edited)';
+                    spanEdited.setAttribute('data-msg-id', editMsgId);
+                    spanEdited.title = 'Click to view edit history';
+                    pMessage.appendChild(spanEdited);
+                }
+            }
+
+            // Update in cache as well
+            const chat = arrChats.find(c => c.id === strOpenChat);
+            if (chat) {
+                const msg = chat.messages.find(m => m.id === editMsgId);
+                if (msg) {
+                    // Build edit history if it doesn't exist yet
+                    if (!msg.edit_history) {
+                        msg.edit_history = [];
+                        // Add original content as first entry
+                        msg.edit_history.push({
+                            content: originalContent,
+                            edited_at: msg.created_at * 1000 // Convert to milliseconds
+                        });
+                    }
+                    // Add new edit entry
+                    msg.edit_history.push({
+                        content: cleanedText,
+                        edited_at: Date.now()
+                    });
+                    msg.content = cleanedText;
+                    msg.edited = true;
+                }
+            }
+
+            // Send edit to backend (fire and forget for responsiveness)
+            invoke('edit_message', {
+                messageId: editMsgId,
+                chatId: strOpenChat,
+                newContent: cleanedText
+            }).catch(e => {
+                console.error('Failed to edit message:', e);
+                // Optionally: revert the UI change on failure
+            });
+
+            nLastTypingIndicator = 0;
+        } catch(e) {
+            console.error('Failed to edit message:', e);
+        }
+        return;
+    }
+
     // Clear input and show sending state
     domChatMessageInput.value = '';
+    resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
     domChatMessageInput.style.height = ''; // Reset textarea height
     domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
@@ -6010,10 +11081,10 @@ async function sendMessage(messageText) {
     try {
         const replyRef = strCurrentReplyReference;
         cancelReply();
-        
+
         // Send message (unified function handles both DMs and MLS groups)
         await message(strOpenChat, cleanedText, replyRef);
-        
+
         nLastTypingIndicator = 0;
     } catch(e) {
         console.error('Failed to send message:', e);
@@ -6027,8 +11098,29 @@ async function sendMessage(messageText) {
                 evt.preventDefault();
                 await sendMessage(domChatMessageInput.value);
             }
+            // ESC key cancels reply/edit mode
+            if (evt.key === 'Escape') {
+                if (strCurrentEditMessageId) {
+                    cancelEdit();
+                } else if (strCurrentReplyReference) {
+                    cancelReply();
+                }
+            }
         });
     }
+
+/**
+ * Immediately reset send/mic buttons to mic state (no animation)
+ * Used after sending messages to avoid animation race conditions
+ */
+function resetSendMicButtons() {
+    // Clear any animation classes
+    domChatMessageInputSend.classList.remove('active', 'button-swap-in', 'button-swap-out');
+    domChatMessageInputVoice.classList.remove('button-swap-in', 'button-swap-out');
+    // Set correct display states
+    domChatMessageInputSend.style.display = 'none';
+    domChatMessageInputVoice.style.display = '';
+}
 
     // Hook up an 'input' listener on the Message Box for typing indicators
 domChatMessageInput.oninput = async () => {
@@ -6070,7 +11162,8 @@ domChatMessageInput.oninput = async () => {
     }
 
     // Send a Typing Indicator only when content actually changes and setting is enabled
-    if (fSendTypingIndicators && nLastTypingIndicator + 30000 < Date.now()) {
+    // Don't send typing indicators while editing a message (it's not a new message)
+    if (fSendTypingIndicators && !strCurrentEditMessageId && nLastTypingIndicator + 30000 < Date.now()) {
         nLastTypingIndicator = Date.now();
         await invoke("start_typing", { receiver: strOpenChat });
     }
@@ -6218,6 +11311,21 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
     };
+    domSettingsDisplayImageTypesInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.', true);
+    };
+    domSettingsChatBgInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
+    };
+    domSettingsNotifMuteInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.', true);
+    };
 
     domSettingsDeepRescanInfo.onclick = (e) => {
         e.preventDefault();
@@ -6255,7 +11363,7 @@ domChatMessageInput.oninput = async () => {
     domSettingsDonorsInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        popupConfirm('Donors & Contributors', 'The organisations listed below have contributed either <b>financially or resourcefully</b> (developers, infrastructure, etc) to Vector\'s development.<br><br>We extend our sincere thanks to these supporters for helping make Vector possible.', true);
+        popupConfirm('Donors & Contributors', 'Your support keeps Vector Privacy independent, open-source, and free. If you would be interested in donating, please visit our GitBook to learn more.<br><br>We extend our sincere gratitude to these supporters for helping make Vector possible.', true);
     };
 
     // PIVX donor logo click - opens pivx.org
@@ -6265,23 +11373,19 @@ domChatMessageInput.oninput = async () => {
         openUrl('https://pivx.org');
     };
 
-    // Add npub copy functionality for chat-new section
-    document.getElementById('chat-new-npub-copy')?.addEventListener('click', (e) => {
-        const npub = document.getElementById('share-npub')?.textContent;
-        if (npub) {
-            // Copy the full profile URL for easy sharing
-            const profileUrl = `https://vectorapp.io/profile/${npub}`;
-            navigator.clipboard.writeText(profileUrl).then(() => {
-                const copyBtn = e.target.closest('.profile-npub-copy');
-                if (copyBtn) {
-                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                    setTimeout(() => {
-                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-                    }, 2000);
-                }
-            });
-        }
-    });
+    // Restore PIVX Wallet button - restores hidden PIVX app
+    if (domRestorePivxBtn) {
+        domRestorePivxBtn.onclick = async () => {
+            localStorage.removeItem('pivx_hidden');
+            // Hide the restore button
+            if (domRestorePivxGroup) {
+                domRestorePivxGroup.style.display = 'none';
+            }
+            // Refresh Mini Apps list if it's loaded
+            await loadMiniAppsHistory();
+            popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
+        };
+    }
 });
 
 // Listen for app-wide click interations
@@ -6324,6 +11428,23 @@ document.addEventListener('click', (e) => {
 
     // If we're clicking a Reply button, begin a reply
     if (e.target.classList.contains("reply-btn")) return selectReplyingMessage(e);
+
+    // If we're clicking an Edit button, begin editing the message
+    if (e.target.classList.contains("edit-btn")) {
+        const msgId = e.target.getAttribute('data-msg-id');
+        const msgContent = e.target.getAttribute('data-msg-content');
+        if (msgId && msgContent) {
+            return startEditMessage(msgId, msgContent);
+        }
+    }
+
+    // If we're clicking an edited indicator, show the edit history
+    if (e.target.classList.contains("msg-edited-indicator")) {
+        const msgId = e.target.getAttribute('data-msg-id');
+        if (msgId) {
+            showEditHistory(msgId, e.target);
+        }
+    }
 
     // If we're clicking a File Reveal button, reveal the file with the OS File Explorer
     if (e.target.getAttribute('filepath')) {
@@ -6387,6 +11508,37 @@ document.addEventListener('click', (e) => {
 
     // Run the emoji panel open/close logic
     openEmojiPanel(e);
+
+    // Close attachment panel when clicking outside of it
+    if (domAttachmentPanel.classList.contains('visible')) {
+        const clickedInsidePanel = domAttachmentPanel.contains(e.target);
+        const clickedFileButton = domChatMessageInputFile.contains(e.target);
+        // Don't close if clicking inside PIVX dialogs, popup prompts, or Mini App launch dialog
+        const clickedInsidePivxDialog = e.target.closest('.pivx-dialog-overlay');
+        const clickedInsidePopup = e.target.closest('#popup-container');
+        const clickedInsideLaunchDialog = e.target.closest('#miniapp-launch-overlay');
+        if (!clickedInsidePanel && !clickedFileButton && !clickedInsidePivxDialog && !clickedInsidePopup && !clickedInsideLaunchDialog) {
+            closeAttachmentPanel();
+        }
+    }
+
+    // Close edit history popup when clicking outside of it
+    const editHistoryPopup = document.getElementById('edit-history-popup');
+    if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
+        if (!editHistoryPopup.contains(e.target) && !e.target.classList.contains('msg-edited-indicator')) {
+            hideEditHistory();
+        }
+    }
+});
+
+// Close edit history popup on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const editHistoryPopup = document.getElementById('edit-history-popup');
+        if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
+            hideEditHistory();
+        }
+    }
 });
 
 /**
@@ -6407,6 +11559,9 @@ function adjustSize() {
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     softChatScroll();
+
+    // Re-truncate marketplace category tags on resize
+    truncateAllCategoryTags();
 }
 
 /**
@@ -6534,17 +11689,8 @@ function renderCreateGroupList(filterText = '') {
         });
 
         // Avatar - compact 25px size
-        let avatar;
-        if (p.avatar) {
-            avatar = document.createElement('img');
-            avatar.src = p.avatar;
-            avatar.style.width = '25px';
-            avatar.style.height = '25px';
-            avatar.style.borderRadius = '50%';
-            avatar.style.objectFit = 'cover';
-        } else {
-            avatar = createPlaceholderAvatar(false, 25);
-        }
+        const listAvatarSrc = getProfileAvatarSrc(p);
+        const avatar = createAvatarImg(listAvatarSrc, 25, false);
         avatar.style.marginRight = '10px';
         avatar.style.position = 'relative';
         avatar.style.zIndex = '1';

@@ -1,11 +1,10 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use once_cell::sync::OnceCell;
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+
+use crate::audio;
 
 static RECORDER: OnceCell<AudioRecorder> = OnceCell::new();
 
@@ -100,9 +99,7 @@ impl AudioRecorder {
             }
 
             let device_sample_rate = *self.device_sample_rate.lock().unwrap();
-
-            // Resample audio to target sample rate to ensure consistent quality
-            let resampled_samples = self.resample_audio(&samples, device_sample_rate)?;
+            let resampled_samples = audio::resample_mono_i16(&samples, device_sample_rate, TARGET_SAMPLE_RATE)?;
 
             let spec = hound::WavSpec {
                 channels: 1,
@@ -127,50 +124,5 @@ impl AudioRecorder {
         self.samples.lock().unwrap().clear();
 
         Ok(wav_buffer)
-    }
-
-    /// Resample audio using Rubato's high-quality resampling
-    fn resample_audio(&self, samples: &[i16], source_rate: u32) -> Result<Vec<i16>, String> {
-        // If sample rates are already the same, return the original samples
-        if source_rate == TARGET_SAMPLE_RATE {
-            return Ok(samples.to_vec());
-        }
-
-        // Convert i16 samples to f32 for Rubato
-        let samples_f32: Vec<f32> = samples.iter().map(|&s| (s as f32) / 32768.0).collect();
-
-        // Since Rubato works with separate channels, wrap our mono audio in a Vec of Vecs
-        let input_frames = vec![samples_f32];
-
-        // Create a Sinc resampler with good quality settings for voice
-        let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        };
-
-        let mut resampler = SincFixedIn::<f32>::new(
-            TARGET_SAMPLE_RATE as f64 / source_rate as f64,
-            1.0,
-            params,
-            samples.len(),
-            1, // mono audio (1 channel)
-        )
-        .map_err(|e| format!("Failed to create resampler: {}", e))?;
-
-        // Process the audio
-        let output_frames = resampler
-            .process(&input_frames, None)
-            .map_err(|e| format!("Failed to resample audio: {}", e))?;
-
-        // Convert back to i16 from f32 (first channel only since we're using mono)
-        let resampled_samples = output_frames[0]
-            .iter()
-            .map(|&s| (s * 32767.0) as i16)
-            .collect();
-
-        Ok(resampled_samples)
     }
 }

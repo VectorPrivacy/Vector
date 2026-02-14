@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-toggle-muted"
+description = "Enables the toggle_muted command without any pre-configured scope."
+commands.allow = ["toggle_muted"]
+
+[[permission]]
+identifier = "deny-toggle-muted"
+description = "Denies the toggle_muted command without any pre-configured scope."
+commands.deny = ["toggle_muted"]

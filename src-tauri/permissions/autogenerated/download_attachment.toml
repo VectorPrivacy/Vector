@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-download-attachment"
+description = "Enables the download_attachment command without any pre-configured scope."
+commands.allow = ["download_attachment"]
+
+[[permission]]
+identifier = "deny-download-attachment"
+description = "Denies the download_attachment command without any pre-configured scope."
+commands.deny = ["download_attachment"]

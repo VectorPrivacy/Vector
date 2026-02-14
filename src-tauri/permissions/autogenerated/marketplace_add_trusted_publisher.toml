@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-marketplace-add-trusted-publisher"
+description = "Enables the marketplace_add_trusted_publisher command without any pre-configured scope."
+commands.allow = ["marketplace_add_trusted_publisher"]
+
+[[permission]]
+identifier = "deny-marketplace-add-trusted-publisher"
+description = "Denies the marketplace_add_trusted_publisher command without any pre-configured scope."
+commands.deny = ["marketplace_add_trusted_publisher"]

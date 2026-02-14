@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-image-precompression"
+description = "Enables the start_image_precompression command without any pre-configured scope."
+commands.allow = ["start_image_precompression"]
+
+[[permission]]
+identifier = "deny-start-image-precompression"
+description = "Denies the start_image_precompression command without any pre-configured scope."
+commands.deny = ["start_image_precompression"]

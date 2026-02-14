@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-url-image"
+description = "Enables the cache_url_image command without any pre-configured scope."
+commands.allow = ["cache_url_image"]
+
+[[permission]]
+identifier = "deny-cache-url-image"
+description = "Denies the cache_url_image command without any pre-configured scope."
+commands.deny = ["cache_url_image"]

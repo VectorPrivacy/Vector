@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-seed"
+description = "Enables the get_seed command without any pre-configured scope."
+commands.allow = ["get_seed"]
+
+[[permission]]
+identifier = "deny-get-seed"
+description = "Denies the get_seed command without any pre-configured scope."
+commands.deny = ["get_seed"]

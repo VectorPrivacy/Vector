@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-encryption-status"
+description = "Enables the get_encryption_status command without any pre-configured scope."
+commands.allow = ["get_encryption_status"]
+
+[[permission]]
+identifier = "deny-get-encryption-status"
+description = "Denies the get_encryption_status command without any pre-configured scope."
+commands.deny = ["get_encryption_status"]

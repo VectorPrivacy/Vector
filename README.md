@@ -62,53 +62,17 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 ---
 
 # Compiling
+
 > [!NOTE]
 > For any additional help or questions, visit the [Vector Community Discord](https://discord.gg/ar2pnE9Huy).
->
-> *The following process was written and contributed by [PalmTree](https://primal.net/p/npub1e3zglze5g2mq894pfw42kw8uwmyd8uc6m8mupctjfkfplgddglds4v7wja).*
 
-### Install Dependencies
+### Build Guides
 
-Rust Stable and Tauri must be installed along with other dependencies. The easiest way to do that is to follow this guide:    
-<https://v1.tauri.app/v1/guides/getting-started/prerequisites>  
-
-### Compiling Vector for the First Time
-
-Assuming you want Vector in an `apps` folder (adjust as necessary):  
-
-```
-cd ~/apps && git pull https://github.com/VectorPrivacy/Vector
-```
-
-```
-cd ~/apps/Vector && yarn add -D @tauri-apps/cli && yarn install
-```
-
-```
-npm run build
-```
-
-### Upgrading Vector
-
-Check for updates:  
-
-```
-cd ~/apps/Vector && git pull
-```
-
-Compiling is only necessary if files were updated when running the previous command:
-
-```
-npm run build
-```
-
-### Vector Executables
-
-The compiled Vector app can be found in the release folder located here:  
-
-```
-cd ~/apps/Vector/src-tauri/target/release/
-```
+| Platform | Guide |
+|----------|-------|
+| Ubuntu / Debian | [docs/build/ubuntu.md](docs/build/ubuntu.md) |
+| macOS → Android | [docs/build/macos-android.md](docs/build/macos-android.md) |
+| Your OS missing? | [Contribute a guide!](docs/build/) |
 
 ---
 

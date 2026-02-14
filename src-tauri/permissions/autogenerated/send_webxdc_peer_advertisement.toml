@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-webxdc-peer-advertisement"
+description = "Enables the send_webxdc_peer_advertisement command without any pre-configured scope."
+commands.allow = ["send_webxdc_peer_advertisement"]
+
+[[permission]]
+identifier = "deny-send-webxdc-peer-advertisement"
+description = "Denies the send_webxdc_peer_advertisement command without any pre-configured scope."
+commands.deny = ["send_webxdc_peer_advertisement"]

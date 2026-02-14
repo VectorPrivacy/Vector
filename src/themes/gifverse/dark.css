@@ -1,0 +1,670 @@
+:root {
+  background-color: #030303;
+  --voice-highlight-bg: #F7FFAE30;
+  --voice-highlight-text: #F7FFAE;
+  --voice-frequency-glow: #F7FFAE80;
+  --icon-color-primary: #F7FFAE;
+  --voice-progress-secondary: #F7FFAE40;
+  --reply-highlight-border: #FFAECE;
+  --toast-border-color: #F7FFAE;
+}
+
+.sync-line {
+  background-color: #AEFFDF;
+}
+
+.popup {
+  background-color: rgba(0, 0, 0, 1);
+  box-shadow: 0 0 15px #F7FFAE50;
+  border-color: #F7FFAE;
+}
+
+.text-gradient {
+  background: linear-gradient(to right, #f8f8f8 13.87%, #f8f8f8 60%);
+  background-size: 200% 200%;
+  background-clip: text;
+}
+
+.text-gradient-green {
+  background: linear-gradient(to right, #F7FFAE 13.87%, #F7FFAE 60%);
+  background-size: 200% 200%;
+  background-clip: text;
+}
+
+.back-btn {
+  color: #F7FFAE;
+}
+
+.chatlist-contact {
+  border-color: transparent;
+}
+
+.chat {
+  background-color: inherit;
+}
+
+.chat-messages {
+  background-color: #030303;
+  border-top-color: #FFAECE75;
+  border-top-style: solid;
+  border-top-width: 1px;
+}
+
+.msg-me p {
+  color: #ffffff;
+  background-color: #161616;
+  border-color: #161616;
+}
+
+.msg-them p {
+  background: linear-gradient(90deg, #F7FFAE50, #F7FFAE00);
+  border-color: #F7FFAE;
+}
+
+.msg-reply {
+  border-left: solid rgba(255, 255, 255, 0.45) 2px !important;
+}
+
+/* Purple border when quoting the other person's message */
+.msg-reply-them {
+  border-left-color: #F7FFAE !important;
+}
+
+@keyframes highlightMessage {
+  0% {
+      box-shadow: 0 0 0 0 rgba(66, 29, 95, 0);
+  }
+  20% {
+      box-shadow: 0 0 8px 3px rgba(161, 40, 253, 0.4);
+  }
+  80% {
+      box-shadow: 0 0 8px 3px rgba(161, 40, 253, 0.4);
+  }
+  100% {
+      box-shadow: 0 0 0 0 rgba(66, 29, 95, 0);
+  }
+}
+
+.emoji-picker {
+  background: #251134e3;
+  border-color: #FFAECE;
+}
+
+.attachment-panel {
+  background: #161616;
+  border-color: #F7FFAE;
+}
+
+.input-box {
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+}
+
+#chat-input {
+  background-color: #0A0A0A;
+}
+
+input,
+textarea,
+button {
+  background-color: #161616;
+}
+
+.corner-float {
+  border-color: #F7FFAE;
+}
+
+.divider {
+  background-color: #F7FFAE;
+}
+
+.new-chat-btn .icon {
+  background-color: #F7FFAE;
+}
+
+.msg-preview-container {
+  border-color: #F7FFAE !important;
+  background-color: #F7FFAE50 !important;
+}
+
+.progress-bar {
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+}
+
+select {
+  border: 1px solid #FFAECE;
+}
+
+#whisper-model:focus {
+  box-shadow: 0 0 0 2px rgba(177, 136, 226, 0.3);
+}
+
+#download-model {
+  background: linear-gradient(135deg, 
+    #F7FFAE 0%,
+    #AEFFDF 25%,
+    #B6AEFF 50%,
+    #FFAECE 100%);
+}
+
+#download-model:hover {
+  box-shadow: 0 5px 15px #F7FFAE30;
+}
+
+.model-status {
+  color: #F7FFAE;
+}
+
+.progress-bar-track {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.4),
+    0 0 0 1px #F7FFAE10;
+}
+
+.progress-bar-fill {
+  background: linear-gradient(90deg, 
+    #F7FFAE 0%,
+    #AEFFDF 25%,
+    #B6AEFF 50%,
+    #1D003F 100%);
+}
+
+.progress-text {
+  text-shadow: 0 0 5px #F7FFAE70;
+}
+
+.voice-progress-container {
+  border: 1px solid #F7FFAE;
+  box-shadow: 0 0 15px #F7FFAE30;
+}
+
+.voice-progress-fill {
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+}
+
+.voice-progress-text {
+  color: #F7FFAE;
+}
+
+input[type="checkbox"]:checked + .neon-toggle {
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+  box-shadow: 
+    inset 0 1px 10px rgba(0, 0, 0, 0.1);
+}
+
+.neon-toggle:hover {
+  box-shadow: 
+    inset 0 1px 3px rgba(0, 0, 0, 0.3),
+    0 0 8px #F7FFAE00;
+}
+
+input[type="checkbox"]:checked + .neon-toggle:hover {
+  box-shadow: 
+    0 0 6px #F7FFAE90,
+    inset 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+#theme-select:focus {
+  box-shadow: 0 0 0 2px #FFAECE50;
+}
+
+.icon-trash {
+  background-color: #F7FFAE;
+}
+
+select:disabled {
+  border-color: #F7FFAE30;
+}
+
+.nav-icon {
+  background-color: #FFAECE;
+}
+
+/* Custom Audio Player Theme Overrides */
+/* Default style */
+.custom-audio-player {
+  background: #F7FFAE40;
+  border-color: #F7FFAE;
+}
+
+.custom-audio-player:hover {
+  background: #F7FFAE60;
+  border-color: #F7FFAE50;
+}
+
+/* msg-me style (purple gradient to match text bubbles) */
+.msg-me .custom-audio-player {
+  background: #161616;
+  border-color: #161616;
+}
+
+.msg-me .custom-audio-player:hover {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+  box-shadow: none;
+}
+
+/* msg-them style (dark gray to match text bubbles) */
+.msg-them .custom-audio-player {
+  background: #F7FFAE20;
+  border-color: #F7FFAE80;
+}
+
+.msg-them .custom-audio-player:hover {
+  background: #FFAECE40;
+  border-color: #FFAECE;
+  box-shadow: none;
+}
+
+.audio-play-btn {
+  background: linear-gradient(0deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+}
+
+.audio-progress-fill {
+  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+}
+
+.audio-progress-handle {
+  background: #F7FFAE;
+}
+
+.waveform-bar {
+  background: linear-gradient(to top, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+}
+
+.custom-audio-player.playing .waveform-bar {
+  box-shadow: none;
+}
+
+.audio-time-display .current-time {
+  color: #ffffff60;
+}
+
+.audio-transcribe-btn .icon {
+  background-color: #F7FFAE;
+}
+
+.transcribe-progress-fill {
+  background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
+}
+
+.transcribe-progress-text {
+  color: #FFAECE;
+}
+
+.transcription-section.current {
+  background-color: #F7FFAE30;
+  color: #F7FFAE;
+  box-shadow: 0 0 8px #F7FFAE20;
+}
+
+/* Update Settings Section Styles */
+#current-version,
+#new-version {
+  color: #F7FFAE;
+}
+
+.accept-btn {
+  background: #FFAECE10;
+  border-color: #FFAECE;
+  color: #ffffff;
+}
+
+.accept-btn:hover:not(:disabled) {
+  background: #F7FFAE10;
+  border: 1px solid #F7FFAE;
+  color: #ffffff;
+}
+
+#update-status-text {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+#update-progress-bar {
+  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+  box-shadow: 0 0 10px #F7FFAE40;
+}
+
+#download-update-btn,
+#restart-update-btn {
+  color: #000;
+  border: none;
+  box-shadow: 0 4px 12px #F7FFAE30;
+}
+
+#changelog-content {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid #F7FFAE20;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+#popupConfirm {
+  background-color: #F7FFAE;
+  color: #000000;
+}
+
+/* File Preview Overlay Theme */
+.file-preview-container {
+  border-color: #474747;
+}
+
+.file-preview-icon-container {
+  background: rgba(177, 136, 226, 0.1);
+  border: 1px solid rgba(177, 136, 226, 0.2);
+}
+
+.file-preview-icon {
+  background-color: #F7FFAE;
+}
+
+.file-preview-option {
+  background: rgba(177, 136, 226, 0.05);
+  border: 1px solid #474747;
+}
+
+.file-preview-btn-send {
+  background: #F7FFAE;
+  color: #000000;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.file-preview-btn-send:hover {
+  opacity: 0.9;
+}
+
+/* Marketplace Theme Overrides */
+.marketplace-panel {
+  background-color: #0a0a0a;
+}
+
+.marketplace-header {
+  background-color: rgba(22, 22, 22, 0.85);
+}
+
+.marketplace-search-container input:focus {
+  border-color: rgba(89, 252, 179, 0.5);
+}
+
+.marketplace-filter-tag {
+  background-color: rgba(89, 252, 179, 0.15);
+  color: #59fcb3;
+}
+
+.marketplace-filter-tag:hover {
+  background-color: rgba(89, 252, 179, 0.25);
+}
+
+.marketplace-filter-tag .icon {
+  background-color: #59fcb3;
+}
+
+.marketplace-app-card {
+  background-color: #161616;
+  border-color: rgba(90, 252, 180, 0.15);
+}
+
+.marketplace-app-card:hover {
+  border-color: rgba(90, 252, 180, 0.35);
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.15);
+}
+
+.marketplace-app-icon-container {
+  background-color: rgba(89, 252, 179, 0.1);
+  border: 1px solid rgba(89, 252, 179, 0.2);
+}
+
+.marketplace-app-icon-placeholder {
+  background-color: #59fcb3;
+}
+
+.marketplace-app-category {
+  background-color: rgba(89, 252, 179, 0.15);
+  color: #59fcb3;
+}
+
+.marketplace-app-category:hover {
+  background-color: rgba(89, 252, 179, 0.3);
+}
+
+.marketplace-install-btn {
+  background-color: #58fcb3;
+  color: #000;
+}
+
+.marketplace-install-btn:hover {
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+.marketplace-install-btn.installed {
+  background-color: #58fcb3;
+}
+
+.marketplace-install-btn.installing {
+  background-color: #58fcb3;
+  opacity: 0.7;
+}
+
+.marketplace-install-btn.update-available {
+  background-color: #58fcb3;
+  color: #000;
+}
+
+.marketplace-install-btn.updating {
+  background-color: #58fcb3;
+  opacity: 0.7;
+}
+
+.marketplace-app-version.update-available {
+  color: #59fcb3;
+}
+
+.marketplace-loading-icon {
+  background-color: #59fcb3;
+}
+
+.marketplace-empty-icon {
+  background-color: rgba(89, 252, 179, 0.4);
+}
+
+.marketplace-retry-btn {
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  color: #000;
+}
+
+.marketplace-retry-btn:hover {
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+/* Publish Dialog Theme */
+.publish-app-container {
+  background-color: #0a0a0a;
+  border-color: rgba(90, 252, 180, 0.25);
+}
+
+.publish-app-header {
+  border-bottom-color: rgba(90, 252, 180, 0.2);
+}
+
+.publish-app-icon-placeholder {
+  background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
+}
+
+.publish-app-icon-placeholder .icon {
+  background-color: #000;
+}
+
+.publish-app-field input:focus,
+.publish-app-field textarea:focus {
+  border-color: rgba(89, 252, 179, 0.5);
+  box-shadow: 0 0 0 2px rgba(89, 252, 179, 0.15);
+}
+
+.publish-app-btn-publish {
+  background: linear-gradient(90deg, #33db98, #00ff9d);
+  color: #000;
+}
+
+.publish-app-btn-publish:hover {
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+/* File Preview Publish Button */
+.file-preview-btn-publish {
+  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
+  color: #000;
+}
+
+.file-preview-btn-publish .icon {
+  background-color: #000;
+}
+
+.file-preview-btn-publish:hover {
+  box-shadow: 0 4px 16px #F7FFAE50;
+}
+
+/* App Details Panel Theme Overrides */
+.app-details-panel {
+  background-color: #0a0a0a;
+}
+
+.app-details-header {
+  background-color: rgba(22, 22, 22, 0.85);
+}
+
+.app-details-icon-container {
+  background-color: rgba(89, 252, 179, 0.1);
+}
+
+.app-details-icon-placeholder {
+  background-color: #59fcb3;
+}
+
+.app-details-category {
+  background-color: rgba(89, 252, 179, 0.15);
+  color: #59fcb3;
+}
+
+.app-details-category:hover {
+  background-color: rgba(89, 252, 179, 0.3);
+}
+
+.app-details-action-btn {
+  background-color: #58fcb3;
+  color: #000;
+}
+
+.app-details-action-btn:hover {
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+.app-details-action-btn.installed {
+  background-color: #58fcb3;
+}
+
+.app-details-action-btn.installing {
+  background-color: #58fcb3;
+  opacity: 0.7;
+}
+
+/* App Details Uninstall Button */
+.app-details-uninstall-btn {
+  background-color: rgba(255, 100, 100, 0.2);
+  color: #ff6464;
+  border: 1px solid rgba(255, 100, 100, 0.4);
+}
+
+.app-details-uninstall-btn:hover {
+  background-color: rgba(255, 100, 100, 0.3);
+  box-shadow: 0 4px 16px rgba(255, 100, 100, 0.2);
+}
+
+/* App Details Update Button */
+.app-details-update-btn {
+  background-color: #58fcb3;
+  color: #000;
+}
+
+.app-details-update-btn:hover {
+  box-shadow: 0 4px 16px rgba(89, 252, 179, 0.4);
+}
+
+.app-details-update-btn.updating {
+  background-color: #58fcb3;
+  opacity: 0.7;
+}
+
+.app-details-publisher {
+  background-color: rgba(89, 252, 179, 0.05);
+}
+
+.app-details-publisher:hover {
+  background-color: rgba(89, 252, 179, 0.1);
+}
+
+/* Marketplace category overflow indicator */
+.marketplace-app-category-overflow {
+  background-color: rgba(89, 252, 179, 0.2);
+  color: rgba(89, 252, 179, 0.9);
+}
+
+/* Featured category card */
+.marketplace-featured-category.highlighted {
+  background: linear-gradient(135deg, rgba(89, 252, 179, 0.15) 0%, rgba(43, 151, 108, 0.08) 100%);
+  border-color: rgba(89, 252, 179, 0.3);
+}
+
+.marketplace-featured-category.highlighted:hover {
+  box-shadow: 0 8px 24px rgba(89, 252, 179, 0.2);
+}
+
+.marketplace-popular-category:hover {
+  background-color: rgba(89, 252, 179, 0.2);
+  color: #59fcb3;
+}
+
+/* Relay Add Button */
+.relay-add-btn {
+  background: #F7FFAE50;
+  border-color: #F7FFAE;
+  color: #F7FFAE;
+}
+
+.relay-add-btn:hover {
+  background: #AEFFDF50;
+  border-color: #AEFFDF;
+  color: #AEFFDF;
+}
+
+/* Relay Dialog */
+.relay-dialog {
+  border-color: #171717;
+}
+
+.relay-dialog-header {
+  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
+}
+
+.relay-form-input:focus,
+.relay-form-select:focus {
+  border-color: #F7FFAE;
+}
+
+.relay-dialog-buttons .primary-btn {
+  background-color: #F7FFAE;
+  color: #000000;
+}
+
+.relay-dialog-buttons .primary-btn:hover {
+  color: #000;
+  box-shadow: 0 0 4px #F7FFAE00;
+}
+
+.relay-metric-value {
+  color: #F7FFAE;
+}
+
+.relay-dialog-header h3 {
+  color: #000;
+  margin: 0;
+  line-height: 1;
+}

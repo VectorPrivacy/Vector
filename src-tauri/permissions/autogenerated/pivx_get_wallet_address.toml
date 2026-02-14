@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-get-wallet-address"
+description = "Enables the pivx_get_wallet_address command without any pre-configured scope."
+commands.allow = ["pivx_get_wallet_address"]
+
+[[permission]]
+identifier = "deny-pivx-get-wallet-address"
+description = "Denies the pivx_get_wallet_address command without any pre-configured scope."
+commands.deny = ["pivx_get_wallet_address"]

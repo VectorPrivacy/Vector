@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-get-promo-balance"
+description = "Enables the pivx_get_promo_balance command without any pre-configured scope."
+commands.allow = ["pivx_get_promo_balance"]
+
+[[permission]]
+identifier = "deny-pivx-get-promo-balance"
+description = "Denies the pivx_get_promo_balance command without any pre-configured scope."
+commands.deny = ["pivx_get_promo_balance"]

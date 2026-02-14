@@ -19,3 +19,38 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# ============================================
+# Mini Apps (WebXDC) - JNI and JavaScript Interface
+# ============================================
+
+# Keep the JavaScript interface for Mini Apps WebView
+-keepclassmembers class io.vectorapp.miniapp.MiniAppIpc {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
+# Keep MiniAppIpc native JNI methods
+-keepclassmembers class io.vectorapp.miniapp.MiniAppIpc {
+    native <methods>;
+}
+
+# Keep MiniAppManager native JNI methods (callbacks to Rust)
+-keepclassmembers class io.vectorapp.miniapp.MiniAppManager {
+    native <methods>;
+}
+
+# Keep MiniAppManager companion object static methods (called from Rust via JNI)
+-keep class io.vectorapp.miniapp.MiniAppManager {
+    public static void initialize(android.app.Activity);
+    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
+    public static void closeMiniApp();
+    public static void sendToMiniApp(java.lang.String, java.lang.String);
+    public static void sendRealtimeData(byte[]);
+    public static boolean isOpen();
+    public static java.lang.String getCurrentMiniAppId();
+}
+
+# Keep MiniAppWebViewClient native JNI method for file serving
+-keepclassmembers class io.vectorapp.miniapp.MiniAppWebViewClient {
+    native <methods>;
+}

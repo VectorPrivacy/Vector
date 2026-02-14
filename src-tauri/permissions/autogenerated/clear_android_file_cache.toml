@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-android-file-cache"
+description = "Enables the clear_android_file_cache command without any pre-configured scope."
+commands.allow = ["clear_android_file_cache"]
+
+[[permission]]
+identifier = "deny-clear-android-file-cache"
+description = "Denies the clear_android_file_cache command without any pre-configured scope."
+commands.deny = ["clear_android_file_cache"]

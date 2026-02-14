@@ -3,7 +3,16 @@ use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use blurhash::decode;
 use base64::{Engine as _, engine::general_purpose};
-use image::ImageEncoder;
+
+// Re-export SIMD-accelerated functions for backwards compatibility
+pub use crate::simd::{
+    bytes_to_hex_32, bytes_to_hex_string,
+    hex_string_to_bytes, hex_to_bytes_16, hex_to_bytes_32,
+    has_alpha_transparency, set_all_alpha_opaque,
+};
+
+#[cfg(target_os = "windows")]
+pub use crate::simd::has_all_alpha_near_zero;
 
 /// Extract all HTTPS URLs from a string
 pub fn extract_https_urls(text: &str) -> Vec<String> {
@@ -14,24 +23,13 @@ pub fn extract_https_urls(text: &str) -> Vec<String> {
         let abs_start = start_idx + https_idx;
         let url_text = &text[abs_start..];
 
-        // Find the end of the URL (first whitespace or common URL-ending chars)
-        let mut end_idx = url_text
-            .find(|c: char| {
-                c.is_whitespace()
-                    || c == '"'
-                    || c == '<'
-                    || c == '>'
-                    || c == ')'
-                    || c == ']'
-                    || c == '}'
-                    || c == '|'
-            })
-            .unwrap_or(url_text.len());
+        // Find the end of the URL (SIMD-accelerated: 4.7-5.2x faster than scalar)
+        let mut end_idx = crate::simd::url::find_url_delimiter(url_text.as_bytes());
 
-        // Trim trailing punctuation
+        // Trim trailing punctuation (ASCII-only, so byte access is safe)
         while end_idx > 0 {
-            let last_char = url_text[..end_idx].chars().last().unwrap();
-            if last_char == '.' || last_char == ',' || last_char == ':' || last_char == ';' {
+            let last_byte = url_text.as_bytes()[end_idx - 1];
+            if last_byte == b'.' || last_byte == b',' || last_byte == b':' || last_byte == b';' {
                 end_idx -= 1;
             } else {
                 break;
@@ -47,6 +45,7 @@ pub fn extract_https_urls(text: &str) -> Vec<String> {
 
     urls
 }
+
 
 /// Creates a description of a file type based on its extension.
 pub fn get_file_type_description(extension: &str) -> String {
@@ -328,61 +327,11 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Convert a byte slice to a hex string
-pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
-    // Pre-allocate the exact size needed (2 hex chars per byte)
-    let mut result = String::with_capacity(bytes.len() * 2);
-    
-    // Use a lookup table for hex conversion
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    
-    for &b in bytes {
-        // Extract high and low nibbles
-        let high = b >> 4;
-        let low = b & 0xF;
-        result.push(HEX_CHARS[high as usize] as char);
-        result.push(HEX_CHARS[low as usize] as char);
-    }
-    
-    result
-}
-
-/// Convert hex string back to bytes for decryption
-pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
-    // Pre-allocate the result vector to avoid resize operations
-    let mut result = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    
-    // Process bytes directly to avoid UTF-8 decoding overhead
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        // Convert two hex characters to a single byte
-        let high = match bytes[i] {
-            b'0'..=b'9' => bytes[i] - b'0',
-            b'a'..=b'f' => bytes[i] - b'a' + 10,
-            b'A'..=b'F' => bytes[i] - b'A' + 10,
-            _ => 0,
-        };
-        
-        let low = match bytes[i + 1] {
-            b'0'..=b'9' => bytes[i + 1] - b'0',
-            b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
-            b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
-            _ => 0,
-        };
-        
-        result.push((high << 4) | low);
-        i += 2;
-    }
-    
-    result
-}
-
 /// Calculate SHA-256 hash of file data
 pub fn calculate_file_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    hex::encode(hasher.finalize())
+    bytes_to_hex_string(hasher.finalize().as_slice())
 }
 
 /// Ultra-fast nearest-neighbor downsampling for RGBA8 pixel data
@@ -401,6 +350,10 @@ pub fn calculate_file_hash(data: &[u8]) -> String {
 ///
 /// # Returns
 /// Downsampled RGBA8 pixel data
+/// Fast nearest-neighbor downsampling for RGBA images.
+///
+/// Delegates to SIMD-optimized implementation in `crate::simd::image`.
+#[inline]
 pub fn nearest_neighbor_downsample(
     pixels: &[u8],
     src_width: u32,
@@ -408,21 +361,7 @@ pub fn nearest_neighbor_downsample(
     dst_width: u32,
     dst_height: u32,
 ) -> Vec<u8> {
-    let mut result = Vec::with_capacity((dst_width * dst_height * 4) as usize);
-    
-    let x_ratio = src_width as f32 / dst_width as f32;
-    let y_ratio = src_height as f32 / dst_height as f32;
-    
-    for ty in 0..dst_height {
-        let sy = (ty as f32 * y_ratio) as u32;
-        for tx in 0..dst_width {
-            let sx = (tx as f32 * x_ratio) as u32;
-            let src_idx = ((sy * src_width + sx) * 4) as usize;
-            result.extend_from_slice(&pixels[src_idx..src_idx + 4]);
-        }
-    }
-    
-    result
+    crate::simd::image::nearest_neighbor_downsample(pixels, src_width, src_height, dst_width, dst_height)
 }
 
 /// Generate a blurhash from RGBA8 image data with adaptive downscaling for optimal performance
@@ -456,11 +395,42 @@ pub fn generate_blurhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Op
     blurhash::encode(4, 3, thumbnail_width, thumbnail_height, &thumbnail_pixels).ok()
 }
 
+/// Generate a blurhash from a DynamicImage with minimal memory allocation.
+///
+/// Generate a blurhash from a DynamicImage.
+///
+/// Resizes to a small thumbnail before converting to RGBA,
+/// avoiding large temporary allocations for high-resolution images.
+#[inline]
+pub fn generate_blurhash_from_image(img: &image::DynamicImage) -> Option<String> {
+    // Target size for blurhash - 64x64 is more than enough for a 4x3 component hash
+    // Small thumbnail gives good quality blurhash with minimal allocation
+    const BLURHASH_SIZE: u32 = 64;
+
+    let (width, height) = (img.width(), img.height());
+
+    // Calculate thumbnail dimensions maintaining aspect ratio
+    let (thumb_w, thumb_h) = if width > height {
+        (BLURHASH_SIZE, (BLURHASH_SIZE * height / width).max(1))
+    } else {
+        ((BLURHASH_SIZE * width / height).max(1), BLURHASH_SIZE)
+    };
+
+    let thumbnail = img.thumbnail(thumb_w, thumb_h);
+    let rgba = thumbnail.to_rgba8();
+    blurhash::encode(4, 3, rgba.width(), rgba.height(), rgba.as_raw()).ok()
+}
+
 /// Decode a blurhash string to a Base64-encoded PNG data URL
 /// Returns a data URL string that can be used directly in an <img> src attribute
 pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch: f32) -> String {
     const EMPTY_DATA_URL: &str = "data:image/png;base64,";
-    
+
+    // Blurhash must be at least 6 characters - return early if invalid
+    if blurhash.len() < 6 {
+        return EMPTY_DATA_URL.to_string();
+    }
+
     let decoded_data = match decode(blurhash, width, height, punch) {
         Ok(data) => data,
         Err(e) => {
@@ -475,17 +445,10 @@ pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch:
     // Fast path for RGBA data
     if bytes_per_pixel == 4 {
         encode_rgba_to_png_base64(&decoded_data, width, height)
-    } 
-    // Convert RGB to RGBA
+    }
+    // Convert RGB to RGBA using SIMD-optimized function
     else if bytes_per_pixel == 3 {
-        // Pre-allocate exact size needed
-        let mut rgba_data = Vec::with_capacity(pixel_count * 4);
-        
-        // Use chunks_exact for safe and efficient iteration
-        for rgb_chunk in decoded_data.chunks_exact(3) {
-            rgba_data.extend_from_slice(&[rgb_chunk[0], rgb_chunk[1], rgb_chunk[2], 255]);
-        }
-        
+        let rgba_data = crate::simd::image::rgb_to_rgba(&decoded_data);
         encode_rgba_to_png_base64(&rgba_data, width, height)
     } else {
         eprintln!("Unexpected decoded data length: {} bytes for {} pixels", 
@@ -498,59 +461,25 @@ pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch:
 #[inline]
 fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> String {
     const EMPTY_DATA_URL: &str = "data:image/png;base64,";
-    
-    // Create image without additional allocation
-    let img = match image::RgbaImage::from_raw(width, height, rgba_data.to_vec()) {
-        Some(img) => img,
-        None => {
-            eprintln!("Failed to create image from RGBA data");
+
+    // Use shared encode_png - no need to clone data into RgbaImage
+    let png_data = match crate::shared::image::encode_png(rgba_data, width, height) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("Failed to encode PNG: {}", e);
             return EMPTY_DATA_URL.to_string();
         }
     };
-    
-    // Pre-allocate PNG buffer with estimated size
-    // PNG is typically smaller than raw RGBA, estimate 50% of original size
-    let estimated_size = (rgba_data.len() / 2).max(1024);
-    let mut png_data = Vec::with_capacity(estimated_size);
-    
-    // Use best compression for smaller output
-    let encoder = image::codecs::png::PngEncoder::new_with_quality(
-        &mut png_data,
-        image::codecs::png::CompressionType::Best,
-        image::codecs::png::FilterType::Adaptive,
-    );
-    if let Err(e) = encoder.write_image(
-        img.as_raw(),
-        width,
-        height,
-        image::ExtendedColorType::Rgba8
-    ) {
-        eprintln!("Failed to encode PNG: {}", e);
-        return EMPTY_DATA_URL.to_string();
-    }
-    
+
     // Encode as base64 with pre-allocated string
     // Base64 is 4/3 the size of input + padding
     let base64_capacity = ((png_data.len() * 4 / 3) + 4) + 22; // +22 for "data:image/png;base64,"
     let mut result = String::with_capacity(base64_capacity);
     result.push_str("data:image/png;base64,");
     general_purpose::STANDARD.encode_string(&png_data, &mut result);
-    
+
     result
 }
-
-/// Check if RGBA pixel data contains any meaningful transparency (alpha < 255)
-/// Returns true if any pixel has alpha less than 255, indicating the image uses transparency
-#[inline]
-pub fn has_alpha_transparency(rgba_pixels: &[u8]) -> bool {
-    // Check every 4th byte (alpha channel) for any value less than 255
-    rgba_pixels
-        .iter()
-        .skip(3)
-        .step_by(4)
-        .any(|&alpha| alpha < 255)
-}
-
 
 // ===== MIME & Extension Conversion Utilities =====
 static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
@@ -634,6 +563,7 @@ static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("dmg", "application/x-apple-diskimage");
     m.insert("apk", "application/vnd.android.package-archive");
     m.insert("jar", "application/java-archive");
+    m.insert("xdc", "application/vnd.webxdc+zip"); // WebXDC Mini Apps
 
     // 3D
     m.insert("obj", "model/obj");
@@ -758,6 +688,7 @@ static MIME_TO_EXT: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("application/x-apple-diskimage", "dmg");
     m.insert("application/vnd.android.package-archive", "apk");
     m.insert("application/java-archive", "jar");
+    m.insert("application/vnd.webxdc+zip", "xdc"); // WebXDC Mini Apps
 
     // 3D
     m.insert("model/obj", "obj");

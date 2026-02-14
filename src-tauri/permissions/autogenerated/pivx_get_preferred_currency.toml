@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pivx-get-preferred-currency"
+description = "Enables the pivx_get_preferred_currency command without any pre-configured scope."
+commands.allow = ["pivx_get_preferred_currency"]
+
+[[permission]]
+identifier = "deny-pivx-get-preferred-currency"
+description = "Denies the pivx_get_preferred_currency command without any pre-configured scope."
+commands.deny = ["pivx_get_preferred_currency"]

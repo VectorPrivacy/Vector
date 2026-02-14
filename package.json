@@ -1,7 +1,7 @@
 {
   "name": "vector",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "tauri": "tauri",
@@ -12,17 +12,21 @@
     "dev": "npm run tauri:dev",
     "build": "npm run tauri:build",
     "dev:bare": "npm run tauri:dev:bare",
-    "build:bare": "npm run tauri:build:bare"
+    "build:bare": "npm run tauri:build:bare",
+    "android:dev": "./scripts/android-dev.sh",
+    "android:build": "tauri android build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.9.4"
+    "@tauri-apps/cli": "^2.9.6",
+    "lightningcss": "^1.31.1",
+    "terser": "^5.46.0"
   },
   "dependencies": {
-    "@tauri-apps/plugin-clipboard-manager": "^2.3.0",
-    "@tauri-apps/plugin-deep-link": "^2.4.5",
-    "@tauri-apps/plugin-dialog": "^2.4.0",
-    "@tauri-apps/plugin-fs": "^2.4.2",
-    "@tauri-apps/plugin-process": "^2.3.0",
-    "@tauri-apps/plugin-updater": "^2.9.0"
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
+    "@tauri-apps/plugin-deep-link": "^2.4.6",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.0"
   }
 }

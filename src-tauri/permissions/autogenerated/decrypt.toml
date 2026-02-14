@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-decrypt"
+description = "Enables the decrypt command without any pre-configured scope."
+commands.allow = ["decrypt"]
+
+[[permission]]
+identifier = "deny-decrypt"
+description = "Denies the decrypt command without any pre-configured scope."
+commands.deny = ["decrypt"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-media-servers"
+description = "Enables the get_media_servers command without any pre-configured scope."
+commands.allow = ["get_media_servers"]
+
+[[permission]]
+identifier = "deny-get-media-servers"
+description = "Denies the get_media_servers command without any pre-configured scope."
+commands.deny = ["get_media_servers"]

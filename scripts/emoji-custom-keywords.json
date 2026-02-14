@@ -1,0 +1,4774 @@
+{
+  "😃": [
+    "excited"
+  ],
+  "😄": [
+    "laughing"
+  ],
+  "😁": [
+    "pleased"
+  ],
+  "😆": [
+    "grin"
+  ],
+  "😅": [
+    "awkward",
+    "anxious"
+  ],
+  "🤣": [
+    "lmfao"
+  ],
+  "🙂": [
+    "content"
+  ],
+  "🙃": [
+    "upside",
+    "down",
+    "silly",
+    "playful",
+    "ironic",
+    "sarcastic"
+  ],
+  "😉": [
+    "playful",
+    "hint",
+    "joke"
+  ],
+  "😊": [
+    "happy",
+    "pleased"
+  ],
+  "😇": [
+    "good"
+  ],
+  "🥰": [
+    "loving",
+    "adorable"
+  ],
+  "😍": [
+    "heart",
+    "eyes",
+    "crush",
+    "infatuation",
+    "adore"
+  ],
+  "🤩": [
+    "struck",
+    "amazed",
+    "impressed",
+    "starstruck"
+  ],
+  "😘": [
+    "kissing",
+    "affection"
+  ],
+  "😗": [
+    "peck"
+  ],
+  "😚": [
+    "kiss",
+    "affection"
+  ],
+  "😙": [
+    "happy",
+    "affection"
+  ],
+  "😛": [
+    "silly",
+    "playful",
+    "teasing"
+  ],
+  "😜": [
+    "silly",
+    "playful"
+  ],
+  "🤪": [
+    "silly",
+    "wacky"
+  ],
+  "😝": [
+    "silly",
+    "playful",
+    "joke"
+  ],
+  "🤑": [
+    "rich",
+    "wealthy",
+    "dollar"
+  ],
+  "🤗": [
+    "embrace",
+    "cuddle",
+    "arms"
+  ],
+  "🤫": [
+    "silence",
+    "secret"
+  ],
+  "🤔": [
+    "wonder",
+    "thought"
+  ],
+  "🤐": [
+    "silent"
+  ],
+  "🤨": [
+    "suspicious",
+    "doubt"
+  ],
+  "😐": [
+    "poker"
+  ],
+  "😑": [
+    "blank",
+    "deadpan"
+  ],
+  "😏": [
+    "suggestive"
+  ],
+  "😒": [
+    "unimpressed",
+    "skeptical",
+    "side",
+    "eye"
+  ],
+  "🙄": [
+    "annoyed"
+  ],
+  "😬": [
+    "eek",
+    "nervous"
+  ],
+  "🤥": [
+    "nose",
+    "fib"
+  ],
+  "😌": [
+    "relaxed",
+    "phew"
+  ],
+  "😔": [
+    "reflective"
+  ],
+  "😪": [
+    "exhausted"
+  ],
+  "🤤": [
+    "drool",
+    "hungry",
+    "desire",
+    "want"
+  ],
+  "😷": [
+    "ill",
+    "virus",
+    "covid",
+    "pandemic"
+  ],
+  "🤒": [
+    "fever",
+    "unwell"
+  ],
+  "🤕": [
+    "head",
+    "wounded",
+    "injured"
+  ],
+  "🤢": [
+    "green",
+    "illness"
+  ],
+  "🤧": [
+    "achoo",
+    "cold",
+    "tissues"
+  ],
+  "🥵": [
+    "overheated",
+    "sun",
+    "burning"
+  ],
+  "🥶": [
+    "ice",
+    "winter",
+    "chill",
+    "frozen"
+  ],
+  "😵": [
+    "confused",
+    "disoriented",
+    "shocked"
+  ],
+  "😵‍💫": [
+    "disoriented"
+  ],
+  "🤯": [
+    "boom"
+  ],
+  "🤠": [
+    "western",
+    "rodeo",
+    "yeehaw"
+  ],
+  "🥳": [
+    "festive"
+  ],
+  "😎": [
+    "dude",
+    "chill"
+  ],
+  "🤓": [
+    "dork"
+  ],
+  "🧐": [
+    "sophisticated",
+    "intelligent",
+    "examine"
+  ],
+  "😕": [
+    "puzzled",
+    "uncertain",
+    "unsure"
+  ],
+  "😟": [
+    "concerned"
+  ],
+  "🙁": [
+    "upset",
+    "disappointed"
+  ],
+  "☹️": [
+    "upset",
+    "disappointed",
+    "unhappy"
+  ],
+  "😮": [
+    "woah"
+  ],
+  "😯": [
+    "shocked"
+  ],
+  "😲": [
+    "amazed",
+    "surprised",
+    "wow"
+  ],
+  "😳": [
+    "blushing",
+    "shocked"
+  ],
+  "🥺": [
+    "beg"
+  ],
+  "😦": [
+    "shock",
+    "horror"
+  ],
+  "😧": [
+    "shocked",
+    "horrified",
+    "concerned"
+  ],
+  "😨": [
+    "terrified",
+    "shock"
+  ],
+  "😰": [
+    "worried",
+    "stressed"
+  ],
+  "😢": [
+    "tears",
+    "upset"
+  ],
+  "😭": [
+    "sobbing",
+    "wailing"
+  ],
+  "😱": [
+    "horror",
+    "terrified"
+  ],
+  "😖": [
+    "upset"
+  ],
+  "😣": [
+    "struggling",
+    "determined",
+    "persisting"
+  ],
+  "😞": [
+    "upset"
+  ],
+  "😓": [
+    "stressed",
+    "disappointed"
+  ],
+  "😩": [
+    "exhausted",
+    "frustrated"
+  ],
+  "😫": [
+    "exhausted",
+    "frustrated",
+    "annoyed"
+  ],
+  "😤": [
+    "frustrated",
+    "hmph"
+  ],
+  "😡": [
+    "furious"
+  ],
+  "😠": [
+    "annoyed"
+  ],
+  "😈": [
+    "mischievous",
+    "naughty"
+  ],
+  "👿": [
+    "mad"
+  ],
+  "💀": [
+    "danger",
+    "poison"
+  ],
+  "☠️": [
+    "poison",
+    "danger",
+    "pirate"
+  ],
+  "💩": [
+    "crap",
+    "shit"
+  ],
+  "🤡": [
+    "circus",
+    "funny",
+    "joke"
+  ],
+  "👹": [
+    "ugly"
+  ],
+  "👺": [
+    "scary",
+    "ugly"
+  ],
+  "👻": [
+    "spooky"
+  ],
+  "👽": [
+    "et"
+  ],
+  "👾": [
+    "invader",
+    "retro"
+  ],
+  "🤖": [
+    "mechanical",
+    "bot",
+    "automation"
+  ],
+  "👋": [
+    "goodbye"
+  ],
+  "🤚": [
+    "highfive",
+    "stop",
+    "halt"
+  ],
+  "🖐️": [
+    "halt"
+  ],
+  "✋": [
+    "highfive",
+    "halt"
+  ],
+  "🖖": [
+    "spock",
+    "star",
+    "trek",
+    "prosper"
+  ],
+  "👌": [
+    "perfect",
+    "nice",
+    "good"
+  ],
+  "🤏": [
+    "tiny"
+  ],
+  "✌️": [
+    "sign",
+    "yeah"
+  ],
+  "🤞": [
+    "hopeful",
+    "wishing"
+  ],
+  "🤟": [
+    "rock",
+    "music",
+    "sign"
+  ],
+  "🤘": [
+    "rock",
+    "metal",
+    "music",
+    "concert"
+  ],
+  "👇": [
+    "below"
+  ],
+  "👆": [
+    "above"
+  ],
+  "👉": [
+    "this",
+    "way"
+  ],
+  "👈": [
+    "that",
+    "way"
+  ],
+  "👍": [
+    "approve",
+    "positive"
+  ],
+  "👎": [
+    "disapprove",
+    "negative"
+  ],
+  "✊": [
+    "power",
+    "strength"
+  ],
+  "🤛": [
+    "left",
+    "facing",
+    "bump",
+    "pound"
+  ],
+  "🤜": [
+    "right",
+    "facing",
+    "bump",
+    "pound"
+  ],
+  "👏": [
+    "praise"
+  ],
+  "👐": [
+    "welcome"
+  ],
+  "🤲": [
+    "please",
+    "beg",
+    "offering"
+  ],
+  "🤝": [
+    "greet"
+  ],
+  "🙏": [
+    "thank",
+    "you",
+    "prayer",
+    "namaste"
+  ],
+  "💪": [
+    "strength",
+    "power"
+  ],
+  "🦾": [
+    "robot",
+    "bionic"
+  ],
+  "🦿": [
+    "robot",
+    "bionic"
+  ],
+  "🦶": [
+    "toe",
+    "sole"
+  ],
+  "🦻": [
+    "deaf",
+    "accessible"
+  ],
+  "👃": [
+    "scent",
+    "sniff"
+  ],
+  "🧠": [
+    "mind",
+    "intellectual",
+    "intelligence"
+  ],
+  "👀": [
+    "watch",
+    "view",
+    "peek"
+  ],
+  "👅": [
+    "taste",
+    "flavor"
+  ],
+  "👄": [
+    "speaking"
+  ],
+  "🫀": [
+    "cardiac",
+    "love"
+  ],
+  "🫁": [
+    "breathing",
+    "respiratory"
+  ],
+  "🦷": [
+    "dental",
+    "molar"
+  ],
+  "🦴": [
+    "structure"
+  ],
+  "👁️": [
+    "see",
+    "view",
+    "vision",
+    "sight"
+  ],
+  "🖕": [
+    "fuck",
+    "you",
+    "rude",
+    "offensive"
+  ],
+  "💅": [
+    "self",
+    "beauty"
+  ],
+  "🍏": [
+    "healthy",
+    "food"
+  ],
+  "🍎": [
+    "healthy"
+  ],
+  "🍐": [
+    "healthy",
+    "food"
+  ],
+  "🍌": [
+    "food"
+  ],
+  "🍉": [
+    "summer",
+    "food"
+  ],
+  "🍇": [
+    "food",
+    "wine"
+  ],
+  "🍓": [
+    "red"
+  ],
+  "🍈": [
+    "food",
+    "honeydew"
+  ],
+  "🍒": [
+    "food",
+    "berry"
+  ],
+  "🍑": [
+    "food",
+    "butt",
+    "ass",
+    "booty"
+  ],
+  "🍍": [
+    "food"
+  ],
+  "🥥": [
+    "fruit",
+    "tropical",
+    "food"
+  ],
+  "🥝": [
+    "green"
+  ],
+  "🥑": [
+    "guacamole"
+  ],
+  "🍆": [
+    "food",
+    "dick",
+    "penis",
+    "cock"
+  ],
+  "🥔": [
+    "tuber"
+  ],
+  "🥕": [
+    "orange"
+  ],
+  "🌽": [
+    "vegetable",
+    "food"
+  ],
+  "🌶️": [
+    "vegetable",
+    "food",
+    "spicy",
+    "chili"
+  ],
+  "🥬": [
+    "vegetable",
+    "food",
+    "spinach"
+  ],
+  "🥦": [
+    "vegetable",
+    "food",
+    "green"
+  ],
+  "🧄": [
+    "vegetable",
+    "food",
+    "spice"
+  ],
+  "🧅": [
+    "vegetable",
+    "food",
+    "spice"
+  ],
+  "🍄": [
+    "fungi",
+    "food"
+  ],
+  "🥜": [
+    "nuts",
+    "legume"
+  ],
+  "🌰": [
+    "food",
+    "nut"
+  ],
+  "🍞": [
+    "bakery"
+  ],
+  "🥐": [
+    "bakery"
+  ],
+  "🥖": [
+    "bakery"
+  ],
+  "🥨": [
+    "food",
+    "bread"
+  ],
+  "🥯": [
+    "food"
+  ],
+  "🥞": [
+    "hotcakes"
+  ],
+  "🧇": [
+    "food",
+    "dessert"
+  ],
+  "🧀": [
+    "food",
+    "dairy"
+  ],
+  "🍳": [
+    "food"
+  ],
+  "🍲": [
+    "meal",
+    "dinner"
+  ],
+  "🥣": [
+    "food",
+    "soup"
+  ],
+  "🥗": [
+    "healthy",
+    "lettuce",
+    "vegetable"
+  ],
+  "🍿": [
+    "food",
+    "snack",
+    "cinema"
+  ],
+  "🧈": [
+    "food",
+    "ingredient"
+  ],
+  "🍗": [
+    "food",
+    "meat"
+  ],
+  "🍖": [
+    "food",
+    "rib"
+  ],
+  "🥩": [
+    "food",
+    "beef"
+  ],
+  "🍔": [
+    "beef"
+  ],
+  "🍟": [
+    "potato",
+    "chips"
+  ],
+  "🌭": [
+    "food",
+    "fast",
+    "food"
+  ],
+  "🍕": [
+    "italian"
+  ],
+  "🌮": [
+    "food",
+    "tortilla"
+  ],
+  "🌯": [
+    "food"
+  ],
+  "🍤": [
+    "food",
+    "seafood"
+  ],
+  "🍚": [
+    "asian"
+  ],
+  "🍛": [
+    "spicy",
+    "asian"
+  ],
+  "🍜": [
+    "noodles"
+  ],
+  "🍝": [
+    "noodles",
+    "italian"
+  ],
+  "🍠": [
+    "vegetable"
+  ],
+  "🍢": [
+    "asian"
+  ],
+  "🍣": [
+    "fish",
+    "japanese",
+    "rice"
+  ],
+  "🍱": [
+    "japanese"
+  ],
+  "🥟": [
+    "food",
+    "asian",
+    "chinese"
+  ],
+  "🍘": [
+    "japanese",
+    "snack"
+  ],
+  "🍙": [
+    "onigiri"
+  ],
+  "🍡": [
+    "food"
+  ],
+  "🥮": [
+    "food",
+    "dessert",
+    "chinese"
+  ],
+  "🍧": [
+    "cold"
+  ],
+  "🍨": [
+    "cold"
+  ],
+  "🍦": [
+    "cold",
+    "cone"
+  ],
+  "🥧": [
+    "food",
+    "dessert",
+    "sweet"
+  ],
+  "🍰": [
+    "food",
+    "birthday"
+  ],
+  "🎂": [
+    "food"
+  ],
+  "🍮": [
+    "food",
+    "flan"
+  ],
+  "🍬": [
+    "food",
+    "sucker"
+  ],
+  "🍫": [
+    "food",
+    "snack"
+  ],
+  "🍪": [
+    "food",
+    "snack"
+  ],
+  "🍵": [
+    "hot",
+    "green",
+    "asian"
+  ],
+  "🥛": [
+    "food",
+    "dairy",
+    "breakfast"
+  ],
+  "🍼": [
+    "food",
+    "formula"
+  ],
+  "🍺": [
+    "beverage",
+    "pub"
+  ],
+  "🍻": [
+    "drink",
+    "toast"
+  ],
+  "🥂": [
+    "champagne",
+    "toast",
+    "celebration"
+  ],
+  "🥃": [
+    "alcohol",
+    "drink"
+  ],
+  "🍹": [
+    "beach"
+  ],
+  "🍾": [
+    "champagne",
+    "wine",
+    "celebration"
+  ],
+  "🥤": [
+    "beverage"
+  ],
+  "🧃": [
+    "drink"
+  ],
+  "🧉": [
+    "tea",
+    "beverage",
+    "herb"
+  ],
+  "🧊": [
+    "freeze",
+    "winter"
+  ],
+  "🥢": [
+    "utensil",
+    "asian",
+    "chinese",
+    "japanese"
+  ],
+  "🍽️": [
+    "dining",
+    "utensil",
+    "food"
+  ],
+  "🍴": [
+    "utensil",
+    "silverware"
+  ],
+  "🥄": [
+    "utensil",
+    "silverware",
+    "food"
+  ],
+  "🔪": [
+    "cook",
+    "food",
+    "utensil"
+  ],
+  "🍶": [
+    "alcohol",
+    "japanese"
+  ],
+  "🥫": [
+    "soup",
+    "tin",
+    "preserved"
+  ],
+  "🫐": [
+    "healthy"
+  ],
+  "🫔": [
+    "wrap"
+  ],
+  "🧋": [
+    "drink"
+  ],
+  "🧆": [
+    "food",
+    "mediterranean"
+  ],
+  "🥠": [
+    "food",
+    "dessert",
+    "chinese"
+  ],
+  "🥡": [
+    "leftover",
+    "chinese"
+  ],
+  "🫘": [
+    "legumes",
+    "protein"
+  ],
+  "🫗": [
+    "beverage"
+  ],
+  "🐨": [
+    "australian"
+  ],
+  "🦥": [
+    "animal",
+    "sleepy"
+  ],
+  "🦦": [
+    "water",
+    "river",
+    "sea"
+  ],
+  "🦨": [
+    "smelly",
+    "stinky"
+  ],
+  "🦩": [
+    "pink",
+    "zoo"
+  ],
+  "🐦": [
+    "flying",
+    "pet",
+    "avian",
+    "chirp",
+    "sing"
+  ],
+  "🦜": [
+    "tropical",
+    "colorful",
+    "pet"
+  ],
+  "🦢": [
+    "elegant",
+    "water",
+    "grace"
+  ],
+  "🦅": [
+    "predator",
+    "raptor",
+    "hunting"
+  ],
+  "🐧": [
+    "arctic",
+    "antarctic",
+    "cold"
+  ],
+  "🕊️": [
+    "white"
+  ],
+  "🦉": [
+    "night",
+    "nocturnal",
+    "hoot"
+  ],
+  "🦚": [
+    "feathers"
+  ],
+  "🦤": [
+    "extinct"
+  ],
+  "🦠": [
+    "germ",
+    "cell"
+  ],
+  "🐤": [
+    "yellow",
+    "young",
+    "hatch"
+  ],
+  "🐥": [
+    "front",
+    "facing",
+    "yellow",
+    "young"
+  ],
+  "🐺": [
+    "wild",
+    "dog",
+    "howl"
+  ],
+  "🦝": [
+    "masked",
+    "bandit"
+  ],
+  "🐗": [
+    "wild",
+    "forest"
+  ],
+  "🐴": [
+    "equestrian"
+  ],
+  "🦄": [
+    "animal",
+    "fantasy",
+    "magic",
+    "mythical"
+  ],
+  "🦓": [
+    "stripes",
+    "safari",
+    "wildlife"
+  ],
+  "🦒": [
+    "tall",
+    "savanna"
+  ],
+  "🦘": [
+    "australia"
+  ],
+  "🐂": [
+    "cow"
+  ],
+  "🐃": [
+    "ox",
+    "cow"
+  ],
+  "🐄": [
+    "bovine"
+  ],
+  "🐖": [
+    "oink",
+    "hog"
+  ],
+  "🐕": [
+    "puppy",
+    "canine"
+  ],
+  "🐩": [
+    "pet",
+    "canine"
+  ],
+  "🐈": [
+    "feline"
+  ],
+  "🐱": [
+    "feline",
+    "meow"
+  ],
+  "🦇": [
+    "nocturnal",
+    "flying"
+  ],
+  "🐀": [
+    "rodent",
+    "mouse"
+  ],
+  "🐁": [
+    "rodent",
+    "rat"
+  ],
+  "🦔": [
+    "prickly"
+  ],
+  "🦡": [
+    "forest"
+  ],
+  "🐿️": [
+    "rodent"
+  ],
+  "🐾": [
+    "animal",
+    "track",
+    "footprints"
+  ],
+  "🦀": [
+    "animal",
+    "shellfish",
+    "sea",
+    "ocean"
+  ],
+  "🦞": [
+    "shellfish"
+  ],
+  "🦐": [
+    "animal",
+    "seafood"
+  ],
+  "🦑": [
+    "ocean",
+    "sea",
+    "tentacles"
+  ],
+  "🐙": [
+    "sea",
+    "tentacles"
+  ],
+  "🦪": [
+    "animal",
+    "shellfish",
+    "sea"
+  ],
+  "🐠": [
+    "aquarium"
+  ],
+  "🐟": [
+    "sea",
+    "ocean",
+    "aquarium"
+  ],
+  "🐡": [
+    "sea",
+    "ocean",
+    "pufferfish"
+  ],
+  "🐬": [
+    "sea",
+    "marine"
+  ],
+  "🐳": [
+    "sea",
+    "marine"
+  ],
+  "🐋": [
+    "sea",
+    "marine"
+  ],
+  "🦈": [
+    "sea",
+    "ocean",
+    "predator"
+  ],
+  "🐊": [
+    "reptile",
+    "alligator"
+  ],
+  "🐢": [
+    "reptile",
+    "slow"
+  ],
+  "🐍": [
+    "reptile",
+    "python"
+  ],
+  "🐉": [
+    "mythical",
+    "fantasy"
+  ],
+  "🦕": [
+    "extinct"
+  ],
+  "🦖": [
+    "extinct"
+  ],
+  "🐲": [
+    "mythical",
+    "fantasy"
+  ],
+  "🦂": [
+    "animal",
+    "arachnid",
+    "sting"
+  ],
+  "🕷️": [
+    "arachnid",
+    "bug"
+  ],
+  "🕸️": [
+    "spiderweb",
+    "cobweb"
+  ],
+  "🐜": [
+    "bug",
+    "tiny",
+    "pest"
+  ],
+  "🐝": [
+    "buzz"
+  ],
+  "🐞": [
+    "bug"
+  ],
+  "🪳": [
+    "bug"
+  ],
+  "🐌": [
+    "slow",
+    "shell"
+  ],
+  "🦋": [
+    "bug",
+    "beautiful"
+  ],
+  "🐛": [
+    "worm",
+    "caterpillar"
+  ],
+  "🦟": [
+    "bug"
+  ],
+  "🦮": [
+    "service",
+    "seeing",
+    "eye"
+  ],
+  "🐕‍🦺": [
+    "support"
+  ],
+  "🐈‍⬛": [
+    "pet"
+  ],
+  "🦬": [
+    "ox"
+  ],
+  "🦣": [
+    "extinct",
+    "elephant",
+    "prehistoric"
+  ],
+  "🦫": [
+    "rodent"
+  ],
+  "🐻": [
+    "forest",
+    "wild"
+  ],
+  "🐻‍❄️": [
+    "cold"
+  ],
+  "🐼": [
+    "china",
+    "bear"
+  ],
+  "🦁": [
+    "wild",
+    "cat",
+    "jungle",
+    "king"
+  ],
+  "🐯": [
+    "wild",
+    "jungle"
+  ],
+  "🐅": [
+    "wild",
+    "jungle"
+  ],
+  "🐆": [
+    "wild",
+    "spots"
+  ],
+  "🐎": [
+    "race"
+  ],
+  "🦧": [
+    "primate"
+  ],
+  "🦍": [
+    "ape",
+    "monkey"
+  ],
+  "🐘": [
+    "big",
+    "tusks",
+    "trunk"
+  ],
+  "🦏": [
+    "rhino",
+    "horn"
+  ],
+  "🦛": [
+    "water"
+  ],
+  "🦌": [
+    "bambi",
+    "antlers"
+  ],
+  "🐶": [
+    "canine"
+  ],
+  "🐹": [
+    "rodent"
+  ],
+  "🦊": [
+    "cunning"
+  ],
+  "🐭": [
+    "rodent",
+    "pet"
+  ],
+  "🐷": [
+    "oink"
+  ],
+  "🐸": [
+    "toad",
+    "amphibian"
+  ],
+  "🐵": [
+    "primate",
+    "ape"
+  ],
+  "🙈": [
+    "see",
+    "animal",
+    "primate",
+    "hides",
+    "eyes"
+  ],
+  "🙉": [
+    "primate",
+    "covers"
+  ],
+  "🙊": [
+    "primate",
+    "covers",
+    "mouth"
+  ],
+  "🎒": [
+    "travel",
+    "hiking"
+  ],
+  "👓": [
+    "spectacles"
+  ],
+  "🕶️": [
+    "shades",
+    "cool"
+  ],
+  "🌂": [
+    "weather",
+    "protection"
+  ],
+  "🧳": [
+    "baggage"
+  ],
+  "👜": [
+    "fashion",
+    "accessory"
+  ],
+  "👛": [
+    "wallet",
+    "money",
+    "bag",
+    "fashion"
+  ],
+  "👝": [
+    "small",
+    "container"
+  ],
+  "🎽": [
+    "sportswear",
+    "jersey"
+  ],
+  "👕": [
+    "t",
+    "top"
+  ],
+  "🧣": [
+    "neckwear",
+    "winter",
+    "accessory"
+  ],
+  "🧤": [
+    "mittens",
+    "winter",
+    "handwear"
+  ],
+  "🧥": [
+    "winter",
+    "clothing",
+    "outerwear"
+  ],
+  "🧦": [
+    "feet",
+    "clothing",
+    "footwear"
+  ],
+  "👗": [
+    "outfit",
+    "fashion",
+    "women"
+  ],
+  "👙": [
+    "swimwear",
+    "swimsuit"
+  ],
+  "👘": [
+    "dress",
+    "traditional",
+    "japanese"
+  ],
+  "👠": [
+    "high",
+    "heeled",
+    "pumps",
+    "women"
+  ],
+  "👡": [
+    "footwear",
+    "summer"
+  ],
+  "👢": [
+    "footwear",
+    "winter"
+  ],
+  "👞": [
+    "formal",
+    "leather",
+    "footwear"
+  ],
+  "👟": [
+    "sneakers",
+    "trainers"
+  ],
+  "👒": [
+    "fashion",
+    "summer",
+    "accessory"
+  ],
+  "🎓": [
+    "academic",
+    "degree",
+    "university",
+    "school"
+  ],
+  "🧢": [
+    "snapback"
+  ],
+  "⛑️": [
+    "worker",
+    "safety",
+    "protection"
+  ],
+  "💼": [
+    "business",
+    "work",
+    "bag"
+  ],
+  "📱": [
+    "smartphone",
+    "iphone",
+    "android"
+  ],
+  "📲": [
+    "incoming",
+    "download"
+  ],
+  "☎️": [
+    "landline",
+    "call"
+  ],
+  "📞": [
+    "handset",
+    "call"
+  ],
+  "📟": [
+    "beeper",
+    "old",
+    "tech",
+    "device",
+    "message"
+  ],
+  "📠": [
+    "office",
+    "old",
+    "tech",
+    "device",
+    "document",
+    "send"
+  ],
+  "🔋": [
+    "power",
+    "energy",
+    "charge",
+    "electricity"
+  ],
+  "🔌": [
+    "power",
+    "outlet"
+  ],
+  "💡": [
+    "electricity",
+    "lamp",
+    "bright"
+  ],
+  "🔦": [
+    "portable"
+  ],
+  "🕯️": [
+    "wax",
+    "flame"
+  ],
+  "🪔": [
+    "hindu",
+    "diwali"
+  ],
+  "💣": [
+    "explosive",
+    "danger",
+    "weapon"
+  ],
+  "🧨": [
+    "firework",
+    "celebration"
+  ],
+  "🔫": [
+    "toy"
+  ],
+  "🧰": [
+    "tools",
+    "repair",
+    "fix",
+    "maintenance"
+  ],
+  "🪛": [
+    "repair",
+    "fix"
+  ],
+  "🔧": [
+    "repair",
+    "fix",
+    "mechanical"
+  ],
+  "🔨": [
+    "construction",
+    "repair"
+  ],
+  "⛏️": [
+    "construction"
+  ],
+  "🪓": [
+    "tool",
+    "weapon",
+    "lumberjack"
+  ],
+  "🔩": [
+    "hardware",
+    "fastener"
+  ],
+  "⚙️": [
+    "mechanical",
+    "settings"
+  ],
+  "🧱": [
+    "building",
+    "construction"
+  ],
+  "🪝": [
+    "tool",
+    "fishing",
+    "hang"
+  ],
+  "🧲": [
+    "metal"
+  ],
+  "🔗": [
+    "chain",
+    "connection",
+    "url",
+    "attach"
+  ],
+  "🧷": [
+    "fastener",
+    "clasp"
+  ],
+  "🧴": [
+    "cosmetic"
+  ],
+  "🧵": [
+    "craft"
+  ],
+  "🧶": [
+    "knitting",
+    "craft",
+    "wool"
+  ],
+  "🪡": [
+    "craft",
+    "stitch"
+  ],
+  "📌": [
+    "tack",
+    "office"
+  ],
+  "📍": [
+    "tack"
+  ],
+  "📎": [
+    "office",
+    "supplies",
+    "attachment"
+  ],
+  "🖇️": [
+    "office",
+    "supplies",
+    "attachment"
+  ],
+  "✂️": [
+    "craft",
+    "office"
+  ],
+  "🧹": [
+    "sweep",
+    "clean",
+    "housework"
+  ],
+  "🧺": [
+    "container",
+    "wicker"
+  ],
+  "🧼": [
+    "wash",
+    "hygiene"
+  ],
+  "🪠": [
+    "unclog",
+    "plumbing"
+  ],
+  "🪣": [
+    "container",
+    "water",
+    "cleaning"
+  ],
+  "🧽": [
+    "absorbent",
+    "wash"
+  ],
+  "🪤": [
+    "rodent",
+    "pest",
+    "catch"
+  ],
+  "💊": [
+    "drug",
+    "health",
+    "pharmacy",
+    "medication"
+  ],
+  "💉": [
+    "injection",
+    "vaccine"
+  ],
+  "📄": [
+    "file"
+  ],
+  "📃": [
+    "file"
+  ],
+  "📑": [
+    "markers",
+    "colors",
+    "organize"
+  ],
+  "📊": [
+    "statistics",
+    "presentation"
+  ],
+  "📈": [
+    "trending",
+    "stats"
+  ],
+  "📉": [
+    "trending",
+    "stats"
+  ],
+  "📇": [
+    "organizer",
+    "contacts"
+  ],
+  "🗃️": [
+    "storage",
+    "organize",
+    "office"
+  ],
+  "🗄️": [
+    "storage",
+    "organize",
+    "office"
+  ],
+  "🗑️": [
+    "bin",
+    "delete"
+  ],
+  "🔒": [
+    "security",
+    "protection"
+  ],
+  "🔓": [
+    "security",
+    "access"
+  ],
+  "🔏": [
+    "secure",
+    "private",
+    "writing"
+  ],
+  "🔐": [
+    "private"
+  ],
+  "🔑": [
+    "security",
+    "access"
+  ],
+  "🗝️": [
+    "antique",
+    "vintage",
+    "security"
+  ],
+  "🪑": [
+    "furniture"
+  ],
+  "🛋️": [
+    "sofa",
+    "furniture",
+    "relax"
+  ],
+  "🛌": [
+    "rest"
+  ],
+  "🛏️": [
+    "furniture",
+    "rest"
+  ],
+  "🚪": [
+    "entrance",
+    "exit",
+    "entry"
+  ],
+  "🪟": [
+    "building"
+  ],
+  "❤️": [
+    "romance",
+    "like",
+    "affection"
+  ],
+  "🧡": [
+    "love",
+    "like",
+    "affection"
+  ],
+  "💛": [
+    "like",
+    "affection"
+  ],
+  "💚": [
+    "like",
+    "affection"
+  ],
+  "💙": [
+    "like",
+    "affection"
+  ],
+  "💜": [
+    "like",
+    "affection"
+  ],
+  "🤎": [
+    "love",
+    "like",
+    "affection"
+  ],
+  "🖤": [
+    "love",
+    "emo",
+    "goth",
+    "dark"
+  ],
+  "🤍": [
+    "love",
+    "pure",
+    "clean"
+  ],
+  "💕": [
+    "couple",
+    "relationship",
+    "romance"
+  ],
+  "💞": [
+    "love",
+    "relationship",
+    "animated"
+  ],
+  "💗": [
+    "love",
+    "increase"
+  ],
+  "💖": [
+    "love",
+    "excitement"
+  ],
+  "💘": [
+    "struck"
+  ],
+  "💝": [
+    "love",
+    "gift"
+  ],
+  "💟": [
+    "love",
+    "ornament"
+  ],
+  "❣️": [
+    "love",
+    "emphasis"
+  ],
+  "💔": [
+    "heartbreak",
+    "breakup"
+  ],
+  "❤️‍🔥": [
+    "passion",
+    "intense"
+  ],
+  "❤️‍🩹": [
+    "love",
+    "healing",
+    "recovery"
+  ],
+  "✨": [
+    "glitter",
+    "shiny",
+    "stars"
+  ],
+  "🌟": [
+    "shiny",
+    "glitter",
+    "bright"
+  ],
+  "⭐": [
+    "rating",
+    "favorite",
+    "bookmark",
+    "yellow"
+  ],
+  "💫": [
+    "sparkle",
+    "spin",
+    "swirl"
+  ],
+  "🔥": [
+    "trending"
+  ],
+  "☄️": [
+    "asteroid",
+    "shooting",
+    "star"
+  ],
+  "💥": [
+    "bang",
+    "explosion",
+    "crash"
+  ],
+  "💢": [
+    "irritated",
+    "rage"
+  ],
+  "💬": [
+    "chat"
+  ],
+  "👁️‍🗨️": [
+    "statement"
+  ],
+  "🗯️": [
+    "rage"
+  ],
+  "💭": [
+    "imagine"
+  ],
+  "🗨️": [
+    "talk",
+    "chat",
+    "message"
+  ],
+  "🔯": [
+    "six",
+    "pointed",
+    "david"
+  ],
+  "✡️": [
+    "hebrew"
+  ],
+  "✝️": [
+    "christianity"
+  ],
+  "🕉️": [
+    "spiritual"
+  ],
+  "☸️": [
+    "buddhism"
+  ],
+  "☮️": [
+    "harmony",
+    "pacifism"
+  ],
+  "🔄": [
+    "reload"
+  ],
+  "🔃": [
+    "sync"
+  ],
+  "🈂️": [
+    "\"service",
+    "charge\"",
+    "kanji"
+  ],
+  "🈁": [
+    "\"here\"",
+    "kanji"
+  ],
+  "🈹": [
+    "\"discount\"",
+    "kanji"
+  ],
+  "🈶": [
+    "\"not",
+    "charge\"",
+    "kanji"
+  ],
+  "🈯": [
+    "\"reserved\"",
+    "kanji"
+  ],
+  "🉐": [
+    "\"bargain\"",
+    "kanji"
+  ],
+  "💯": [
+    "percent"
+  ],
+  "🔠": [
+    "abc"
+  ],
+  "🔡": [
+    "abc"
+  ],
+  "🔢": [
+    "123",
+    "number",
+    "digits"
+  ],
+  "🔣": [
+    "special",
+    "characters"
+  ],
+  "🆑": [
+    "clear",
+    "delete"
+  ],
+  "🆒": [
+    "word"
+  ],
+  "🆓": [
+    "no",
+    "charge"
+  ],
+  "🆔": [
+    "identification"
+  ],
+  "🆕": [
+    "item",
+    "badge"
+  ],
+  "🆖": [
+    "not",
+    "good",
+    "no",
+    "good"
+  ],
+  "🆗": [
+    "good",
+    "agree"
+  ],
+  "🆘": [
+    "emergency",
+    "mayday"
+  ],
+  "🆙": [
+    "level",
+    "increase"
+  ],
+  "🆚": [
+    "competition",
+    "against"
+  ],
+  "🈷️": [
+    "\"monthly",
+    "amount\"",
+    "kanji"
+  ],
+  "🈳": [
+    "\"vacancy\"",
+    "kanji"
+  ],
+  "🈴": [
+    "\"passing",
+    "grade\"",
+    "kanji"
+  ],
+  "🈵": [
+    "\"no",
+    "vacancy\"",
+    "kanji"
+  ],
+  "🈺": [
+    "\"open",
+    "business\"",
+    "kanji"
+  ],
+  "🉑": [
+    "\"acceptable\"",
+    "kanji"
+  ],
+  "🅰️": [
+    "letter"
+  ],
+  "🅱️": [
+    "letter"
+  ],
+  "🅾️": [
+    "letter"
+  ],
+  "⚠️": [
+    "alert",
+    "danger",
+    "triangle",
+    "sign"
+  ],
+  "♨️": [
+    "steam",
+    "bathing",
+    "onsen"
+  ],
+  "♻️": [
+    "environment",
+    "green"
+  ],
+  "⚕️": [
+    "rod",
+    "asklepios",
+    "healthcare"
+  ],
+  "🏧": [
+    "withdrawal"
+  ],
+  "🚮": [
+    "dispose",
+    "trash",
+    "garbage"
+  ],
+  "🚰": [
+    "sign",
+    "drinkable"
+  ],
+  "🚹": [
+    "male",
+    "sign"
+  ],
+  "🚺": [
+    "female",
+    "sign"
+  ],
+  "🚻": [
+    "sign"
+  ],
+  "🚼": [
+    "child",
+    "infant"
+  ],
+  "🛂": [
+    "border",
+    "customs",
+    "immigration"
+  ],
+  "🛃": [
+    "border",
+    "declaration",
+    "baggage"
+  ],
+  "🛄": [
+    "luggage",
+    "suitcase",
+    "airport"
+  ],
+  "🛅": [
+    "storage"
+  ],
+  "🚸": [
+    "school",
+    "zone",
+    "warning"
+  ],
+  "🚫": [
+    "ban"
+  ],
+  "🚭": [
+    "cigarette"
+  ],
+  "🚯": [
+    "trash"
+  ],
+  "🚱": [
+    "non",
+    "potable",
+    "not",
+    "drinkable"
+  ],
+  "🚷": [
+    "walking"
+  ],
+  "🔞": [
+    "adult",
+    "only",
+    "xxx"
+  ],
+  "☢️": [
+    "danger",
+    "nuclear",
+    "warning"
+  ],
+  "☣️": [
+    "danger",
+    "warning",
+    "biological"
+  ],
+  "⬆️": [
+    "pointer"
+  ],
+  "↗️": [
+    "up",
+    "right",
+    "pointer"
+  ],
+  "➡️": [
+    "pointer"
+  ],
+  "↘️": [
+    "down",
+    "right",
+    "pointer"
+  ],
+  "⬇️": [
+    "pointer"
+  ],
+  "↙️": [
+    "down",
+    "left",
+    "pointer"
+  ],
+  "⬅️": [
+    "pointer"
+  ],
+  "↖️": [
+    "up",
+    "left",
+    "pointer"
+  ],
+  "↕️": [
+    "up",
+    "down",
+    "direction",
+    "vertical"
+  ],
+  "↔️": [
+    "left",
+    "right",
+    "direction",
+    "horizontal"
+  ],
+  "↩️": [
+    "return",
+    "back"
+  ],
+  "↪️": [
+    "forward",
+    "continue"
+  ],
+  "⤴️": [
+    "direction"
+  ],
+  "⤵️": [
+    "direction"
+  ],
+  "🔙": [
+    "previous",
+    "return"
+  ],
+  "🔚": [
+    "finish",
+    "stop"
+  ],
+  "🔛": [
+    "continue",
+    "go"
+  ],
+  "🔜": [
+    "future",
+    "shortly"
+  ],
+  "🔝": [
+    "high",
+    "best",
+    "highest"
+  ],
+  "☀️": [
+    "hot",
+    "sunshine"
+  ],
+  "🌤️": [
+    "partly",
+    "cloudy"
+  ],
+  "⛅": [
+    "partly"
+  ],
+  "🌥️": [
+    "cloudy"
+  ],
+  "☁️": [
+    "cloudy",
+    "overcast"
+  ],
+  "🌦️": [
+    "rainy"
+  ],
+  "🌧️": [
+    "rainy",
+    "wet"
+  ],
+  "⛈️": [
+    "storm",
+    "weather"
+  ],
+  "🌩️": [
+    "storm",
+    "thunder"
+  ],
+  "🌨️": [
+    "snowfall"
+  ],
+  "❄️": [
+    "winter",
+    "crystal"
+  ],
+  "☃️": [
+    "winter",
+    "frosty"
+  ],
+  "⛄": [
+    "frost",
+    "winter"
+  ],
+  "🌬️": [
+    "blowing",
+    "breeze",
+    "air"
+  ],
+  "💨": [
+    "wind"
+  ],
+  "🌪️": [
+    "cyclone",
+    "twister",
+    "storm"
+  ],
+  "🌫️": [
+    "mist",
+    "visibility",
+    "foggy",
+    "haze"
+  ],
+  "☔": [
+    "wet",
+    "shower",
+    "storm"
+  ],
+  "💧": [
+    "drip"
+  ],
+  "💦": [
+    "tear",
+    "splash"
+  ],
+  "🌊": [
+    "sea",
+    "tsunami"
+  ],
+  "🌈": [
+    "colorful"
+  ],
+  "⛱️": [
+    "beach",
+    "sunny",
+    "shade"
+  ],
+  "☂️": [
+    "shelter",
+    "protection"
+  ],
+  "🌞": [
+    "summer",
+    "hot"
+  ],
+  "🌝": [
+    "night",
+    "sky"
+  ],
+  "🌛": [
+    "night",
+    "sky"
+  ],
+  "🌜": [
+    "night",
+    "sky"
+  ],
+  "🌚": [
+    "night",
+    "sky",
+    "dark"
+  ],
+  "🌕": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌖": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌗": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌘": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌑": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌒": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌓": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌔": [
+    "night",
+    "sky",
+    "astronomy"
+  ],
+  "🌙": [
+    "night",
+    "sky",
+    "islam"
+  ],
+  "🌎": [
+    "planet",
+    "usa"
+  ],
+  "🌍": [
+    "planet"
+  ],
+  "🌏": [
+    "planet"
+  ],
+  "🌐": [
+    "planet",
+    "international"
+  ],
+  "🪐": [
+    "space",
+    "astronomy"
+  ],
+  "🌋": [
+    "lava",
+    "geology"
+  ],
+  "🌄": [
+    "dawn",
+    "daybreak"
+  ],
+  "🌅": [
+    "dawn",
+    "daybreak"
+  ],
+  "🌇": [
+    "city",
+    "evening"
+  ],
+  "🌉": [
+    "evening",
+    "dark"
+  ],
+  "🌌": [
+    "galaxy",
+    "stars",
+    "night"
+  ],
+  "🌠": [
+    "wish"
+  ],
+  "🌁": [
+    "weather",
+    "visibility",
+    "mist",
+    "cityscape"
+  ],
+  "🌃": [
+    "evening",
+    "nighttime",
+    "starry",
+    "city",
+    "dark"
+  ],
+  "🏞️": [
+    "nature",
+    "mountain",
+    "forest"
+  ],
+  "🏜️": [
+    "arid",
+    "hot",
+    "sand",
+    "dry"
+  ],
+  "🏝️": [
+    "beach",
+    "isolated",
+    "coast"
+  ],
+  "🏖️": [
+    "sand",
+    "sea",
+    "vacation"
+  ],
+  "🗻": [
+    "japan",
+    "volcano"
+  ],
+  "⛰️": [
+    "highland",
+    "peak",
+    "summit"
+  ],
+  "🏔️": [
+    "capped",
+    "alpine",
+    "peak"
+  ],
+  "🏕️": [
+    "outdoors",
+    "tent",
+    "adventure"
+  ],
+  "🏙️": [
+    "buildings",
+    "skyscrapers",
+    "metropolis",
+    "urban"
+  ],
+  "🪨": [
+    "mountain"
+  ],
+  "🪵": [
+    "tree"
+  ],
+  "🛸": [
+    "alien",
+    "space"
+  ],
+  "📅": [
+    "time",
+    "schedule",
+    "appointment"
+  ],
+  "📆": [
+    "tear",
+    "off",
+    "date",
+    "time",
+    "schedule"
+  ],
+  "🗓️": [
+    "date",
+    "time",
+    "schedule",
+    "planner"
+  ],
+  "⏰": [
+    "wake",
+    "up",
+    "morning",
+    "wakeup"
+  ],
+  "⏱️": [
+    "timer",
+    "race",
+    "precision"
+  ],
+  "⏲️": [
+    "time",
+    "countdown",
+    "cooking"
+  ],
+  "🕰️": [
+    "antique",
+    "vintage"
+  ],
+  "⌛": [
+    "complete"
+  ],
+  "⏳": [
+    "time"
+  ],
+  "🕛": [
+    "oclock",
+    "noon",
+    "midnight"
+  ],
+  "🕧": [
+    "half",
+    "past"
+  ],
+  "🕐": [
+    "oclock",
+    "hour"
+  ],
+  "🕜": [
+    "half",
+    "past"
+  ],
+  "🕑": [
+    "oclock",
+    "hour"
+  ],
+  "🕝": [
+    "half",
+    "past"
+  ],
+  "🕒": [
+    "oclock",
+    "hour"
+  ],
+  "🕞": [
+    "half",
+    "past"
+  ],
+  "🕓": [
+    "oclock",
+    "hour"
+  ],
+  "🕟": [
+    "half",
+    "past"
+  ],
+  "🕔": [
+    "oclock",
+    "hour"
+  ],
+  "🕠": [
+    "half",
+    "past"
+  ],
+  "🕕": [
+    "oclock",
+    "hour"
+  ],
+  "🕡": [
+    "time",
+    "half",
+    "past"
+  ],
+  "🕖": [
+    "oclock",
+    "time",
+    "hour"
+  ],
+  "🕢": [
+    "time",
+    "half",
+    "past"
+  ],
+  "🕗": [
+    "oclock",
+    "hour"
+  ],
+  "🕣": [
+    "half",
+    "past"
+  ],
+  "🕘": [
+    "oclock",
+    "hour"
+  ],
+  "🕤": [
+    "half",
+    "past"
+  ],
+  "🕙": [
+    "oclock",
+    "time",
+    "hour"
+  ],
+  "🕥": [
+    "half",
+    "past"
+  ],
+  "🕚": [
+    "oclock",
+    "hour"
+  ],
+  "🕦": [
+    "half",
+    "past"
+  ],
+  "🚗": [
+    "drive",
+    "transport"
+  ],
+  "🚕": [
+    "rideshare",
+    "transportation"
+  ],
+  "🚙": [
+    "suv",
+    "jeep"
+  ],
+  "🚌": [
+    "transportation",
+    "public"
+  ],
+  "🚎": [
+    "vehicle",
+    "transportation",
+    "public"
+  ],
+  "🏎️": [
+    "fast",
+    "formula1",
+    "f1",
+    "speed"
+  ],
+  "🚓": [
+    "law",
+    "enforcement",
+    "vehicle"
+  ],
+  "🚑": [
+    "medical",
+    "911"
+  ],
+  "🚒": [
+    "firefighter",
+    "emergency"
+  ],
+  "🚐": [
+    "transportation",
+    "shuttle"
+  ],
+  "🚚": [
+    "shipping",
+    "transport"
+  ],
+  "🚛": [
+    "transport"
+  ],
+  "🚜": [
+    "farm",
+    "agriculture"
+  ],
+  "🛻": [
+    "vehicle"
+  ],
+  "🏍️": [
+    "bike",
+    "vehicle"
+  ],
+  "🛵": [
+    "vehicle",
+    "vespa",
+    "transportation"
+  ],
+  "🛺": [
+    "vehicle",
+    "transportation"
+  ],
+  "🚲": [
+    "vehicle",
+    "transportation"
+  ],
+  "🛴": [
+    "vehicle",
+    "transportation"
+  ],
+  "🚏": [
+    "transportation",
+    "public"
+  ],
+  "🛣️": [
+    "freeway"
+  ],
+  "🛤️": [
+    "transportation"
+  ],
+  "⛽": [
+    "petroleum"
+  ],
+  "🚧": [
+    "sign",
+    "warning",
+    "caution"
+  ],
+  "⚓": [
+    "boat",
+    "marina",
+    "harbor"
+  ],
+  "🚤": [
+    "ship"
+  ],
+  "🚢": [
+    "cruise",
+    "ferry"
+  ],
+  "✈️": [
+    "flight",
+    "aviation",
+    "air"
+  ],
+  "🛩️": [
+    "flight",
+    "aviation"
+  ],
+  "🛫": [
+    "takeoff",
+    "flight",
+    "flying"
+  ],
+  "🛬": [
+    "flight",
+    "flying"
+  ],
+  "🪂": [
+    "flying",
+    "skydiving",
+    "extreme"
+  ],
+  "💺": [
+    "sitting"
+  ],
+  "🚁": [
+    "aircraft",
+    "chopper",
+    "flying"
+  ],
+  "🚟": [
+    "transportation"
+  ],
+  "🚠": [
+    "transportation"
+  ],
+  "🚡": [
+    "transportation"
+  ],
+  "🚀": [
+    "spaceship",
+    "blast",
+    "rocketship"
+  ],
+  "🚉": [
+    "subway",
+    "metro",
+    "transportation"
+  ],
+  "🚂": [
+    "transportation",
+    "railroad"
+  ],
+  "🚆": [
+    "transportation",
+    "vehicle"
+  ],
+  "🚇": [
+    "train",
+    "transportation"
+  ],
+  "🚊": [
+    "transportation",
+    "vehicle"
+  ],
+  "🚝": [
+    "transportation",
+    "train"
+  ],
+  "🚞": [
+    "transportation",
+    "train"
+  ],
+  "🚋": [
+    "transportation",
+    "vehicle"
+  ],
+  "🚃": [
+    "transportation"
+  ],
+  "🚄": [
+    "high",
+    "bullet",
+    "transportation"
+  ],
+  "🚅": [
+    "high",
+    "transportation"
+  ],
+  "🚈": [
+    "transportation",
+    "train"
+  ],
+  "🛑": [
+    "octagon",
+    "halt",
+    "traffic"
+  ],
+  "⚽": [
+    "sports",
+    "game"
+  ],
+  "🏀": [
+    "hoops",
+    "nba"
+  ],
+  "🏈": [
+    "nfl",
+    "game"
+  ],
+  "⚾": [
+    "mlb",
+    "game"
+  ],
+  "🥎": [
+    "sport",
+    "game"
+  ],
+  "🎾": [
+    "game",
+    "racket"
+  ],
+  "🏐": [
+    "sport"
+  ],
+  "🏉": [
+    "game"
+  ],
+  "🥏": [
+    "frisbee",
+    "sport"
+  ],
+  "🎱": [
+    "billiards",
+    "snooker"
+  ],
+  "🪀": [
+    "yo",
+    "yo",
+    "play",
+    "spin",
+    "string"
+  ],
+  "🏓": [
+    "sport"
+  ],
+  "🏸": [
+    "racket",
+    "sport"
+  ],
+  "🏒": [
+    "sport",
+    "nhl"
+  ],
+  "🏑": [
+    "sport"
+  ],
+  "🥍": [
+    "sport"
+  ],
+  "🏏": [
+    "sport"
+  ],
+  "🥅": [
+    "hockey",
+    "soccer",
+    "football",
+    "sport"
+  ],
+  "⛸️": [
+    "winter",
+    "sport"
+  ],
+  "🎣": [
+    "rod",
+    "catch"
+  ],
+  "🤿": [
+    "snorkel",
+    "underwater"
+  ],
+  "🎿": [
+    "skiing",
+    "winter"
+  ],
+  "🛷": [
+    "snowsled",
+    "winter",
+    "sport"
+  ],
+  "🥌": [
+    "winter",
+    "sport",
+    "olympics"
+  ],
+  "🎯": [
+    "darts"
+  ],
+  "🪃": [
+    "throw",
+    "return",
+    "australian"
+  ],
+  "🏹": [
+    "sport",
+    "shooting"
+  ],
+  "🥊": [
+    "sport",
+    "fighting",
+    "punch"
+  ],
+  "🥋": [
+    "sport"
+  ],
+  "🎮": [
+    "play",
+    "gaming",
+    "gaming",
+    "esports"
+  ],
+  "🎲": [
+    "gambling",
+    "random",
+    "board"
+  ],
+  "♟️": [
+    "board",
+    "game",
+    "strategy"
+  ],
+  "🎭": [
+    "drama",
+    "masks",
+    "acting"
+  ],
+  "🎨": [
+    "drawing",
+    "paint",
+    "colors"
+  ],
+  "🎬": [
+    "film",
+    "director"
+  ],
+  "🎤": [
+    "voice",
+    "audio"
+  ],
+  "🎧": [
+    "music",
+    "listen",
+    "audio",
+    "earphones"
+  ],
+  "🎼": [
+    "notes",
+    "sheet"
+  ],
+  "🎹": [
+    "organ",
+    "keys"
+  ],
+  "🪕": [
+    "instrument",
+    "string",
+    "country"
+  ],
+  "🎸": [
+    "rock",
+    "string"
+  ],
+  "🎻": [
+    "string",
+    "orchestra"
+  ],
+  "🎺": [
+    "brass"
+  ],
+  "🎷": [
+    "jazz",
+    "blues"
+  ],
+  "🥁": [
+    "instrument",
+    "percussion",
+    "beat"
+  ],
+  "🪘": [
+    "music",
+    "percussion"
+  ],
+  "🎵": [
+    "tone",
+    "melody"
+  ],
+  "🎶": [
+    "melody",
+    "sing"
+  ],
+  "🏋️": [
+    "gym",
+    "exercise",
+    "strength"
+  ],
+  "🏊": [
+    "water",
+    "pool"
+  ],
+  "🏌️": [
+    "golfer",
+    "sport"
+  ],
+  "🧗": [
+    "sport"
+  ],
+  "🤺": [
+    "fight",
+    "sport"
+  ],
+  "🏇": [
+    "derby"
+  ],
+  "🏄": [
+    "wave"
+  ],
+  "🚣": [
+    "sport"
+  ],
+  "🏂": [
+    "snowboarding",
+    "winter"
+  ],
+  "⛷️": [
+    "skiing",
+    "winter",
+    "sport"
+  ],
+  "🏆": [
+    "award"
+  ],
+  "🥇": [
+    "champion",
+    "award"
+  ],
+  "🥈": [
+    "award"
+  ],
+  "🥉": [
+    "award"
+  ],
+  "🏅": [
+    "prize"
+  ],
+  "🎖️": [
+    "honor",
+    "decoration"
+  ],
+  "🏵️": [
+    "flower",
+    "decoration"
+  ],
+  "🎗️": [
+    "cause",
+    "awareness"
+  ],
+  "🎫": [
+    "pass",
+    "event"
+  ],
+  "🏠": [
+    "residence"
+  ],
+  "🏡": [
+    "yard",
+    "lawn"
+  ],
+  "🏢": [
+    "work",
+    "corporate",
+    "business"
+  ],
+  "🏣": [
+    "mail",
+    "postal"
+  ],
+  "🏤": [
+    "mail",
+    "postal"
+  ],
+  "🏥": [
+    "health",
+    "emergency",
+    "medical",
+    "sick"
+  ],
+  "🏦": [
+    "money",
+    "financial"
+  ],
+  "🏨": [
+    "lodging",
+    "accommodation"
+  ],
+  "🏩": [
+    "heart",
+    "romance"
+  ],
+  "🏪": [
+    "7",
+    "eleven"
+  ],
+  "🏫": [
+    "education",
+    "student"
+  ],
+  "🏬": [
+    "shopping",
+    "mall"
+  ],
+  "🏭": [
+    "industrial",
+    "manufacturing"
+  ],
+  "🏯": [
+    "fortress",
+    "palace"
+  ],
+  "🏰": [
+    "fortress",
+    "palace",
+    "medieval"
+  ],
+  "💒": [
+    "church",
+    "marriage",
+    "love"
+  ],
+  "🗼": [
+    "landmark",
+    "japan"
+  ],
+  "🗽": [
+    "usa",
+    "america"
+  ],
+  "⛪": [
+    "building"
+  ],
+  "🛕": [
+    "building",
+    "religion",
+    "jagannath"
+  ],
+  "🕍": [
+    "building"
+  ],
+  "⛩️": [
+    "building",
+    "japanese"
+  ],
+  "⛲": [
+    "water",
+    "park",
+    "decoration"
+  ],
+  "⛺": [
+    "outdoors",
+    "festival"
+  ],
+  "🎠": [
+    "amusement",
+    "park",
+    "ride"
+  ],
+  "🎡": [
+    "carnival"
+  ],
+  "🎢": [
+    "carnival",
+    "ride"
+  ],
+  "💈": [
+    "salon"
+  ],
+  "🎪": [
+    "festival",
+    "carnival",
+    "big",
+    "top",
+    "entertainment"
+  ],
+  "🎙️": [
+    "recording",
+    "podcast",
+    "audio"
+  ],
+  "🎚️": [
+    "control",
+    "audio",
+    "mixing"
+  ],
+  "🎛️": [
+    "dial",
+    "mix",
+    "audio",
+    "adjustment"
+  ],
+  "📻": [
+    "audio",
+    "broadcast",
+    "tuner",
+    "music"
+  ],
+  "🖼️": [
+    "gallery"
+  ],
+  "🕹️": [
+    "gaming",
+    "controller",
+    "arcade"
+  ],
+  "🎴": [
+    "hanafuda"
+  ],
+  "🀄": [
+    "tiles"
+  ],
+  "🖍️": [
+    "drawing",
+    "art",
+    "coloring"
+  ],
+  "🖌️": [
+    "art",
+    "drawing"
+  ],
+  "💻": [
+    "tech",
+    "notebook"
+  ],
+  "🖥️": [
+    "pc",
+    "tech"
+  ],
+  "🖨️": [
+    "device",
+    "output",
+    "office"
+  ],
+  "⌨️": [
+    "typing",
+    "input",
+    "device"
+  ],
+  "🖱️": [
+    "input",
+    "device",
+    "click"
+  ],
+  "🖲️": [
+    "input",
+    "device",
+    "pointer"
+  ],
+  "💽": [
+    "storage",
+    "minidisc"
+  ],
+  "💾": [
+    "save",
+    "old",
+    "storage"
+  ],
+  "💿": [
+    "storage"
+  ],
+  "📀": [
+    "storage",
+    "movie",
+    "film"
+  ],
+  "🧮": [
+    "math",
+    "counting",
+    "calculate"
+  ],
+  "🎥": [
+    "video",
+    "recording"
+  ],
+  "📺": [
+    "screen",
+    "broadcast"
+  ],
+  "📷": [
+    "photography",
+    "picture"
+  ],
+  "📸": [
+    "photography",
+    "picture"
+  ],
+  "📹": [
+    "recording",
+    "film",
+    "movie"
+  ],
+  "🔍": [
+    "zoom"
+  ],
+  "🔎": [
+    "zoom"
+  ],
+  "🔆": [
+    "sun"
+  ],
+  "🔅": [
+    "light"
+  ],
+  "📡": [
+    "signal",
+    "reception"
+  ],
+  "🔬": [
+    "laboratory",
+    "research"
+  ],
+  "🔭": [
+    "astronomy",
+    "space",
+    "stars"
+  ],
+  "🧪": [
+    "laboratory"
+  ],
+  "🧫": [
+    "science",
+    "laboratory"
+  ],
+  "🧬": [
+    "science",
+    "biology",
+    "helix"
+  ],
+  "🩹": [
+    "bandaid",
+    "injury",
+    "plaster"
+  ],
+  "🩺": [
+    "nurse",
+    "health",
+    "medical"
+  ],
+  "🪒": [
+    "blade",
+    "barber"
+  ],
+  "♈": [
+    "astrology",
+    "march",
+    "april"
+  ],
+  "♉": [
+    "astrology",
+    "april",
+    "may"
+  ],
+  "♊": [
+    "astrology",
+    "may",
+    "june"
+  ],
+  "♋": [
+    "astrology",
+    "june",
+    "july"
+  ],
+  "♌": [
+    "astrology",
+    "july",
+    "august"
+  ],
+  "♍": [
+    "astrology",
+    "maiden",
+    "august",
+    "september"
+  ],
+  "♎": [
+    "astrology",
+    "september",
+    "october"
+  ],
+  "♏": [
+    "astrology",
+    "october",
+    "november"
+  ],
+  "♐": [
+    "astrology",
+    "november",
+    "december"
+  ],
+  "♑": [
+    "astrology",
+    "december",
+    "january"
+  ],
+  "♒": [
+    "astrology",
+    "january",
+    "february"
+  ],
+  "♓": [
+    "astrology",
+    "february",
+    "march"
+  ],
+  "⛎": [
+    "horoscope",
+    "astrology"
+  ],
+  "🏁": [
+    "motorsport",
+    "f1",
+    "formula1",
+    "nascar"
+  ],
+  "🚩": [
+    "location",
+    "marker",
+    "pin",
+    "red",
+    "warning"
+  ],
+  "🎌": [
+    "japan",
+    "ceremony",
+    "festival",
+    "nippon"
+  ],
+  "🏴": [
+    "pirate",
+    "dark"
+  ],
+  "🏳️": [
+    "surrender",
+    "truce",
+    "peace",
+    "giving",
+    "up"
+  ],
+  "🏴‍☠️": [
+    "skull",
+    "crossbones",
+    "buccaneer",
+    "caribbean"
+  ],
+  "🇦🇨": [
+    "ac"
+  ],
+  "🇦🇩": [
+    "ad",
+    "andorran"
+  ],
+  "🇦🇪": [
+    "uae",
+    "emirati",
+    "dubai",
+    "abu",
+    "dhabi"
+  ],
+  "🇦🇫": [
+    "af",
+    "afghan"
+  ],
+  "🇦🇬": [
+    "ag",
+    "antiguan",
+    "barbudan"
+  ],
+  "🇦🇮": [
+    "ai"
+  ],
+  "🇦🇱": [
+    "al",
+    "albanian"
+  ],
+  "🇦🇲": [
+    "am",
+    "armenian"
+  ],
+  "🇦🇴": [
+    "ao",
+    "angolan"
+  ],
+  "🇦🇶": [
+    "aq",
+    "antarctic",
+    "south",
+    "pole"
+  ],
+  "🇦🇷": [
+    "ar",
+    "argentinian",
+    "argentinean"
+  ],
+  "🇦🇸": [
+    "as",
+    "samoan"
+  ],
+  "🇦🇹": [
+    "at",
+    "austrian",
+    "vienna"
+  ],
+  "🇦🇺": [
+    "au",
+    "aussie",
+    "australian",
+    "oz",
+    "sydney",
+    "melbourne"
+  ],
+  "🇦🇼": [
+    "aw",
+    "aruban"
+  ],
+  "🇦🇽": [
+    "ax",
+    "aland"
+  ],
+  "🇦🇿": [
+    "az",
+    "azerbaijani",
+    "azeri"
+  ],
+  "🇧🇦": [
+    "ba",
+    "bosnian",
+    "herzegovinian"
+  ],
+  "🇧🇧": [
+    "bb",
+    "barbadian",
+    "bajan"
+  ],
+  "🇧🇩": [
+    "bd",
+    "bangladeshi",
+    "bengali"
+  ],
+  "🇧🇪": [
+    "be",
+    "belgian",
+    "flemish"
+  ],
+  "🇧🇫": [
+    "bf",
+    "burkinabe"
+  ],
+  "🇧🇬": [
+    "bg",
+    "bulgarian"
+  ],
+  "🇧🇭": [
+    "bh",
+    "bahraini"
+  ],
+  "🇧🇮": [
+    "bi",
+    "burundian"
+  ],
+  "🇧🇯": [
+    "bj",
+    "beninese"
+  ],
+  "🇧🇱": [
+    "bl",
+    "saint",
+    "barthelemy"
+  ],
+  "🇧🇲": [
+    "bm",
+    "bermudan"
+  ],
+  "🇧🇳": [
+    "bn",
+    "bruneian"
+  ],
+  "🇧🇴": [
+    "bo",
+    "bolivian"
+  ],
+  "🇧🇶": [
+    "bq",
+    "bonaire",
+    "st",
+    "eustatius",
+    "saba"
+  ],
+  "🇧🇷": [
+    "br",
+    "brazilian",
+    "brasil",
+    "rio",
+    "sao",
+    "paulo"
+  ],
+  "🇧🇸": [
+    "bs",
+    "bahamian"
+  ],
+  "🇧🇹": [
+    "bt",
+    "bhutanese"
+  ],
+  "🇧🇻": [
+    "bv"
+  ],
+  "🇧🇼": [
+    "bw",
+    "motswana",
+    "batswana"
+  ],
+  "🇧🇾": [
+    "by",
+    "belarusian"
+  ],
+  "🇧🇿": [
+    "bz",
+    "belizean"
+  ],
+  "🇨🇦": [
+    "ca",
+    "canadian",
+    "maple",
+    "leaf",
+    "toronto",
+    "ottawa"
+  ],
+  "🇨🇨": [
+    "cc"
+  ],
+  "🇨🇩": [
+    "cd",
+    "drc",
+    "democratic",
+    "republic"
+  ],
+  "🇨🇫": [
+    "cf",
+    "car"
+  ],
+  "🇨🇬": [
+    "cg",
+    "republic"
+  ],
+  "🇨🇭": [
+    "ch",
+    "swiss",
+    "suisse",
+    "zurich",
+    "geneva"
+  ],
+  "🇨🇰": [
+    "ck"
+  ],
+  "🇨🇱": [
+    "cl",
+    "chilean"
+  ],
+  "🇨🇲": [
+    "cm",
+    "cameroonian"
+  ],
+  "🇨🇳": [
+    "cn",
+    "chinese",
+    "prc",
+    "beijing",
+    "shanghai"
+  ],
+  "🇨🇴": [
+    "co",
+    "colombian"
+  ],
+  "🇨🇵": [
+    "cp"
+  ],
+  "🇨🇷": [
+    "cr",
+    "rican"
+  ],
+  "🇨🇺": [
+    "cu",
+    "cuban"
+  ],
+  "🇨🇻": [
+    "cv",
+    "cabo",
+    "cabo",
+    "verdean"
+  ],
+  "🇨🇼": [
+    "cw",
+    "curacao"
+  ],
+  "🇨🇽": [
+    "cx"
+  ],
+  "🇨🇾": [
+    "cy",
+    "cypriot"
+  ],
+  "🇨🇿": [
+    "cz",
+    "czech",
+    "republic",
+    "prague"
+  ],
+  "🇩🇪": [
+    "de",
+    "german",
+    "deutsch",
+    "berlin",
+    "munich"
+  ],
+  "🇩🇬": [
+    "dg"
+  ],
+  "🇩🇯": [
+    "dj",
+    "djiboutian"
+  ],
+  "🇩🇰": [
+    "dk",
+    "danish",
+    "dane",
+    "copenhagen"
+  ],
+  "🇩🇲": [
+    "dm",
+    "dominican"
+  ],
+  "🇩🇴": [
+    "do"
+  ],
+  "🇩🇿": [
+    "dz",
+    "algerian"
+  ],
+  "🇪🇦": [
+    "ea"
+  ],
+  "🇪🇨": [
+    "ec",
+    "ecuadorian"
+  ],
+  "🇪🇪": [
+    "ee",
+    "estonian"
+  ],
+  "🇪🇬": [
+    "eg",
+    "egyptian"
+  ],
+  "🇪🇭": [
+    "eh",
+    "sahrawi"
+  ],
+  "🇪🇷": [
+    "er",
+    "eritrean"
+  ],
+  "🇪🇸": [
+    "es",
+    "spanish",
+    "espana",
+    "espanol",
+    "madrid",
+    "barcelona"
+  ],
+  "🇪🇹": [
+    "et",
+    "ethiopian"
+  ],
+  "🇪🇺": [
+    "eu",
+    "europe",
+    "brussels"
+  ],
+  "🇫🇮": [
+    "fi",
+    "finnish",
+    "finn",
+    "helsinki"
+  ],
+  "🇫🇯": [
+    "fj",
+    "fijian"
+  ],
+  "🇫🇰": [
+    "fk",
+    "malvinas"
+  ],
+  "🇫🇲": [
+    "fm",
+    "micronesian"
+  ],
+  "🇫🇴": [
+    "fo",
+    "faroese"
+  ],
+  "🇫🇷": [
+    "fr",
+    "french",
+    "paris",
+    "marseille"
+  ],
+  "🇬🇦": [
+    "ga",
+    "gabonese"
+  ],
+  "🇬🇧": [
+    "gb",
+    "uk",
+    "britain",
+    "british",
+    "england",
+    "english",
+    "london"
+  ],
+  "🇬🇩": [
+    "gd",
+    "grenadian"
+  ],
+  "🇬🇪": [
+    "ge",
+    "georgian"
+  ],
+  "🇬🇫": [
+    "gf"
+  ],
+  "🇬🇬": [
+    "gg"
+  ],
+  "🇬🇭": [
+    "gh",
+    "ghanaian"
+  ],
+  "🇬🇮": [
+    "gi",
+    "gibraltarian"
+  ],
+  "🇬🇱": [
+    "gl",
+    "greenlandic"
+  ],
+  "🇬🇲": [
+    "gm",
+    "gambian"
+  ],
+  "🇬🇳": [
+    "gn",
+    "guinean"
+  ],
+  "🇬🇵": [
+    "gp"
+  ],
+  "🇬🇶": [
+    "gq",
+    "equatoguinean"
+  ],
+  "🇬🇷": [
+    "gr",
+    "greek",
+    "hellenic",
+    "athens"
+  ],
+  "🇬🇸": [
+    "gs"
+  ],
+  "🇬🇹": [
+    "gt",
+    "guatemalan"
+  ],
+  "🇬🇺": [
+    "gu",
+    "guamanian",
+    "chamorro"
+  ],
+  "🇬🇼": [
+    "gw",
+    "bissau-guinean"
+  ],
+  "🇬🇾": [
+    "gy",
+    "guyanese"
+  ],
+  "🇭🇰": [
+    "hk",
+    "hongkong",
+    "hongkonger"
+  ],
+  "🇭🇲": [
+    "hm"
+  ],
+  "🇭🇳": [
+    "hn",
+    "honduran"
+  ],
+  "🇭🇷": [
+    "hr",
+    "croatian",
+    "croat"
+  ],
+  "🇭🇹": [
+    "ht",
+    "haitian"
+  ],
+  "🇭🇺": [
+    "hu",
+    "hungarian",
+    "magyar"
+  ],
+  "🇮🇨": [
+    "ic"
+  ],
+  "🇮🇩": [
+    "id",
+    "indonesian",
+    "jakarta"
+  ],
+  "🇮🇪": [
+    "ie",
+    "irish",
+    "eire",
+    "dublin"
+  ],
+  "🇮🇱": [
+    "il",
+    "israeli",
+    "tel",
+    "aviv",
+    "jerusalem"
+  ],
+  "🇮🇲": [
+    "im",
+    "manx"
+  ],
+  "🇮🇳": [
+    "indian",
+    "delhi",
+    "mumbai"
+  ],
+  "🇮🇴": [
+    "io",
+    "biot"
+  ],
+  "🇮🇶": [
+    "iq",
+    "iraqi"
+  ],
+  "🇮🇷": [
+    "ir",
+    "iranian",
+    "persian"
+  ],
+  "🇮🇸": [
+    "icelandic",
+    "icelander",
+    "reykjavik"
+  ],
+  "🇮🇹": [
+    "it",
+    "italian",
+    "italia",
+    "rome",
+    "milan"
+  ],
+  "🇯🇪": [
+    "je"
+  ],
+  "🇯🇲": [
+    "jm",
+    "jamaican"
+  ],
+  "🇯🇴": [
+    "jo",
+    "jordanian"
+  ],
+  "🇯🇵": [
+    "jp",
+    "japanese",
+    "nippon",
+    "tokyo",
+    "osaka"
+  ],
+  "🇰🇪": [
+    "ke",
+    "kenyan"
+  ],
+  "🇰🇬": [
+    "kg",
+    "kyrgyz"
+  ],
+  "🇰🇭": [
+    "kh",
+    "cambodian",
+    "khmer"
+  ],
+  "🇰🇮": [
+    "ki",
+    "i-kiribati"
+  ],
+  "🇰🇲": [
+    "km",
+    "comoran"
+  ],
+  "🇰🇳": [
+    "kn",
+    "saint",
+    "kittitian",
+    "nevisian"
+  ],
+  "🇰🇵": [
+    "kp",
+    "dprk",
+    "democratic",
+    "peoples",
+    "republic",
+    "korean",
+    "pyongyang"
+  ],
+  "🇰🇷": [
+    "kr",
+    "republic",
+    "korean",
+    "seoul"
+  ],
+  "🇰🇼": [
+    "kw",
+    "kuwaiti"
+  ],
+  "🇰🇾": [
+    "ky",
+    "caymanian"
+  ],
+  "🇰🇿": [
+    "kz",
+    "kazakh"
+  ],
+  "🇱🇦": [
+    "la",
+    "lao",
+    "laotian"
+  ],
+  "🇱🇧": [
+    "lb",
+    "lebanese"
+  ],
+  "🇱🇨": [
+    "lc",
+    "saint",
+    "saint",
+    "lucian"
+  ],
+  "🇱🇮": [
+    "li",
+    "liechtensteiner"
+  ],
+  "🇱🇰": [
+    "lk",
+    "lankan"
+  ],
+  "🇱🇷": [
+    "lr",
+    "liberian"
+  ],
+  "🇱🇸": [
+    "ls",
+    "mosotho",
+    "basotho"
+  ],
+  "🇱🇹": [
+    "lt",
+    "lithuanian"
+  ],
+  "🇱🇺": [
+    "lu",
+    "luxembourger",
+    "luxembourgish"
+  ],
+  "🇱🇻": [
+    "lv",
+    "latvian"
+  ],
+  "🇱🇾": [
+    "ly",
+    "libyan"
+  ],
+  "🇲🇦": [
+    "ma",
+    "moroccan"
+  ],
+  "🇲🇨": [
+    "mc",
+    "monegasque",
+    "monacan"
+  ],
+  "🇲🇩": [
+    "md",
+    "moldovan"
+  ],
+  "🇲🇪": [
+    "me",
+    "montenegrin"
+  ],
+  "🇲🇫": [
+    "mf",
+    "saint"
+  ],
+  "🇲🇬": [
+    "mg",
+    "malagasy"
+  ],
+  "🇲🇭": [
+    "mh",
+    "marshallese"
+  ],
+  "🇲🇰": [
+    "mk",
+    "macedonian"
+  ],
+  "🇲🇱": [
+    "ml",
+    "malian"
+  ],
+  "🇲🇲": [
+    "burma",
+    "mm",
+    "burmese"
+  ],
+  "🇲🇳": [
+    "mn",
+    "mongolian"
+  ],
+  "🇲🇴": [
+    "mo",
+    "macau",
+    "macanese"
+  ],
+  "🇲🇵": [
+    "mp"
+  ],
+  "🇲🇶": [
+    "mq",
+    "martiniquais"
+  ],
+  "🇲🇷": [
+    "mr",
+    "mauritanian"
+  ],
+  "🇲🇸": [
+    "ms",
+    "montserratian"
+  ],
+  "🇲🇹": [
+    "mt",
+    "maltese"
+  ],
+  "🇲🇺": [
+    "mu",
+    "mauritian"
+  ],
+  "🇲🇻": [
+    "mv",
+    "maldivian"
+  ],
+  "🇲🇼": [
+    "mw",
+    "malawian"
+  ],
+  "🇲🇽": [
+    "mx",
+    "mexican"
+  ],
+  "🇲🇾": [
+    "my",
+    "malaysian"
+  ],
+  "🇲🇿": [
+    "mz",
+    "mozambican"
+  ],
+  "🇳🇦": [
+    "na",
+    "namibian"
+  ],
+  "🇳🇨": [
+    "nc",
+    "caledonian"
+  ],
+  "🇳🇪": [
+    "ne",
+    "nigerien"
+  ],
+  "🇳🇫": [
+    "nf"
+  ],
+  "🇳🇬": [
+    "ng",
+    "nigerian"
+  ],
+  "🇳🇮": [
+    "ni",
+    "nicaraguan"
+  ],
+  "🇳🇱": [
+    "nl",
+    "dutch",
+    "holland",
+    "amsterdam"
+  ],
+  "🇳🇴": [
+    "no",
+    "norwegian",
+    "oslo"
+  ],
+  "🇳🇵": [
+    "np",
+    "nepali",
+    "nepalese"
+  ],
+  "🇳🇷": [
+    "nr",
+    "nauruan"
+  ],
+  "🇳🇺": [
+    "nu",
+    "niuean"
+  ],
+  "🇳🇿": [
+    "nz",
+    "kiwi",
+    "zealander",
+    "aotearoa"
+  ],
+  "🇴🇲": [
+    "om",
+    "omani"
+  ],
+  "🇵🇦": [
+    "pa",
+    "panamanian"
+  ],
+  "🇵🇪": [
+    "pe",
+    "peruvian"
+  ],
+  "🇵🇫": [
+    "pf",
+    "polynesian",
+    "tahiti"
+  ],
+  "🇵🇬": [
+    "pg",
+    "guinean",
+    "papuan"
+  ],
+  "🇵🇭": [
+    "ph",
+    "filipino",
+    "pinoy",
+    "pinay"
+  ],
+  "🇵🇰": [
+    "pk",
+    "pakistani"
+  ],
+  "🇵🇱": [
+    "pl",
+    "polish",
+    "pole",
+    "warsaw"
+  ],
+  "🇵🇲": [
+    "pm",
+    "saint"
+  ],
+  "🇵🇳": [
+    "pn"
+  ],
+  "🇵🇷": [
+    "pr",
+    "rican"
+  ],
+  "🇵🇸": [
+    "ps",
+    "palestine"
+  ],
+  "🇵🇹": [
+    "pt",
+    "portuguese",
+    "lisbon"
+  ],
+  "🇵🇼": [
+    "pw",
+    "palauan"
+  ],
+  "🇵🇾": [
+    "py",
+    "paraguayan"
+  ],
+  "🇶🇦": [
+    "qa",
+    "qatari"
+  ],
+  "🇷🇪": [
+    "re",
+    "reunion",
+    "reunionese"
+  ],
+  "🇷🇴": [
+    "ro",
+    "romanian"
+  ],
+  "🇷🇸": [
+    "rs",
+    "serbian",
+    "serb"
+  ],
+  "🇷🇺": [
+    "ru",
+    "russian",
+    "federation",
+    "moscow"
+  ],
+  "🇷🇼": [
+    "rw",
+    "rwandan"
+  ],
+  "🇸🇦": [
+    "sa",
+    "arabian"
+  ],
+  "🇸🇧": [
+    "sb",
+    "islander"
+  ],
+  "🇸🇨": [
+    "sc",
+    "seychellois"
+  ],
+  "🇸🇩": [
+    "sd",
+    "sudanese"
+  ],
+  "🇸🇪": [
+    "se",
+    "swedish",
+    "swede",
+    "stockholm"
+  ],
+  "🇸🇬": [
+    "sg",
+    "singaporean"
+  ],
+  "🇸🇭": [
+    "sh",
+    "saint"
+  ],
+  "🇸🇮": [
+    "si",
+    "slovenian",
+    "slovene"
+  ],
+  "🇸🇯": [
+    "sj"
+  ],
+  "🇸🇰": [
+    "sk",
+    "slovak"
+  ],
+  "🇸🇱": [
+    "sl",
+    "leonean"
+  ],
+  "🇸🇲": [
+    "sm",
+    "sammarinese"
+  ],
+  "🇸🇳": [
+    "sn",
+    "senegalese"
+  ],
+  "🇸🇴": [
+    "so",
+    "somali"
+  ],
+  "🇸🇷": [
+    "sr",
+    "surinamese"
+  ],
+  "🇸🇸": [
+    "ss",
+    "sudanese"
+  ],
+  "🇸🇹": [
+    "st",
+    "sao",
+    "tome",
+    "principe",
+    "santomean"
+  ],
+  "🇸🇻": [
+    "sv",
+    "salvadoran"
+  ],
+  "🇸🇽": [
+    "sx"
+  ],
+  "🇸🇾": [
+    "sy",
+    "syrian"
+  ],
+  "🇸🇿": [
+    "sz",
+    "swazi",
+    "swaziland"
+  ],
+  "🇹🇦": [
+    "ta"
+  ],
+  "🇹🇨": [
+    "tc"
+  ],
+  "🇹🇩": [
+    "td",
+    "chadian"
+  ],
+  "🇹🇫": [
+    "tf"
+  ],
+  "🇹🇬": [
+    "tg",
+    "togolese"
+  ],
+  "🇹🇭": [
+    "th",
+    "thai"
+  ],
+  "🇹🇯": [
+    "tj",
+    "tajik"
+  ],
+  "🇹🇰": [
+    "tk"
+  ],
+  "🇹🇱": [
+    "tl",
+    "east",
+    "timor",
+    "timorese"
+  ],
+  "🇹🇲": [
+    "tm",
+    "turkmen"
+  ],
+  "🇹🇳": [
+    "tn",
+    "tunisian"
+  ],
+  "🇹🇴": [
+    "tongan"
+  ],
+  "🇹🇷": [
+    "turkey",
+    "tr",
+    "turkish",
+    "turk",
+    "istanbul",
+    "ankara"
+  ],
+  "🇹🇹": [
+    "tt",
+    "trinidadian",
+    "tobagonian"
+  ],
+  "🇹🇻": [
+    "tv",
+    "tuvaluan"
+  ],
+  "🇹🇼": [
+    "tw",
+    "taiwanese",
+    "taipei"
+  ],
+  "🇹🇿": [
+    "tz",
+    "tanzanian"
+  ],
+  "🇺🇦": [
+    "ua",
+    "ukrainian",
+    "kyiv"
+  ],
+  "🇺🇬": [
+    "ug",
+    "ugandan"
+  ],
+  "🇺🇲": [
+    "um",
+    "united",
+    "states",
+    "minor"
+  ],
+  "🇺🇳": [
+    "un"
+  ],
+  "🇺🇸": [
+    "us",
+    "usa",
+    "america",
+    "american",
+    "stars",
+    "stripes",
+    "washington",
+    "dc"
+  ],
+  "🇺🇾": [
+    "uy",
+    "uruguayan"
+  ],
+  "🇺🇿": [
+    "uz",
+    "uzbek"
+  ],
+  "🇻🇦": [
+    "va",
+    "holy",
+    "see"
+  ],
+  "🇻🇨": [
+    "vc",
+    "saint",
+    "vincentian"
+  ],
+  "🇻🇪": [
+    "ve",
+    "venezuelan"
+  ],
+  "🇻🇬": [
+    "vg"
+  ],
+  "🇻🇮": [
+    "vi",
+    "united",
+    "states"
+  ],
+  "🇻🇳": [
+    "vn",
+    "vietnamese"
+  ],
+  "🇻🇺": [
+    "vu",
+    "ni-vanuatu"
+  ],
+  "🇼🇫": [
+    "wf"
+  ],
+  "🇼🇸": [
+    "ws",
+    "samoan"
+  ],
+  "🇽🇰": [
+    "xk",
+    "kosovar"
+  ],
+  "🇾🇪": [
+    "ye",
+    "yemeni"
+  ],
+  "🇾🇹": [
+    "yt"
+  ],
+  "🇿🇦": [
+    "za",
+    "african"
+  ],
+  "🇿🇲": [
+    "zm",
+    "zambian"
+  ],
+  "🇿🇼": [
+    "zw",
+    "zimbabwean"
+  ],
+  "🏴󠁧󠁢󠁥󠁮󠁧󠁿": [
+    "english",
+    "gb",
+    "uk",
+    "britain",
+    "british",
+    "cross",
+    "st",
+    "george"
+  ],
+  "🏴󠁧󠁢󠁳󠁣󠁴󠁿": [
+    "scottish",
+    "gb",
+    "uk",
+    "britain",
+    "british",
+    "scot",
+    "st",
+    "andrew",
+    "cross",
+    "saltire"
+  ],
+  "🏴󠁧󠁢󠁷󠁬󠁳󠁿": [
+    "welsh",
+    "gb",
+    "uk",
+    "britain",
+    "british",
+    "cymru",
+    "dragon"
+  ],
+  "₿": [
+    "money",
+    "wealth",
+    "rich"
+  ],
+  "💰": [
+    "wealth"
+  ],
+  "💴": [
+    "japan"
+  ],
+  "💵": [
+    "usa"
+  ],
+  "💶": [
+    "europe"
+  ],
+  "💷": [
+    "uk",
+    "british"
+  ],
+  "💸": [
+    "spending",
+    "flying",
+    "wealth"
+  ],
+  "💳": [
+    "payment",
+    "shopping",
+    "debit"
+  ],
+  "🧾": [
+    "payment",
+    "bill"
+  ],
+  "💹": [
+    "stocks"
+  ],
+  "💱": [
+    "forex"
+  ],
+  "✉️": [
+    "mail",
+    "correspondence",
+    "message"
+  ],
+  "📧": [
+    "message",
+    "electronic",
+    "communication"
+  ],
+  "📩": [
+    "message"
+  ],
+  "📤": [
+    "send"
+  ],
+  "📮": [
+    "letter",
+    "send",
+    "postal"
+  ],
+  "🛒": [
+    "store",
+    "supermarket"
+  ]
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-pending-mls-welcomes"
+description = "Enables the list_pending_mls_welcomes command without any pre-configured scope."
+commands.allow = ["list_pending_mls_welcomes"]
+
+[[permission]]
+identifier = "deny-list-pending-mls-welcomes"
+description = "Denies the list_pending_mls_welcomes command without any pre-configured scope."
+commands.deny = ["list_pending_mls_welcomes"]

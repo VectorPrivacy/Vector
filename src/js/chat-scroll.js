@@ -47,12 +47,12 @@ function handleProceduralScroll() {
 
     // Check if we're using cache mode
     if (proceduralScrollState.useCache) {
-        // Use cache stats to determine if there are more messages
-        const cacheStats = messageCache.getStats(strOpenChat);
-        if (!cacheStats?.hasMoreMessages) {
-            return; // No more messages to load
+        // Use cache stats to determine if there are more events
+        const cacheStats = eventCache.getStats(strOpenChat);
+        if (!cacheStats?.hasMoreEvents) {
+            return; // No more events to load
         }
-        // Load more messages
+        // Load more events
         loadMoreMessages();
         return;
     }
@@ -79,13 +79,13 @@ async function loadMoreMessages() {
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat) return;
 
-    // Check if we should use the message cache
+    // Check if we should use the event cache
     if (proceduralScrollState.useCache) {
         // Use cache-based loading
-        const cacheStats = messageCache.getStats(strOpenChat);
-        
-        // Check if there are more messages to load
-        if (!cacheStats?.hasMoreMessages) {
+        const cacheStats = eventCache.getStats(strOpenChat);
+
+        // Check if there are more events to load
+        if (!cacheStats?.hasMoreEvents) {
             return;
         }
 
@@ -96,8 +96,8 @@ async function loadMoreMessages() {
         const scrollHeightBefore = domChatMessages.scrollHeight;
         const scrollTopBefore = domChatMessages.scrollTop;
 
-        // Load more messages from cache (fetches from DB if needed)
-        const olderMessages = await messageCache.loadMoreMessages(
+        // Load more events from cache (fetches from DB if needed)
+        const olderMessages = await eventCache.loadMoreEvents(
             strOpenChat,
             proceduralScrollState.messagesPerBatch
         );
@@ -109,20 +109,20 @@ async function loadMoreMessages() {
         }
 
         // Update the chat object's messages array for compatibility
-        chat.messages = messageCache.getMessages(strOpenChat) || [];
+        chat.messages = eventCache.getEvents(strOpenChat) || [];
 
         // Get profile for rendering
         const isGroup = chat?.chat_type === 'MlsGroup';
         const profile = !isGroup ? getProfile(chat.id) : null;
 
-        // Render the older messages (prepend)
+        // Render the older events (prepend)
         await updateChat(chat, olderMessages, profile, false);
 
         // Update rendered count
         proceduralScrollState.renderedMessageCount += olderMessages.length;
-        
+
         // Update total from cache stats
-        const newStats = messageCache.getStats(strOpenChat);
+        const newStats = eventCache.getStats(strOpenChat);
         proceduralScrollState.totalMessageCount = newStats?.totalInDb || proceduralScrollState.totalMessageCount;
 
         // Correct scroll position to prevent "snapping"
@@ -332,51 +332,86 @@ async function waitForMediaToLoad(timeout = 5000) {
 
 /**
  * Load and scroll to a specific message that isn't currently rendered
+ * If the message isn't in memory, fetches from backend database
  * @param {string} targetMsgId - The ID of the message to scroll to
  */
 async function loadAndScrollToMessage(targetMsgId) {
     if (!strOpenChat) return;
-    
+
     const chat = arrChats.find(c => c.id === strOpenChat);
-    if (!chat || !chat.messages) return;
-    
+    if (!chat) return;
+
+    // Initialize messages array if needed
+    if (!chat.messages) chat.messages = [];
+
     // Find the target message in the chat
-    const targetMsgIndex = chat.messages.findIndex(m => m.id === targetMsgId);
-    if (targetMsgIndex === -1) return console.warn('Target message not found in chat history');
-    
+    let targetMsgIndex = chat.messages.findIndex(m => m.id === targetMsgId);
+
+    // If message not in memory, fetch from backend database
+    if (targetMsgIndex === -1) {
+        try {
+            // Fetch messages from (target - 10) to newest, ensuring context around the target
+            const messages = await invoke('get_messages_around_id', {
+                chatId: strOpenChat,
+                targetMessageId: targetMsgId,
+                contextBefore: 10
+            });
+
+            if (!messages || messages.length === 0) {
+                return console.warn('Target message not found in database');
+            }
+
+            // Merge fetched messages with existing ones (avoid duplicates)
+            const existingIds = new Set(chat.messages.map(m => m.id));
+            const newMessages = messages.filter(m => !existingIds.has(m.id));
+
+            // Add new messages and sort chronologically
+            chat.messages = [...chat.messages, ...newMessages].sort((a, b) => a.at - b.at);
+
+            // Re-find the target message index after merge
+            targetMsgIndex = chat.messages.findIndex(m => m.id === targetMsgId);
+
+            if (targetMsgIndex === -1) {
+                return console.warn('Target message not found after fetch');
+            }
+        } catch (error) {
+            return console.warn('Failed to fetch messages around target:', error);
+        }
+    }
+
     // Calculate which messages to load:
     // - All messages from the target to the most recent
     // - Plus 20 additional older messages for context
     const contextMessages = 20;
     const startIndex = Math.max(0, targetMsgIndex - contextMessages);
     const endIndex = chat.messages.length;
-    
+
     const messagesToLoad = chat.messages.slice(startIndex, endIndex);
-    
+
     // Update procedural scroll state to reflect what we're about to render
     proceduralScrollState.renderedMessageCount = messagesToLoad.length;
     proceduralScrollState.totalMessageCount = chat.messages.length;
-    
+
     // Get profile for rendering
     const isGroup = chat?.chat_type === 'MlsGroup';
     const profile = !isGroup ? getProfile(chat.id) : null;
-    
+
     // Clear existing messages and render the new range
     while (domChatMessages.firstElementChild) {
         domChatMessages.firstElementChild.remove();
     }
-    
+
     // Render all the messages
     await updateChat(chat, messagesToLoad, profile, false);
-    
+
     // Wait for all media (images, videos) to load before scrolling
     await waitForMediaToLoad();
-    
+
     // Now scroll to the target message
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
         centerInView(domMsg);
-        
+
         // Run an animation to bring the user's eye to the message
         const pContainer = domMsg.querySelector('p');
         if (pContainer && !pContainer.classList.contains('no-background')) {

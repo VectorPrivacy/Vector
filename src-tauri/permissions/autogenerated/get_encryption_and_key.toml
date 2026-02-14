@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-encryption-and-key"
+description = "Enables the get_encryption_and_key command without any pre-configured scope."
+commands.allow = ["get_encryption_and_key"]
+
+[[permission]]
+identifier = "deny-get-encryption-and-key"
+description = "Denies the get_encryption_and_key command without any pre-configured scope."
+commands.deny = ["get_encryption_and_key"]

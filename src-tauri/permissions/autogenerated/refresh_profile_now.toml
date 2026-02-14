@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-refresh-profile-now"
+description = "Enables the refresh_profile_now command without any pre-configured scope."
+commands.allow = ["refresh_profile_now"]
+
+[[permission]]
+identifier = "deny-refresh-profile-now"
+description = "Denies the refresh_profile_now command without any pre-configured scope."
+commands.deny = ["refresh_profile_now"]

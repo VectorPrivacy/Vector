@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-mls-groups-now"
+description = "Enables the sync_mls_groups_now command without any pre-configured scope."
+commands.allow = ["sync_mls_groups_now"]
+
+[[permission]]
+identifier = "deny-sync-mls-groups-now"
+description = "Denies the sync_mls_groups_now command without any pre-configured scope."
+commands.deny = ["sync_mls_groups_now"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-nickname"
+description = "Enables the set_nickname command without any pre-configured scope."
+commands.allow = ["set_nickname"]
+
+[[permission]]
+identifier = "deny-set-nickname"
+description = "Denies the set_nickname command without any pre-configured scope."
+commands.deny = ["set_nickname"]

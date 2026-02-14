@@ -14,12 +14,29 @@ let pendingReplyRef = null;
 let compressionInProgress = false;
 let compressionComplete = false;
 let compressionPollingInterval = null;
+let pendingMiniAppInfo = null; // For marketplace publishing: stores Mini App info
 
 // Image extensions supported by the image crate
 const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
 
 // Video extensions supported for preview (mp4, webm, mov - except on Linux)
 const SUPPORTED_VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov'];
+
+/**
+ * Validate that a string is a safe image source (data URL or blob URL)
+ * Prevents XSS via malicious src injection (e.g., javascript: protocol)
+ * @param {string} src - The source string to validate
+ * @returns {string|null} The validated src or null if invalid
+ */
+function validateImageSrc(src) {
+    if (!src || typeof src !== 'string') return null;
+    // Allow data URLs for images and blob URLs only
+    if (src.startsWith('data:image/') || src.startsWith('blob:')) {
+        return src;
+    }
+    console.warn('[file-preview] Rejected invalid image src:', src.substring(0, 50));
+    return null;
+}
 
 /**
  * Format file size in human-readable format
@@ -112,6 +129,41 @@ function getFileIcon(filepath) {
 }
 
 /**
+ * Check if file is a Mini App (.xdc file)
+ * @param {string} ext - File extension
+ * @returns {boolean}
+ */
+function isMiniAppExtension(ext) {
+    return ext === 'xdc';
+}
+
+/**
+ * Display Mini App preview in the content area
+ * @param {HTMLElement} contentArea - The content area element
+ * @param {object} miniAppInfo - Mini App info from loadMiniAppInfo
+ * @param {string} fileName - Fallback file name if no Mini App info
+ */
+function displayMiniAppPreview(contentArea, miniAppInfo, fileName) {
+    const validatedIcon = miniAppInfo ? validateImageSrc(miniAppInfo.icon_data) : null;
+    if (validatedIcon) {
+        // Show Mini App icon
+        contentArea.innerHTML = `
+            <div class="file-preview-image-container file-preview-miniapp">
+                <img src="${validatedIcon}" class="file-preview-image file-preview-miniapp-icon" alt="${escapeHtml(miniAppInfo.name || 'Mini App')}">
+            </div>
+        `;
+    } else {
+        // Show generic Mini App icon
+        contentArea.innerHTML = `
+            <div class="file-preview-icon-container file-preview-miniapp">
+                <div class="icon icon-file file-preview-icon"></div>
+                <span class="file-preview-miniapp-badge">Mini App</span>
+            </div>
+        `;
+    }
+}
+
+/**
  * Create the file preview overlay element
  */
 function createFilePreviewOverlay() {
@@ -130,6 +182,9 @@ function createFilePreviewOverlay() {
                 <div class="file-preview-options" id="file-preview-options"></div>
             </div>
             <div class="file-preview-buttons">
+                <button class="file-preview-btn file-preview-btn-publish" id="file-preview-publish" style="display: none;">
+                    <span class="icon icon-star"></span> Publish
+                </button>
                 <button class="file-preview-btn file-preview-btn-cancel" id="file-preview-cancel">Cancel</button>
                 <button class="file-preview-btn file-preview-btn-send" id="file-preview-send">Send</button>
             </div>
@@ -141,6 +196,7 @@ function createFilePreviewOverlay() {
     // Event listeners
     document.getElementById('file-preview-cancel').addEventListener('click', closeFilePreview);
     document.getElementById('file-preview-send').addEventListener('click', sendPreviewedFile);
+    document.getElementById('file-preview-publish').addEventListener('click', openPublishDialog);
     
     // Close on background click
     filePreviewOverlay.addEventListener('click', (e) => {
@@ -149,12 +205,32 @@ function createFilePreviewOverlay() {
         }
     });
     
-    // Close on Escape key
+    // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && filePreviewOverlay && filePreviewOverlay.classList.contains('active')) {
+        if (!filePreviewOverlay || !filePreviewOverlay.classList.contains('active')) return;
+
+        if (e.key === 'Escape') {
             closeFilePreview();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            sendPreviewedFile();
         }
     });
+}
+
+/**
+ * Open the publish dialog for marketplace publishing
+ */
+async function openPublishDialog() {
+    if (!pendingFile || !pendingMiniAppInfo) {
+        return console.error('No pending file or Mini App info for publishing');
+    }
+    
+    // Close the file preview first
+    closeFilePreview();
+    
+    // Open the publish dialog
+    await showPublishAppDialog(pendingFile, pendingMiniAppInfo);
 }
 
 /**
@@ -221,9 +297,22 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     // Determine file type using the resolved extension
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const isMiniApp = isMiniAppExtension(ext);
     
-    // Update file name
-    document.getElementById('file-preview-name').textContent = fileName;
+    // For Mini Apps, try to load the app info to get name and icon
+    let miniAppInfo = null;
+    if (isMiniApp) {
+        try {
+            miniAppInfo = await loadMiniAppInfo(filepath);
+            console.log('Mini App info:', miniAppInfo);
+        } catch (e) {
+            console.error('Failed to load Mini App info:', e);
+        }
+    }
+    
+    // Update file name - use Mini App name if available
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    document.getElementById('file-preview-name').textContent = displayName;
     
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
@@ -231,15 +320,19 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     // Update content area
     const contentArea = document.getElementById('file-preview-content');
     
-    if (isImage) {
+    if (isMiniApp) {
+        // Show Mini App preview with icon
+        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+    } else if (isImage) {
         // Show image preview
         const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
         
-        if (isAndroid && androidPreview) {
+        const validatedAndroidPreview = validateImageSrc(androidPreview);
+        if (isAndroid && validatedAndroidPreview) {
             // On Android, use the base64 preview we already got from cache_android_file
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
-                    <img src="${androidPreview}" class="file-preview-image" alt="Preview">
+                    <img src="${validatedAndroidPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
         } else if (isAndroid) {
@@ -298,9 +391,10 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     }
     
     // Only show compress option for images larger than 25KB (excluding GIFs to preserve animation)
+    // Mini Apps don't get compression option
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
     const isGif = ext === 'gif';
-    if (isImage && !isGif && fileSize > MIN_COMPRESS_SIZE) {
+    if (isImage && !isGif && !isMiniApp && fileSize > MIN_COMPRESS_SIZE) {
         // Show compress option for images with loading state
         optionsArea.innerHTML = `
             <label class="file-preview-option">
@@ -319,9 +413,45 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         optionsArea.innerHTML = '';
     }
     
+    // Store Mini App info for potential publishing
+    pendingMiniAppInfo = miniAppInfo;
+    
+    // Show/hide publish button for trusted publishers with Mini Apps
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) {
+        if (isMiniApp) {
+            // Check if current user is a trusted publisher
+            checkAndShowPublishButton(publishBtn);
+        } else {
+            publishBtn.style.display = 'none';
+        }
+    }
+    
     // Show overlay
     filePreviewOverlay.style.display = 'flex';
     setTimeout(() => filePreviewOverlay.classList.add('active'), 10);
+}
+
+/**
+ * Check if current user is trusted publisher and show publish button
+ * @param {HTMLElement} publishBtn - The publish button element
+ */
+async function checkAndShowPublishButton(publishBtn) {
+    console.log('[FilePreview] Checking if user is trusted publisher...');
+    try {
+        // Check if isCurrentUserTrustedPublisher is available from marketplace.js
+        if (typeof isCurrentUserTrustedPublisher === 'function') {
+            const isTrusted = await isCurrentUserTrustedPublisher();
+            console.log('[FilePreview] isTrusted:', isTrusted);
+            publishBtn.style.display = isTrusted ? 'flex' : 'none';
+        } else {
+            console.log('[FilePreview] isCurrentUserTrustedPublisher function not available');
+            publishBtn.style.display = 'none';
+        }
+    } catch (e) {
+        console.error('Failed to check trusted publisher status:', e);
+        publishBtn.style.display = 'none';
+    }
 }
 
 /**
@@ -404,6 +534,7 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
     // Determine file type
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const isMiniApp = isMiniAppExtension(ext);
     
     // Store the File object for later use when sending
     pendingFileObject = file;
@@ -414,8 +545,22 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     
-    // Update file name
-    document.getElementById('file-preview-name').textContent = fileName;
+    // For Mini Apps, try to load the app info directly from bytes (no temp file needed)
+    let miniAppInfo = null;
+    if (isMiniApp) {
+        try {
+            // Read file bytes and load Mini App info directly
+            const bytes = await file.arrayBuffer();
+            miniAppInfo = await loadMiniAppInfoFromBytes(new Uint8Array(bytes), fileName);
+            console.log('Mini App info:', miniAppInfo);
+        } catch (e) {
+            console.error('Failed to load Mini App info:', e);
+        }
+    }
+    
+    // Update file name - use Mini App name if available
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    document.getElementById('file-preview-name').textContent = displayName;
     
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(file.size);
@@ -434,7 +579,12 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
         compressionPollingInterval = null;
     }
     
-    if (isImage) {
+    if (isMiniApp) {
+        // Show Mini App preview with icon
+        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+        optionsArea.innerHTML = '';
+        optionsArea.style.display = 'none';
+    } else if (isImage) {
         // Show loading state first
         contentArea.innerHTML = `
             <div class="file-preview-image-container">
@@ -486,7 +636,21 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
         optionsArea.innerHTML = '';
         optionsArea.style.display = 'none';
     }
-    
+
+    // Store Mini App info for potential publishing
+    pendingMiniAppInfo = miniAppInfo;
+
+    // Show/hide publish button for trusted publishers with Mini Apps
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) {
+        if (isMiniApp) {
+            // Check if current user is a trusted publisher
+            checkAndShowPublishButton(publishBtn);
+        } else {
+            publishBtn.style.display = 'none';
+        }
+    }
+
     // Show overlay
     filePreviewOverlay.style.display = 'flex';
     requestAnimationFrame(() => {
@@ -517,6 +681,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     // Determine file type
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const isMiniApp = isMiniAppExtension(ext);
     
     // Cache bytes in Rust immediately - Rust will generate a thumbnail preview for images
     let preview = null;
@@ -535,6 +700,17 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         return;
     }
     
+    // For Mini Apps, try to load the app info directly from bytes (no temp file needed)
+    let miniAppInfo = null;
+    if (isMiniApp) {
+        try {
+            miniAppInfo = await loadMiniAppInfoFromBytes(bytes, fileName);
+            console.log('Mini App info:', miniAppInfo);
+        } catch (e) {
+            console.error('Failed to load Mini App info:', e);
+        }
+    }
+    
     // Mark that we're using bytes mode (no file path)
     pendingFileBytes = true; // Flag to indicate bytes mode
     pendingFileObject = null; // Clear File object since we're using cached bytes
@@ -544,8 +720,9 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     
-    // Update file name
-    document.getElementById('file-preview-name').textContent = fileName;
+    // Update file name - use Mini App name if available
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    document.getElementById('file-preview-name').textContent = displayName;
     
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
@@ -564,12 +741,17 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         compressionPollingInterval = null;
     }
     
-    if (isImage) {
+    if (isMiniApp) {
+        // Show Mini App preview with icon
+        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+        optionsArea.innerHTML = '';
+    } else if (isImage) {
         // Use the preview from Rust (already a base64 data URL)
-        if (preview) {
+        const validatedPreview = validateImageSrc(preview);
+        if (validatedPreview) {
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
-                    <img src="${preview}" class="file-preview-image" alt="Preview">
+                    <img src="${validatedPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
         } else {
@@ -634,10 +816,24 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
                 <span class="icon ${iconClass} file-preview-icon"></span>
             </div>
         `;
-        
+
         optionsArea.innerHTML = '';
     }
-    
+
+    // Store Mini App info for potential publishing
+    pendingMiniAppInfo = miniAppInfo;
+
+    // Show/hide publish button for trusted publishers with Mini Apps
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) {
+        if (isMiniApp) {
+            // Check if current user is a trusted publisher
+            checkAndShowPublishButton(publishBtn);
+        } else {
+            publishBtn.style.display = 'none';
+        }
+    }
+
     // Show overlay
     filePreviewOverlay.style.display = 'flex';
     requestAnimationFrame(() => {
@@ -700,29 +896,28 @@ async function startCachedBytesCompression() {
  * @param {boolean} startCompression - Whether to start compression after caching
  */
 async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, startCompression) {
-    const infoElement = document.getElementById('file-preview-compress-info');
-    
     try {
-        // Read file bytes
+        // Read file as ArrayBuffer
         const arrayBuffer = await file.arrayBuffer();
-        const bytes = Array.from(new Uint8Array(arrayBuffer));
+        const bytes = new Uint8Array(arrayBuffer);
         
-        // Cache bytes in Rust - this also generates a base64 preview for images
+        // Cache in Rust and get preview
         const result = await invoke('cache_file_bytes', {
-            bytes: bytes,
+            bytes: Array.from(bytes),
             fileName: fileName,
             extension: ext
         });
         
-        // Display the preview from Rust (base64 data URL - works on all Android versions)
-        if (result.preview) {
+        // Display preview
+        const validatedResultPreview = validateImageSrc(result.preview);
+        if (validatedResultPreview) {
             contentArea.innerHTML = `
                 <div class="file-preview-image-container">
-                    <img src="${result.preview}" class="file-preview-image" alt="Preview">
+                    <img src="${validatedResultPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
         } else {
-            // Fallback to icon if no preview
+            // Fallback to icon
             contentArea.innerHTML = `
                 <div class="file-preview-icon-container">
                     <div class="icon icon-image file-preview-icon"></div>
@@ -732,47 +927,15 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
         
         // Start compression if requested
         if (startCompression) {
-            compressionInProgress = true;
-            compressionComplete = false;
-            
-            await invoke('start_cached_bytes_compression');
-            
-            // Poll for completion
-            compressionPollingInterval = setInterval(async () => {
-                try {
-                    const status = await invoke('get_cached_bytes_compression_status');
-                    if (status) {
-                        clearInterval(compressionPollingInterval);
-                        compressionPollingInterval = null;
-                        compressionComplete = true;
-                        compressionInProgress = false;
-                        
-                        // Update UI with compression info
-                        if (infoElement) {
-                            if (status.savings_percent > 0) {
-                                infoElement.textContent = `~${formatFileSize(status.estimated_size)} (${status.savings_percent}% smaller)`;
-                            } else {
-                                infoElement.textContent = 'No significant savings';
-                            }
-                        }
-                    }
-                } catch (e) {
-                    // Still compressing or error
-                }
-            }, 200);
+            startCachedBytesCompression();
         }
     } catch (e) {
         console.error('Failed to cache file:', e);
-        // Show error state
         contentArea.innerHTML = `
             <div class="file-preview-icon-container">
                 <div class="icon icon-image file-preview-icon"></div>
             </div>
         `;
-        if (infoElement) {
-            infoElement.textContent = 'Failed to load';
-        }
-        compressionInProgress = false;
     }
 }
 
@@ -782,79 +945,72 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
 function closeFilePreview() {
     if (!filePreviewOverlay) return;
     
-    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-    
-    // Stop polling
+    // Stop compression polling
     if (compressionPollingInterval) {
         clearInterval(compressionPollingInterval);
         compressionPollingInterval = null;
     }
     
-    // Clear caches if we're cancelling
-    if (pendingFile) {
-        invoke('clear_compression_cache', { filePath: pendingFile }).catch(() => {});
-        // On Android, also clear the file cache since we cached the bytes
-        if (isAndroid) {
-            invoke('clear_android_file_cache', { filePath: pendingFile }).catch(() => {});
-        }
-    }
-    if (pendingFileBytes || pendingFileObject) {
-        // Clear cached bytes (used for clipboard paste or File object compression)
-        invoke('clear_cached_file').catch(() => {});
-    }
-    
-    // Stop and clean up any video element
-    const video = filePreviewOverlay.querySelector('video');
-    if (video) {
-        video.pause();
-        video.src = '';
-        video.load();
-    }
-    
-    // Clean up any blob URLs
+    // Clean up blob URLs if any
     const contentArea = document.getElementById('file-preview-content');
     if (contentArea && contentArea.dataset.blobUrl) {
         URL.revokeObjectURL(contentArea.dataset.blobUrl);
         delete contentArea.dataset.blobUrl;
     }
     
+    // Cancel any pending compression
+    if (pendingFile) {
+        invoke('cancel_compression', { filePath: pendingFile }).catch(() => {});
+    }
+    if (pendingFileBytes) {
+        invoke('cancel_cached_bytes_compression').catch(() => {});
+    }
+    
     filePreviewOverlay.classList.remove('active');
     setTimeout(() => {
         filePreviewOverlay.style.display = 'none';
-        // Clear content after animation
-        if (contentArea) {
-            contentArea.innerHTML = '';
-        }
+        
+        // Clear pending state
+        pendingFile = null;
+        pendingFileBytes = null;
+        pendingFileObject = null;
+        pendingFileName = null;
+        pendingFileExt = null;
+        pendingReceiver = null;
+        pendingReplyRef = null;
+        compressionInProgress = false;
+        compressionComplete = false;
+        
+        // Clear content
+        const contentArea = document.getElementById('file-preview-content');
+        if (contentArea) contentArea.innerHTML = '';
+        
+        const optionsArea = document.getElementById('file-preview-options');
+        if (optionsArea) optionsArea.innerHTML = '';
     }, 200);
-    
-    // Reset state
-    compressionInProgress = false;
-    compressionComplete = false;
-    pendingFile = null;
-    pendingFileBytes = null;
-    pendingFileObject = null;
-    pendingFileName = null;
-    pendingFileExt = null;
-    pendingReceiver = null;
-    pendingReplyRef = null;
 }
 
 /**
  * Send the previewed file
  */
 async function sendPreviewedFile() {
-    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
+    if (!pendingReceiver) {
+        console.error('No receiver set for file preview');
+        closeFilePreview();
+        return;
+    }
     
-    // Check if we have either a file path, cached bytes, or File object
-    if ((!pendingFile && !pendingFileBytes && !pendingFileObject) || !pendingReceiver) return;
-    
-    // Capture values before closing
-    const filePath = pendingFile;
-    const usingBytes = pendingFileBytes; // Flag indicating bytes mode
-    const fileObject = pendingFileObject; // File object for Android optimized flow
+    // Capture all values we need before closing dialog
     const receiver = pendingReceiver;
-    const replyRef = pendingReplyRef;
+    const replyRef = pendingReplyRef || '';
+    const filePath = pendingFile;
+    const fileBytes = pendingFileBytes;
+    const fileObject = pendingFileObject;
+    const fileName = pendingFileName;
     const ext = pendingFileExt;
+    const usingBytes = !!fileBytes;
+    
+    // Check if this is an image for compression logic
     const isImage = (usingBytes || fileObject)
         ? SUPPORTED_IMAGE_EXTENSIONS.includes(ext)
         : isSupportedImage(filePath);
@@ -900,7 +1056,12 @@ async function sendPreviewedFile() {
     compressionInProgress = false;
     compressionComplete = false;
     
+    // Determine if this is a group or DM
+    const isGroup = receiver.startsWith('group:');
+    
     // Send file in background
+    const chatId = isGroup ? receiver.replace('group:', '') : receiver;
+    let result;
     try {
         if (fileObject) {
             // Android File object flow
@@ -908,8 +1069,8 @@ async function sendPreviewedFile() {
             // Otherwise, read from File object directly
             if (shouldCompress || compressionWasStarted) {
                 // Use cached bytes (compression was started, so bytes are cached)
-                await invoke("send_cached_file", {
-                    receiver: receiver,
+                result = await invoke("send_cached_file", {
+                    receiver: chatId,
                     repliedTo: replyRef,
                     useCompression: shouldCompress
                 });
@@ -917,8 +1078,8 @@ async function sendPreviewedFile() {
                 // No compression needed and bytes weren't cached, read directly
                 const arrayBuffer = await fileObject.arrayBuffer();
                 const bytes = Array.from(new Uint8Array(arrayBuffer));
-                await invoke("send_file_bytes", {
-                    receiver: receiver,
+                result = await invoke("send_file_bytes", {
+                    receiver: chatId,
                     repliedTo: replyRef,
                     fileBytes: bytes,
                     fileName: fileObject.name,
@@ -927,26 +1088,31 @@ async function sendPreviewedFile() {
             }
         } else if (usingBytes) {
             // Legacy flow: use cached bytes from JS (clipboard paste)
-            await invoke("send_cached_file", {
-                receiver: receiver,
+            result = await invoke("send_cached_file", {
+                receiver: chatId,
                 repliedTo: replyRef,
                 useCompression: shouldCompress
             });
         } else if (shouldCompress) {
             // Desktop: use cached compressed file (will wait if still compressing)
-            await invoke("send_cached_compressed_file", {
-                receiver: receiver,
+            result = await invoke("send_cached_compressed_file", {
+                receiver: chatId,
                 repliedTo: replyRef,
                 filePath: filePath
             });
         } else {
             // Desktop: send without compression, but clear the cache first
             await invoke("clear_compression_cache", { filePath: filePath });
-            await invoke("file_message", {
-                receiver: receiver,
+            result = await invoke("file_message", {
+                receiver: chatId,
                 repliedTo: replyRef,
                 filePath: filePath
             });
+        }
+
+        // Finalize the pending message with the real event ID
+        if (result && result.event_id) {
+            finalizePendingMessage(chatId, result.pending_id, result.event_id);
         }
     } catch (e) {
         console.error('Failed to send file:', e);

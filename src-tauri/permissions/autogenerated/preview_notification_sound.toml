@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-notification-sound"
+description = "Enables the preview_notification_sound command without any pre-configured scope."
+commands.allow = ["preview_notification_sound"]
+
+[[permission]]
+identifier = "deny-preview-notification-sound"
+description = "Denies the preview_notification_sound command without any pre-configured scope."
+commands.deny = ["preview_notification_sound"]

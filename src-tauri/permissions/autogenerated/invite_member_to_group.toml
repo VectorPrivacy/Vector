@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-invite-member-to-group"
+description = "Enables the invite_member_to_group command without any pre-configured scope."
+commands.allow = ["invite_member_to_group"]
+
+[[permission]]
+identifier = "deny-invite-member-to-group"
+description = "Denies the invite_member_to_group command without any pre-configured scope."
+commands.deny = ["invite_member_to_group"]

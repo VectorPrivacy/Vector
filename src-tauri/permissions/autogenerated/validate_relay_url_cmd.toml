@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-validate-relay-url-cmd"
+description = "Enables the validate_relay_url_cmd command without any pre-configured scope."
+commands.allow = ["validate_relay_url_cmd"]
+
+[[permission]]
+identifier = "deny-validate-relay-url-cmd"
+description = "Denies the validate_relay_url_cmd command without any pre-configured scope."
+commands.deny = ["validate_relay_url_cmd"]

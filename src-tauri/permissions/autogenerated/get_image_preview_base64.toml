@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-image-preview-base64"
+description = "Enables the get_image_preview_base64 command without any pre-configured scope."
+commands.allow = ["get_image_preview_base64"]
+
+[[permission]]
+identifier = "deny-get-image-preview-base64"
+description = "Denies the get_image_preview_base64 command without any pre-configured scope."
+commands.deny = ["get_image_preview_base64"]

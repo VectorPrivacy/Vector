@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-set-favorite"
+description = "Enables the miniapp_set_favorite command without any pre-configured scope."
+commands.allow = ["miniapp_set_favorite"]
+
+[[permission]]
+identifier = "deny-miniapp-set-favorite"
+description = "Denies the miniapp_set_favorite command without any pre-configured scope."
+commands.deny = ["miniapp_set_favorite"]

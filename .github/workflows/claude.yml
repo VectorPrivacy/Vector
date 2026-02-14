@@ -8,12 +8,18 @@ on:
   pull_request:
     types: [opened, ready_for_review]
   issues:
-    types: [opened, assigned]
+    types: [opened]
   pull_request_review:
     types: [submitted]
 
 jobs:
   claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -34,10 +40,8 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           track_progress: true
-          assignee_trigger: JSKitty,YuurinBee
           claude_args: |
             --model claude-opus-4-5-20251101
-          show_full_output: true
           prompt: |
             Review this pull request. Focus on:
             - Code quality and best practices
