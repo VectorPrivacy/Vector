@@ -5112,7 +5112,14 @@ async function setupRustListeners() {
             console.error('Error handling mls_group_left event:', e);
         }
     });
-    
+
+    // Listen for async MLS operation failures (background publish/merge errors)
+    _on('mls_error', (evt) => {
+        const { group_id, error } = evt.payload || {};
+        console.error('[MLS] Background operation failed:', group_id, error);
+        showToast(error || 'Group operation failed');
+    });
+
     // Listen for MLS initial sync completion after joining a group
     _on('mls_group_initial_sync', async (evt) => {
         try {
