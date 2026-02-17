@@ -3959,6 +3959,21 @@ async function hydrateMLSGroupMetadata() {
     }
 }
 
+/** Extract a valid npub from a bare npub string or a vectorapp.io profile URL */
+function extractNpub(input) {
+    const trimmed = (input || '').trim();
+    if (/^npub1[a-z0-9]{58}$/i.test(trimmed)) return trimmed.toLowerCase();
+    const m = trimmed.match(/https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i);
+    if (m) return m[1].toLowerCase();
+    return null;
+}
+
+/** Track npubs we've already fired load_profile for (to avoid duplicate relay lookups) */
+const strangerProfileRequested = new Set();
+
+/** Active invite-modal re-render callback (set while the invite modal is open) */
+let activeInviteModalRerender = null;
+
 /**
  * Get a profile by npub
  * @param {string} npub - The user's npub
@@ -5448,7 +5463,15 @@ async function setupRustListeners() {
         if (domProfileId.textContent === evt.payload.id) {
             renderProfileTab(evt.payload);
         }
-        
+
+        // Re-render create group or invite modal if a stranger npub's profile resolved
+        if (arrSelectedGroupMembers.includes(evt.payload.id) && domCreateGroup?.style.display !== 'none') {
+            renderCreateGroupList(domCreateGroupFilter?.value || '');
+        }
+        if (activeInviteModalRerender) {
+            activeInviteModalRerender();
+        }
+
         // Render the Chat List
         renderChatlist();
     });
@@ -10095,7 +10118,7 @@ async function openInviteMemberToGroup(chat) {
     closeBtn.className = 'btn';
     closeBtn.style.padding = '8px 12px';
     closeBtn.style.fontSize = '18px';
-    closeBtn.onclick = () => modal.remove();
+    closeBtn.onclick = () => { activeInviteModalRerender = null; modal.remove(); };
     header.appendChild(closeBtn);
     
     container.appendChild(header);
@@ -10114,7 +10137,7 @@ async function openInviteMemberToGroup(chat) {
     searchContainer.appendChild(searchIcon);
     
     const searchInput = document.createElement('input');
-    searchInput.placeholder = 'Search contacts...';
+    searchInput.placeholder = 'Search or paste npub...';
     searchInput.style.padding = '10px 40px';
     searchInput.style.backgroundColor = 'transparent';
     searchInput.style.border = '1px solid rgba(57, 57, 57, 0.5)';
@@ -10163,10 +10186,80 @@ async function openInviteMemberToGroup(chat) {
 
     const renderMemberList = (filterText = '') => {
         memberList.innerHTML = '';
-        const filter = filterText.toLowerCase();
+        const filter = (filterText || '').trim().toLowerCase();
 
         // Get mine profile to exclude self
         const mine = arrProfiles.find(p => p.mine)?.id;
+
+        // Collect stranger npubs: selected npubs not in arrProfiles and not current members
+        const knownIds = new Set(arrProfiles.map(p => p.id));
+        const strangerNpubs = [...selectedMembers].filter(id => !knownIds.has(id) && !currentMembers.includes(id));
+
+        // Check if filter text is a valid stranger npub
+        const filterNpub = extractNpub(filterText);
+        if (filterNpub && filterNpub !== mine && !knownIds.has(filterNpub) && !currentMembers.includes(filterNpub) && !strangerNpubs.includes(filterNpub)) {
+            strangerNpubs.push(filterNpub);
+        }
+
+        // Helper to build a row
+        const buildInviteRow = (npub, profile) => {
+            const name = profile ? (profile.nickname || profile.name || '') : '';
+            const isSelected = selectedMembers.has(npub);
+
+            const row = document.createElement('div');
+            row.className = 'member-pick-row';
+
+            const bgDiv = document.createElement('div');
+            bgDiv.className = 'member-pick-hover';
+            row.appendChild(bgDiv);
+
+            row.addEventListener('mouseenter', () => {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+            });
+
+            const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
+            const avatar = createAvatarImg(avatarSrc, 25, false);
+            avatar.className = 'member-pick-avatar';
+            row.appendChild(avatar);
+
+            const nameSpan = document.createElement('div');
+            nameSpan.className = 'compact-member-name';
+            nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+            if (name) twemojify(nameSpan);
+            row.appendChild(nameSpan);
+
+            const indicator = document.createElement('div');
+            indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
+            row.appendChild(indicator);
+
+            row.onclick = () => {
+                if (selectedMembers.has(npub)) {
+                    selectedMembers.delete(npub);
+                } else {
+                    selectedMembers.add(npub);
+                }
+                renderMemberList(searchInput.value || '');
+                updateInviteButton();
+            };
+
+            return row;
+        };
+
+        let hasRows = false;
+
+        // Render stranger npubs (selected first, then filter-matched)
+        for (const npub of strangerNpubs) {
+            const isSelected = selectedMembers.has(npub);
+            if (!isSelected && filterNpub !== npub) continue;
+            memberList.appendChild(buildInviteRow(npub, null));
+            hasRows = true;
+            // Fire-and-forget relay lookup
+            if (!strangerProfileRequested.has(npub)) {
+                strangerProfileRequested.add(npub);
+                invoke('load_profile', { npub }).catch(() => {});
+            }
+        }
 
         // Filter available contacts (exclude self and current members)
         const availableContacts = arrProfiles.filter(p => {
@@ -10188,65 +10281,25 @@ async function openInviteMemberToGroup(chat) {
             return aSelected - bSelected;
         });
 
-        if (availableContacts.length === 0) {
+        for (const contact of availableContacts) {
+            memberList.appendChild(buildInviteRow(contact.id, getProfile(contact.id)));
+            hasRows = true;
+        }
+
+        if (!hasRows) {
             const empty = document.createElement('p');
             empty.textContent = filter ? 'No matches' : 'No contacts available to invite';
             empty.style.textAlign = 'center';
             empty.style.color = '#999';
             empty.style.padding = '20px';
             memberList.appendChild(empty);
-            return;
-        }
-
-        for (const contact of availableContacts) {
-            const contactProfile = getProfile(contact.id);
-            const name = contactProfile?.nickname || contactProfile?.name || '';
-            const isSelected = selectedMembers.has(contact.id);
-
-            const row = document.createElement('div');
-            row.className = 'member-pick-row';
-
-            const bgDiv = document.createElement('div');
-            bgDiv.className = 'member-pick-hover';
-            row.appendChild(bgDiv);
-
-            row.addEventListener('mouseenter', () => {
-                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-            });
-
-            const contactAvatarSrc = getProfileAvatarSrc(contactProfile);
-            const avatar = createAvatarImg(contactAvatarSrc, 25, false);
-            avatar.className = 'member-pick-avatar';
-            row.appendChild(avatar);
-
-            const nameSpan = document.createElement('div');
-            nameSpan.className = 'compact-member-name';
-            nameSpan.textContent = name || contact.id.substring(0, 10) + '...';
-            if (name) twemojify(nameSpan);
-            row.appendChild(nameSpan);
-
-            const indicator = document.createElement('div');
-            indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
-            row.appendChild(indicator);
-
-            row.onclick = () => {
-                if (selectedMembers.has(contact.id)) {
-                    selectedMembers.delete(contact.id);
-                } else {
-                    selectedMembers.add(contact.id);
-                }
-                indicator.classList.toggle('selected');
-                updateInviteButton();
-            };
-
-            memberList.appendChild(row);
         }
     };
     
     renderMemberList();
     searchInput.oninput = (e) => renderMemberList(e.target.value);
-    
+    activeInviteModalRerender = () => renderMemberList(searchInput.value || '');
+
     inviteBtn.onclick = async () => {
         if (selectedMembers.size === 0) return;
 
@@ -10270,22 +10323,21 @@ async function openInviteMemberToGroup(chat) {
 
             // Refresh the group overview
             setTimeout(async () => {
+                activeInviteModalRerender = null;
                 modal.remove();
                 await renderGroupOverview(chat);
             }, 1000);
         } catch (e) {
-            const errorMsg = (e || '').toString();
+            const errorMsg = typeof e === 'string' ? e : (e?.message || e || '').toString();
             let friendlyMsg = errorMsg;
 
             // Map backend errors to friendly messages
-            if (errorMsg.includes('no device keypackag')) {
-                const match = errorMsg.match(/for (\S+)/);
-                if (match) {
-                    const npub = match[1];
-                    const prof = arrProfiles.find(p => p.id === npub);
-                    const display = prof?.nickname || prof?.name || 'This user';
-                    friendlyMsg = `${display} is using an older Vector version! Please ask them to upgrade.`;
-                }
+            const keyPkgMatch = errorMsg.match(/(?:no device keypackag(?:e|es) found|failed to refresh device keypackage) for (\S+)/i);
+            if (keyPkgMatch && keyPkgMatch[1]) {
+                const npub = keyPkgMatch[1].replace(/:$/, '');
+                const prof = getProfile(npub);
+                const display = prof?.nickname || prof?.name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+                friendlyMsg = `${display} can't join group chats yet. They may need to update Vector or set up their device.`;
             }
 
             statusMsg.style.color = '#f44336';
@@ -10305,7 +10357,7 @@ async function openInviteMemberToGroup(chat) {
     
     // Close on background click
     modal.onclick = (e) => {
-        if (e.target === modal) modal.remove();
+        if (e.target === modal) { activeInviteModalRerender = null; modal.remove(); }
     };
 }
 
@@ -11685,26 +11737,36 @@ function renderCreateGroupList(filterText = '') {
     // Build a fragment for performance
     const frag = document.createDocumentFragment();
 
+    // Collect stranger npubs: selected npubs that are NOT in arrProfiles
+    const knownIds = new Set(arrProfiles.map(p => p.id));
+    const strangerNpubs = arrSelectedGroupMembers.filter(id => !knownIds.has(id));
+
+    // Check if the filter text itself is a valid stranger npub
+    const filterNpub = extractNpub(filterText);
+    if (filterNpub && filterNpub !== mine && !knownIds.has(filterNpub) && !strangerNpubs.includes(filterNpub)) {
+        strangerNpubs.push(filterNpub);
+    }
+
     // Sort profiles: selected members first (by selection order), then unselected by last message time
     const sortedProfiles = [...arrProfiles].sort((a, b) => {
         const aSelectedIndex = arrSelectedGroupMembers.indexOf(a?.id);
         const bSelectedIndex = arrSelectedGroupMembers.indexOf(b?.id);
         const aSelected = aSelectedIndex !== -1;
         const bSelected = bSelectedIndex !== -1;
-        
+
         // Selected members come first
         if (aSelected && !bSelected) return -1;
         if (!aSelected && bSelected) return 1;
-        
+
         // For selected members: sort by selection order (first selected = first in list)
         if (aSelected && bSelected) {
             return aSelectedIndex - bSelectedIndex;
         }
-        
+
         // For unselected members: sort by last message time (most recent first)
         const aChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === a?.id) || {});
         const bChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === b?.id) || {});
-        
+
         // If both have timestamps, sort by most recent
         if (aChatTimestamp && bChatTimestamp) {
             return bChatTimestamp - aChatTimestamp;
@@ -11712,24 +11774,20 @@ function renderCreateGroupList(filterText = '') {
         // Contacts with messages come before those without
         if (aChatTimestamp && !bChatTimestamp) return -1;
         if (!aChatTimestamp && bChatTimestamp) return 1;
-        
+
         // Fallback: sort alphabetically
         const aName = (a?.nickname || a?.name || '').toLowerCase();
         const bName = (b?.nickname || b?.name || '').toLowerCase();
         return aName.localeCompare(bName);
     });
 
-    for (const p of sortedProfiles) {
-        if (!p || !p.id) continue;
-        if (p.id === mine) continue;
-
-        // Filter by nickname/name/npub
-        const name = p.nickname || p.name || '';
-        const hay = (name + ' ' + p.id).toLowerCase();
-        if (f && !hay.includes(f)) continue;
+    // Helper to build a member-pick row
+    const buildRow = (npub, profile) => {
+        const name = profile ? (profile.nickname || profile.name || '') : '';
+        const isSelected = arrSelectedGroupMembers.includes(npub);
 
         const row = document.createElement('div');
-        row.id = `cg-${p.id}`;
+        row.id = `cg-${npub}`;
         row.className = 'member-pick-row';
 
         const bgDiv = document.createElement('div');
@@ -11741,42 +11799,60 @@ function renderCreateGroupList(filterText = '') {
             bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
         });
 
-        const listAvatarSrc = getProfileAvatarSrc(p);
-        const avatar = createAvatarImg(listAvatarSrc, 25, false);
+        const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
+        const avatar = createAvatarImg(avatarSrc, 25, false);
         avatar.className = 'member-pick-avatar';
         row.appendChild(avatar);
 
         const nameSpan = document.createElement('div');
         nameSpan.className = 'compact-member-name';
-        nameSpan.textContent = name || p.id.substring(0, 10) + '...';
+        nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
         if (name) twemojify(nameSpan);
         row.appendChild(nameSpan);
 
         const indicator = document.createElement('div');
-        indicator.className = 'member-pick-indicator' + (arrSelectedGroupMembers.includes(p.id) ? ' selected' : '');
+        indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
         row.appendChild(indicator);
 
-        // Row click toggles selection
         row.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            
-            const isSelected = arrSelectedGroupMembers.includes(p.id);
-            if (isSelected) {
-                // Deselect
-                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== p.id);
+            if (arrSelectedGroupMembers.includes(npub)) {
+                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== npub);
             } else {
-                // Select
-                arrSelectedGroupMembers.push(p.id);
+                arrSelectedGroupMembers.push(npub);
             }
             updateCreateGroupValidation(true);
-            
-            // Re-render to hoist selected members to top
             const currentFilter = domCreateGroupFilter?.value || '';
             renderCreateGroupList(currentFilter);
         });
 
-        frag.appendChild(row);
+        return row;
+    };
+
+    // Render stranger npubs (selected ones first, then filter-matched)
+    for (const npub of strangerNpubs) {
+        const isSelected = arrSelectedGroupMembers.includes(npub);
+        // Show if selected (always) or if it matches the current filter npub
+        if (!isSelected && filterNpub !== npub) continue;
+        frag.appendChild(buildRow(npub, null));
+        // Fire-and-forget relay lookup
+        if (!strangerProfileRequested.has(npub)) {
+            strangerProfileRequested.add(npub);
+            invoke('load_profile', { npub }).catch(() => {});
+        }
+    }
+
+    for (const p of sortedProfiles) {
+        if (!p || !p.id) continue;
+        if (p.id === mine) continue;
+
+        // Filter by nickname/name/npub
+        const name = p.nickname || p.name || '';
+        const hay = (name + ' ' + p.id).toLowerCase();
+        if (f && !hay.includes(f)) continue;
+
+        frag.appendChild(buildRow(p.id, p));
     }
 
     // If no matches
@@ -12016,17 +12092,17 @@ Create Group UI wiring
             // Hide panel
             domCreateGroup.style.display = 'none';
         } catch (e) {
-            const raw = (e || '').toString();
+            const raw = typeof e === 'string' ? e : (e?.message || e || '').toString();
             // Map backend "no device keypackages" errors to a friendlier UX message
             let friendly = raw;
             let isHtml = false;
             try {
-                const m = raw.match(/no device keypackag(?:e|es) found for (\S+)/i);
+                const m = raw.match(/(?:no device keypackag(?:e|es) found|failed to refresh device keypackage) for (\S+)/i);
                 if (m && m[1]) {
-                    const npub = m[1];
-                    const prof = arrProfiles.find(p => p.id === npub);
-                    const display = prof?.nickname || prof?.name || 'This user';
-                    friendly = `${display} is using an older Vector version!<br>Please ask them to upgrade before inviting them to a Group Chat.`;
+                    const npub = m[1].replace(/:$/, '');
+                    const prof = getProfile(npub);
+                    const display = prof?.nickname || prof?.name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+                    friendly = `<b>${display}</b> can't join group chats yet.<br>They may need to update Vector or set up their device.`;
                     isHtml = true;
                 }
             } catch (_) {}
