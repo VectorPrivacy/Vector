@@ -28,7 +28,6 @@ jobs:
         run: gh release upload ${{ github.event.release.tag_name }} ahqstore.json --repo ${{ github.repository }} --clobber
 
       - name: Notify AHQ Store bot
-        if: ${{ secrets.AHQSTORE_PAT != '' }}
         env:
           GH_TOKEN: ${{ secrets.AHQSTORE_PAT }}
         run: |
