@@ -139,24 +139,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
 
-      - name: Build OpenSSL for Android
+      - name: Build OpenSSL for Android (aarch64 + armv7)
         run: |
-          # Download and extract OpenSSL
-          OPENSSL_VERSION="3.0.16"
+          OPENSSL_VERSION="3.5.0"
           curl -LO https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz
-          tar xzf openssl-${OPENSSL_VERSION}.tar.gz
-          cd openssl-${OPENSSL_VERSION}
 
-          # Set up Android NDK toolchain
           export ANDROID_NDK_ROOT=$NDK_HOME
           export PATH=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
 
-          # Configure and build for aarch64-linux-android
-          ./Configure android-arm64 \
-            -D__ANDROID_API__=24 \
-            --prefix=/usr/local/openssl-android-arm64 \
-            no-shared \
-            no-tests
+          # Build for aarch64
+          tar xzf openssl-${OPENSSL_VERSION}.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+          ./Configure android-arm64 -D__ANDROID_API__=26 --prefix=/usr/local/openssl-android-arm64 no-shared no-tests no-ui-console
+          make -j$(nproc)
+          sudo make install_sw
+          cd ..
+
+          # Build for armv7
+          rm -rf openssl-${OPENSSL_VERSION}
+          tar xzf openssl-${OPENSSL_VERSION}.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+          ./Configure android-arm -D__ANDROID_API__=26 --prefix=/usr/local/openssl-android-armv7 no-shared no-tests no-ui-console
           make -j$(nproc)
           sudo make install_sw
         env:
@@ -178,16 +181,16 @@ jobs:
           EOF
 
       - name: Build Android APK
-        run: npx tauri android build --apk true --target aarch64
+        run: npx tauri android build --apk true --target aarch64 --target armv7
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
-          # Point sqlcipher/libsqlite3-sys to the Android OpenSSL we built
           OPENSSL_STATIC: 1
-          OPENSSL_DIR: /usr/local/openssl-android-arm64
           OPENSSL_INCLUDE_DIR: /usr/local/openssl-android-arm64/include
-          OPENSSL_LIB_DIR: /usr/local/openssl-android-arm64/lib
+          # Per-target OpenSSL lib dirs
+          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: /usr/local/openssl-android-arm64/lib
           AARCH64_LINUX_ANDROID_OPENSSL_DIR: /usr/local/openssl-android-arm64
-          AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
+          ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR: /usr/local/openssl-android-armv7/lib
+          ARMV7_LINUX_ANDROIDEABI_OPENSSL_DIR: /usr/local/openssl-android-armv7
 
       - name: Get version from Cargo.toml
         id: get_version

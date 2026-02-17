@@ -1,6 +1,6 @@
 #!/bin/bash
 # Android APK build script for Vector
-# Produces an aarch64 release APK
+# Produces a release APK for arm64 and arm32
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -27,9 +27,18 @@ echo "Using Android NDK: $ANDROID_NDK_HOME"
 OPENSSL_ANDROID_DIR="$TAURI_DIR/android-deps/openssl"
 
 if [ ! -d "$OPENSSL_ANDROID_DIR/include/openssl" ]; then
-    echo "Error: OpenSSL for Android not found at $OPENSSL_ANDROID_DIR"
-    echo "Please run a release build first to generate OpenSSL artifacts,"
-    echo "or manually place pre-built OpenSSL for Android in that directory."
+    echo "Error: OpenSSL headers not found at $OPENSSL_ANDROID_DIR/include/"
+    exit 1
+fi
+
+if [ ! -f "$OPENSSL_ANDROID_DIR/aarch64/lib/libcrypto.a" ]; then
+    echo "Error: OpenSSL aarch64 libs not found at $OPENSSL_ANDROID_DIR/aarch64/lib/"
+    exit 1
+fi
+
+if [ ! -f "$OPENSSL_ANDROID_DIR/armv7/lib/libcrypto.a" ]; then
+    echo "Error: OpenSSL armv7 libs not found at $OPENSSL_ANDROID_DIR/armv7/lib/"
+    echo "Please build or obtain OpenSSL for armv7-linux-androideabi and place libs there."
     exit 1
 fi
 
@@ -37,14 +46,16 @@ echo "Using OpenSSL: $OPENSSL_ANDROID_DIR"
 
 # Export environment variables for the build
 export ANDROID_NDK_HOME
-export OPENSSL_DIR="$OPENSSL_ANDROID_DIR"
-export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
-export OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/lib"
 export OPENSSL_STATIC=1
+export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
+
+# Per-target OpenSSL lib directories
+export AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/aarch64/lib"
+export ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/armv7/lib"
 
 # Build the APK
 cd "$PROJECT_ROOT"
-npx tauri android build --apk true --target aarch64 "$@"
+npx tauri android build --apk true --target aarch64 --target armv7 "$@"
 
 # Show output location
 APK_PATH="$TAURI_DIR/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
