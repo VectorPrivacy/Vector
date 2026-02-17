@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-group-avatar"
+description = "Enables the cache_group_avatar command without any pre-configured scope."
+commands.allow = ["cache_group_avatar"]
+
+[[permission]]
+identifier = "deny-cache-group-avatar"
+description = "Denies the cache_group_avatar command without any pre-configured scope."
+commands.deny = ["cache_group_avatar"]

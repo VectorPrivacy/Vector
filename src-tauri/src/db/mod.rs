@@ -22,7 +22,7 @@ pub use settings::{get_sql_setting, set_sql_setting, get_seed, set_seed, get_pke
 pub use profiles::{SlimProfile, get_all_profiles, set_profile};
 // MLS database functions
 pub use mls::{
-    save_mls_groups, save_mls_group, load_mls_groups,
+    save_mls_groups, save_mls_group, load_mls_groups, update_mls_group_avatar,
     save_mls_keypackages, load_mls_keypackages,
     save_mls_event_cursors, load_mls_event_cursors,
     save_mls_device_id, load_mls_device_id,

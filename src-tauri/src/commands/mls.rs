@@ -10,6 +10,9 @@ use nostr_sdk::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 use tauri::Emitter;
+use std::sync::Arc;
+#[cfg(not(target_os = "android"))]
+use tauri_plugin_fs::FsExt;
 use crate::{db, mls, MlsService, NotificationData, show_notification_generic, NOSTR_CLIENT, NOTIFIED_WELCOMES, STATE, TAURI_APP, TRUSTED_RELAYS};
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
@@ -530,6 +533,315 @@ pub async fn add_mls_member_device(
 }
 
 // ============================================================================
+// Group Avatar Upload
+// ============================================================================
+
+/// Encrypt and upload a group avatar image to Blossom
+///
+/// 1. Reads image file from disk
+/// 2. Encrypts with ChaCha20-Poly1305 via MDK (CPU-only, no network)
+/// 3. Uploads encrypted blob to Blossom servers with progress events
+/// 4. Returns image_hash, image_key, image_nonce, blob_url as hex strings
+#[tauri::command]
+pub async fn upload_group_avatar(filepath: String) -> Result<serde_json::Value, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+
+    // Read file from disk
+    let bytes = {
+        #[cfg(not(target_os = "android"))]
+        {
+            handle.fs().read(std::path::Path::new(&filepath))
+                .map_err(|_| "Image couldn't be loaded from disk")?
+        }
+        #[cfg(target_os = "android")]
+        {
+            let att = crate::android::filesystem::read_android_uri(filepath.clone())?;
+            Arc::try_unwrap(att.bytes).unwrap_or_else(|arc| (*arc).clone())
+        }
+    };
+
+    // Determine MIME type from extension
+    let extension = filepath
+        .rsplit('.')
+        .next()
+        .unwrap_or("bin")
+        .to_lowercase();
+    let mime_type = crate::util::mime_from_extension_safe(&extension, true)
+        .map_err(|_| "File type is not allowed (only images are permitted)")?;
+
+    // Encrypt the image using MDK (CPU-only, instant)
+    let prepared = mdk_core::extension::prepare_group_image_for_upload(&bytes, &mime_type)
+        .map_err(|e| format!("Failed to prepare group image: {}", e))?;
+
+    // Set up progress callback
+    let handle_clone = handle.clone();
+    let progress_callback: crate::blossom::ProgressCallback = Arc::new(move |percentage, bytes_uploaded| {
+        let payload = serde_json::json!({
+            "type": "group_avatar",
+            "progress": percentage.unwrap_or(0),
+            "bytes": bytes_uploaded.unwrap_or(0)
+        });
+        handle_clone.emit("profile_upload_progress", payload)
+            .map_err(|_| "Failed to emit progress event".to_string())
+    });
+
+    // Upload encrypted blob to Blossom using the derived upload keypair
+    let servers = crate::get_blossom_servers();
+    let encrypted_data = Arc::new(prepared.encrypted_data.as_ref().to_vec());
+    let blob_url = crate::blossom::upload_blob_with_progress_and_failover(
+        prepared.upload_keypair,
+        servers,
+        encrypted_data,
+        Some("application/octet-stream"),
+        progress_callback,
+        None,
+        None,
+    )
+    .await?;
+
+    // Pre-cache the original (decrypted) image so the creator sees it instantly
+    let cached_path = match crate::image_cache::precache_image_bytes(
+        &handle,
+        &blob_url,
+        &bytes,
+        crate::image_cache::ImageType::Avatar,
+    ) {
+        crate::image_cache::CacheResult::Cached(p) | crate::image_cache::CacheResult::AlreadyCached(p) => Some(p),
+        _ => None,
+    };
+
+    // Return encryption metadata as hex strings + cached path
+    Ok(serde_json::json!({
+        "image_hash": bytes_to_hex_string(&prepared.encrypted_hash),
+        "image_key": bytes_to_hex_string(prepared.image_key.as_ref()),
+        "image_nonce": bytes_to_hex_string(prepared.image_nonce.as_ref()),
+        "blob_url": blob_url,
+        "cached_path": cached_path,
+    }))
+}
+
+/// Download, decrypt, and cache a group avatar from Blossom.
+///
+/// Reads image encryption metadata (hash/key/nonce) from the MDK engine's stored Group,
+/// downloads the encrypted blob from Blossom, decrypts with ChaCha20-Poly1305,
+/// and caches the result locally using the image cache system.
+#[tauri::command]
+pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+
+    // Load group metadata from SQL
+    let groups = db::load_mls_groups(&handle).await
+        .map_err(|e| format!("Failed to load MLS groups: {}", e))?;
+    let meta = groups.iter().find(|g| g.group_id == group_id)
+        .ok_or_else(|| format!("Group not found: {}", group_id))?;
+
+    // If already cached, return immediately
+    if let Some(ref cached) = meta.avatar_cached {
+        if !cached.is_empty() {
+            return Ok(Some(cached.clone()));
+        }
+    }
+
+    let avatar_ref = meta.avatar_ref.clone();
+    let engine_group_id = meta.engine_group_id.clone();
+
+    // Read image encryption data from the MDK engine's stored Group
+    let image_data = tokio::task::spawn_blocking({
+        let handle = handle.clone();
+        move || -> Result<Option<([u8; 32], [u8; 32], [u8; 12])>, String> {
+            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let engine = mls.engine().map_err(|e| e.to_string())?;
+
+            // Find our group in the engine by engine_group_id
+            let engine_gid_bytes = hex_string_to_bytes(&engine_group_id);
+            let mls_group_id = mdk_core::prelude::GroupId::from_slice(&engine_gid_bytes);
+            let group = engine.get_group(&mls_group_id)
+                .map_err(|e| format!("Engine error: {}", e))?
+                .ok_or_else(|| "Group not found in engine".to_string())?;
+
+            // All three fields must be present for decryption
+            match (group.image_hash, &group.image_key, &group.image_nonce) {
+                (Some(hash), Some(key), Some(nonce)) => {
+                    Ok(Some((hash, *key.as_ref(), *nonce.as_ref())))
+                }
+                _ => Ok(None), // No image data — group has no avatar
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))??;
+
+    let (image_hash, image_key_bytes, image_nonce_bytes) = match image_data {
+        Some(data) => data,
+        None => return Ok(None), // Group has no avatar — not an error
+    };
+
+    // Construct download URL: prefer avatar_ref if set, otherwise try Blossom servers by hash
+    let hash_hex = bytes_to_hex_string(&image_hash);
+    let download_urls: Vec<String> = if let Some(ref url) = avatar_ref {
+        if !url.is_empty() {
+            vec![url.clone()]
+        } else {
+            crate::get_blossom_servers().iter()
+                .map(|s| format!("{}/{}", s.trim_end_matches('/'), hash_hex))
+                .collect()
+        }
+    } else {
+        crate::get_blossom_servers().iter()
+            .map(|s| format!("{}/{}", s.trim_end_matches('/'), hash_hex))
+            .collect()
+    };
+
+    // Try downloading from each URL until one succeeds
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    const MAX_AVATAR_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+    let mut encrypted_data: Option<Vec<u8>> = None;
+    let mut successful_url = String::new();
+    for url in &download_urls {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                // Reject oversized responses before buffering
+                if let Some(len) = resp.content_length() {
+                    if len as usize > MAX_AVATAR_SIZE { continue; }
+                }
+                match resp.bytes().await {
+                    Ok(data) if data.len() <= MAX_AVATAR_SIZE => {
+                        successful_url = url.clone();
+                        encrypted_data = Some(data.to_vec());
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let encrypted = encrypted_data
+        .ok_or_else(|| "Failed to download group avatar from any Blossom server".to_string())?;
+
+    // Decrypt the image using MDK
+    let image_key_secret = mdk_storage_traits::Secret::new(image_key_bytes);
+    let image_nonce_secret = mdk_storage_traits::Secret::new(image_nonce_bytes);
+    let decrypted = mdk_core::extension::decrypt_group_image(
+        &encrypted,
+        Some(&image_hash),
+        &image_key_secret,
+        &image_nonce_secret,
+    ).map_err(|e| format!("Failed to decrypt group avatar: {}", e))?;
+
+    // Cache the decrypted image
+    let cache_url = if !successful_url.is_empty() { &successful_url } else { &hash_hex };
+    let cached_path = match crate::image_cache::precache_image_bytes(
+        &handle,
+        cache_url,
+        &decrypted,
+        crate::image_cache::ImageType::Avatar,
+    ) {
+        crate::image_cache::CacheResult::Cached(p) | crate::image_cache::CacheResult::AlreadyCached(p) => p,
+        crate::image_cache::CacheResult::Failed(e) => return Err(format!("Failed to cache avatar: {}", e)),
+    };
+
+    // Update avatar_cached in DB with a targeted UPDATE (no full reload)
+    let needs_ref = avatar_ref.is_none() || avatar_ref.as_deref() == Some("");
+    let ref_to_set = if needs_ref && !successful_url.is_empty() { Some(successful_url.as_str()) } else { None };
+    db::update_mls_group_avatar(&handle, &group_id, &cached_path, ref_to_set)
+        .map_err(|e| format!("Failed to update group avatar in DB: {}", e))?;
+
+    // Emit metadata event from the already-loaded metadata (mutated in place)
+    let mut updated_meta = meta.clone();
+    updated_meta.avatar_cached = Some(cached_path.clone());
+    if let Some(url) = ref_to_set {
+        updated_meta.avatar_ref = Some(url.to_string());
+    }
+    mls::emit_group_metadata_event(&updated_meta);
+
+    println!("[MLS] Cached group avatar for {}: {}", &group_id[..8.min(group_id.len())], cached_path);
+    Ok(Some(cached_path))
+}
+
+/// Cache a group avatar from a pending invite's image encryption data.
+/// Unlike cache_group_avatar which reads keys from the engine, this takes
+/// the image hash/key/nonce directly from the welcome metadata.
+#[tauri::command]
+pub async fn cache_invite_avatar(
+    image_hash: String,
+    image_key: String,
+    image_nonce: String,
+) -> Result<Option<String>, String> {
+    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+
+    // Parse hex strings to byte arrays
+    let hash_bytes: [u8; 32] = hex_string_to_bytes(&image_hash)
+        .try_into().map_err(|_| "Invalid image_hash length")?;
+    let key_bytes: [u8; 32] = hex_string_to_bytes(&image_key)
+        .try_into().map_err(|_| "Invalid image_key length")?;
+    let nonce_bytes: [u8; 12] = hex_string_to_bytes(&image_nonce)
+        .try_into().map_err(|_| "Invalid image_nonce length")?;
+
+    // Check if already cached by hash
+    let cache_key = &image_hash;
+    if let Some(existing) = crate::image_cache::get_cached_path(&handle, cache_key, crate::image_cache::ImageType::Avatar) {
+        return Ok(Some(existing));
+    }
+
+    // Build download URLs from Blossom servers
+    let download_urls: Vec<String> = crate::get_blossom_servers().iter()
+        .map(|s| format!("{}/{}", s.trim_end_matches('/'), image_hash))
+        .collect();
+
+    // Download encrypted blob
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    const MAX_AVATAR_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+    let mut encrypted_data: Option<Vec<u8>> = None;
+    for url in &download_urls {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Some(len) = resp.content_length() {
+                    if len as usize > MAX_AVATAR_SIZE { continue; }
+                }
+                match resp.bytes().await {
+                    Ok(data) if data.len() <= MAX_AVATAR_SIZE => {
+                        encrypted_data = Some(data.to_vec());
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let encrypted = encrypted_data
+        .ok_or_else(|| "Failed to download invite avatar from any Blossom server".to_string())?;
+
+    // Decrypt
+    let key_secret = mdk_storage_traits::Secret::new(key_bytes);
+    let nonce_secret = mdk_storage_traits::Secret::new(nonce_bytes);
+    let decrypted = mdk_core::extension::decrypt_group_image(
+        &encrypted, Some(&hash_bytes), &key_secret, &nonce_secret,
+    ).map_err(|e| format!("Failed to decrypt invite avatar: {}", e))?;
+
+    // Cache
+    let cached_path = match crate::image_cache::precache_image_bytes(
+        &handle, cache_key, &decrypted, crate::image_cache::ImageType::Avatar,
+    ) {
+        crate::image_cache::CacheResult::Cached(p) | crate::image_cache::CacheResult::AlreadyCached(p) => p,
+        crate::image_cache::CacheResult::Failed(e) => return Err(format!("Failed to cache invite avatar: {}", e)),
+    };
+
+    Ok(Some(cached_path))
+}
+
+// ============================================================================
 // Group Creation & Sync Commands
 // ============================================================================
 
@@ -538,8 +850,27 @@ pub async fn add_mls_member_device(
 pub async fn create_mls_group(
     name: String,
     avatar_ref: Option<String>,
+    avatar_cached: Option<String>,
     initial_member_devices: Vec<(String, String)>,
+    description: Option<String>,
+    image_hash: Option<String>,
+    image_key: Option<String>,
+    image_nonce: Option<String>,
 ) -> Result<String, String> {
+    // Parse hex strings to byte arrays
+    let image_hash_bytes: Option<[u8; 32]> = image_hash.as_deref().and_then(|h| {
+        let bytes = hex_string_to_bytes(h);
+        if bytes.len() == 32 { Some(bytes.try_into().unwrap()) } else { None }
+    });
+    let image_key_bytes: Option<[u8; 32]> = image_key.as_deref().and_then(|k| {
+        let bytes = hex_string_to_bytes(k);
+        if bytes.len() == 32 { Some(bytes.try_into().unwrap()) } else { None }
+    });
+    let image_nonce_bytes: Option<[u8; 12]> = image_nonce.as_deref().and_then(|n| {
+        let bytes = hex_string_to_bytes(n);
+        if bytes.len() == 12 { Some(bytes.try_into().unwrap()) } else { None }
+    });
+
     // Use tokio::task::spawn_blocking to run the non-Send MlsService in a blocking context
     tokio::task::spawn_blocking(move || {
         // Get handle in blocking context
@@ -549,7 +880,16 @@ pub async fn create_mls_group(
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.create_group(&name, avatar_ref.as_deref(), &initial_member_devices)
+            mls.create_group(
+                &name,
+                avatar_ref.as_deref(),
+                avatar_cached.as_deref(),
+                &initial_member_devices,
+                description.as_deref(),
+                image_hash_bytes,
+                image_key_bytes,
+                image_nonce_bytes,
+            )
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -569,9 +909,18 @@ pub async fn create_mls_group(
 /// - For now we choose the first returned device as the member's device to add
 ///   This can be evolved to pick "newest" by fetched_at if exposed; UI can later allow device selection.
 ///
-/// Frontend will invoke this command via: invoke('create_group_chat', { groupName, memberIds })
+/// Frontend will invoke this command via: invoke('create_group_chat', { groupName, memberIds, ... })
 #[tauri::command]
-pub async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> Result<String, String> {
+pub async fn create_group_chat(
+    group_name: String,
+    member_ids: Vec<String>,
+    group_description: Option<String>,
+    image_hash: Option<String>,
+    image_key: Option<String>,
+    image_nonce: Option<String>,
+    avatar_blob_url: Option<String>,
+    avatar_cached: Option<String>,
+) -> Result<String, String> {
     // Input validation
     let name = group_name.trim();
     if name.is_empty() {
@@ -602,8 +951,16 @@ pub async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> R
     }
 
     // Delegate to existing helper that persists metadata, publishes welcomes and emits UI events
-    // avatar_ref: None for now (out of scope for this subtask)
-    let result = create_mls_group(name.to_string(), None, initial_member_devices).await;
+    let result = create_mls_group(
+        name.to_string(),
+        avatar_blob_url,
+        avatar_cached,
+        initial_member_devices,
+        group_description,
+        image_hash,
+        image_key,
+        image_nonce,
+    ).await;
 
     if result.is_ok() {
         tokio::spawn(async {
@@ -807,6 +1164,11 @@ pub struct SimpleWelcome {
     pub group_name: String,
     pub group_description: Option<String>,
     pub group_image_url: Option<String>,
+    pub avatar_cached: Option<String>,
+    // Image encryption data (hex-encoded) for frontend-triggered caching
+    pub image_hash: Option<String>,
+    pub image_key: Option<String>,
+    pub image_nonce: Option<String>,
     // Admins (npub strings if possible are not available here; expose hex pubkeys)
     pub group_admin_pubkeys: Vec<String>,
     // Relay URLs
@@ -833,13 +1195,20 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
 
             let mut out: Vec<SimpleWelcome> = Vec::with_capacity(pending.len());
             for w in pending {
+                let img_hash_hex = w.group_image_hash.map(|h| bytes_to_hex_string(&h));
+                let img_key_hex = w.group_image_key.as_ref().map(|k| bytes_to_hex_string(k.as_ref()));
+                let img_nonce_hex = w.group_image_nonce.as_ref().map(|n| bytes_to_hex_string(n.as_ref()));
                 out.push(SimpleWelcome {
                     id: w.id.to_hex(),
                     wrapper_event_id: w.wrapper_event_id.to_hex(),
                     nostr_group_id: bytes_to_hex_string(&w.nostr_group_id),
                     group_name: w.group_name.clone(),
                     group_description: Some(w.group_description.clone()),
-                    group_image_url: None, // MDK uses group_image_hash/key/nonce instead of URL
+                    group_image_url: None,
+                    avatar_cached: None, // Will be filled by cache_invite_avatar
+                    image_hash: img_hash_hex,
+                    image_key: img_key_hex,
+                    image_nonce: img_nonce_hex,
                     group_admin_pubkeys: w.group_admin_pubkeys.iter()
                         .filter_map(|pk| pk.to_bech32().ok())
                         .collect(),
@@ -914,14 +1283,14 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
 #[tauri::command]
 pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, String> {
     // Run non-Send MLS engine work on blocking thread; drive async via current runtime
-    let accepted = tokio::task::spawn_blocking(move || {
+    let (accepted, nostr_group_id) = tokio::task::spawn_blocking(move || {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
 
             // Get welcome details and accept it (engine work in no-await scope)
-            let (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex, invite_sent_at) = {
+            let (nostr_group_id, engine_group_id, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex) = {
                 let engine = mls.engine().map_err(|e| e.to_string())?;
 
                 let id = nostr_sdk::EventId::from_hex(&welcome_event_id_hex).map_err(|e| e.to_string())?;
@@ -931,8 +1300,10 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                 // Extract metadata before accepting
                 let nostr_group_id_bytes = welcome.nostr_group_id.clone();
                 let group_name = welcome.group_name.clone();
+                let group_description = if welcome.group_description.is_empty() { None } else { Some(welcome.group_description.clone()) };
                 let welcomer_hex = welcome.welcomer.to_hex();
                 let wrapper_event_id_hex = welcome.wrapper_event_id.to_hex();
+                let image_hash_hex = welcome.group_image_hash.map(|h| bytes_to_hex_string(&h));
                 // Get the invite-sent timestamp from the welcome event (not acceptance time!)
                 // This is critical for accurate sync windows
                 let invite_sent_at = welcome.event.created_at.as_secs();
@@ -982,7 +1353,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                 println!("[MLS]   - group_name: {}", group_name);
                 println!("[MLS]   - invite_sent_at: {}", invite_sent_at);
 
-                (nostr_group_id, engine_group_id, group_name, welcomer_hex, wrapper_event_id_hex, invite_sent_at)
+                (nostr_group_id, engine_group_id, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex)
             }; // engine dropped here
 
             // Now persist the group metadata (awaitable section)
@@ -995,8 +1366,11 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                 // Group exists - check if it was evicted and we're being re-invited
                 if groups[idx].evicted {
                     println!("[MLS] Re-invited to previously evicted group: {}", nostr_group_id);
-                    // Clear the evicted flag and update metadata
+                    // Clear the evicted flag and update metadata from the fresh welcome
                     groups[idx].evicted = false;
+                    groups[idx].name = group_name;
+                    groups[idx].description = group_description;
+                    groups[idx].engine_group_id = engine_group_id.clone();
                     // CRITICAL: Update created_at to the NEW invite time, not the old one.
                     // The cursor was removed on eviction, so sync_group_since_cursor will use
                     // created_at as the starting point. If we don't update it, sync will try
@@ -1006,6 +1380,10 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|e| e.to_string())?
                         .as_secs();
+                    // Reuse invite avatar cache if available, otherwise clear for re-download
+                    groups[idx].avatar_cached = image_hash_hex.as_deref().and_then(|hash| {
+                        crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
+                    });
                     // Update only the specific group instead of all groups
                     db::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
                     mls::emit_group_metadata_event(&groups[idx]);
@@ -1020,12 +1398,19 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     .map_err(|e| e.to_string())?
                     .as_secs();
 
+                // Check if the invite avatar was already cached (from renderInviteItem)
+                let avatar_cached = image_hash_hex.as_deref().and_then(|hash| {
+                    crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
+                });
+
                 let metadata = mls::MlsGroupMetadata {
                     group_id: nostr_group_id.clone(),         // Wire ID for relay filtering (h tag)
                     engine_group_id: engine_group_id.clone(), // Internal engine ID for local operations
                     creator_pubkey: welcomer_hex,             // The welcomer becomes the creator from our perspective
                     name: group_name,
+                    description: group_description,
                     avatar_ref: None,
+                    avatar_cached,
                     created_at: invite_sent_at,               // Use invite-sent time, NOT acceptance time!
                     updated_at: now_secs,
                     evicted: false,                           // Accepting a welcome means we're joining, not evicted
@@ -1100,16 +1485,25 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                 }
             }
 
-            Ok::<bool, String>(true)
+            Ok::<(bool, String), String>((true, nostr_group_id))
         })
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
 
     if accepted {
+        let gid_for_avatar = nostr_group_id.clone();
         tokio::spawn(async {
             if let Err(err) = regenerate_device_keypackage(false).await {
                 eprintln!("[MLS] Failed to regenerate device KeyPackage after accepting welcome: {}", err);
+            }
+        });
+        // Spawn background avatar caching (fire-and-forget)
+        tokio::spawn(async move {
+            match cache_group_avatar(gid_for_avatar.clone()).await {
+                Ok(Some(path)) => println!("[MLS] Cached group avatar after welcome: {}", path),
+                Ok(None) => {} // No avatar data in this group
+                Err(e) => eprintln!("[MLS] Failed to cache group avatar after welcome for {}: {}", &gid_for_avatar[..8.min(gid_for_avatar.len())], e),
             }
         });
     }

@@ -105,6 +105,9 @@ fn main() {
             "export_keys",
             "regenerate_device_keypackage",
             // MLS core commands
+            "upload_group_avatar",
+            "cache_group_avatar",
+            "cache_invite_avatar",
             "create_group_chat",
             "create_mls_group",
             "sync_mls_groups_now",

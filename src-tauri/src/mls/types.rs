@@ -98,7 +98,11 @@ pub struct MlsGroupMetadata {
     pub engine_group_id: String,
     pub creator_pubkey: String,
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub avatar_ref: Option<String>,
+    #[serde(default)]
+    pub avatar_cached: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     // Flag indicating if we were evicted/kicked from this group

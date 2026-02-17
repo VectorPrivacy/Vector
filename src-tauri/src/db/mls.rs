@@ -16,17 +16,18 @@ pub async fn save_mls_groups<R: Runtime>(
 ) -> Result<(), String> {
     let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
-    // Store each group in the mls_groups table (all fields as columns)
     for group in groups {
         conn.execute(
-            "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, description, avatar_ref, avatar_cached, created_at, updated_at, evicted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 group.group_id,
                 group.engine_group_id,
                 group.creator_pubkey,
                 group.name,
+                group.description,
                 group.avatar_ref,
+                group.avatar_cached,
                 group.created_at as i64,
                 group.updated_at as i64,
                 group.evicted as i32,
@@ -46,16 +47,17 @@ pub async fn save_mls_group<R: Runtime>(
 ) -> Result<(), String> {
     let conn = crate::account_manager::get_write_connection_guard(&handle)?;
 
-    // Insert or replace a single group
     conn.execute(
-        "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, description, avatar_ref, avatar_cached, created_at, updated_at, evicted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             group.group_id,
             group.engine_group_id,
             group.creator_pubkey,
             group.name,
+            group.description,
             group.avatar_ref,
+            group.avatar_cached,
             group.created_at as i64,
             group.updated_at as i64,
             group.evicted as i32,
@@ -67,15 +69,39 @@ pub async fn save_mls_group<R: Runtime>(
     Ok(())
 }
 
+/// Update only the avatar_cached (and optionally avatar_ref) columns for a single group.
+/// This avoids a full load-all + save cycle when only the avatar changed.
+pub fn update_mls_group_avatar<R: Runtime>(
+    handle: &AppHandle<R>,
+    group_id: &str,
+    avatar_cached: &str,
+    avatar_ref: Option<&str>,
+) -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+
+    if let Some(ref_url) = avatar_ref {
+        conn.execute(
+            "UPDATE mls_groups SET avatar_cached = ?1, avatar_ref = ?2 WHERE group_id = ?3",
+            rusqlite::params![avatar_cached, ref_url, group_id],
+        ).map_err(|e| format!("Failed to update group avatar: {}", e))?;
+    } else {
+        conn.execute(
+            "UPDATE mls_groups SET avatar_cached = ?1 WHERE group_id = ?2",
+            rusqlite::params![avatar_cached, group_id],
+        ).map_err(|e| format!("Failed to update group avatar: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Load MLS groups from SQL database (plaintext columns)
 pub async fn load_mls_groups<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<Vec<crate::mls::MlsGroupMetadata>, String> {
     let conn = crate::account_manager::get_db_connection_guard(handle)?;
 
-    // Load from mls_groups table
     let mut stmt = conn.prepare(
-        "SELECT group_id, engine_group_id, creator_pubkey, name, avatar_ref, created_at, updated_at, evicted FROM mls_groups"
+        "SELECT group_id, engine_group_id, creator_pubkey, name, description, avatar_ref, avatar_cached, created_at, updated_at, evicted FROM mls_groups"
     ).map_err(|e| format!("Failed to prepare query: {}", e))?;
 
     let rows = stmt.query_map([], |row| {
@@ -84,10 +110,12 @@ pub async fn load_mls_groups<R: Runtime>(
             engine_group_id: row.get(1)?,
             creator_pubkey: row.get(2)?,
             name: row.get(3)?,
-            avatar_ref: row.get(4)?,
-            created_at: row.get::<_, i64>(5)? as u64,
-            updated_at: row.get::<_, i64>(6)? as u64,
-            evicted: row.get::<_, i32>(7)? != 0,
+            description: row.get(4)?,
+            avatar_ref: row.get(5)?,
+            avatar_cached: row.get(6)?,
+            created_at: row.get::<_, i64>(7)? as u64,
+            updated_at: row.get::<_, i64>(8)? as u64,
+            evicted: row.get::<_, i32>(9)? != 0,
         })
     }).map_err(|e| format!("Failed to query mls_groups: {}", e))?;
 

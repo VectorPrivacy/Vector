@@ -761,7 +761,17 @@
             <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
             <hr class="divider chat-new-divider">
             <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+              <div id="create-group-avatar-picker" class="create-group-avatar-picker" title="Choose group avatar">
+                <img id="create-group-avatar-preview" class="create-group-avatar-preview" style="display: none;" />
+                <img id="create-group-avatar-placeholder" class="create-group-avatar-placeholder" src="icons/group-placeholder.svg" />
+                <div class="create-group-avatar-edit">
+                  <span id="create-group-avatar-edit-icon" class="icon icon-plus-circle"></span>
+                </div>
+              </div>
               <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
+            </div>
+            <div style="padding: 0 15px; margin-top: 8px;">
+              <textarea id="create-group-description" placeholder="Group description (optional)" class="create-group-description" rows="2"></textarea>
             </div>
           </center>
 

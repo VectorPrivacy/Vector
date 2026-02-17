@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS mls_groups (
     engine_group_id TEXT NOT NULL DEFAULT '',
     creator_pubkey TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
+    description TEXT,
     avatar_ref TEXT,
+    avatar_cached TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     evicted INTEGER NOT NULL DEFAULT 0
@@ -735,6 +737,31 @@ where
     }
 }
 
+/// Ensure a column exists on a table, adding it if missing.
+/// This is a safety net for cases where ALTER TABLE inside a WAL-mode
+/// transaction silently fails (e.g., other connections hold read locks).
+fn ensure_column_exists(
+    conn: &mut rusqlite::Connection,
+    table: &str,
+    column: &str,
+    col_type: &str,
+) -> Result<(), String> {
+    let exists: bool = conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name='{}'", table, column),
+        [],
+        |row| row.get::<_, i32>(0),
+    ).map(|c| c > 0).unwrap_or(false);
+
+    if !exists {
+        println!("[DB] Safety net: adding missing column {}.{}", table, column);
+        conn.execute(
+            &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type),
+            [],
+        ).map_err(|e| format!("[DB] Failed to add column {}.{}: {}", table, column, e))?;
+    }
+    Ok(())
+}
+
 /// Run database migrations for schema updates
 ///
 /// GUARANTEES:
@@ -1075,10 +1102,46 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // Migration 14: Add description column to mls_groups table
+    run_atomic_migration(conn, 14, "Add description to mls_groups table", |tx| {
+        let col_exists: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mls_groups') WHERE name='description'",
+            [], |row| row.get::<_, i32>(0)
+        ).map(|c| c > 0).unwrap_or(false);
+        if !col_exists {
+            tx.execute(
+                "ALTER TABLE mls_groups ADD COLUMN description TEXT",
+                []
+            ).map_err(|e| format!("Failed to add description column: {}", e))?;
+        }
+        Ok(())
+    })?;
+
+    // Migration 15: Add avatar_cached column to mls_groups table
+    run_atomic_migration(conn, 15, "Add avatar_cached to mls_groups table", |tx| {
+        let col_exists: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mls_groups') WHERE name='avatar_cached'",
+            [], |row| row.get::<_, i32>(0)
+        ).map(|c| c > 0).unwrap_or(false);
+        if !col_exists {
+            tx.execute(
+                "ALTER TABLE mls_groups ADD COLUMN avatar_cached TEXT",
+                []
+            ).map_err(|e| format!("Failed to add avatar_cached column: {}", e))?;
+        }
+        Ok(())
+    })?;
+
+    // Safety net: ALTER TABLE inside WAL-mode transactions can silently fail when
+    // other connections hold read locks. Verify critical columns exist outside the
+    // migration system so they're always present regardless of migration history.
+    ensure_column_exists(conn, "mls_groups", "description", "TEXT")?;
+    ensure_column_exists(conn, "mls_groups", "avatar_cached", "TEXT")?;
+
     // =========================================================================
-    // Future migrations (14+) follow the same pattern:
+    // Future migrations (16+) follow the same pattern:
     //
-    // run_atomic_migration(conn,14, "Description here", |tx| {
+    // run_atomic_migration(conn, 16, "Description here", |tx| {
     //     tx.execute("...", [])?;
     //     Ok(())
     // })?;
@@ -1522,7 +1585,9 @@ mod tests {
             engine_group_id TEXT NOT NULL DEFAULT '',
             creator_pubkey TEXT NOT NULL,
             name TEXT NOT NULL DEFAULT '',
+            description TEXT,
             avatar_ref TEXT,
+            avatar_cached TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             evicted INTEGER NOT NULL DEFAULT 0

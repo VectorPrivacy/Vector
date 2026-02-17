@@ -159,7 +159,12 @@ impl MlsService {
         &self,
         name: &str,
         avatar_ref: Option<&str>,
+        avatar_cached: Option<&str>,
         initial_member_devices: &[(String, String)], // (member_pubkey, device_id) pairs
+        description: Option<&str>,
+        image_hash: Option<[u8; 32]>,
+        image_key: Option<[u8; 32]>,
+        image_nonce: Option<[u8; 12]>,
     ) -> Result<String, MlsError> {
         // Persistent group creation using sqlite-backed engine.
         // - Resolve signer and relay config
@@ -188,13 +193,16 @@ impl MlsService {
             .iter()
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect();
-        let description = format!("Vector group: {}", name);
+        let desc = match description.filter(|d| !d.is_empty()) {
+            Some(d) => d.to_string(),
+            None => format!("Vector group: {}", name),
+        };
         let group_config = NostrGroupConfigData::new(
             name.to_string(),
-            description,
-            None, // image_hash
-            None, // image_key
-            None, // image_nonce
+            desc.clone(),
+            image_hash,
+            image_key,
+            image_nonce,
             relay_urls,
             vec![my_pubkey], // admins - moved from create_group call
         );
@@ -433,7 +441,9 @@ impl MlsService {
             engine_group_id: engine_gid_hex,       // engine id for local operations
             creator_pubkey: creator_pubkey_b32,
             name: name.to_string(),
+            description: Some(desc),
             avatar_ref: avatar_ref.map(|s| s.to_string()),
+            avatar_cached: avatar_cached.map(|s| s.to_string()),
             created_at: now_secs,
             updated_at: now_secs,
             evicted: false,                        // New groups are not evicted

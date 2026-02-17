@@ -149,6 +149,11 @@ const domCreateGroupList = document.getElementById('create-group-list');
 const domCreateGroupCreateBtn = document.getElementById('create-group-create-btn');
 const domCreateGroupCancelBtn = document.getElementById('create-group-cancel-btn');
 const domCreateGroupStatus = document.getElementById('create-group-status');
+const domCreateGroupDescription = document.getElementById('create-group-description');
+const domCreateGroupAvatarPicker = document.getElementById('create-group-avatar-picker');
+const domCreateGroupAvatarPreview = document.getElementById('create-group-avatar-preview');
+const domCreateGroupAvatarPlaceholder = document.getElementById('create-group-avatar-placeholder');
+const domCreateGroupAvatarEditIcon = document.getElementById('create-group-avatar-edit-icon');
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
@@ -3915,10 +3920,17 @@ function applyMlsGroupMetadata(metadata) {
     assignIfChanged(chat.metadata, 'engine_group_id', metadata.engine_group_id);
     assignIfChanged(chat.metadata, 'creator_pubkey', metadata.creator_pubkey);
     assignIfChanged(chat.metadata, 'avatar_ref', metadata.avatar_ref ?? null);
+    assignIfChanged(chat.metadata, 'avatar_cached', metadata.avatar_cached ?? null);
     assignIfChanged(chat.metadata, 'created_at', metadata.created_at);
     assignIfChanged(chat.metadata, 'updated_at', metadata.updated_at);
     assignIfChanged(chat.metadata, 'evicted', metadata.evicted);
+
+    // Auto-trigger avatar caching if we have a ref but no cache
+    if (chat.metadata.avatar_ref && !chat.metadata.avatar_cached) {
+        invoke('cache_group_avatar', { groupId: metadata.group_id }).catch(() => {});
+    }
     assignIfChanged(chat.metadata.custom_fields, 'name', metadata.name);
+    assignIfChanged(chat.metadata.custom_fields, 'description', metadata.description);
     if (metadata.member_count !== undefined) {
         assignIfChanged(chat.metadata.custom_fields, 'member_count', metadata.member_count);
     }
@@ -4272,9 +4284,9 @@ function generateChatlistStateHash() {
     // Build a simple array of state values (faster than creating objects)
     const states = [];
 
-    // Add invite IDs first
+    // Add invite IDs and avatar state
     for (const inv of arrMLSInvites) {
-        states.push(inv.id || inv.welcome_event_id || inv.group_id);
+        states.push(inv.id || inv.welcome_event_id || inv.group_id, inv.avatar_cached);
     }
 
     // Add chat states (including chat ID to capture order changes)
@@ -4296,7 +4308,9 @@ function generateChatlistStateHash() {
             profile?.nickname || profile?.name,
             profile?.avatar,
             profile?.avatar_cached,
-            chat.muted
+            chat.muted,
+            isGroup ? chat.metadata?.avatar_cached : undefined,
+            isGroup ? chat.metadata?.custom_fields?.name : undefined
         );
     }
 
@@ -4372,10 +4386,43 @@ function renderInviteItem(invite, primaryColor) {
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
     divInvite.style.borderColor = primaryColor;
 
-    // Avatar container with group placeholder
+    // Avatar container — show cached avatar if available, otherwise placeholder
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = 'relative';
-    divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+    if (invite.avatar_cached) {
+        const imgAvatar = document.createElement('img');
+        imgAvatar.src = convertFileSrc(invite.avatar_cached);
+        imgAvatar.style.width = '50px';
+        imgAvatar.style.height = '50px';
+        imgAvatar.style.objectFit = 'cover';
+        imgAvatar.style.borderRadius = '50%';
+        imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
+        divAvatarContainer.appendChild(imgAvatar);
+    } else {
+        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        // Fire-and-forget: cache the invite avatar if encryption data is available
+        if (invite.image_hash && invite.image_key && invite.image_nonce) {
+            invoke('cache_invite_avatar', {
+                imageHash: invite.image_hash,
+                imageKey: invite.image_key,
+                imageNonce: invite.image_nonce,
+            }).then(cachedPath => {
+                if (cachedPath) {
+                    invite.avatar_cached = cachedPath;
+                    // Direct DOM update + state hash change triggers re-render
+                    const img = document.createElement('img');
+                    img.src = convertFileSrc(cachedPath);
+                    img.style.width = '50px';
+                    img.style.height = '50px';
+                    img.style.objectFit = 'cover';
+                    img.style.borderRadius = '50%';
+                    img.onerror = () => img.replaceWith(createPlaceholderAvatar(true, 50));
+                    divAvatarContainer.innerHTML = '';
+                    divAvatarContainer.appendChild(img);
+                }
+            }).catch(() => {});
+        }
+    }
     divInvite.appendChild(divAvatarContainer);
 
     // Preview container with group name and member count
@@ -4570,8 +4617,19 @@ function renderChat(chat, primaryColor) {
     divAvatarContainer.style.position = `relative`;
     
     if (isGroup) {
-        // For groups, show the group placeholder SVG
-        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        const groupAvatarCached = chat.metadata?.avatar_cached;
+        if (groupAvatarCached) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = convertFileSrc(groupAvatarCached);
+            imgAvatar.style.width = '50px';
+            imgAvatar.style.height = '50px';
+            imgAvatar.style.objectFit = 'cover';
+            imgAvatar.style.borderRadius = '50%';
+            imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        }
     } else {
         const avatarSrc = getProfileAvatarSrc(profile);
         if (avatarSrc) {
@@ -5031,6 +5089,14 @@ async function setupRustListeners() {
                 const groupName = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
                 domChatContact.textContent = groupName;
                 updateChatHeaderSubtext(chat);
+                // Update header avatar if cached avatar changed
+                if (chat.metadata?.avatar_cached) {
+                    domChatHeaderAvatarContainer.innerHTML = '';
+                    const avatarImg = createAvatarImg(convertFileSrc(chat.metadata.avatar_cached), 22, true);
+                    avatarImg.classList.add('btn');
+                    avatarImg.onclick = () => { closeChat(); openGroupOverview(chat); };
+                    domChatHeaderAvatarContainer.appendChild(avatarImg);
+                }
             }
 
             const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
@@ -7271,9 +7337,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             // Notes: no avatar, just show the title "Notes"
             domChatAvatar = null;
         } else if (isGroup) {
-            // Group: use group placeholder
-            domChatAvatar = document.createElement('img');
-            domChatAvatar.src = './icons/group-placeholder.svg';
+            const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+            domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 closeChat();
@@ -7530,9 +7595,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             // Notes: no avatar icon
             domChatAvatar = null;
         } else if (isGroup) {
-            // Group: use group placeholder
-            domChatAvatar = document.createElement('img');
-            domChatAvatar.src = './icons/group-placeholder.svg';
+            const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+            domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 closeChat();
@@ -9627,7 +9691,41 @@ async function renderGroupOverview(chat) {
     // Display Name (top header)
     domGroupOverviewName.innerHTML = groupName;
     domGroupOverviewStatus.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
-    
+
+    // Header avatar (small, next to name)
+    const headerAvatarContainer = document.getElementById('group-overview-header-avatar-container');
+    if (headerAvatarContainer) {
+        headerAvatarContainer.innerHTML = '';
+        const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+        headerAvatarContainer.appendChild(createAvatarImg(groupAvatarSrc, 22, true));
+    }
+
+    // Large center avatar
+    const avatarParent = domGroupOverviewAvatar.parentElement;
+    const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+    if (groupAvatarSrc) {
+        const img = document.createElement('img');
+        img.src = groupAvatarSrc;
+        img.style.width = '100px';
+        img.style.height = '100px';
+        img.style.objectFit = 'cover';
+        img.style.borderRadius = '50%';
+        img.onerror = () => {
+            img.replaceWith(domGroupOverviewAvatar);
+            domGroupOverviewAvatar.style.display = 'inline-block';
+        };
+        domGroupOverviewAvatar.style.display = 'none';
+        // Remove any previous cached avatar img from parent
+        const prevImg = avatarParent.querySelector('img');
+        if (prevImg) prevImg.remove();
+        avatarParent.appendChild(img);
+    } else {
+        // Remove any stale cached img
+        const prevImg = avatarParent.querySelector('img');
+        if (prevImg) prevImg.remove();
+        domGroupOverviewAvatar.style.display = 'inline-block';
+    }
+
     // Secondary name
     domGroupOverviewNameSecondary.innerHTML = groupName;
     
@@ -11562,6 +11660,8 @@ window.onresize = adjustSize;
  * Keep this decoupled from arrChats.
  */
 let arrSelectedGroupMembers = [];
+/** Path to the selected group avatar image file (null if none selected) */
+let strCreateGroupAvatarPath = null;
 /**
  * Tracks whether the user attempted to create the group.
  * Used to only show inline validation after an explicit attempt.
@@ -11738,13 +11838,22 @@ function openCreateGroup() {
 
     // Reset state
     arrSelectedGroupMembers = [];
+    strCreateGroupAvatarPath = null;
     fCreateGroupAttempt = false;
     if (domCreateGroupName) domCreateGroupName.value = '';
+    if (domCreateGroupDescription) domCreateGroupDescription.value = '';
     if (domCreateGroupFilter) domCreateGroupFilter.value = '';
     if (domCreateGroupStatus) {
         domCreateGroupStatus.style.display = 'none';
         domCreateGroupStatus.textContent = '';
     }
+    // Reset avatar picker
+    if (domCreateGroupAvatarPreview) {
+        domCreateGroupAvatarPreview.style.display = 'none';
+        domCreateGroupAvatarPreview.src = '';
+    }
+    if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = '';
+    if (domCreateGroupAvatarPicker) domCreateGroupAvatarPicker.classList.remove('has-image');
 
     // Render list
     renderCreateGroupList('');
@@ -11802,6 +11911,31 @@ Create Group UI wiring
     domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
     domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
 
+    // Avatar picker: open file dialog on click
+    if (domCreateGroupAvatarPicker) {
+        domCreateGroupAvatarPicker.onclick = async () => {
+            const { open } = window.__TAURI__.dialog;
+            const file = await open({
+                title: 'Choose Group Avatar',
+                multiple: false,
+                directory: false,
+                filters: [{
+                    name: 'Image',
+                    extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp']
+                }]
+            });
+            if (!file) return;
+            strCreateGroupAvatarPath = file;
+            // Show local preview, hide placeholder
+            if (domCreateGroupAvatarPreview) {
+                domCreateGroupAvatarPreview.src = convertFileSrc(file);
+                domCreateGroupAvatarPreview.style.display = '';
+            }
+            if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = 'none';
+            domCreateGroupAvatarPicker.classList.add('has-image');
+        };
+    }
+
     domCreateGroupCreateBtn.onclick = async () => {
         const groupName = (domCreateGroupName?.value || '').trim();
         const memberIds = [...arrSelectedGroupMembers];
@@ -11825,11 +11959,50 @@ Create Group UI wiring
         }
 
         try {
+            // Upload group avatar if one was selected
+            let avatarResult = null;
+            if (strCreateGroupAvatarPath) {
+                if (domCreateGroupStatus) {
+                    domCreateGroupStatus.style.display = '';
+                    domCreateGroupStatus.textContent = 'Uploading avatar...';
+                }
+                // Show progress spinner on edit badge (matches profile avatar pattern)
+                let unlisten = null;
+                if (domCreateGroupAvatarEditIcon) {
+                    domCreateGroupAvatarEditIcon.className = 'profile-upload-spinner';
+                    domCreateGroupAvatarEditIcon.style.setProperty('--progress', '5%');
+                    unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+                        if (event.payload.type === 'group_avatar') {
+                            const progress = Math.max(5, event.payload.progress);
+                            domCreateGroupAvatarEditIcon.style.setProperty('--progress', `${progress}%`);
+                        }
+                    });
+                }
+                try {
+                    avatarResult = await invoke('upload_group_avatar', { filepath: strCreateGroupAvatarPath });
+                } finally {
+                    if (unlisten) unlisten();
+                    if (domCreateGroupAvatarEditIcon) domCreateGroupAvatarEditIcon.className = 'icon icon-plus-circle';
+                }
+            }
+
+            const groupDescription = (domCreateGroupDescription?.value || '').trim() || null;
+
+            if (domCreateGroupStatus) {
+                domCreateGroupStatus.textContent = 'Preparing devices...';
+            }
+
             // Backend orchestration: refresh keypackages per member, create group, persist
             // Note: Tauri expects camelCase arg keys for Rust snake_case params.
             const newGroupId = await invoke('create_group_chat', {
                 groupName: groupName,
-                memberIds: memberIds
+                memberIds: memberIds,
+                groupDescription: groupDescription,
+                imageHash: avatarResult?.image_hash || null,
+                imageKey: avatarResult?.image_key || null,
+                imageNonce: avatarResult?.image_nonce || null,
+                avatarBlobUrl: avatarResult?.blob_url || null,
+                avatarCached: avatarResult?.cached_path || null,
             });
 
             // On success: refresh groups, open the new group chat, and close panel
