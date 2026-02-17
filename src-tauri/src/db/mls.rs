@@ -94,6 +94,18 @@ pub fn update_mls_group_avatar<R: Runtime>(
     Ok(())
 }
 
+/// Clear avatar_cached for all MLS groups (used when cache is purged).
+pub fn clear_all_mls_group_avatar_cache<R: Runtime>(
+    handle: &AppHandle<R>,
+) -> Result<u64, String> {
+    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let changed = conn.execute(
+        "UPDATE mls_groups SET avatar_cached = NULL WHERE avatar_cached IS NOT NULL",
+        [],
+    ).map_err(|e| format!("Failed to clear MLS group avatar cache: {}", e))?;
+    Ok(changed as u64)
+}
+
 /// Load MLS groups from SQL database (plaintext columns)
 pub async fn load_mls_groups<R: Runtime>(
     handle: &AppHandle<R>,

@@ -271,6 +271,16 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
         }
     }
 
+    // Clear cached avatar paths from all MLS groups in DB and notify frontend
+    if db::clear_all_mls_group_avatar_cache(&handle).is_ok() {
+        // Reload (now all avatar_cached = NULL) and emit events so frontend switches to placeholders
+        if let Ok(groups) = db::load_mls_groups(&handle).await {
+            for meta in groups.iter().filter(|g| !g.evicted) {
+                crate::mls::emit_group_metadata_event(meta);
+            }
+        }
+    }
+
     // Get storage info after clearing to calculate freed space
     // Need to drop the state lock first since get_storage_info needs it
     drop(state);

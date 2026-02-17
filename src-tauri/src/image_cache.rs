@@ -490,7 +490,7 @@ pub async fn get_or_cache_image<R: Runtime>(
     }
 }
 
-/// Tauri command: Clear all image caches
+/// Tauri command: Clear all image caches (files + stale DB/state references)
 #[tauri::command]
 pub async fn clear_image_cache<R: Runtime>(
     handle: AppHandle<R>,
@@ -500,6 +500,34 @@ pub async fn clear_image_cache<R: Runtime>(
     total += clear_cache(&handle, ImageType::Banner)?;
     total += clear_cache(&handle, ImageType::MiniAppIcon)?;
     total += clear_cache(&handle, ImageType::InlineImage)?;
+
+    // Clear stale cached path references in profiles (DB + in-memory state)
+    {
+        let mut state = crate::STATE.lock().await;
+        let mut cleared_ids = Vec::new();
+        for profile in &mut state.profiles {
+            if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
+                profile.avatar_cached = Box::<str>::default();
+                profile.banner_cached = Box::<str>::default();
+                cleared_ids.push(profile.id);
+            }
+        }
+        for id in cleared_ids {
+            if let Some(slim) = state.serialize_profile(id) {
+                crate::db::set_profile(handle.clone(), slim).await.ok();
+            }
+        }
+    }
+
+    // Clear stale cached path references in MLS groups (DB) and notify frontend
+    if crate::db::clear_all_mls_group_avatar_cache(&handle).is_ok() {
+        if let Ok(groups) = crate::db::load_mls_groups(&handle).await {
+            for meta in groups.iter().filter(|g| !g.evicted) {
+                crate::mls::emit_group_metadata_event(meta);
+            }
+        }
+    }
+
     Ok(total)
 }
 
