@@ -3,6 +3,9 @@
 //! This module provides MLS group messaging capabilities using the nostr-mls crate.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use once_cell::sync::Lazy;
+use tokio::sync::Mutex as TokioMutex;
 use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use tauri::{AppHandle, Runtime, Emitter};
@@ -26,6 +29,19 @@ pub use messaging::{send_mls_message, emit_group_metadata_event, metadata_to_fro
 pub use tracking::{is_mls_event_processed, track_mls_event_processed, cleanup_old_processed_events};
 use types::{has_encoding_tag, KeyPackageIndexEntry};
 use tracking::wipe_legacy_mls_database;
+
+/// Per-group lock to ensure only one sync/process_message runs at a time for a given MLS group.
+/// Prevents concurrent relay syncs from interleaving epoch-sequential commits.
+static GROUP_SYNC_LOCKS: Lazy<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+/// Get or create a per-group sync lock
+pub fn get_group_sync_lock(group_id: &str) -> Arc<TokioMutex<()>> {
+    let mut locks = GROUP_SYNC_LOCKS.lock().unwrap();
+    locks.entry(group_id.to_string())
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
 
 /// Main MLS service facade
 ///
@@ -845,6 +861,10 @@ impl MlsService {
             return Err(MlsError::InvalidGroupId);
         }
 
+        // Acquire per-group lock to prevent concurrent syncs from interleaving epoch-sequential commits
+        let group_lock = get_group_sync_lock(group_id);
+        let _guard = group_lock.lock().await;
+
         // 1) Check if this group is marked as evicted
         let groups = self.read_groups().await.ok();
         let group_metadata = groups.as_ref().and_then(|gs| {
@@ -1301,20 +1321,20 @@ impl MlsService {
             }
         }
 
-        // RETRY LOOP: Do immediate retries for out-of-order events within the same batch.
-        // We do up to 5 immediate passes (no delay) to resolve ordering issues.
-        // Events still unprocessable after that will be retried on the NEXT sync cycle
-        // (since we don't advance cursor for Unprocessable events).
-        // This is NON-BLOCKING to avoid delaying sync of other groups.
+        // RETRY LOOP: Retry out-of-order events within the same batch using progress-based passes.
+        // We keep retrying as long as each pass makes progress (resolves at least one event).
+        // Events still unprocessable after no-progress pass will be retried on the NEXT sync cycle
+        // (since we don't advance cursor past them).
+        // Safety cap of 50 passes prevents infinite loops.
         if !pending_retry.is_empty() && !was_evicted {
-            let max_immediate_retries: u32 = 5; // Quick passes, no delay
+            let max_retry_passes: u32 = 50; // Safety cap to prevent infinite loops
             let mut retry_attempt: u32 = 0;
 
-            while !pending_retry.is_empty() && retry_attempt < max_immediate_retries {
+            while !pending_retry.is_empty() && retry_attempt < max_retry_passes {
                 retry_attempt += 1;
 
-                println!("[MLS] Immediate retry pass {}/{} for {} events",
-                         retry_attempt, max_immediate_retries, pending_retry.len());
+                println!("[MLS] Retry pass {}/{} for {} events",
+                         retry_attempt, max_retry_passes, pending_retry.len());
 
                 // Sort pending events by created_at to ensure chronological processing
                 pending_retry.sort_by_key(|e| e.created_at.as_secs());
@@ -1478,11 +1498,21 @@ impl MlsService {
                     }
                 }
 
+                // Check if we made progress this pass
+                let made_progress = still_pending.len() < pending_retry.len();
+
                 // Update pending list for next iteration
                 pending_retry = still_pending;
 
                 // If we processed all events or got evicted, we're done
                 if pending_retry.is_empty() || was_evicted {
+                    break;
+                }
+
+                // Stop if no progress (remaining events are genuinely stuck, not just out-of-order)
+                if !made_progress {
+                    eprintln!("[MLS] No progress in retry pass {} — {} events permanently unprocessable",
+                             retry_attempt, pending_retry.len());
                     break;
                 }
 
@@ -1492,9 +1522,19 @@ impl MlsService {
 
             // Log final status
             if !pending_retry.is_empty() {
-                // Some events still unprocessable - they'll be retried on next sync cycle
-                // (cursor wasn't advanced for them, so they'll be fetched again)
-                eprintln!("[MLS] {} events still unprocessable after {} immediate passes (will retry next sync)",
+                // These events are permanently unprocessable (wrong epoch, already failed in MDK, etc.)
+                // Track them as processed and advance cursor past them so they're never re-fetched.
+                for ev in &pending_retry {
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
+                    }
+                    // Advance cursor past these permanently-failed events
+                    last_seen_id = Some(ev.id);
+                    last_seen_at = ev.created_at.as_secs();
+                    processed = processed.saturating_add(1);
+                }
+
+                eprintln!("[MLS] {} events permanently unprocessable after {} retry passes (skipped, cursor advancing past them)",
                          pending_retry.len(), retry_attempt);
 
                 // Record one failure for desync detection (not per-event to avoid spam)
@@ -1840,42 +1880,14 @@ impl MlsService {
                 eprintln!("[MLS] Failed to cleanup evicted group: {}", e);
             }
         } else {
-            // 7) Advance cursor based on highest timestamp SEEN (not just processed)
-            // This prevents re-fetching events that were already processed by live subscription
-            // or marked as Unprocessable (already processed, own message, etc.)
-
-            // Find the highest timestamp from all events we fetched (not just processed ones)
-            let highest_seen_at = ordered.iter().map(|e| e.created_at.as_secs()).max();
-            let highest_seen_id = ordered.iter().max_by_key(|e| e.created_at.as_secs()).map(|e| e.id);
-
-            if let (Some(seen_at), Some(seen_id)) = (highest_seen_at, highest_seen_id) {
-                // Only advance if we saw events newer than current cursor
+            // 7) Advance cursor to the last processed/skipped event.
+            // Permanently unprocessable events were already tracked and included above.
+            if let Some(id) = last_seen_id {
                 let current_cursor_at = cursors.get(&gid_for_fetch).map(|c| c.last_seen_at).unwrap_or(0);
 
-                if seen_at > current_cursor_at {
+                if last_seen_at > current_cursor_at {
                     println!("[MLS] Saving cursor: group={}, processed={}, seen_at={} (advanced from {})",
-                             gid_for_fetch, processed, seen_at, current_cursor_at);
-                    cursors.insert(
-                        gid_for_fetch.clone(),
-                        EventCursor {
-                            last_seen_event_id: seen_id.to_hex(),
-                            last_seen_at: seen_at,
-                        },
-                    );
-                    // Persist updated cursors
-                    if let Err(e) = self.write_event_cursors(&cursors).await {
-                        eprintln!("[MLS] write_event_cursors failed: {}", e);
-                    }
-                    // Update current_since for next pagination batch (add 1 to avoid re-fetching same event)
-                    current_since = Timestamp::from_secs(seen_at);
-                } else {
-                    println!("[MLS] Cursor already up-to-date for group={} (at {})", gid_for_fetch, current_cursor_at);
-                }
-            } else if processed > 0 {
-                // Fallback to old behavior if ordered is empty but we processed something
-                if let Some(id) = last_seen_id {
-                    println!("[MLS] Saving cursor (fallback): group={}, processed={}, last_seen_at={}",
-                             gid_for_fetch, processed, last_seen_at);
+                             gid_for_fetch, processed, last_seen_at, current_cursor_at);
                     cursors.insert(
                         gid_for_fetch.clone(),
                         EventCursor {
@@ -1886,8 +1898,9 @@ impl MlsService {
                     if let Err(e) = self.write_event_cursors(&cursors).await {
                         eprintln!("[MLS] write_event_cursors failed: {}", e);
                     }
-                    // Update current_since for next pagination batch
                     current_since = Timestamp::from_secs(last_seen_at);
+                } else {
+                    println!("[MLS] Cursor already up-to-date for group={} (at {})", gid_for_fetch, current_cursor_at);
                 }
             }
         }

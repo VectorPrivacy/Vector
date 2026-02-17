@@ -130,6 +130,10 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                             // Use runtime handle to drive async operations from blocking context
                             let rt = tokio::runtime::Handle::current();
 
+                            // Acquire per-group lock to coordinate with sync
+                            let group_lock = crate::mls::get_group_sync_lock(&group_id_for_persist);
+                            let _guard = rt.block_on(group_lock.lock());
+
                             // EventTracker: Skip if already processed (pre-check before MDK call)
                             if crate::mls::is_mls_event_processed(&app_handle, &ev.id.to_hex()) {
                                 // Already processed by sync or previous live handler - skip

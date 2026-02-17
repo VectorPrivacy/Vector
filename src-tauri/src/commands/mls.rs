@@ -141,9 +141,9 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
         .collect();
 
     // Build and sign event with nostr client
-    let kp_event = client
-        .sign_event_builder(EventBuilder::new(Kind::MlsKeyPackage, kp_encoded).tags(filtered_tags))
-        .await
+    let kp_event = EventBuilder::new(Kind::MlsKeyPackage, kp_encoded)
+        .tags(filtered_tags)
+        .sign_with_keys(crate::MY_KEYS.get().unwrap())
         .map_err(|e| e.to_string())?;
 
     // Debug: Print event details before publishing
@@ -348,23 +348,33 @@ pub async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, Str
                 let gid = GroupId::from_slice(&gid_bytes);
 
                 // Get members via engine API
-                if let Ok(pk_list) = engine.get_members(&gid) {
-                    members = pk_list
-                        .into_iter()
-                        .filter_map(|pk| pk.to_bech32().ok())
-                        .collect();
+                match engine.get_members(&gid) {
+                    Ok(pk_list) => {
+                        members = pk_list
+                            .into_iter()
+                            .filter_map(|pk| pk.to_bech32().ok())
+                            .collect();
+                    }
+                    Err(e) => {
+                        eprintln!("[MLS] get_members failed for engine_id={}: {}", engine_id, e);
+                    }
                 }
 
                 // Get admins from the group
-                if let Ok(groups) = engine.get_groups() {
-                    for g in groups {
-                        let gid_hex = bytes_to_hex_string(g.mls_group_id.as_slice());
-                        if gid_hex == engine_id {
-                            admins = g.admin_pubkeys.iter()
-                                .filter_map(|pk| pk.to_bech32().ok())
-                                .collect();
-                            break;
+                match engine.get_groups() {
+                    Ok(groups) => {
+                        for g in groups {
+                            let gid_hex = bytes_to_hex_string(g.mls_group_id.as_slice());
+                            if gid_hex == engine_id {
+                                admins = g.admin_pubkeys.iter()
+                                    .filter_map(|pk| pk.to_bech32().ok())
+                                    .collect();
+                                break;
+                            }
                         }
+                    }
+                    Err(e) => {
+                        eprintln!("[MLS] get_groups failed: {}", e);
                     }
                 }
             }
