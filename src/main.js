@@ -203,6 +203,9 @@ let strCurrentReactionReference = "";
 function openEmojiPanel(e) {
     const isDefaultPanel = e.target === domChatMessageInputEmoji || domChatMessageInputEmoji.contains(e.target);
 
+    // Don't close if clicking inside the picker itself
+    if (picker.contains(e.target)) return;
+
     // Open or Close the panel depending on it's state
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
