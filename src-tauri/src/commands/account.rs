@@ -10,7 +10,7 @@
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE, TRUSTED_RELAYS};
+use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, TRUSTED_RELAYS};
 use crate::{Profile, account_manager, db, crypto, commands};
 
 // ============================================================================
@@ -248,32 +248,25 @@ pub async fn create_account() -> Result<LoginResult, String> {
 /// Export account keys (nsec and seed phrase if available)
 #[tauri::command]
 pub async fn export_keys() -> Result<serde_json::Value, String> {
-    // Try to get nsec from database first
     let handle = TAURI_APP.get().unwrap();
-    let nsec = if let Some(enc_pkey) = db::get_pkey(handle.clone())? {
-        // Decrypt the nsec
-        match crypto::internal_decrypt(enc_pkey, None).await {
-            Ok(decrypted_nsec) => decrypted_nsec,
-            Err(_) => return Err("Failed to decrypt nsec".to_string()),
-        }
+    let stored = db::get_pkey(handle.clone())?
+        .ok_or("No nsec found in database")?;
+
+    // If encryption is disabled the stored value is already plaintext
+    let nsec = if crypto::is_encryption_enabled() {
+        crypto::internal_decrypt(stored, None).await
+            .map_err(|_| "Failed to decrypt nsec".to_string())?
     } else {
-        return Err("No nsec found in database".to_string());
+        stored
     };
 
-    // Try to get seed phrase from memory first
+    // Try to get seed phrase from memory first, then from database
     let seed_phrase = if let Some(seed) = MNEMONIC_SEED.get() {
         Some(seed.clone())
     } else {
-        // If not in memory, try to get from database
-        let has_key = ENCRYPTION_KEY.read().unwrap().is_some();
-        if has_key {
-            match db::get_seed(handle.clone()).await {
-                Ok(Some(seed)) => Some(seed),
-                Ok(None) => None,
-                Err(_) => None,
-            }
-        } else {
-            None
+        match db::get_seed(handle.clone()).await {
+            Ok(Some(seed)) => Some(seed),
+            _ => None,
         }
     };
 
