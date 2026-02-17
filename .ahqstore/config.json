@@ -1,0 +1,64 @@
+{
+  "$schema": "./spec.schema.json",
+  "O00NinpJA6yTm9rRdtf8nr5Yam": {
+    "appId": "O00NinpJA6yTm9rRdtf8nr5Yam",
+    "appShortcutName": "Vector",
+    "appDisplayName": "Vector - Private & Encrypted Messenger",
+    "authorId": "49b0b020965937c2689a6ea688e8d24fad2c307387923e383dff3055133f7a77",
+    "description": "A private, encrypted messenger built on Nostr. No KYC, no phone number, no email required. End-to-end encrypted messaging with zero metadata leakage.",
+    "repo": {
+      "author": "VectorPrivacy",
+      "repo": "Vector"
+    },
+    "platform": {
+      "winAmd64Platform": "WindowsInstallerExe",
+      "winArm64Platform": null,
+      "linuxAmd64Platform": "LinuxAppImage",
+      "linuxArm64Platform": null,
+      "linuxArm32Platform": null,
+      "androidUniversal": "AndroidApkZip",
+      "androidOptions": {
+        "minSdk": 24,
+        "abi": [
+          "Aarch64",
+          "Armv7",
+          "X86",
+          "X64"
+        ]
+      },
+      "winAmd64Options": {
+        "zip_file_exec": null,
+        "exe_installer_args": [],
+        "scope": null
+      },
+      "winArm64Options": {
+        "zip_file_exec": null,
+        "exe_installer_args": [],
+        "scope": null
+      }
+    },
+    "finder": {
+      "windowsAmd64Finder": {
+        "startsWith": "Vector_",
+        "contains": "x64-setup",
+        "endsWith": ".exe"
+      },
+      "windowsArm64Finder": null,
+      "linuxAmd64Finder": {
+        "startsWith": "Vector_",
+        "contains": "amd64",
+        "endsWith": ".AppImage"
+      },
+      "linuxArm64Finder": null,
+      "linuxArm32Finder": null,
+      "androidUniversalFinder": {
+        "startsWith": "Vector",
+        "contains": "",
+        "endsWith": ".apk"
+      }
+    },
+    "site": null,
+    "redistributed": null,
+    "license_or_tos": null
+  }
+}

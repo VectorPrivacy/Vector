@@ -1,0 +1,171 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Application Metadata Object",
+  "description": "A collection of application metadata objects, where each object is keyed by a unique string identifier.",
+  "patternProperties": {
+    "^(?!\\$schema$).*$": {
+      "type": "object",
+      "title": "IMetadata",
+      "description": "Metadata for an application, including its identity, authorship, and platform-specific details.",
+      "required": [
+        "appId",
+        "appShortcutName",
+        "appDisplayName",
+        "authorId",
+        "description",
+        "repo",
+        "platform"
+      ],
+      "properties": {
+        "appId": {
+          "type": "string",
+          "description": "A unique identifier for the application."
+        },
+        "appShortcutName": {
+          "type": "string",
+          "description": "A short, user-friendly name for the application, suitable for shortcuts."
+        },
+        "appDisplayName": {
+          "type": "string",
+          "description": "The full display name of the application."
+        },
+        "authorId": {
+          "type": "string",
+          "description": "The unique identifier of the application's author."
+        },
+        "description": {
+          "type": "string",
+          "description": "A brief description of what the application does."
+        },
+        "repo": {
+          "type": "object",
+          "description": "Information about the application's source code repository.",
+          "required": ["author", "repo"],
+          "properties": {
+            "author": {
+              "type": "string",
+              "description": "The author or organization of the repository."
+            },
+            "repo": {
+              "type": "string",
+              "description": "The name of the repository."
+            }
+          }
+        },
+        "platform": {
+          "type": "object",
+          "description": "Details about the application's distribution and installation on various platforms.",
+          "properties": {
+            "winAmd64Platform": {
+              "type": ["string", "null"],
+              "description": "The installation method for Windows on AMD64 architecture.",
+              "enum": [
+                "WindowsZip",
+                "WindowsInstallerMsi",
+                "WindowsInstallerExe",
+                "WindowsAHQDB",
+                "WindowsUWPMsix",
+                null
+              ]
+            },
+            "winAmd64Options": {
+              "type": "object",
+              "description": "Additional options for the Windows AMD64 platform.",
+              "properties": {
+                "zip_file_exec": {
+                  "type": ["string", "null"],
+                  "description": "The executable file name within a zip archive."
+                },
+                "exe_installer_args": {
+                  "type": "array",
+                  "description": "A list of command-line arguments for the .exe installer.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "scope": {
+                  "type": ["string", "null"],
+                  "description": "The installation scope, either for the current user or the entire machine. Only for WindowsZip or WindowsInstallerExe. We recommend you do not specify it for WindowsZip",
+                  "enum": ["User", "Machine", null]
+                }
+              }
+            },
+            "winArm64Platform": {
+              "type": ["string", "null"],
+              "description": "The installation method for Windows on ARM64 architecture.",
+              "enum": [
+                "WindowsZip",
+                "WindowsInstallerMsi",
+                "WindowsInstallerExe",
+                "WindowsAHQDB",
+                "WindowsUWPMsix",
+                null
+              ]
+            },
+            "winArm64Options": {
+              "type": "object",
+              "description": "Additional options for the Windows ARM64 platform.",
+              "properties": {
+                "zip_file_exec": {
+                  "type": ["string", "null"],
+                  "description": "The executable file name within a zip archive."
+                },
+                "exe_installer_args": {
+                  "type": "array",
+                  "description": "A list of command-line arguments for the .exe installer.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "scope": {
+                  "type": ["string", "null"],
+                  "description": "The installation scope, either for the current user or the entire machine. Only for WindowsZip or WindowsInstallerExe. We recommend you do not specify it for WindowsZip",
+                  "enum": ["User", "Machine", null]
+                }
+              }
+            },
+            "linuxAmd64Platform": {
+              "type": ["string", "null"],
+              "description": "The installation method for Linux on AMD64 architecture.",
+              "enum": ["LinuxAppImage", null]
+            },
+            "linuxArm64Platform": {
+              "type": ["string", "null"],
+              "description": "The installation method for Linux on ARM64 architecture.",
+              "enum": ["LinuxAppImage", null]
+            },
+            "linuxArm32Platform": {
+              "type": ["string", "null"],
+              "description": "The installation method for Linux on ARM32 architecture.",
+              "enum": ["LinuxAppImage", null]
+            },
+            "androidUniversal": {
+              "type": ["string", "null"],
+              "description": "The installation method for all Android architectures.",
+              "enum": ["AndroidApkZip", null]
+            },
+            "androidOptions": {
+              "type": "object",
+              "description": "Additional options for the Android platform.",
+              "properties": {
+                "minSdk": {
+                  "type": "number",
+                  "description": "The minimum Android SDK version required."
+                },
+                "abi": {
+                  "type": "array",
+                  "description": "The Application Binary Interface (ABI) for the Android build.",
+                  "items": {
+                    "type": "string",
+                    "enum": ["Aarch64", "Armv7", "X86", "X64"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
