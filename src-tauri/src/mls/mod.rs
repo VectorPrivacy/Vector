@@ -649,6 +649,194 @@ impl MlsService {
     }
 
 
+    /// Add multiple members to an existing MLS group in a single commit.
+    ///
+    /// This will:
+    /// 1. Fetch all members' keypackages from the network
+    /// 2. Add all members to the group via a single engine.add_members() call
+    /// 3. Merge pending commit once
+    /// 4. Publish evolution event
+    /// 5. Send all welcome messages concurrently
+    /// 6. Update group metadata
+    pub async fn add_member_devices(
+        &self,
+        group_id: &str,
+        members: &[(String, String)], // (npub, device_id) pairs
+    ) -> Result<(), MlsError> {
+        use nostr_sdk::prelude::*;
+
+        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let index = self.read_keypackage_index().await.unwrap_or_default();
+
+        let mut member_kp_events: Vec<Event> = Vec::new();
+        let mut invited_recipients: Vec<PublicKey> = Vec::new();
+
+        // Fetch keypackages for all members
+        for (member_npub, device_id) in members {
+            let member_pk = PublicKey::from_bech32(member_npub)
+                .map_err(|e| MlsError::CryptoError(format!("Invalid member npub: {}", e)))?;
+
+            // Try index first
+            let mut kp_event: Option<Event> = None;
+            for entry in &index {
+                if entry.owner_pubkey == *member_npub && entry.device_id == *device_id {
+                    let id = EventId::from_hex(&entry.keypackage_ref)
+                        .map_err(|e| MlsError::CryptoError(format!("Invalid keypackage ref: {}", e)))?;
+                    let filter = Filter::new().id(id).limit(1);
+                    if let Ok(events) = client
+                        .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                        .await
+                    {
+                        kp_event = events.into_iter().next();
+                    }
+                    break;
+                }
+            }
+
+            // Fallback: fetch latest from network
+            if kp_event.is_none() {
+                let filter = Filter::new()
+                    .author(member_pk)
+                    .kind(Kind::MlsKeyPackage)
+                    .limit(50);
+                if let Ok(events) = client
+                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                    .await
+                {
+                    kp_event = events.into_iter().max_by_key(|e| e.created_at.as_secs());
+                }
+            }
+
+            let kp_event = kp_event.ok_or_else(|| {
+                MlsError::NetworkError(format!("No keypackage found for {}:{}", member_npub, device_id))
+            })?;
+
+            // Validate keypackage has encoding tag
+            if !has_encoding_tag(&kp_event) {
+                let display_name = {
+                    let state = STATE.lock().await;
+                    state.get_profile(&member_npub)
+                        .and_then(|p| {
+                            if !p.name.is_empty() { Some(p.name.to_string()) }
+                            else if !p.display_name.is_empty() { Some(p.display_name.to_string()) }
+                            else { None }
+                        })
+                        .unwrap_or_else(|| member_npub.to_string())
+                };
+                return Err(MlsError::OutdatedKeyPackage(display_name));
+            }
+
+            member_kp_events.push(kp_event);
+            invited_recipients.push(member_pk);
+        }
+
+        // Find the group's MLS group ID
+        let groups = self.read_groups().await?;
+        let group_meta = groups.iter()
+            .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
+            .ok_or(MlsError::GroupNotFound)?;
+        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
+
+        // Add all members in a single engine call
+        let (evolution_event, welcome_rumors) = {
+            let engine = self.engine()?;
+
+            let add_result = engine
+                .add_members(&mls_group_id, &member_kp_events)
+                .map_err(|e| {
+                    eprintln!("[MLS] Failed to add members: {}", e);
+                    MlsError::NostrMlsError(format!("Failed to add members: {}", e))
+                })?;
+
+            engine
+                .merge_pending_commit(&mls_group_id)
+                .map_err(|e| {
+                    eprintln!("[MLS] Failed to merge commit: {}", e);
+                    MlsError::NostrMlsError(format!("Failed to merge commit: {}", e))
+                })?;
+
+            (add_result.evolution_event, add_result.welcome_rumors)
+        };
+
+        // Publish evolution event in the background
+        let group_id_clone = group_id.to_string();
+        tokio::spawn(async move {
+            let client = NOSTR_CLIENT.get().unwrap();
+            match client.send_event(&evolution_event).await {
+                Ok(_) => {
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = track_mls_event_processed(handle, &evolution_event.id.to_hex(), &group_id_clone, evolution_event.created_at.as_secs());
+                    }
+                }
+                Err(e) => eprintln!("[MLS] Failed to publish commit: {}", e),
+            }
+        });
+
+        // Send welcome messages concurrently, pairing each welcome with its recipient
+        if let Some(welcome_rumors) = welcome_rumors {
+            let invited_count = invited_recipients.len();
+            if welcome_rumors.len() != invited_count {
+                eprintln!(
+                    "[MLS] welcome/member count mismatch: welcomes={}, invited={}",
+                    welcome_rumors.len(),
+                    invited_count
+                );
+            }
+            let min_len = std::cmp::min(welcome_rumors.len(), invited_recipients.len());
+            let futs: Vec<_> = (0..min_len)
+                .map(|i| {
+                    let welcome = welcome_rumors[i].clone();
+                    let target = invited_recipients[i];
+                    async move {
+                        match client
+                            .gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &target, welcome, [])
+                            .await
+                        {
+                            Ok(wrapper_id) => {
+                                let recipient = target.to_bech32().unwrap_or_default();
+                                println!(
+                                    "[MLS][welcome][published] wrapper_id={}, recipient={}, relays={:?}",
+                                    wrapper_id.to_hex(),
+                                    recipient,
+                                    TRUSTED_RELAYS
+                                );
+                            }
+                            Err(e) => {
+                                let recipient = target.to_bech32().unwrap_or_default();
+                                eprintln!(
+                                    "[MLS][welcome][publish_error] recipient={}, relays={:?}, err={}",
+                                    recipient,
+                                    TRUSTED_RELAYS,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                })
+                .collect();
+            futures_util::future::join_all(futs).await;
+        }
+
+        // Update group metadata timestamp
+        let mut groups = self.read_groups().await?;
+        if let Some(group) = groups.iter_mut().find(|g| g.group_id == group_id) {
+            group.updated_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            self.write_groups(&groups).await?;
+        }
+
+        // Emit event to refresh UI
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("mls_group_updated", serde_json::json!({
+                "group_id": group_id
+            })).ok();
+        }
+
+        Ok(())
+    }
+
     /// Leave a group voluntarily
     ///
     /// This will:

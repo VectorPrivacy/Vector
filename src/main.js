@@ -9939,7 +9939,7 @@ async function renderGroupOverview(chat) {
 }
 
 /**
- * Open the invite member UI for a specific group
+ * Open the invite members UI for a specific group (multi-select)
  * @param {Chat} chat - The group chat object
  */
 async function openInviteMemberToGroup(chat) {
@@ -9987,7 +9987,7 @@ async function openInviteMemberToGroup(chat) {
     header.style.marginBottom = '20px';
     
     const title = document.createElement('h3');
-    title.textContent = 'Invite Member';
+    title.textContent = 'Invite Members';
     title.style.margin = '0';
     title.style.color = '#f7f4f4';
     header.appendChild(title);
@@ -10054,20 +10054,27 @@ async function openInviteMemberToGroup(chat) {
     inviteBtn.disabled = true;
     inviteBtn.style.opacity = '0.5';
     
-    let selectedMember = null;
-    
+    const selectedMembers = new Set();
+
+    const updateInviteButton = () => {
+        const count = selectedMembers.size;
+        inviteBtn.disabled = count === 0;
+        inviteBtn.style.opacity = count === 0 ? '0.5' : '1';
+        inviteBtn.textContent = count > 1 ? `Invite (${count})` : 'Invite';
+    };
+
     const renderMemberList = (filterText = '') => {
         memberList.innerHTML = '';
         const filter = filterText.toLowerCase();
-        
+
         // Get mine profile to exclude self
         const mine = arrProfiles.find(p => p.mine)?.id;
-        
+
         // Filter available contacts (exclude self and current members)
         const availableContacts = arrProfiles.filter(p => {
             if (!p || !p.id || p.id === mine) return false;
             if (currentMembers.includes(p.id)) return false;
-            
+
             if (filter) {
                 const name = (p.nickname || p.name || '').toLowerCase();
                 const npub = p.id.toLowerCase();
@@ -10075,7 +10082,14 @@ async function openInviteMemberToGroup(chat) {
             }
             return true;
         });
-        
+
+        // Hoist selected members to top
+        availableContacts.sort((a, b) => {
+            const aSelected = selectedMembers.has(a.id) ? 0 : 1;
+            const bSelected = selectedMembers.has(b.id) ? 0 : 1;
+            return aSelected - bSelected;
+        });
+
         if (availableContacts.length === 0) {
             const empty = document.createElement('p');
             empty.textContent = filter ? 'No matches' : 'No contacts available to invite';
@@ -10085,92 +10099,49 @@ async function openInviteMemberToGroup(chat) {
             memberList.appendChild(empty);
             return;
         }
-        
+
         for (const contact of availableContacts) {
             const contactProfile = getProfile(contact.id);
             const name = contactProfile?.nickname || contactProfile?.name || '';
-            
+            const isSelected = selectedMembers.has(contact.id);
+
             const row = document.createElement('div');
-            row.style.display = 'flex';
-            row.style.alignItems = 'center';
-            row.style.padding = '5px 10px';
-            row.style.borderRadius = '6px';
-            row.style.transition = 'background 0.2s ease';
-            row.style.isolation = 'isolate';
-            row.style.cursor = 'pointer';
-            row.style.position = 'relative';
-            
-            // Add hover effect with theme-based gradient
+            row.className = 'member-pick-row';
+
             const bgDiv = document.createElement('div');
-            bgDiv.style.position = 'absolute';
-            bgDiv.style.top = '0';
-            bgDiv.style.left = '0';
-            bgDiv.style.right = '0';
-            bgDiv.style.bottom = '0';
-            bgDiv.style.borderRadius = '6px';
-            bgDiv.style.opacity = '0';
-            bgDiv.style.transition = 'opacity 0.2s ease';
-            bgDiv.style.pointerEvents = 'none';
-            bgDiv.style.zIndex = '0';
+            bgDiv.className = 'member-pick-hover';
             row.appendChild(bgDiv);
-            
+
             row.addEventListener('mouseenter', () => {
                 const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
                 bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-                bgDiv.style.opacity = '1';
             });
-            row.addEventListener('mouseleave', () => {
-                bgDiv.style.opacity = '0';
-            });
-            
-            // Avatar (compact size like member list)
-            let avatar;
+
             const contactAvatarSrc = getProfileAvatarSrc(contactProfile);
-            avatar = createAvatarImg(contactAvatarSrc, 25, false);
-            avatar.style.marginRight = '10px';
-            avatar.style.position = 'relative';
-            avatar.style.zIndex = '1';
+            const avatar = createAvatarImg(contactAvatarSrc, 25, false);
+            avatar.className = 'member-pick-avatar';
             row.appendChild(avatar);
-            
-            // Name
+
             const nameSpan = document.createElement('div');
             nameSpan.className = 'compact-member-name';
             nameSpan.textContent = name || contact.id.substring(0, 10) + '...';
-            nameSpan.style.color = '#f7f4f4';
-            nameSpan.style.fontSize = '14px';
-            nameSpan.style.flex = '1';
-            nameSpan.style.textAlign = 'left';
-            nameSpan.style.position = 'relative';
-            nameSpan.style.zIndex = '1';
             if (name) twemojify(nameSpan);
             row.appendChild(nameSpan);
-            
-            // Selection indicator (right-aligned)
+
             const indicator = document.createElement('div');
-            indicator.style.width = '18px';
-            indicator.style.height = '18px';
-            indicator.style.borderRadius = '50%';
-            indicator.style.border = '2px solid var(--icon-color-primary)';
-            indicator.style.position = 'relative';
-            indicator.style.zIndex = '1';
-            indicator.style.flexShrink = '0';
+            indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
             row.appendChild(indicator);
-            
+
             row.onclick = () => {
-                // Deselect previous
-                memberList.querySelectorAll('div[data-contact-row]').forEach(r => {
-                    const ind = r.querySelector('div:last-child');
-                    if (ind) ind.style.backgroundColor = '';
-                });
-                
-                // Select this one
-                indicator.style.backgroundColor = 'var(--icon-color-primary)';
-                selectedMember = contact.id;
-                inviteBtn.disabled = false;
-                inviteBtn.style.opacity = '1';
+                if (selectedMembers.has(contact.id)) {
+                    selectedMembers.delete(contact.id);
+                } else {
+                    selectedMembers.add(contact.id);
+                }
+                indicator.classList.toggle('selected');
+                updateInviteButton();
             };
-            
-            row.setAttribute('data-contact-row', 'true');
+
             memberList.appendChild(row);
         }
     };
@@ -10179,23 +10150,26 @@ async function openInviteMemberToGroup(chat) {
     searchInput.oninput = (e) => renderMemberList(e.target.value);
     
     inviteBtn.onclick = async () => {
-        if (!selectedMember) return;
-        
+        if (selectedMembers.size === 0) return;
+
         inviteBtn.disabled = true;
         inviteBtn.textContent = 'Inviting...';
         statusMsg.style.display = '';
         statusMsg.style.color = '#999';
         statusMsg.textContent = 'Preparing invitation...';
-        
+
         try {
             await invoke('invite_member_to_group', {
                 groupId: chat.id,
-                memberNpub: selectedMember
+                memberNpubs: Array.from(selectedMembers)
             });
-            
+
+            const count = selectedMembers.size;
             statusMsg.style.color = '#4caf50';
-            statusMsg.textContent = 'Member invited successfully!';
-            
+            statusMsg.textContent = count > 1
+                ? `${count} members invited successfully!`
+                : 'Member invited successfully!';
+
             // Refresh the group overview
             setTimeout(async () => {
                 modal.remove();
@@ -10204,7 +10178,7 @@ async function openInviteMemberToGroup(chat) {
         } catch (e) {
             const errorMsg = (e || '').toString();
             let friendlyMsg = errorMsg;
-            
+
             // Map backend errors to friendly messages
             if (errorMsg.includes('no device keypackag')) {
                 const match = errorMsg.match(/for (\S+)/);
@@ -10215,12 +10189,12 @@ async function openInviteMemberToGroup(chat) {
                     friendlyMsg = `${display} is using an older Vector version! Please ask them to upgrade.`;
                 }
             }
-            
+
             statusMsg.style.color = '#f44336';
             statusMsg.textContent = friendlyMsg;
             inviteBtn.disabled = false;
-            inviteBtn.textContent = 'Invite';
-            
+            updateInviteButton();
+
             // Error is already displayed in the modal, no need for popup
         }
     };
@@ -11654,78 +11628,32 @@ function renderCreateGroupList(filterText = '') {
         const hay = (name + ' ' + p.id).toLowerCase();
         if (f && !hay.includes(f)) continue;
 
-        // Row container - compact style matching Invite Member list
         const row = document.createElement('div');
         row.id = `cg-${p.id}`;
-        row.style.display = 'flex';
-        row.style.alignItems = 'center';
-        row.style.padding = '5px 10px';
-        row.style.borderRadius = '6px';
-        row.style.transition = 'background 0.2s ease';
-        row.style.isolation = 'isolate';
-        row.style.cursor = 'pointer';
-        row.style.position = 'relative';
+        row.className = 'member-pick-row';
 
-        // Add hover effect with theme-based gradient
         const bgDiv = document.createElement('div');
-        bgDiv.style.position = 'absolute';
-        bgDiv.style.top = '0';
-        bgDiv.style.left = '0';
-        bgDiv.style.right = '0';
-        bgDiv.style.bottom = '0';
-        bgDiv.style.borderRadius = '6px';
-        bgDiv.style.opacity = '0';
-        bgDiv.style.transition = 'opacity 0.2s ease';
-        bgDiv.style.pointerEvents = 'none';
-        bgDiv.style.zIndex = '0';
+        bgDiv.className = 'member-pick-hover';
         row.appendChild(bgDiv);
 
         row.addEventListener('mouseenter', () => {
             const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
             bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-            bgDiv.style.opacity = '1';
-        });
-        row.addEventListener('mouseleave', () => {
-            bgDiv.style.opacity = '0';
         });
 
-        // Avatar - compact 25px size
         const listAvatarSrc = getProfileAvatarSrc(p);
         const avatar = createAvatarImg(listAvatarSrc, 25, false);
-        avatar.style.marginRight = '10px';
-        avatar.style.position = 'relative';
-        avatar.style.zIndex = '1';
+        avatar.className = 'member-pick-avatar';
         row.appendChild(avatar);
 
-        // Name - compact style
         const nameSpan = document.createElement('div');
         nameSpan.className = 'compact-member-name';
         nameSpan.textContent = name || p.id.substring(0, 10) + '...';
-        nameSpan.style.color = '#f7f4f4';
-        nameSpan.style.fontSize = '14px';
-        nameSpan.style.flex = '1';
-        nameSpan.style.textAlign = 'left';
-        nameSpan.style.position = 'relative';
-        nameSpan.style.zIndex = '1';
         if (name) twemojify(nameSpan);
         row.appendChild(nameSpan);
 
-        // Custom checkbox indicator (circular, matching Invite Member style)
         const indicator = document.createElement('div');
-        indicator.style.width = '18px';
-        indicator.style.height = '18px';
-        indicator.style.borderRadius = '50%';
-        indicator.style.border = '2px solid var(--icon-color-primary)';
-        indicator.style.position = 'relative';
-        indicator.style.zIndex = '1';
-        indicator.style.flexShrink = '0';
-        indicator.style.marginLeft = 'auto';
-        indicator.style.transition = 'background-color 0.2s ease';
-        
-        // Set initial state
-        if (arrSelectedGroupMembers.includes(p.id)) {
-            indicator.style.backgroundColor = 'var(--icon-color-primary)';
-        }
+        indicator.className = 'member-pick-indicator' + (arrSelectedGroupMembers.includes(p.id) ? ' selected' : '');
         row.appendChild(indicator);
 
         // Row click toggles selection

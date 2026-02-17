@@ -5673,11 +5673,71 @@ select:disabled:hover {
   margin-right: auto;
 }
 
+/* Member picker row (shared by Create Group & Invite modals) */
+.member-pick-row {
+    display: flex;
+    align-items: center;
+    padding: 5px 10px;
+    border-radius: 6px;
+    transition: background 0.2s ease;
+    isolation: isolate;
+    cursor: pointer;
+    position: relative;
+}
+
+.member-pick-row .member-pick-hover {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.member-pick-row:hover .member-pick-hover {
+    opacity: 1;
+}
+
+.member-pick-row .member-pick-avatar {
+    margin-right: 10px;
+    position: relative;
+    z-index: 1;
+}
+
+.compact-member-name {
+    color: #f7f4f4;
+    font-size: 14px;
+    flex: 1;
+    text-align: left;
+    position: relative;
+    z-index: 1;
+}
+
 /* Compact member list emoji styling */
 .compact-member-name img.emoji {
     width: 15px !important;
     height: 15px !important;
     vertical-align: middle !important;
+}
+
+.member-pick-indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 2px solid var(--icon-color-primary);
+    position: relative;
+    z-index: 1;
+    flex-shrink: 0;
+    margin-left: auto;
+    transition: background-color 0.2s ease;
+}
+
+.member-pick-indicator.selected {
+    background-color: var(--icon-color-primary);
 }
 
 /* MLS Group Invite Styles */
@@ -5812,6 +5872,11 @@ select:disabled:hover {
   justify-content: center;
   flex-wrap: wrap;
   flex-shrink: 0;
+}
+
+.create-group-footer .chat-contact-status {
+  width: 100%;
+  text-align: center;
 }
 
 /* Override: show real checkboxes inside Create Group panel only */

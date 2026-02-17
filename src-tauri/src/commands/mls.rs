@@ -617,23 +617,26 @@ pub async fn create_group_chat(group_name: String, member_ids: Vec<String>) -> R
     result
 }
 
-/// Invite a new member to an existing MLS group
-/// Similar to create_group_chat, this refreshes the member's keypackages and adds them to the group
+/// Invite one or more members to an existing MLS group in a single commit
 #[tauri::command]
 pub async fn invite_member_to_group(
     group_id: String,
-    member_npub: String,
+    member_npubs: Vec<String>,
 ) -> Result<(), String> {
-    // Refresh keypackages for the new member
-    let devices = refresh_keypackages_for_contact(member_npub.clone()).await.map_err(|e| {
-        format!("Failed to refresh device keypackage for {}: {}", member_npub, e)
-    })?;
+    // Resolve keypackages for all members upfront (fail early if any member has no device)
+    let mut member_devices: Vec<(String, String)> = Vec::new();
+    for npub in &member_npubs {
+        let devices = refresh_keypackages_for_contact(npub.clone()).await.map_err(|e| {
+            format!("Failed to refresh device keypackage for {}: {}", npub, e)
+        })?;
 
-    // Choose the first device (same policy as group creation)
-    let (device_id, _kp_ref) = devices
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("No device keypackages found for {}", member_npub))?;
+        let (device_id, _kp_ref) = devices
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("No device keypackages found for {}", npub))?;
+
+        member_devices.push((npub.clone(), device_id));
+    }
 
     // Run non-Send MLS engine work on a blocking thread
     let group_id_clone = group_id.clone();
@@ -642,7 +645,7 @@ pub async fn invite_member_to_group(
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
-            mls.add_member_device(&group_id_clone, &member_npub, &device_id)
+            mls.add_member_devices(&group_id_clone, &member_devices)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -650,7 +653,7 @@ pub async fn invite_member_to_group(
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
 
-    // Sync participants array after adding member
+    // Sync participants array after adding members
     sync_mls_group_participants(group_id).await?;
 
     Ok(())
