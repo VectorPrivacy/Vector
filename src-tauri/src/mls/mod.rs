@@ -9,7 +9,7 @@ use tokio::sync::Mutex as TokioMutex;
 use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
 use tauri::{AppHandle, Runtime, Emitter};
-use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, STATE, Message};
+use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, active_trusted_relays, STATE, Message};
 use crate::rumor::{RumorEvent, RumorContext, ConversationType, process_rumor, RumorProcessingResult};
 use crate::db::save_chat_messages;
 use crate::db::chats::{SlimChatDB, save_slim_chat};
@@ -45,8 +45,10 @@ pub fn get_group_sync_lock(group_id: &str) -> Arc<TokioMutex<()>> {
 
 /// Publish a nostr event to TRUSTED_RELAYS with retries and exponential backoff.
 ///
-/// Matches the retry pattern used in pika core's `publish_evolution_event`:
-/// 5 attempts, 250ms base backoff, retries on NIP-42 auth/protected errors.
+/// Filters TRUSTED_RELAYS to only those currently in the relay pool (the user
+/// may have disabled some). 5 attempts, 250ms base backoff. Retries on all
+/// transient errors. Only bails early on definitive rejections like "duplicate"
+/// or "blocked".
 /// Returns `Ok(())` when at least one relay confirms, `Err` after exhausting retries.
 async fn publish_event_with_retries(
     client: &nostr_sdk::Client,
@@ -54,10 +56,15 @@ async fn publish_event_with_retries(
 ) -> Result<(), String> {
     use std::time::Duration;
 
+    let active = active_trusted_relays().await;
+    if active.is_empty() {
+        return Err("no trusted relays connected".to_string());
+    }
+
     let mut last_err: Option<String> = None;
     for attempt in 0..5u8 {
         match client
-            .send_event_to(TRUSTED_RELAYS.iter().copied(), event)
+            .send_event_to(active.iter().copied(), event)
             .await
         {
             Ok(output) if !output.success.is_empty() => {
@@ -70,11 +77,12 @@ async fn publish_event_with_retries(
                 } else {
                     errors.join("; ")
                 };
-                let any_retryable = errors.iter().any(|e| {
-                    e.contains("protected") || e.contains("auth") || e.contains("AUTH")
+                // Only bail early on definitive, non-transient rejections
+                let any_definitive = errors.iter().any(|e| {
+                    e.contains("duplicate") || e.contains("blocked")
                 });
                 last_err = Some(summary);
-                if !any_retryable {
+                if any_definitive {
                     break;
                 }
             }
@@ -82,8 +90,10 @@ async fn publish_event_with_retries(
                 last_err = Some(e.to_string());
             }
         }
-        let delay_ms = 250u64.saturating_mul(1u64 << attempt);
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        if attempt < 4 {
+            let delay_ms = 250u64.saturating_mul(1u64 << attempt);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
     }
     Err(last_err.unwrap_or_else(|| "unknown error".to_string()))
 }
@@ -234,8 +244,8 @@ impl MlsService {
             .map_err(|e| MlsError::CryptoError(e.to_string()))?;
 
         // Build group config (relay-scoped)
-        let relay_urls: Vec<RelayUrl> = TRUSTED_RELAYS
-            .iter()
+        let relay_urls: Vec<RelayUrl> = active_trusted_relays().await
+            .into_iter()
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect();
         let desc = match description.filter(|d| !d.is_empty()) {
@@ -292,7 +302,7 @@ impl MlsService {
                 match NOSTR_CLIENT
                     .get()
                     .unwrap()
-                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     Ok(events) => events.into_iter().next(),
@@ -310,7 +320,7 @@ impl MlsService {
                 match NOSTR_CLIENT
                     .get()
                     .unwrap()
-                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     Ok(events) => {
@@ -442,7 +452,7 @@ impl MlsService {
                     let target = invited_recipients[i];
                     async move {
                         match client
-                            .gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &target, welcome, [])
+                            .gift_wrap_to(active_trusted_relays().await.into_iter(), &target, welcome, [])
                             .await
                         {
                             Ok(wrapper_id) => {
@@ -580,7 +590,7 @@ impl MlsService {
                     .map_err(|e| MlsError::CryptoError(format!("Invalid keypackage ref: {}", e)))?;
                 let filter = Filter::new().id(id).limit(1);
                 if let Ok(events) = client
-                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     kp_event = events.into_iter().next();
@@ -596,7 +606,7 @@ impl MlsService {
                 .kind(Kind::MlsKeyPackage)
                 .limit(50);
             if let Ok(events) = client
-                .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                .fetch_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
                 .await
             {
                 kp_event = events.into_iter().max_by_key(|e| e.created_at.as_secs());
@@ -628,38 +638,54 @@ impl MlsService {
         let group_meta = groups.iter()
             .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
             .ok_or(MlsError::GroupNotFound)?;
-        
-        // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
-        // Create the commit but do NOT merge yet — merge only after relay confirmation
-        // (MIP-02: commit must be on relay before welcome; MIP-03: relay ack before local merge)
-        let (evolution_event, welcome_rumors) = {
-            let engine = self.engine()?;
-
-            let add_result = engine
-                .add_members(&mls_group_id, std::slice::from_ref(&kp_event))
-                .map_err(|e| {
-                    eprintln!("[MLS] Failed to add member: {}", e);
-                    MlsError::NostrMlsError(format!("Failed to add member: {}", e))
-                })?;
-
-            (add_result.evolution_event, add_result.welcome_rumors)
-        };
-
-        // Spawn background task: relay publish → merge → welcomes → UI update.
-        // The Tauri command returns immediately so the frontend isn't blocked.
+        // Spawn background task: lock → create commit → publish → merge → welcomes → UI update.
+        // Validation (keypackage, group lookup) was done above; the engine operation and
+        // everything after it runs under the per-group sync lock to prevent races.
         let db_path = self.db_path.clone();
         let group_id_owned = group_id.to_string();
         let engine_group_id = group_meta.engine_group_id.clone();
         tokio::spawn(async move {
             let client = NOSTR_CLIENT.get().unwrap();
 
-            // Hold per-group lock for the entire publish → merge → welcome flow
+            // Hold per-group lock for the entire commit → publish → merge → welcome flow
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            // 1. Publish evolution event with retries
+            // 1. Create the commit under lock (prevents sync from advancing epoch mid-operation)
+            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+
+            let (evolution_event, welcome_rumors) = {
+                let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to open storage for add: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to open storage: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                };
+                let engine = MDK::new(storage);
+                match engine.add_members(&mls_group_id, std::slice::from_ref(&kp_event)) {
+                    Ok(result) => (result.evolution_event, result.welcome_rumors),
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to add member: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to add member: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                }
+            }; // engine dropped before await
+
+            // 2. Publish evolution event with retries
             if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
                 eprintln!("[MLS] Failed to publish commit after retries: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
@@ -668,13 +694,10 @@ impl MlsService {
                         "error": format!("Failed to publish invite: {}", e)
                     })).ok();
                 }
-                // Don't merge — MIP-03 requires relay ack before local epoch advance.
-                // Pending commit remains; next sync or retry can recover.
                 return;
             }
 
-            // 2. Merge pending commit now that relay confirmed
-            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+            // 3. Merge pending commit now that relay confirmed
             let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -710,12 +733,12 @@ impl MlsService {
                 );
             }
 
-            // 3. Send welcome messages (only after commit is on relay and merged)
+            // 4. Send welcome messages (only after commit is on relay and merged)
             if let Some(welcome_rumors) = welcome_rumors {
                 let futs: Vec<_> = welcome_rumors
                     .into_iter()
                     .map(|welcome| async move {
-                        if let Err(e) = client.gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &member_pk, welcome, []).await {
+                        if let Err(e) = client.gift_wrap_to(active_trusted_relays().await.into_iter(), &member_pk, welcome, []).await {
                             eprintln!("[MLS] Failed to send welcome: {}", e);
                         }
                     })
@@ -723,7 +746,7 @@ impl MlsService {
                 futures_util::future::join_all(futs).await;
             }
 
-            // 4. Sync participants + update metadata + emit UI refresh
+            // 5. Sync participants + update metadata + emit UI refresh
             if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_owned.clone()).await {
                 eprintln!("[MLS] Failed to sync participants after add: {}", e);
             }
@@ -782,7 +805,7 @@ impl MlsService {
                         .map_err(|e| MlsError::CryptoError(format!("Invalid keypackage ref: {}", e)))?;
                     let filter = Filter::new().id(id).limit(1);
                     if let Ok(events) = client
-                        .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                        .fetch_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
                         .await
                     {
                         kp_event = events.into_iter().next();
@@ -798,7 +821,7 @@ impl MlsService {
                     .kind(Kind::MlsKeyPackage)
                     .limit(50);
                 if let Ok(events) = client
-                    .fetch_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+                    .fetch_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
                     .await
                 {
                     kp_event = events.into_iter().max_by_key(|e| e.created_at.as_secs());
@@ -833,36 +856,54 @@ impl MlsService {
         let group_meta = groups.iter()
             .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
             .ok_or(MlsError::GroupNotFound)?;
-        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
-        // Create the commit but do NOT merge yet — merge only after relay confirmation
-        // (MIP-02: commit must be on relay before welcome; MIP-03: relay ack before local merge)
-        let (evolution_event, welcome_rumors) = {
-            let engine = self.engine()?;
-
-            let add_result = engine
-                .add_members(&mls_group_id, &member_kp_events)
-                .map_err(|e| {
-                    eprintln!("[MLS] Failed to add members: {}", e);
-                    MlsError::NostrMlsError(format!("Failed to add members: {}", e))
-                })?;
-
-            (add_result.evolution_event, add_result.welcome_rumors)
-        };
-
-        // Spawn background task: relay publish → merge → welcomes → UI update.
-        // The Tauri command returns immediately so the frontend isn't blocked.
+        // Spawn background task: lock → create commit → publish → merge → welcomes → UI update.
+        // Validation (keypackages, group lookup) was done above; the engine operation and
+        // everything after it runs under the per-group sync lock to prevent races.
         let db_path = self.db_path.clone();
         let group_id_owned = group_id.to_string();
         let engine_group_id = group_meta.engine_group_id.clone();
         tokio::spawn(async move {
             let client = NOSTR_CLIENT.get().unwrap();
 
-            // Hold per-group lock for the entire publish → merge → welcome flow
+            // Hold per-group lock for the entire commit → publish → merge → welcome flow
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            // 1. Publish evolution event with retries
+            // 1. Create the commit under lock (prevents sync from advancing epoch mid-operation)
+            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+
+            let (evolution_event, welcome_rumors) = {
+                let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to open storage for add: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to open storage: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                };
+                let engine = MDK::new(storage);
+                match engine.add_members(&mls_group_id, &member_kp_events) {
+                    Ok(result) => (result.evolution_event, result.welcome_rumors),
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to add members: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to add members: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                }
+            }; // engine dropped before await
+
+            // 2. Publish evolution event with retries
             if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
                 eprintln!("[MLS] Failed to publish commit after retries: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
@@ -871,13 +912,10 @@ impl MlsService {
                         "error": format!("Failed to publish invite: {}", e)
                     })).ok();
                 }
-                // Don't merge — MIP-03 requires relay ack before local epoch advance.
-                // Pending commit remains; next sync or retry can recover.
                 return;
             }
 
-            // 2. Merge pending commit now that relay confirmed
-            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+            // 3. Merge pending commit now that relay confirmed
             let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -913,7 +951,7 @@ impl MlsService {
                 );
             }
 
-            // 3. Send welcome messages concurrently, pairing each welcome with its recipient
+            // 4. Send welcome messages concurrently, pairing each welcome with its recipient
             if let Some(welcome_rumors) = welcome_rumors {
                 let invited_count = invited_recipients.len();
                 if welcome_rumors.len() != invited_count {
@@ -930,7 +968,7 @@ impl MlsService {
                         let target = invited_recipients[i];
                         async move {
                             match client
-                                .gift_wrap_to(TRUSTED_RELAYS.iter().copied(), &target, welcome, [])
+                                .gift_wrap_to(active_trusted_relays().await.into_iter(), &target, welcome, [])
                                 .await
                             {
                                 Ok(wrapper_id) => {
@@ -1083,11 +1121,11 @@ impl MlsService {
     /// Remove a member device from a group (admin only)
     ///
     /// This will:
-    /// 1. Remove the member using MDK's remove_members() (does not merge yet)
-    /// 2. Return immediately — relay publish, merge, and UI update happen in
-    ///    a background task (MIP-03 ordering)
+    /// 1. Validate pubkey and group lookup synchronously
+    /// 2. Return immediately — member verification, commit creation, relay publish,
+    ///    merge, and UI update all happen in a background task under the sync lock
     ///
-    /// Background ordering: relay confirm → merge_pending_commit → UI update
+    /// Background ordering: lock → verify member → create commit → relay confirm → merge → UI update
     pub async fn remove_member_device(
         &self,
         group_id: &str,
@@ -1108,56 +1146,86 @@ impl MlsService {
         let group_meta = groups.iter()
             .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
             .ok_or(MlsError::GroupNotFound)?;
-        
-        // Convert engine_group_id hex to GroupId
-        let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&group_meta.engine_group_id));
 
-        // Create the commit but do NOT merge yet — merge only after relay confirmation
-        // (MIP-03: relay ack before local merge)
+        // Spawn background task: lock → verify member → create commit → publish → merge → UI update.
+        // Validation (pubkey parse, group lookup) was done above; the engine operation and
+        // everything after it runs under the per-group sync lock to prevent races.
         //
         // Note: We intentionally do NOT sync before removal. Syncing can re-process
         // our own commits from the relay, which may corrupt the tree state after
         // multiple kick/re-invite cycles. A fresh engine reads the latest SQLite state.
-        let evolution_event = {
-            let engine = self.engine()?;
-
-            // Verify the member exists in the group
-            let current_members = engine.get_members(&mls_group_id)
-                .map_err(|e| {
-                    eprintln!("[MLS] Failed to get current members: {}", e);
-                    MlsError::NostrMlsError(format!("Failed to get group members: {}", e))
-                })?;
-
-            if !current_members.contains(&member_pk) {
-                eprintln!("[MLS] Member {} not found in group", member_pubkey);
-                return Err(MlsError::NostrMlsError(
-                    "Member not found in group. The group state may be out of sync.".to_string()
-                ));
-            }
-
-            let remove_result = engine
-                .remove_members(&mls_group_id, &[member_pk])
-                .map_err(|e| {
-                    eprintln!("[MLS] Failed to remove member: {}", e);
-                    MlsError::NostrMlsError(format!("Failed to remove member: {}", e))
-                })?;
-
-            remove_result.evolution_event
-        };
-
-        // Spawn background task: relay publish → merge → UI update.
-        // The Tauri command returns immediately so the frontend isn't blocked.
         let db_path = self.db_path.clone();
         let group_id_owned = group_id.to_string();
         let engine_group_id = group_meta.engine_group_id.clone();
+        let member_pubkey_owned = member_pubkey.to_string();
         tokio::spawn(async move {
             let client = NOSTR_CLIENT.get().unwrap();
 
-            // Hold per-group lock for the entire publish → merge flow
+            // Hold per-group lock for the entire commit → publish → merge flow
             let group_lock = get_group_sync_lock(&group_id_owned);
             let _guard = group_lock.lock().await;
 
-            // 1. Publish evolution event with retries
+            // 1. Create the remove commit under lock (prevents sync from advancing epoch mid-operation)
+            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+
+            let evolution_event = {
+                let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to open storage for remove: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to open storage: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                };
+                let engine = MDK::new(storage);
+
+                // Verify the member exists in the group
+                let current_members = match engine.get_members(&mls_group_id) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to get current members: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to get group members: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                };
+
+                if !current_members.contains(&member_pk) {
+                    eprintln!("[MLS] Member {} not found in group", member_pubkey_owned);
+                    if let Some(handle) = TAURI_APP.get() {
+                        handle.emit("mls_error", serde_json::json!({
+                            "group_id": group_id_owned,
+                            "error": "Member not found in group. The group state may be out of sync."
+                        })).ok();
+                    }
+                    return;
+                }
+
+                match engine.remove_members(&mls_group_id, &[member_pk]) {
+                    Ok(result) => result.evolution_event,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to remove member: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to remove member: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                }
+            }; // engine dropped before await
+
+            // 2. Publish evolution event with retries
             if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
                 eprintln!("[MLS] Failed to publish remove commit after retries: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
@@ -1166,13 +1234,10 @@ impl MlsService {
                         "error": format!("Failed to publish remove commit: {}", e)
                     })).ok();
                 }
-                // Don't merge — MIP-03 requires relay ack before local epoch advance.
-                // Pending commit remains; next sync or retry can recover.
                 return;
             }
 
-            // 2. Merge pending commit now that relay confirmed
-            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+            // 3. Merge pending commit now that relay confirmed
             let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1341,7 +1406,7 @@ impl MlsService {
             let mut used_fallback = false;
             let mut events = match client
                 .fetch_events_from(
-                    TRUSTED_RELAYS.to_vec(),
+                    active_trusted_relays().await,
                     filter.clone(),
                     std::time::Duration::from_secs(15),
                 )
@@ -1368,7 +1433,7 @@ impl MlsService {
 
                 events = match client
                     .fetch_events_from(
-                        TRUSTED_RELAYS.to_vec(),
+                        active_trusted_relays().await,
                         filter,
                         std::time::Duration::from_secs(15),
                     )

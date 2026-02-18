@@ -72,7 +72,7 @@ mod state;
 pub(crate) use state::{
     SyncMode,
     TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
-    TRUSTED_RELAYS, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
+    TRUSTED_RELAYS, active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
     get_blossom_servers, PendingInviteAcceptance,
 };

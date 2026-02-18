@@ -6,7 +6,7 @@
 
 use nostr_sdk::prelude::*;
 
-use crate::{mls, NOSTR_CLIENT, TRUSTED_RELAYS};
+use crate::{mls, NOSTR_CLIENT, active_trusted_relays};
 
 // ============================================================================
 // Typing Indicators
@@ -47,7 +47,7 @@ pub async fn start_typing(receiver: String) -> bool {
             );
             match client
                 .gift_wrap_to(
-                    TRUSTED_RELAYS.iter().copied(),
+                    active_trusted_relays().await.into_iter(),
                     &pubkey,
                     rumor,
                     [Tag::expiration(expiry_time)],
@@ -133,7 +133,7 @@ pub async fn send_webxdc_peer_advertisement(
             );
             match client
                 .gift_wrap_to(
-                    TRUSTED_RELAYS.iter().copied(),
+                    active_trusted_relays().await.into_iter(),
                     &pubkey,
                     rumor,
                     [Tag::expiration(expiry_time)],

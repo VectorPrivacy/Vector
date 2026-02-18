@@ -87,6 +87,29 @@ pub static TRUSTED_RELAYS: &[&str] = &[
     "wss://nostr.computingcache.com",
 ];
 
+/// Return only the trusted relay URLs that are currently in the client's relay pool.
+///
+/// The user may have disabled some default relays. `nostr_sdk`'s `send_event_to` /
+/// `fetch_events_from` / `stream_events_from` all require every requested URL to be
+/// in the pool — otherwise the entire call fails with `RelayNotFound`. This helper
+/// filters to avoid that.
+pub async fn active_trusted_relays() -> Vec<&'static str> {
+    let Some(client) = NOSTR_CLIENT.get() else {
+        return Vec::new();
+    };
+    let pool_relays = client.relays().await;
+    TRUSTED_RELAYS
+        .iter()
+        .copied()
+        .filter(|url| {
+            let normalized = url.trim_end_matches('/');
+            pool_relays
+                .keys()
+                .any(|r| r.as_str().trim_end_matches('/') == normalized)
+        })
+        .collect()
+}
+
 /// # Blossom Media Servers
 ///
 /// A list of Blossom servers for file uploads with automatic failover.

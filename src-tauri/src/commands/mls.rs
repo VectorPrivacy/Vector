@@ -13,7 +13,7 @@ use tauri::Emitter;
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_fs::FsExt;
-use crate::{db, mls, MlsService, NotificationData, show_notification_generic, NOSTR_CLIENT, NOTIFIED_WELCOMES, STATE, TAURI_APP, TRUSTED_RELAYS};
+use crate::{db, mls, MlsService, NotificationData, show_notification_generic, NOSTR_CLIENT, NOTIFIED_WELCOMES, STATE, TAURI_APP, active_trusted_relays};
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 
 // ============================================================================
@@ -91,7 +91,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
                     .limit(1);
 
                 match client.stream_events_from(
-                    TRUSTED_RELAYS.to_vec(),
+                    active_trusted_relays().await,
                     filter,
                     std::time::Duration::from_secs(5)
                 ).await {
@@ -123,14 +123,16 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
         }
     }
 
+    // Resolve active relays before entering the no-await engine scope
+    let relay_urls: Vec<nostr_sdk::RelayUrl> = active_trusted_relays().await
+        .into_iter()
+        .filter_map(|r| nostr_sdk::RelayUrl::parse(r).ok())
+        .collect();
+
     // Create device KeyPackage using persistent MLS engine inside a no-await scope
     let (kp_encoded, kp_tags) = {
         let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
         let engine = mls_service.engine().map_err(|e| e.to_string())?;
-        let relay_urls: Vec<nostr_sdk::RelayUrl> = TRUSTED_RELAYS
-            .iter()
-            .filter_map(|r| nostr_sdk::RelayUrl::parse(r).ok())
-            .collect();
         engine
             .create_key_package_for_event(&my_pubkey, relay_urls)
             .map_err(|e| e.to_string())?
@@ -161,7 +163,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
     let mut send_result = None;
     let mut last_error = String::new();
     for attempt in 1..=3 {
-        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &kp_event).await {
+        match client.send_event_to(active_trusted_relays().await.into_iter(), &kp_event).await {
             Ok(result) => {
                 // Check if at least one relay succeeded
                 if !result.success.is_empty() {
@@ -428,7 +430,7 @@ pub async fn refresh_keypackages_for_contact(
 
     // Fetch from TRUSTED_RELAYS with short timeout
     let mut events = client
-        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 

@@ -4661,6 +4661,7 @@ select:disabled:hover {
   border-radius: 100%;
   height: 45px;
   width: 45px;
+  z-index: 1;
 }
 
 .sync-line {

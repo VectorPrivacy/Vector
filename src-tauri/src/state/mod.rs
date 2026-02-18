@@ -14,7 +14,7 @@ pub mod stats;
 
 pub use globals::{
     TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
-    TRUSTED_RELAYS,
+    TRUSTED_RELAYS, active_trusted_relays,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC,
     PENDING_INVITE, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     get_blossom_servers,

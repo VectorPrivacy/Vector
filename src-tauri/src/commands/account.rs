@@ -10,7 +10,7 @@
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, TRUSTED_RELAYS};
+use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, active_trusted_relays};
 use crate::{Profile, account_manager, db, crypto, commands};
 
 // ============================================================================
@@ -319,7 +319,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
                 match client.sign_event_builder(event_builder).await {
                     Ok(event) => {
                         // Send only to trusted relays
-                        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await {
+                        match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
@@ -515,7 +515,7 @@ pub async fn setup_encryption<R: Runtime>(
                     .tag(Tag::public_key(inviter_pubkey));
                 match client.sign_event_builder(event_builder).await {
                     Ok(event) => {
-                        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await {
+                        match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
