@@ -1,17 +1,57 @@
 package io.vectorapp
 
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.os.Bundle
 import android.view.View
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.vectorapp.miniapp.MiniAppManager
 
 class MainActivity : TauriActivity() {
+
+    companion object {
+        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Ensure hardware acceleration is enabled
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
+
+        // Request notification permission (Android 13+)
+        requestNotificationPermission()
+
+        // Cancel any background WorkManager polling (app is now in foreground)
+        VectorNotificationService.cancelPeriodicPolling(this)
+
+        // Start the foreground notification service
+        val serviceIntent = Intent(this, VectorNotificationService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    NOTIFICATION_PERMISSION_REQUEST_CODE
+                )
+            }
+        }
     }
 
     @Deprecated("Deprecated in Java")
