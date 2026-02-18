@@ -1010,8 +1010,7 @@ pub async fn invite_member_to_group(
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
 
-    // Sync participants array after adding members
-    sync_mls_group_participants(group_id).await?;
+    // Participant sync happens inside the background task after merge completes
 
     Ok(())
 }
@@ -1038,8 +1037,7 @@ pub async fn remove_mls_member_device(
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
 
-    // Sync participants array after removing member
-    sync_mls_group_participants(group_id).await?;
+    // Participant sync happens inside the background task after merge completes
 
     Ok(())
 }
