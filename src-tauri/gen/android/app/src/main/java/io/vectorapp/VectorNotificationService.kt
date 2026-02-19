@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.util.concurrent.atomic.AtomicInteger
@@ -16,7 +18,7 @@ class VectorNotificationService : Service() {
 
     companion object {
         const val SERVICE_CHANNEL_ID = "vector_service"
-        const val MESSAGES_CHANNEL_ID = "vector_messages"
+        const val MESSAGES_CHANNEL_ID = "vector_messages_v2"
         const val SERVICE_NOTIFICATION_ID = 1
 
         /** Incrementing counter for unique message notification IDs (enables stacking). */
@@ -156,13 +158,23 @@ class VectorNotificationService : Service() {
         }
         manager.createNotificationChannel(serviceChannel)
 
-        // High-priority message notification channel
+        // Delete the old channel (v1 used default system sound, immutable after creation).
+        // The new v2 channel is created below with the Prelude custom sound.
+        manager.deleteNotificationChannel("vector_messages")
+
+        val preludeUri = Uri.parse("android.resource://${packageName}/raw/notif_prelude")
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+
         val messagesChannel = NotificationChannel(
             MESSAGES_CHANNEL_ID,
             "Messages",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "New message notifications"
+            setSound(preludeUri, audioAttributes)
             enableVibration(true)
         }
         manager.createNotificationChannel(messagesChannel)
