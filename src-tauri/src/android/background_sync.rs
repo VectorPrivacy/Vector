@@ -181,6 +181,9 @@ fn run_standalone_sync_loop(data_dir: &str) {
     }
 
     rt.block_on(async {
+        // Preload profiles so notifications show real display names
+        preload_profiles_into_state().await;
+
         // Bootstrap the standalone client
         let (client, my_public_key) = match bootstrap_client(data_dir).await {
             Ok(result) => result,
@@ -408,6 +411,26 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     Ok(npub)
 }
 
+/// Load saved profiles from the database into STATE so that notifications
+/// can show real display names instead of "New Message".
+async fn preload_profiles_into_state() {
+    match crate::db::get_all_profiles().await {
+        Ok(profiles) => {
+            let count = profiles.len();
+            let mut state = crate::STATE.lock().await;
+            for slim in profiles {
+                let npub = slim.id.clone();
+                let profile = slim.to_profile();
+                state.insert_or_replace_profile(&npub, profile);
+            }
+            info!("[BackgroundSync] Preloaded {} profiles into STATE", count);
+        }
+        Err(e) => {
+            warn!("[BackgroundSync] Failed to preload profiles: {}", e);
+        }
+    }
+}
+
 /// Poll relays for new GiftWrap events and post notifications for unseen messages.
 /// Returns the number of new notifications posted.
 async fn poll_and_notify(
@@ -629,6 +652,9 @@ pub extern "C" fn Java_io_vectorapp_RelayPollWorker_pollForNewMessages(
     // Bootstrap and poll (one-shot)
     info!("[BackgroundSync] Bootstrapping standalone client for WorkManager poll");
     let result = rt.block_on(async {
+        // Preload profiles so notifications show real display names
+        preload_profiles_into_state().await;
+
         let (client, my_public_key) = match bootstrap_client(&data_dir_str).await {
             Ok(result) => result,
             Err(e) => {

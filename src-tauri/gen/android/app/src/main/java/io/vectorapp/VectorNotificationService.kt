@@ -16,6 +16,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class VectorNotificationService : Service() {
 
@@ -23,6 +24,9 @@ class VectorNotificationService : Service() {
         const val SERVICE_CHANNEL_ID = "vector_service"
         const val MESSAGES_CHANNEL_ID = "vector_messages"
         const val SERVICE_NOTIFICATION_ID = 1
+
+        /** Incrementing counter for unique message notification IDs (enables stacking). */
+        private val notificationCounter = AtomicInteger(100)
 
         init {
             System.loadLibrary("vector_lib")
@@ -70,7 +74,7 @@ class VectorNotificationService : Service() {
         @JvmStatic
         fun showMessageNotification(context: android.content.Context, title: String, body: String) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val notificationId = (title.hashCode() and 0x7FFFFFFF)
+            val notificationId = notificationCounter.getAndIncrement()
 
             val launchIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
