@@ -18,8 +18,9 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_PUBLIC_KEY};
+use crate::{NOSTR_CLIENT, MY_PUBLIC_KEY, STATE};
 use crate::commands::relays::DEFAULT_RELAYS;
+use crate::services::event_handler::handle_event_with_context;
 
 /// Flag indicating whether background sync is active
 static BACKGROUND_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -173,6 +174,12 @@ fn run_standalone_sync_loop(data_dir: &str) {
         }
     };
 
+    // Bootstrap the shared processing pipeline (DB, accounts, etc.)
+    if let Err(e) = bootstrap_pipeline(data_dir) {
+        error!("[BackgroundSync] Failed to bootstrap pipeline: {}", e);
+        // Fall through — will still try to connect and notify, just without DB persistence
+    }
+
     rt.block_on(async {
         // Bootstrap the standalone client
         let (client, my_public_key) = match bootstrap_client(data_dir).await {
@@ -221,9 +228,12 @@ fn run_standalone_sync_loop(data_dir: &str) {
         info!("[BackgroundSync] Waiting for incoming GiftWrap events...");
 
         // Live event handler — runs until stop signal or disconnect
+        // Uses the shared pipeline: decrypt → persist to DB → show notification
         let client_for_handler = client.clone();
+        let client_for_notif = client.clone();
         let result = client.handle_notifications(move |notification| {
             let client = client_for_handler.clone();
+            let client_notif = client_for_notif.clone();
             let seen = seen_events.clone();
             let sub_id = gift_sub_id.clone();
 
@@ -242,31 +252,18 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         return Ok(false);
                     }
 
-                    // Unwrap GiftWrap and post notification
-                    match client.unwrap_gift_wrap(&event).await {
-                        Ok(UnwrappedGift { rumor, sender }) => {
-                            if sender != my_public_key {
-                                let sender_display = sender
-                                    .to_bech32()
-                                    .map(|s| {
-                                        let end = s.len().min(4);
-                                        format!("{}...{}", &s[..10.min(s.len())], &s[s.len() - end..])
-                                    })
-                                    .unwrap_or_else(|_| "Unknown".into());
+                    // Process through shared pipeline (decrypts, persists to DB)
+                    let processed = handle_event_with_context(
+                        (*event).clone(), true, &client, my_public_key
+                    ).await;
 
-                                let body = if rumor.content.is_empty() {
-                                    "New message".to_string()
-                                } else {
-                                    rumor.content.chars().take(200).collect()
-                                };
-
-                                info!("[BackgroundSync] New message from {}, posting notification...", sender_display);
-                                post_notification_jni(&sender_display, &body);
-                                info!("[BackgroundSync] Notification posted successfully");
-                            }
-                        }
-                        Err(e) => {
-                            warn!("[BackgroundSync] Failed to unwrap GiftWrap: {:?}", e);
+                    // Post notification for new incoming messages
+                    if processed {
+                        if let Some((title, body)) = get_notification_data(
+                            &client_notif, &event, my_public_key
+                        ).await {
+                            info!("[BackgroundSync] New message from {}, posting notification...", title);
+                            post_notification_jni(&title, &body);
                         }
                     }
 
@@ -384,6 +381,89 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey), String>
     Ok((client, my_public_key))
 }
 
+/// Bootstrap the shared processing pipeline for headless (service-only) mode.
+/// Sets up APP_DATA_DIR, CURRENT_ACCOUNT, and the DB connection pool so that
+/// `handle_event_with_context()` can persist decrypted messages to the database.
+/// Call this once before processing events in the background service.
+fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
+    let data_path = std::path::PathBuf::from(data_dir);
+
+    // Set APP_DATA_DIR so static path helpers work
+    crate::account_manager::set_app_data_dir(data_path.clone());
+
+    // Find the npub directory
+    let entries = std::fs::read_dir(&data_path)
+        .map_err(|e| format!("Failed to read dataDir: {:?}", e))?;
+
+    let mut npub = None;
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("npub1") {
+                npub = Some(name.to_string());
+                break;
+            }
+        }
+    }
+
+    let npub = npub.ok_or("No npub account directory found")?;
+
+    // Set CURRENT_ACCOUNT so DB path resolution works
+    crate::account_manager::set_current_account(npub.clone())?;
+
+    // Initialize the DB pool
+    let db_path = crate::account_manager::get_database_path_static(&npub)?;
+    crate::account_manager::init_db_pool_static(&db_path)?;
+
+    info!("[BackgroundSync] Pipeline bootstrapped for {}", &npub[..20.min(npub.len())]);
+    Ok(npub)
+}
+
+/// Extract notification display data for a processed event.
+/// Checks STATE for profile display names (populated by the pipeline),
+/// falling back to truncated npub if no profile is available.
+async fn get_notification_data(
+    client: &Client,
+    event: &nostr_sdk::Event,
+    my_public_key: PublicKey,
+) -> Option<(String, String)> {
+    let gift = client.unwrap_gift_wrap(event).await.ok()?;
+    let sender = gift.sender;
+
+    // Skip our own messages
+    if sender == my_public_key {
+        return None;
+    }
+
+    let sender_npub = sender.to_bech32().ok()?;
+
+    // Try to get display name from STATE (populated by handle_event_with_context)
+    let display_name = {
+        let state = STATE.lock().await;
+        state.get_profile(&sender_npub).and_then(|p| {
+            if !p.nickname.is_empty() {
+                Some(p.nickname.to_string())
+            } else if !p.name.is_empty() {
+                Some(p.name.to_string())
+            } else {
+                None
+            }
+        })
+    };
+
+    let title = display_name.unwrap_or_else(|| {
+        let end = sender_npub.len().min(4);
+        format!("{}...{}", &sender_npub[..10.min(sender_npub.len())], &sender_npub[sender_npub.len() - end..])
+    });
+
+    let body = if gift.rumor.content.is_empty() {
+        "New message".to_string()
+    } else {
+        gift.rumor.content.chars().take(200).collect()
+    };
+
+    Some((title, body))
+}
+
 /// Poll relays for new GiftWrap events and post notifications for unseen messages.
 /// Returns the number of new notifications posted.
 async fn poll_and_notify(
@@ -418,35 +498,16 @@ async fn poll_and_notify(
             continue;
         }
 
-        match client.unwrap_gift_wrap(&event).await {
-            Ok(UnwrappedGift { rumor, sender }) => {
-                // Skip our own messages
-                if sender == my_public_key {
-                    continue;
-                }
+        // Process through shared pipeline (decrypts, persists to DB)
+        let processed = handle_event_with_context(
+            event.clone(), true, client, my_public_key
+        ).await;
 
-                let sender_display = sender
-                    .to_bech32()
-                    .map(|s| {
-                        let end = s.len().min(4);
-                        format!("{}...{}", &s[..10.min(s.len())], &s[s.len() - end..])
-                    })
-                    .unwrap_or_else(|_| "Unknown".into());
-
-                let body = if rumor.content.is_empty() {
-                    "New message".to_string()
-                } else {
-                    rumor.content.chars().take(200).collect()
-                };
-
-                info!("[BackgroundSync] New message from {}", sender_display);
-
-                // Post notification via JNI
-                post_notification_jni(&sender_display, &body);
+        if processed {
+            if let Some((title, body)) = get_notification_data(client, &event, my_public_key).await {
+                info!("[BackgroundSync] New message from {}", title);
+                post_notification_jni(&title, &body);
                 new_notifications += 1;
-            }
-            Err(e) => {
-                warn!("[BackgroundSync] Failed to unwrap event: {:?}", e);
             }
         }
     }
@@ -618,6 +679,11 @@ pub extern "C" fn Java_io_vectorapp_RelayPollWorker_pollForNewMessages(
             poll_relays_full_app(client, pubkey).await;
         });
         return make_jstring(&mut env, "");
+    }
+
+    // Bootstrap pipeline for headless mode
+    if let Err(e) = bootstrap_pipeline(&data_dir_str) {
+        error!("[BackgroundSync] Failed to bootstrap pipeline for WorkManager: {}", e);
     }
 
     // Bootstrap and poll (one-shot)
