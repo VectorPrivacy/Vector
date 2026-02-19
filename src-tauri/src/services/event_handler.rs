@@ -23,6 +23,20 @@ use crate::{
 // Internal event handler - called by fetch_messages and real-time event stream
 // Not exposed as a Tauri command to frontend
 pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+    handle_event_with_context(event, is_new, client, my_public_key).await
+}
+
+/// Full event processing implementation — accepts dependencies as parameters.
+/// This enables headless (background service) callers to provide their own client/key
+/// without relying on globals that may not be initialized.
+pub(crate) async fn handle_event_with_context(
+    event: Event,
+    is_new: bool,
+    client: &Client,
+    my_public_key: PublicKey,
+) -> bool {
     // Check processing gate - queue events during encryption migration
     if !is_processing_allowed() {
         let mut queue = PENDING_EVENTS.lock().await;
@@ -53,7 +67,7 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                 return false;
             }
         }
-        
+
         // Cache miss - check database as fallback (for events older than cache window)
         if let Ok(exists) = db::wrapper_event_exists(&wrapper_event_id).await {
             if exists {
@@ -62,11 +76,6 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
             }
         }
     }
-
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-
-    // Grab our pubkey
-    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
 
     // Unwrap the gift wrap
     match client.unwrap_gift_wrap(&event).await {
