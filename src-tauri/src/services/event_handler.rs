@@ -7,6 +7,7 @@
 //! - WebXDC peer advertisements
 //! - Unknown event storage for future compatibility
 
+use log::warn;
 use nostr_sdk::prelude::*;
 use tauri::{Emitter, Manager};
 
@@ -15,7 +16,7 @@ use crate::{
     Message, Reaction, StoredEvent,
     RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor,
     MlsService, NotificationData, show_notification_generic,
-    STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, SyncMode,
+    STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES, SyncMode,
     util::get_file_type_description,
     state::{is_processing_allowed, PENDING_EVENTS},
 };
@@ -130,26 +131,36 @@ pub(crate) async fn handle_event_with_context(
                     // Outer giftwrap id is our wrapper id for dedup/logs
                     let wrapper_id = event.id;
 
-                    // Use blocking thread for non-Send MLS engine
-                    let processed = tokio::task::spawn_blocking(move || {
+                    // Use blocking thread for non-Send MLS engine.
+                    // Returns the group name on success (for notification).
+                    let welcome_result: Option<String> = tokio::task::spawn_blocking(move || {
                         let svc = MlsService::new_persistent_static();
                         if let Ok(mls) = svc {
                             if let Ok(engine) = mls.engine() {
                                 match engine.process_welcome(&wrapper_id, &unsigned) {
-                                    Ok(_) => return true,
+                                    Ok(_) => {
+                                        // Read back the welcome to get the group name
+                                        if let Ok(welcomes) = engine.get_pending_welcomes(None) {
+                                            let group_name = welcomes.iter()
+                                                .find(|w| w.wrapper_event_id == wrapper_id)
+                                                .map(|w| w.group_name.clone())
+                                                .unwrap_or_default();
+                                            return Some(group_name);
+                                        }
+                                        return Some(String::new());
+                                    }
                                     Err(e) => {
                                         eprintln!("[MLS] Failed to process welcome: {}", e);
-                                        return false;
                                     }
                                 }
                             }
                         }
-                        false
+                        None
                     })
                     .await
-                    .unwrap_or(false);
+                    .unwrap_or(None);
 
-                    if processed {
+                    if let Some(group_name) = welcome_result {
                         // Mark this wrapper as processed to prevent duplicates from other relays
                         {
                             let mut cache = WRAPPER_ID_CACHE.lock().await;
@@ -161,12 +172,52 @@ pub(crate) async fn handle_event_with_context(
                             let state = STATE.lock().await;
                             state.sync_mode == SyncMode::Finished || !state.is_syncing
                         };
-                        
+
                         if should_emit {
                             if let Some(app) = TAURI_APP.get() {
                                 let _ = app.emit("mls_invite_received", serde_json::json!({
                                     "wrapper_event_id": wrapper_id.to_hex()
                                 }));
+                            }
+
+                            // OS notification for group invites
+                            if !is_mine && is_new {
+                                let display_info = {
+                                    let state = STATE.lock().await;
+                                    match state.get_profile(&contact) {
+                                        Some(profile) => {
+                                            let name = if !profile.nickname.is_empty() {
+                                                profile.nickname.to_string()
+                                            } else if !profile.name.is_empty() {
+                                                profile.name.to_string()
+                                            } else {
+                                                String::from("Someone")
+                                            };
+                                            let avatar = if !profile.avatar_cached.is_empty() {
+                                                Some(profile.avatar_cached.to_string())
+                                            } else {
+                                                None
+                                            };
+                                            (name, avatar)
+                                        }
+                                        None => (String::from("Someone"), None),
+                                    }
+                                };
+                                let notif_group_name = if group_name.is_empty() {
+                                    String::from("Group Chat")
+                                } else {
+                                    group_name.clone()
+                                };
+                                let notification = NotificationData::group_invite(
+                                    notif_group_name,
+                                    display_info.0,
+                                    display_info.1,
+                                );
+                                show_notification_generic(notification);
+
+                                // Mark as notified to prevent list_pending_mls_welcomes from double-notifying
+                                let mut notified = NOTIFIED_WELCOMES.lock().await;
+                                notified.insert(wrapper_event_id.clone());
                             }
                         }
                         return true;
@@ -300,12 +351,15 @@ pub(crate) async fn handle_event_with_context(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to process rumor: {}", e);
+                    warn!("[EventHandler] Failed to process rumor: {}", e);
                     false
                 }
             }
         }
-        Err(_) => false,
+        Err(e) => {
+            warn!("[EventHandler] Failed to unwrap gift wrap: {:?}", e);
+            false
+        }
     }
 }
 
@@ -339,7 +393,6 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
         let mut state = STATE.lock().await;
         state.add_message_to_participant(contact, msg.clone())
     };
-
     // If accepted in-state: commit to the DB and emit to the frontend
     if was_msg_added_to_state {
         // Send it to the frontend
@@ -366,14 +419,19 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                             } else {
                                 String::from("New Message")
                             };
-                            Some((display_name, msg.content.clone()))
+                            let avatar = if !profile.avatar_cached.is_empty() {
+                                Some(profile.avatar_cached.to_string())
+                            } else {
+                                None
+                            };
+                            Some((display_name, msg.content.clone(), avatar))
                         }
                     }
-                    None => Some((String::from("New Message"), msg.content.clone())),
+                    None => Some((String::from("New Message"), msg.content.clone(), None)),
                 }
             };
-            if let Some((display_name, content)) = display_info {
-                let notification = NotificationData::direct_message(display_name, content);
+            if let Some((display_name, content, avatar)) = display_info {
+                let notification = NotificationData::direct_message(display_name, content, avatar);
                 show_notification_generic(notification);
             }
         }
@@ -456,15 +514,20 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
                             } else {
                                 String::from("New Message")
                             };
-                            Some((display_name, extension.clone()))
+                            let avatar = if !profile.avatar_cached.is_empty() {
+                                Some(profile.avatar_cached.to_string())
+                            } else {
+                                None
+                            };
+                            Some((display_name, extension.clone(), avatar))
                         }
                     }
-                    None => Some((String::from("New Message"), extension.clone())),
+                    None => Some((String::from("New Message"), extension.clone(), None)),
                 }
             };
-            if let Some((display_name, file_extension)) = display_info {
+            if let Some((display_name, file_extension, avatar)) = display_info {
                 let file_description = "Sent a ".to_string() + &get_file_type_description(&file_extension);
-                let notification = NotificationData::direct_message(display_name, file_description);
+                let notification = NotificationData::direct_message(display_name, file_description, avatar);
                 show_notification_generic(notification);
             }
         }

@@ -7,15 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class VectorNotificationService : Service() {
@@ -37,42 +31,13 @@ class VectorNotificationService : Service() {
         @JvmStatic
         external fun nativeStopBackgroundSync()
 
-        fun schedulePeriodicPolling(context: Context) {
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
-                .build()
-
-            // Immediate one-shot poll so we don't wait 15 minutes for the first check
-            val immediateRequest = OneTimeWorkRequestBuilder<RelayPollWorker>()
-                .setConstraints(constraints)
-                .build()
-            WorkManager.getInstance(context).enqueue(immediateRequest)
-
-            // Periodic polling every 15 minutes as ongoing fallback
-            val pollRequest = PeriodicWorkRequestBuilder<RelayPollWorker>(
-                15, TimeUnit.MINUTES
-            )
-                .setConstraints(constraints)
-                .build()
-
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                "vector_relay_poll",
-                ExistingPeriodicWorkPolicy.KEEP,
-                pollRequest
-            )
-        }
-
-        fun cancelPeriodicPolling(context: Context) {
-            WorkManager.getInstance(context).cancelUniqueWork("vector_relay_poll")
-        }
-
         /**
          * Post a message notification. Called from Rust JNI via the app's class loader.
          * Must be static and use applicationContext to avoid class loader issues
          * when called from JNI-attached threads.
          */
         @JvmStatic
-        fun showMessageNotification(context: android.content.Context, title: String, body: String) {
+        fun showMessageNotification(context: android.content.Context, title: String, body: String, avatarPath: String) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val notificationId = notificationCounter.getAndIncrement()
 
@@ -84,17 +49,29 @@ class VectorNotificationService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
+            // Use sender's cached avatar if available, otherwise fall back to app icon
+            val largeIcon = if (avatarPath.isNotEmpty()) {
+                try {
+                    BitmapFactory.decodeFile(avatarPath)
+                } catch (e: Exception) {
+                    android.util.Log.w("VectorNotificationService", "Failed to load avatar: ${e.message}")
+                    null
+                }
+            } else null
+            val finalLargeIcon = largeIcon ?: BitmapFactory.decodeResource(context.resources, R.drawable.ic_large_icon)
+
             val notification = NotificationCompat.Builder(context, MESSAGES_CHANNEL_ID)
                 .setContentTitle(title)
                 .setContentText(body)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setLargeIcon(finalLargeIcon)
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pendingIntent)
                 .build()
 
             manager.notify(notificationId, notification)
-            android.util.Log.d("VectorNotificationService", "Posted notification: $title")
+            android.util.Log.d("VectorNotificationService", "Posted notification: $title (avatar: ${avatarPath.isNotEmpty()})")
         }
     }
 
@@ -122,12 +99,6 @@ class VectorNotificationService : Service() {
             android.util.Log.e("VectorNotificationService", "Failed to start background sync (Error): ${e.javaClass.name}: ${e.message}", e)
         }
 
-        // Always schedule WorkManager polling as a safety net.
-        // If started from MainActivity (full app), it will be cancelled immediately after.
-        // If started by Android restart (service-only, no Tauri), this provides polling.
-        schedulePeriodicPolling(this)
-        android.util.Log.d("VectorNotificationService", "WorkManager polling scheduled")
-
         return START_STICKY
     }
 
@@ -142,9 +113,33 @@ class VectorNotificationService : Service() {
         } catch (e: Exception) {
             android.util.Log.e("VectorNotificationService", "Failed to stop background sync: ${e.message}")
         }
+    }
 
-        // Schedule WorkManager periodic polling as fallback
-        schedulePeriodicPolling(this)
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        android.util.Log.d("VectorNotificationService", "Task removed (app swiped), starting sync immediately")
+        // The service process is still alive after the swipe (foreground service keeps it).
+        // Start background sync directly — no need to wait for AlarmManager or START_STICKY.
+        try {
+            startForeground(SERVICE_NOTIFICATION_ID, buildServiceNotification())
+            val dataDir = applicationContext.dataDir.absolutePath
+            nativeStartBackgroundSync(dataDir, applicationContext)
+            android.util.Log.d("VectorNotificationService", "Sync started from onTaskRemoved")
+        } catch (e: Exception) {
+            android.util.Log.e("VectorNotificationService", "Failed to start sync from onTaskRemoved: ${e.message}")
+            // Fallback: schedule alarm restart in case direct start failed
+            val restartIntent = Intent(applicationContext, VectorNotificationService::class.java)
+            val pendingIntent = PendingIntent.getService(
+                applicationContext, 1, restartIntent,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            alarmManager.set(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 1000,
+                pendingIntent
+            )
+        }
     }
 
     private fun createNotificationChannels() {
@@ -185,7 +180,7 @@ class VectorNotificationService : Service() {
         return NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setContentTitle("Vector")
             .setContentText("Connected for messages")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .build()

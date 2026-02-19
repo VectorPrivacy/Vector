@@ -35,9 +35,6 @@ class MainActivity : TauriActivity() {
         // Request notification permission (Android 13+)
         requestNotificationPermission()
 
-        // Cancel any background WorkManager polling (app is now in foreground)
-        VectorNotificationService.cancelPeriodicPolling(this)
-
         // Start the foreground notification service
         val serviceIntent = Intent(this, VectorNotificationService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

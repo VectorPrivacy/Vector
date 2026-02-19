@@ -1,18 +1,16 @@
-//! JNI bridge for Android background sync and relay polling.
+//! JNI bridge for Android background sync via foreground service.
 //!
-//! Provides three JNI functions called from Kotlin:
+//! Provides JNI functions called from Kotlin:
 //! - `nativeStartBackgroundSync` — called by VectorNotificationService when foreground service starts.
-//!   In service-only mode (no Tauri), spawns a background thread that bootstraps a standalone
-//!   Nostr client, connects to relays, and subscribes to live GiftWrap events for instant
-//!   notifications. Events are delivered in real-time via relay subscriptions.
-//! - `nativeStopBackgroundSync` — called when transitioning back to foreground or service destroyed
-//! - `pollForNewMessages` — called by RelayPollWorker (WorkManager) for periodic background polling
-//!   as a fallback when the foreground service is not running.
+//!   Stores JNI refs and data_dir. In service-only mode (no Tauri), immediately starts a standalone
+//!   Nostr client with live relay subscriptions. In full-app mode, deferred to nativeOnPause.
+//! - `nativeStopBackgroundSync` — called when service is destroyed
+//! - `nativeOnResume` / `nativeOnPause` — called from MainActivity lifecycle.
+//!   onPause starts standalone sync when the app is backgrounded.
+//!   onResume stops it when the app returns to foreground.
 
 use jni::objects::{GlobalRef, JClass, JObject, JString};
-use jni::sys::jstring;
 use jni::{JavaVM, JNIEnv};
-use log::{error, info, warn};
 use nostr_sdk::prelude::*;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +20,17 @@ use crate::{NOSTR_CLIENT, MY_PUBLIC_KEY};
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
+/// Log to Android logcat via NDK. println!/eprintln! go to /dev/null on Android.
+fn logcat(msg: &str) {
+    use std::ffi::CString;
+    extern "C" {
+        fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
+    }
+    let tag = CString::new("VectorBgSync").unwrap();
+    let text = CString::new(msg).unwrap_or_else(|_| CString::new("(invalid msg)").unwrap());
+    unsafe { __android_log_write(4, tag.as_ptr(), text.as_ptr()); } // 4 = INFO
+}
+
 /// Flag indicating whether background sync is active
 static BACKGROUND_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -30,31 +39,15 @@ static BACKGROUND_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// When true, notifications are suppressed (user is looking at the app).
 static ACTIVITY_IN_FOREGROUND: AtomicBool = AtomicBool::new(false);
 
+/// Whether an Activity has been created in this process's lifetime.
+/// Set to true on first onResume, NEVER set back to false.
+/// Distinguishes full-app mode (Activity exists, even if briefly paused) from
+/// service-only mode (no Activity at all, e.g. BootReceiver/START_STICKY restart).
+static ACTIVITY_EVER_CREATED: AtomicBool = AtomicBool::new(false);
+
 /// Check if the Activity is currently in the foreground
 pub fn is_activity_in_foreground() -> bool {
     ACTIVITY_IN_FOREGROUND.load(Ordering::Acquire)
-}
-
-/// Called from MainActivity.onResume via JNI
-#[no_mangle]
-pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
-    _env: JNIEnv,
-    _class: JClass,
-) {
-    ensure_android_logger();
-    ACTIVITY_IN_FOREGROUND.store(true, Ordering::Release);
-    info!("[BackgroundSync] Activity resumed (foreground)");
-}
-
-/// Called from MainActivity.onPause via JNI
-#[no_mangle]
-pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
-    _env: JNIEnv,
-    _class: JClass,
-) {
-    ensure_android_logger();
-    ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
-    info!("[BackgroundSync] Activity paused (background)");
 }
 
 /// Signal to stop the standalone sync thread
@@ -69,23 +62,61 @@ static BG_JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 /// Stored application context as GlobalRef (survives Activity destruction)
 static BG_APP_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
 
-/// Ensure the android logger is initialized (safe to call multiple times)
-fn ensure_android_logger() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Debug)
-                .with_tag("VectorBgSync"),
-        );
-    });
+/// Stored data directory path (captured from nativeStartBackgroundSync for later use in nativeOnPause)
+static BG_DATA_DIR: OnceLock<String> = OnceLock::new();
+
+/// Called from MainActivity.onResume via JNI
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    ACTIVITY_IN_FOREGROUND.store(true, Ordering::Release);
+    ACTIVITY_EVER_CREATED.store(true, Ordering::Release);
+    logcat("Activity resumed (foreground)");
+
+    // Stop standalone sync — the full app's live subscriptions take over
+    if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
+        logcat("Stopping standalone sync (activity resumed)");
+        STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Called from MainActivity.onPause via JNI
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
+    logcat("Activity paused (background)");
+
+    // Start standalone sync if the foreground service is active but standalone sync isn't running.
+    // This handles the case where the app was open (standalone sync was skipped), and the user
+    // now backgrounds the app — the service is still alive but nobody is processing events.
+    if BACKGROUND_SYNC_ACTIVE.load(Ordering::SeqCst)
+        && !STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst)
+    {
+        if let Some(data_dir) = BG_DATA_DIR.get() {
+            logcat("Activity paused, starting standalone sync");
+            let data_dir = data_dir.clone();
+            STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                STANDALONE_SYNC_RUNNING.store(true, Ordering::SeqCst);
+                run_standalone_sync_loop(&data_dir);
+                STANDALONE_SYNC_RUNNING.store(false, Ordering::SeqCst);
+                logcat("Standalone sync thread exited");
+            });
+        } else {
+            logcat("Activity paused but no data_dir stored, cannot start sync");
+        }
+    }
 }
 
 /// Called by VectorNotificationService when the foreground service starts.
-/// In full-app mode (NOSTR_CLIENT exists), this is a no-op — live subscriptions handle everything.
-/// In service-only mode, spawns a background thread that bootstraps a standalone Nostr client
-/// and polls relays every ~2 minutes for new messages, posting notifications via JNI.
+/// Stores JNI refs and data_dir for later use. In service-only mode (no Activity),
+/// immediately starts the standalone sync. In full-app mode, standalone sync is
+/// deferred until nativeOnPause (when the user backgrounds the app).
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStartBackgroundSync(
     mut env: JNIEnv,
@@ -93,55 +124,61 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStartBackgro
     data_dir: JString<'_>,
     context: JObject<'_>,
 ) {
-    ensure_android_logger();
-    info!("[BackgroundSync] Foreground service starting background sync");
+    logcat("Foreground service starting background sync");
     BACKGROUND_SYNC_ACTIVE.store(true, Ordering::SeqCst);
     STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
 
     // Store the JavaVM and application context for cross-thread JNI calls.
-    // In service-only mode (no Tauri Activity), ndk_context is not initialized,
-    // so we must capture these from the calling JNI method.
     if BG_JAVA_VM.get().is_none() {
         match env.get_java_vm() {
             Ok(vm) => { let _ = BG_JAVA_VM.set(vm); }
-            Err(e) => error!("[BackgroundSync] Failed to get JavaVM: {:?}", e),
+            Err(e) => logcat(&format!("Failed to get JavaVM: {:?}", e)),
         }
     }
     if BG_APP_CONTEXT.get().is_none() {
         match env.new_global_ref(&context) {
             Ok(global_ref) => { let _ = BG_APP_CONTEXT.set(global_ref); }
-            Err(e) => error!("[BackgroundSync] Failed to create context GlobalRef: {:?}", e),
+            Err(e) => logcat(&format!("Failed to create context GlobalRef: {:?}", e)),
         }
-    }
-
-    // If full app is running, no need for standalone sync
-    if NOSTR_CLIENT.get().is_some() {
-        info!("[BackgroundSync] Full app is running, skipping standalone sync");
-        return;
-    }
-
-    // If standalone sync is already running, skip
-    if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
-        info!("[BackgroundSync] Standalone sync already running, skipping");
-        return;
     }
 
     let data_dir_str: String = match env.get_string(&data_dir) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("[BackgroundSync] Failed to get dataDir string: {:?}", e);
+            logcat(&format!("Failed to get dataDir string: {:?}", e));
             return;
         }
     };
 
-    info!("[BackgroundSync] Starting standalone sync thread for service-only mode");
+    // Store data_dir for later use by nativeOnPause
+    let _ = BG_DATA_DIR.set(data_dir_str.clone());
 
-    // Spawn a background thread for persistent polling
+    // If an Activity has ever been created in this process, we're in full-app mode.
+    // Defer standalone sync to nativeOnPause (when the user actually backgrounds).
+    // This avoids racing with the Activity lifecycle flicker (onResume→onPause→onResume)
+    // that happens during Activity creation, where ACTIVITY_IN_FOREGROUND is briefly false.
+    let activity_exists = ACTIVITY_EVER_CREATED.load(Ordering::Acquire);
+    let tauri_running = crate::TAURI_APP.get().is_some();
+    logcat(&format!("Guard check: activity_exists={}, TAURI_APP={}", activity_exists, tauri_running));
+    if activity_exists || tauri_running {
+        logcat("Full app mode, standalone sync deferred to onPause");
+        return;
+    }
+
+    // If standalone sync is already running, skip
+    if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
+        logcat("Standalone sync already running, skipping");
+        return;
+    }
+
+    logcat("Starting standalone sync thread for service-only mode");
+
+    // Spawn a background thread for persistent relay subscription
     std::thread::spawn(move || {
         STANDALONE_SYNC_RUNNING.store(true, Ordering::SeqCst);
         run_standalone_sync_loop(&data_dir_str);
         STANDALONE_SYNC_RUNNING.store(false, Ordering::SeqCst);
-        info!("[BackgroundSync] Standalone sync thread exited");
+        logcat("Standalone sync thread exited");
     });
 }
 
@@ -152,8 +189,7 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStopBackgrou
     _env: JNIEnv,
     _class: JClass,
 ) {
-    ensure_android_logger();
-    info!("[BackgroundSync] Stopping background sync");
+    logcat("Stopping background sync");
     BACKGROUND_SYNC_ACTIVE.store(false, Ordering::SeqCst);
     STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
 }
@@ -169,26 +205,23 @@ fn run_standalone_sync_loop(data_dir: &str) {
     {
         Ok(rt) => rt,
         Err(e) => {
-            error!("[BackgroundSync] Failed to create tokio runtime: {:?}", e);
+            logcat(&format!("Failed to create tokio runtime: {:?}", e));
             return;
         }
     };
 
     // Bootstrap the shared processing pipeline (DB, accounts, etc.)
     if let Err(e) = bootstrap_pipeline(data_dir) {
-        error!("[BackgroundSync] Failed to bootstrap pipeline: {}", e);
+        logcat(&format!("Failed to bootstrap pipeline: {}", e));
         // Fall through — will still try to connect and notify, just without DB persistence
     }
 
     rt.block_on(async {
-        // Preload profiles so notifications show real display names
-        preload_profiles_into_state().await;
-
-        // Bootstrap the standalone client
-        let (client, my_public_key) = match bootstrap_client(data_dir).await {
+        // Bootstrap the standalone client — get connected ASAP
+        let (client, my_public_key, can_decrypt) = match bootstrap_client(data_dir).await {
             Ok(result) => result,
             Err(e) => {
-                error!("[BackgroundSync] Failed to bootstrap client: {}", e);
+                logcat(&format!("Failed to bootstrap client: {}", e));
                 return;
             }
         };
@@ -202,14 +235,21 @@ fn run_standalone_sync_loop(data_dir: &str) {
 
         let gift_sub_id = match client.subscribe(giftwrap_filter, None).await {
             Ok(output) => {
-                info!("[BackgroundSync] Live GiftWrap subscription active");
+                logcat("Live GiftWrap subscription active");
                 output.val
             }
             Err(e) => {
-                error!("[BackgroundSync] Failed to subscribe: {:?}", e);
+                logcat(&format!("Failed to subscribe: {:?}", e));
                 return;
             }
         };
+
+        // Preload profiles AFTER subscribe — runs while relay TCP/TLS handshakes complete.
+        // Profiles are only needed when a notification arrives (to resolve display names).
+        // Skip for encrypted accounts (can't read profiles from encrypted DB).
+        if can_decrypt {
+            preload_profiles_into_state().await;
+        }
 
         // Spawn a stop-checker task that disconnects the client when stop is signaled.
         // This ensures handle_notifications() returns even if no events arrive.
@@ -218,7 +258,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
-                    info!("[BackgroundSync] Stop signal received, disconnecting client...");
+                    logcat("Stop signal received, disconnecting client...");
                     client_for_stop.disconnect().await;
                     break;
                 }
@@ -228,12 +268,11 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // Track seen event IDs to deduplicate across relays
         let seen_events: Arc<Mutex<HashSet<EventId>>> = Arc::new(Mutex::new(HashSet::new()));
 
-        info!("[BackgroundSync] Waiting for incoming GiftWrap events...");
+        logcat("Waiting for incoming GiftWrap events...");
 
-        // Live event handler — runs until stop signal or disconnect
-        // Uses the shared pipeline: decrypt → persist to DB → show notification.
-        // Notifications are handled inside handle_event_with_context via
-        // show_notification_generic → post_notification_jni (no extra unwrap needed).
+        // Live event handler — runs until stop signal or disconnect.
+        // Full mode: decrypt → persist to DB → show rich notification.
+        // Read-only mode (encrypted account): show generic "New message" notification.
         let client_for_handler = client.clone();
         let result = client.handle_notifications(move |notification| {
             let client = client_for_handler.clone();
@@ -255,10 +294,15 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         return Ok(false);
                     }
 
-                    // Process through shared pipeline (decrypts, persists to DB, notifies)
-                    handle_event_with_context(
-                        (*event).clone(), true, &client, my_public_key
-                    ).await;
+                    if can_decrypt {
+                        // Full pipeline — decrypt, persist to DB, show rich notification
+                        handle_event_with_context(
+                            (*event).clone(), true, &client, my_public_key
+                        ).await;
+                    } else {
+                        // Encrypted account — can't decrypt, but we know something arrived
+                        post_notification_jni("Vector", "You have a new message", None);
+                    }
 
                     // Cap the seen set to prevent unbounded memory growth
                     let seen_len = seen.lock().unwrap().len();
@@ -272,19 +316,21 @@ fn run_standalone_sync_loop(data_dir: &str) {
         }).await;
 
         match &result {
-            Ok(_) => info!("[BackgroundSync] handle_notifications returned Ok"),
-            Err(e) => error!("[BackgroundSync] handle_notifications returned Err: {:?}", e),
+            Ok(_) => logcat("handle_notifications returned Ok"),
+            Err(e) => logcat(&format!("handle_notifications returned Err: {:?}", e)),
         }
 
         // Clean up
         client.disconnect().await;
-        info!("[BackgroundSync] Client disconnected");
+        logcat("Client disconnected");
     });
 }
 
 /// Bootstrap a standalone Nostr client from stored keys in the database.
-/// Returns the client and the user's public key.
-async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey), String> {
+/// Returns (client, public_key, can_decrypt).
+/// When local encryption is enabled, returns a read-only client (no signer) that can
+/// subscribe to events but not decrypt them — used for generic "New message" notifications.
+async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), String> {
     let data_path = std::path::Path::new(data_dir);
 
     // Scan for npub directories
@@ -292,10 +338,12 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey), String>
         .map_err(|e| format!("Failed to read dataDir: {:?}", e))?;
 
     let mut npub_dir = None;
+    let mut npub_name = String::new();
     for entry in entries.flatten() {
         if let Some(name) = entry.file_name().to_str() {
             if name.starts_with("npub1") {
-                info!("[BackgroundSync] Found account dir: {}", name);
+                logcat(&format!("Found account dir: {}", name));
+                npub_name = name.to_string();
                 npub_dir = Some(entry.path());
                 break;
             }
@@ -309,7 +357,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey), String>
         return Err("Database file not found".into());
     }
 
-    info!("[BackgroundSync] Opening database: {:?}", db_path);
+    logcat(&format!("Opening database: {:?}", db_path));
 
     // Open database directly (read-only)
     let conn = rusqlite::Connection::open_with_flags(
@@ -327,51 +375,66 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey), String>
         )
         .ok();
 
-    if encryption_enabled.as_deref() == Some("true") {
-        return Err("Local encryption is enabled, cannot bootstrap background client".into());
-    }
+    let encrypted = encryption_enabled.as_deref() == Some("true");
 
-    // Read the stored nsec key
-    let pkey: String = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'pkey'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Failed to read pkey: {:?}", e))?;
+    if encrypted {
+        // Encrypted account — can't read nsec, but we can derive the pubkey from the
+        // directory name (npub is never encrypted) and subscribe read-only.
+        drop(conn);
 
-    drop(conn);
+        let my_public_key = PublicKey::from_bech32(&npub_name)
+            .map_err(|e| format!("Failed to parse npub from dir name: {:?}", e))?;
 
-    let keys = Keys::parse(&pkey)
-        .map_err(|e| format!("Failed to parse stored key: {:?}", e))?;
+        logcat(&format!("Encrypted account — read-only mode for {}...",
+            &npub_name[..20.min(npub_name.len())]));
 
-    let my_public_key = keys.public_key();
+        let client = Client::builder().build();
 
-    info!("[BackgroundSync] Bootstrapped client for {}...",
-        &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]);
-
-    let client = Client::builder()
-        .signer(keys)
-        .build();
-
-    // Add default relays
-    for relay_url in DEFAULT_RELAYS {
-        if let Err(e) = client.add_relay(*relay_url).await {
-            warn!("[BackgroundSync] Failed to add relay {}: {:?}", relay_url, e);
+        for relay_url in DEFAULT_RELAYS {
+            if let Err(e) = client.add_relay(*relay_url).await {
+                logcat(&format!("Failed to add relay {}: {:?}", relay_url, e));
+            }
         }
+
+        logcat(&format!("Connecting to {} relays...", DEFAULT_RELAYS.len()));
+        client.connect().await;
+
+        Ok((client, my_public_key, false))
+    } else {
+        // Normal account — full signer client
+        let pkey: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'pkey'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to read pkey: {:?}", e))?;
+
+        drop(conn);
+
+        let keys = Keys::parse(&pkey)
+            .map_err(|e| format!("Failed to parse stored key: {:?}", e))?;
+
+        let my_public_key = keys.public_key();
+
+        logcat(&format!("Bootstrapped client for {}...",
+            &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]));
+
+        let client = Client::builder()
+            .signer(keys)
+            .build();
+
+        for relay_url in DEFAULT_RELAYS {
+            if let Err(e) = client.add_relay(*relay_url).await {
+                logcat(&format!("Failed to add relay {}: {:?}", relay_url, e));
+            }
+        }
+
+        logcat(&format!("Connecting to {} relays...", DEFAULT_RELAYS.len()));
+        client.connect().await;
+
+        Ok((client, my_public_key, true))
     }
-
-    info!("[BackgroundSync] Connecting to {} relays...", DEFAULT_RELAYS.len());
-    client.connect().await;
-
-    // Wait for connections to establish
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-    let relays = client.relays().await;
-    let connected = relays.values().filter(|r| r.status() == RelayStatus::Connected).count();
-    info!("[BackgroundSync] Connected to {}/{} relays", connected, relays.len());
-
-    Ok((client, my_public_key))
 }
 
 /// Bootstrap the shared processing pipeline for headless (service-only) mode.
@@ -407,7 +470,7 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     let db_path = crate::account_manager::get_database_path_static(&npub)?;
     crate::account_manager::init_db_pool_static(&db_path)?;
 
-    info!("[BackgroundSync] Pipeline bootstrapped for {}", &npub[..20.min(npub.len())]);
+    logcat(&format!("Pipeline bootstrapped for {}", &npub[..20.min(npub.len())]));
     Ok(npub)
 }
 
@@ -423,59 +486,12 @@ async fn preload_profiles_into_state() {
                 let profile = slim.to_profile();
                 state.insert_or_replace_profile(&npub, profile);
             }
-            info!("[BackgroundSync] Preloaded {} profiles into STATE", count);
+            logcat(&format!("Preloaded {} profiles into STATE", count));
         }
         Err(e) => {
-            warn!("[BackgroundSync] Failed to preload profiles: {}", e);
+            logcat(&format!("Failed to preload profiles: {}", e));
         }
     }
-}
-
-/// Poll relays for new GiftWrap events and post notifications for unseen messages.
-/// Returns the number of new notifications posted.
-async fn poll_and_notify(
-    client: &Client,
-    my_public_key: PublicKey,
-    seen_events: &mut HashSet<EventId>,
-) -> usize {
-    let now = Timestamp::now();
-    let since = Timestamp::from_secs(now.as_secs().saturating_sub(5 * 60));
-
-    let filter = Filter::new()
-        .pubkey(my_public_key)
-        .kind(Kind::GiftWrap)
-        .since(since);
-
-    let mut events = match client
-        .stream_events(filter, std::time::Duration::from_secs(15))
-        .await
-    {
-        Ok(stream) => stream,
-        Err(e) => {
-            error!("[BackgroundSync] Failed to stream events: {:?}", e);
-            return 0;
-        }
-    };
-
-    let mut new_notifications = 0usize;
-
-    while let Some(event) = events.next().await {
-        // Skip already-seen events
-        if !seen_events.insert(event.id) {
-            continue;
-        }
-
-        // Process through shared pipeline (decrypts, persists to DB, notifies)
-        let processed = handle_event_with_context(
-            event.clone(), true, client, my_public_key
-        ).await;
-
-        if processed {
-            new_notifications += 1;
-        }
-    }
-
-    new_notifications
 }
 
 /// Post a notification by calling VectorNotificationService.showMessageNotification() in Kotlin.
@@ -483,7 +499,7 @@ async fn poll_and_notify(
 /// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
 ///
 /// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
-pub fn post_notification_jni(title: &str, body: &str) {
+pub fn post_notification_jni(title: &str, body: &str, avatar_path: Option<&str>) {
     // Don't post notifications when the user is actively using the app
     if is_activity_in_foreground() {
         return;
@@ -491,14 +507,14 @@ pub fn post_notification_jni(title: &str, body: &str) {
     let vm = match BG_JAVA_VM.get() {
         Some(vm) => vm,
         None => {
-            error!("[BackgroundSync] post_notification_jni: JavaVM not stored");
+            logcat("post_notification_jni: JavaVM not stored");
             return;
         }
     };
     let context_ref = match BG_APP_CONTEXT.get() {
         Some(ctx) => ctx,
         None => {
-            error!("[BackgroundSync] post_notification_jni: App context not stored");
+            logcat("post_notification_jni: App context not stored");
             return;
         }
     };
@@ -506,7 +522,7 @@ pub fn post_notification_jni(title: &str, body: &str) {
     let mut env = match vm.attach_current_thread() {
         Ok(env) => env,
         Err(e) => {
-            error!("[BackgroundSync] post_notification_jni: Failed to attach thread: {:?}", e);
+            logcat(&format!("post_notification_jni: Failed to attach thread: {:?}", e));
             return;
         }
     };
@@ -545,172 +561,24 @@ pub fn post_notification_jni(title: &str, body: &str) {
             .map_err(|e| format!("Failed to create title string: {:?}", e))?;
         let jbody = env.new_string(body)
             .map_err(|e| format!("Failed to create body string: {:?}", e))?;
+        let javatar = env.new_string(avatar_path.unwrap_or(""))
+            .map_err(|e| format!("Failed to create avatar string: {:?}", e))?;
 
         env.call_static_method(
             &service_jclass,
             "showMessageNotification",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
-            &[context.into(), (&jtitle).into(), (&jbody).into()],
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[context.into(), (&jtitle).into(), (&jbody).into(), (&javatar).into()],
         )
         .map_err(|e| format!("Failed to call showMessageNotification: {:?}", e))?;
 
-        info!("[BackgroundSync] Notification posted via JNI");
+        logcat("Notification posted via JNI");
         Ok(())
     })();
 
     if let Err(e) = result {
-        error!("[BackgroundSync] Failed to post notification: {}", e);
+        logcat(&format!("Failed to post notification: {}", e));
     }
-}
-
-// ─── WorkManager fallback (RelayPollWorker) ───────────────────────────────────
-// Used when the foreground service is NOT running (e.g., service killed by OS).
-// WorkManager polls every 15 minutes as a safety net.
-
-/// Called by RelayPollWorker to poll relays for new messages.
-/// This is the WorkManager fallback path — only used when the foreground service
-/// is not running and cannot maintain persistent polling.
-#[no_mangle]
-pub extern "C" fn Java_io_vectorapp_RelayPollWorker_pollForNewMessages(
-    mut env: JNIEnv,
-    this: JObject<'_>,
-    data_dir: JString<'_>,
-) -> jstring {
-    ensure_android_logger();
-    info!("[BackgroundSync] WorkManager poll worker triggered");
-
-    // Store JavaVM + context for cross-thread JNI calls (same as foreground service path)
-    if BG_JAVA_VM.get().is_none() {
-        if let Ok(vm) = env.get_java_vm() {
-            let _ = BG_JAVA_VM.set(vm);
-        }
-    }
-    if BG_APP_CONTEXT.get().is_none() {
-        if let Ok(ctx) = env.call_method(&this, "getApplicationContext", "()Landroid/content/Context;", &[])
-            .and_then(|v| v.l())
-        {
-            if let Ok(global_ref) = env.new_global_ref(&ctx) {
-                let _ = BG_APP_CONTEXT.set(global_ref);
-            }
-        }
-    }
-
-    // If standalone sync is already running in the foreground service, skip
-    if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
-        info!("[BackgroundSync] Standalone sync is running, WorkManager poll skipped");
-        return make_jstring(&mut env, "");
-    }
-
-    let data_dir_str: String = match env.get_string(&data_dir) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("[BackgroundSync] Failed to get dataDir string: {:?}", e);
-            return make_jstring(&mut env, "-1");
-        }
-    };
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            error!("[BackgroundSync] Failed to create tokio runtime: {:?}", e);
-            return make_jstring(&mut env, "-1");
-        }
-    };
-
-    // Quick check for global client
-    let client_ready = rt.block_on(async {
-        for i in 0..3 {
-            if NOSTR_CLIENT.get().is_some() && MY_PUBLIC_KEY.get().is_some() {
-                return true;
-            }
-            if i == 0 {
-                info!("[BackgroundSync] Checking for existing Nostr client...");
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-        false
-    });
-
-    if client_ready {
-        let client = NOSTR_CLIENT.get().unwrap();
-        let pubkey = *MY_PUBLIC_KEY.get().unwrap();
-        info!("[BackgroundSync] Using existing Nostr client (full app mode)");
-        rt.block_on(async {
-            poll_relays_full_app(client, pubkey).await;
-        });
-        return make_jstring(&mut env, "");
-    }
-
-    // Bootstrap pipeline for headless mode
-    if let Err(e) = bootstrap_pipeline(&data_dir_str) {
-        error!("[BackgroundSync] Failed to bootstrap pipeline for WorkManager: {}", e);
-    }
-
-    // Bootstrap and poll (one-shot)
-    info!("[BackgroundSync] Bootstrapping standalone client for WorkManager poll");
-    let result = rt.block_on(async {
-        // Preload profiles so notifications show real display names
-        preload_profiles_into_state().await;
-
-        let (client, my_public_key) = match bootstrap_client(&data_dir_str).await {
-            Ok(result) => result,
-            Err(e) => {
-                error!("[BackgroundSync] Bootstrap failed: {}", e);
-                return "-1".to_string();
-            }
-        };
-
-        let mut seen = HashSet::new();
-        let count = poll_and_notify(&client, my_public_key, &mut seen).await;
-        client.disconnect().await;
-
-        info!("[BackgroundSync] WorkManager poll complete: {} notifications", count);
-        // Return empty — notifications are posted directly via JNI
-        String::new()
-    });
-
-    make_jstring(&mut env, &result)
-}
-
-/// Helper to create a JString, returning null on failure
-fn make_jstring(env: &mut JNIEnv, s: &str) -> jstring {
-    env.new_string(s)
-        .map(|js| js.into_raw())
-        .unwrap_or(std::ptr::null_mut())
-}
-
-/// Poll relays in full-app mode — uses the existing handle_event pipeline.
-async fn poll_relays_full_app(client: &Client, my_public_key: PublicKey) {
-    let now = Timestamp::now();
-    let since = Timestamp::from_secs(now.as_secs().saturating_sub(20 * 60));
-
-    let filter = Filter::new()
-        .pubkey(my_public_key)
-        .kind(Kind::GiftWrap)
-        .since(since)
-        .until(now);
-
-    let mut events = match client
-        .stream_events(filter, std::time::Duration::from_secs(30))
-        .await
-    {
-        Ok(stream) => stream,
-        Err(e) => {
-            error!("[BackgroundSync] Failed to stream events: {:?}", e);
-            return;
-        }
-    };
-
-    let mut count = 0u32;
-    while let Some(event) = events.next().await {
-        crate::services::handle_event(event, false).await;
-        count += 1;
-    }
-
-    info!("[BackgroundSync] Full-app poll complete, processed {} events", count);
 }
 
 /// Check if background sync is currently active (foreground service running)

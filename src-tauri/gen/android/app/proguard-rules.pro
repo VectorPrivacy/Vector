@@ -56,14 +56,11 @@
 }
 
 # ============================================
-# Background Sync - JNI and WorkManager
+# Background Sync - JNI and Foreground Service
 # ============================================
 
 # Keep VectorNotificationService native JNI methods and static helpers
 -keep class io.vectorapp.VectorNotificationService { *; }
-
-# Keep RelayPollWorker native JNI methods (called from Rust)
--keep class io.vectorapp.RelayPollWorker { *; }
 
 # Keep BootReceiver (referenced in AndroidManifest)
 -keep class io.vectorapp.BootReceiver { *; }

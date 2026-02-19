@@ -26,6 +26,10 @@ pub struct ChatState {
     pub sync_mode: SyncMode,
     pub sync_empty_iterations: u8,
     pub sync_total_iterations: u8,
+    /// Whether the initial DB load (profiles, chats, messages) has completed.
+    /// Used instead of `profiles.len()` heuristics, which break when the
+    /// background service preloads profiles into STATE before the GUI init.
+    pub db_loaded: bool,
     /// Cache statistics for benchmarking (debug builds only)
     #[cfg(debug_assertions)]
     pub cache_stats: CacheStats,
@@ -44,6 +48,7 @@ impl ChatState {
             sync_mode: SyncMode::Finished,
             sync_empty_iterations: 0,
             sync_total_iterations: 0,
+            db_loaded: false,
             #[cfg(debug_assertions)]
             cache_stats: CacheStats::new(),
         }

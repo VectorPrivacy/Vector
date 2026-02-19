@@ -141,8 +141,8 @@ pub async fn fetch_messages<R: Runtime>(
                 }
             }
 
-            // Load our DB (if we haven't already; i.e: our profile is the single loaded profile since login)
-            if state.profiles.len() == 1 {
+            // Load our DB (if we haven't already)
+            if !state.db_loaded {
                 // Load profiles, chats, MLS groups, and last messages in parallel (all are independent reads)
                 let db_start = std::time::Instant::now();
                 let (profiles_result, slim_chats_result, mls_groups_result, last_messages_result) = tokio::join!(
@@ -234,17 +234,29 @@ pub async fn fetch_messages<R: Runtime>(
                         // Get messages to add (if any)
                         let messages_to_add = last_messages_map.remove(&chat_id);
 
-                        // Add messages to the chat using interner, then push
-                        // This avoids double borrow by operating on local chat before adding to state
-                        if let Some(messages) = messages_to_add {
-                            total_messages += messages.len();
-                            for message in messages {
-                                chat.internal_add_message(message, &mut state.interner);
-                            }
-                        }
+                        // Check if this chat already exists in STATE (e.g. created by concurrent event processing)
+                        let existing_idx = state.chats.iter().position(|c| c.id == chat_id);
 
-                        // Push the chat (now with messages) to state
-                        state.chats.push(chat);
+                        if let Some(idx) = existing_idx {
+                            // Merge DB-loaded messages into the existing chat
+                            if let Some(messages) = messages_to_add {
+                                total_messages += messages.len();
+                                // Deref MutexGuard for split field borrow
+                                let s = &mut *state;
+                                for message in messages {
+                                    s.chats[idx].internal_add_message(message, &mut s.interner);
+                                }
+                            }
+                        } else {
+                            // New chat — add messages then push
+                            if let Some(messages) = messages_to_add {
+                                total_messages += messages.len();
+                                for message in messages {
+                                    chat.internal_add_message(message, &mut state.interner);
+                                }
+                            }
+                            state.chats.push(chat);
+                        }
                     }
 
                     // Sort chats by last message time (do once at the end, not per-chat)
@@ -266,6 +278,8 @@ pub async fn fetch_messages<R: Runtime>(
                 } else {
                     eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
                 }
+
+                state.db_loaded = true;
             }
 
             // Check filesystem integrity for downloaded attachments (queries DB directly)

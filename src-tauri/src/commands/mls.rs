@@ -1247,23 +1247,29 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
                 continue;
             }
 
-            // Get inviter's display name
-            let inviter_name = {
+            // Get inviter's display name and avatar
+            let (inviter_name, avatar) = {
                 let state = STATE.lock().await;
                 if let Some(profile) = state.get_profile(&welcome.welcomer) {
-                    if !profile.nickname.is_empty() {
+                    let name = if !profile.nickname.is_empty() {
                         profile.nickname.to_string()
                     } else if !profile.name.is_empty() {
                         profile.name.to_string()
                     } else {
                         "Someone".to_string()
-                    }
+                    };
+                    let cached = if !profile.avatar_cached.is_empty() {
+                        Some(profile.avatar_cached.to_string())
+                    } else {
+                        None
+                    };
+                    (name, cached)
                 } else {
-                    "Someone".to_string()
+                    ("Someone".to_string(), None)
                 }
             };
 
-            let notification = NotificationData::group_invite(welcome.group_name.clone(), inviter_name);
+            let notification = NotificationData::group_invite(welcome.group_name.clone(), inviter_name, avatar);
             show_notification_generic(notification);
 
             // Mark this welcome as notified

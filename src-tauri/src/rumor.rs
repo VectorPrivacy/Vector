@@ -563,20 +563,25 @@ async fn process_file_attachment(
         .ok_or("Missing file-type tag")?;
     let extension = crate::util::extension_from_mime(mime_type);
     
-    // Get the handle for path resolution
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
-    
-    // Choose the appropriate base directory based on platform
-    let base_directory = if cfg!(target_os = "ios") {
-        tauri::path::BaseDirectory::Document
+    // Resolve the download directory path.
+    // In full-app mode, use Tauri's path resolver for the platform-appropriate Downloads dir.
+    // In headless mode (background service), use a fallback under APP_DATA_DIR — the file
+    // won't be downloaded in the background, but we need a valid path for the Attachment struct
+    // so the Message can be created and the notification sent.
+    let dir = if let Some(handle) = TAURI_APP.get() {
+        let base_directory = if cfg!(target_os = "ios") {
+            tauri::path::BaseDirectory::Document
+        } else {
+            tauri::path::BaseDirectory::Download
+        };
+        handle.path()
+            .resolve("vector", base_directory)
+            .map_err(|e| format!("Failed to resolve directory: {}", e))?
+    } else if let Ok(data_dir) = crate::account_manager::get_app_data_dir() {
+        data_dir.join("vector_downloads")
     } else {
-        tauri::path::BaseDirectory::Download
+        return Err("No path resolver available (no app handle or data dir)".into());
     };
-    
-    // Resolve the directory path
-    let dir = handle.path()
-        .resolve("vector", base_directory)
-        .map_err(|e| format!("Failed to resolve directory: {}", e))?;
     
     // Grab the reported file size
     let reported_size = rumor.tags

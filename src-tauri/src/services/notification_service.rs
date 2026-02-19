@@ -37,40 +37,45 @@ pub struct NotificationData {
     pub group_name: Option<String>,
     /// Optional sender name
     pub sender_name: Option<String>,
+    /// Optional cached avatar file path for the sender
+    pub avatar_path: Option<String>,
 }
 
 impl NotificationData {
     /// Create a DM notification (works for both text and file attachments)
-    pub fn direct_message(sender_name: String, content: String) -> Self {
+    pub fn direct_message(sender_name: String, content: String, avatar_path: Option<String>) -> Self {
         Self {
             notification_type: NotificationType::DirectMessage,
             title: sender_name.clone(),
             body: content,
             group_name: None,
             sender_name: Some(sender_name),
+            avatar_path,
         }
     }
 
     /// Create a group message notification (works for both text and file attachments)
-    pub fn group_message(sender_name: String, group_name: String, content: String) -> Self {
+    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>) -> Self {
         Self {
             notification_type: NotificationType::GroupMessage,
             title: format!("{} - {}", sender_name, group_name),
             body: content,
             group_name: Some(group_name),
             sender_name: Some(sender_name),
+            avatar_path,
         }
     }
 
     /// Create a group invite notification
     #[allow(dead_code)]
-    pub fn group_invite(group_name: String, inviter_name: String) -> Self {
+    pub fn group_invite(group_name: String, inviter_name: String, avatar_path: Option<String>) -> Self {
         Self {
             notification_type: NotificationType::GroupInvite,
-            title: format!("Group Invite: {}", group_name),
+            title: group_name.clone(),
             body: format!("Invited by {}", inviter_name),
             group_name: Some(group_name),
             sender_name: Some(inviter_name),
+            avatar_path,
         }
     }
 }
@@ -83,7 +88,7 @@ pub fn show_notification_generic(data: NotificationData) {
     // notifications when the user is actively using the app.
     #[cfg(target_os = "android")]
     {
-        crate::android::background_sync::post_notification_jni(&data.title, &data.body);
+        crate::android::background_sync::post_notification_jni(&data.title, &data.body, data.avatar_path.as_deref());
         return;
     }
 

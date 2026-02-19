@@ -203,20 +203,26 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                 // Send OS notification for new group messages
                                                                 if was_added && should_notify {
-                                                                    // Get sender name and group name for notification
-                                                                    let (sender_name, group_name) = {
+                                                                    // Get sender name, group name, and avatar for notification
+                                                                    let (sender_name, group_name, avatar) = {
                                                                         let state = crate::STATE.lock().await;
 
-                                                                        let sender = if let Some(profile) = state.get_profile(&sender_npub) {
-                                                                            if !profile.nickname.is_empty() {
+                                                                        let (sender, av) = if let Some(profile) = state.get_profile(&sender_npub) {
+                                                                            let name = if !profile.nickname.is_empty() {
                                                                                 profile.nickname.to_string()
                                                                             } else if !profile.name.is_empty() {
                                                                                 profile.name.to_string()
                                                                             } else {
                                                                                 "Someone".to_string()
-                                                                            }
+                                                                            };
+                                                                            let cached = if !profile.avatar_cached.is_empty() {
+                                                                                Some(profile.avatar_cached.to_string())
+                                                                            } else {
+                                                                                None
+                                                                            };
+                                                                            (name, cached)
                                                                         } else {
-                                                                            "Someone".to_string()
+                                                                            ("Someone".to_string(), None)
                                                                         };
 
                                                                         let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
@@ -225,11 +231,11 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                             "Group Chat".to_string()
                                                                         };
 
-                                                                        (sender, group)
+                                                                        (sender, group, av)
                                                                     };
 
                                                                     // Create notification for text message
-                                                                    let notification = NotificationData::group_message(sender_name, group_name, message.content.clone());
+                                                                    let notification = NotificationData::group_message(sender_name, group_name, message.content.clone(), avatar);
                                                                     show_notification_generic(notification);
                                                                 }
 
@@ -283,20 +289,26 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                 // Send OS notification for new group messages
                                                                 if was_added && should_notify {
-                                                                    // Get sender name and group name for notification
-                                                                    let (sender_name, group_name) = {
+                                                                    // Get sender name, group name, and avatar for notification
+                                                                    let (sender_name, group_name, avatar) = {
                                                                         let state = crate::STATE.lock().await;
 
-                                                                        let sender = if let Some(profile) = state.get_profile(&sender_npub) {
-                                                                            if !profile.nickname.is_empty() {
+                                                                        let (sender, av) = if let Some(profile) = state.get_profile(&sender_npub) {
+                                                                            let name = if !profile.nickname.is_empty() {
                                                                                 profile.nickname.to_string()
                                                                             } else if !profile.name.is_empty() {
                                                                                 profile.name.to_string()
                                                                             } else {
                                                                                 "Someone".to_string()
-                                                                            }
+                                                                            };
+                                                                            let cached = if !profile.avatar_cached.is_empty() {
+                                                                                Some(profile.avatar_cached.to_string())
+                                                                            } else {
+                                                                                None
+                                                                            };
+                                                                            (name, cached)
                                                                         } else {
-                                                                            "Someone".to_string()
+                                                                            ("Someone".to_string(), None)
                                                                         };
 
                                                                         let group = if let Some(chat) = state.get_chat(&group_id_for_persist) {
@@ -305,7 +317,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                             "Group Chat".to_string()
                                                                         };
 
-                                                                        (sender, group)
+                                                                        (sender, group, av)
                                                                     };
 
                                                                     // Create appropriate notification (both text and files use group_message)
@@ -317,7 +329,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     } else {
                                                                         message.content.clone()
                                                                     };
-                                                                    let notification = NotificationData::group_message(sender_name, group_name, content);
+                                                                    let notification = NotificationData::group_message(sender_name, group_name, content, avatar);
 
                                                                     show_notification_generic(notification);
                                                                 }
