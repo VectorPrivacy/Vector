@@ -7,14 +7,12 @@
 //! - Device ID storage
 
 use std::collections::HashMap;
-use tauri::{AppHandle, Runtime};
 
 /// Save MLS groups to SQL database (plaintext columns)
-pub async fn save_mls_groups<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_mls_groups(
     groups: &[crate::mls::MlsGroupMetadata],
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     for group in groups {
         conn.execute(
@@ -41,11 +39,10 @@ pub async fn save_mls_groups<R: Runtime>(
 }
 
 /// Save a single MLS group to SQL database (plaintext columns) - more efficient for adding new groups
-pub async fn save_mls_group<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_mls_group(
     group: &crate::mls::MlsGroupMetadata,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "INSERT OR REPLACE INTO mls_groups (group_id, engine_group_id, creator_pubkey, name, description, avatar_ref, avatar_cached, created_at, updated_at, evicted)
@@ -71,13 +68,12 @@ pub async fn save_mls_group<R: Runtime>(
 
 /// Update only the avatar_cached (and optionally avatar_ref) columns for a single group.
 /// This avoids a full load-all + save cycle when only the avatar changed.
-pub fn update_mls_group_avatar<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn update_mls_group_avatar(
     group_id: &str,
     avatar_cached: &str,
     avatar_ref: Option<&str>,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     if let Some(ref_url) = avatar_ref {
         conn.execute(
@@ -95,10 +91,8 @@ pub fn update_mls_group_avatar<R: Runtime>(
 }
 
 /// Clear avatar_cached for all MLS groups (used when cache is purged).
-pub fn clear_all_mls_group_avatar_cache<R: Runtime>(
-    handle: &AppHandle<R>,
-) -> Result<u64, String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+pub fn clear_all_mls_group_avatar_cache() -> Result<u64, String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
     let changed = conn.execute(
         "UPDATE mls_groups SET avatar_cached = NULL WHERE avatar_cached IS NOT NULL",
         [],
@@ -107,10 +101,8 @@ pub fn clear_all_mls_group_avatar_cache<R: Runtime>(
 }
 
 /// Load MLS groups from SQL database (plaintext columns)
-pub async fn load_mls_groups<R: Runtime>(
-    handle: &AppHandle<R>,
-) -> Result<Vec<crate::mls::MlsGroupMetadata>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+pub async fn load_mls_groups() -> Result<Vec<crate::mls::MlsGroupMetadata>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT group_id, engine_group_id, creator_pubkey, name, description, avatar_ref, avatar_cached, created_at, updated_at, evicted FROM mls_groups"
@@ -138,11 +130,10 @@ pub async fn load_mls_groups<R: Runtime>(
 }
 
 /// Save MLS keypackage index to SQL database (plaintext)
-pub async fn save_mls_keypackages<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_mls_keypackages(
     packages: &[serde_json::Value],
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     // Clear existing keypackages
     conn.execute("DELETE FROM mls_keypackages", [])
@@ -170,10 +161,8 @@ pub async fn save_mls_keypackages<R: Runtime>(
 }
 
 /// Load MLS keypackage index from SQL database (plaintext)
-pub async fn load_mls_keypackages<R: Runtime>(
-    handle: &AppHandle<R>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+pub async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT owner_pubkey, device_id, keypackage_ref, created_at, fetched_at, expires_at FROM mls_keypackages"
@@ -203,11 +192,10 @@ pub async fn load_mls_keypackages<R: Runtime>(
 }
 
 /// Save MLS event cursors to SQL database (plaintext)
-pub async fn save_mls_event_cursors<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_mls_event_cursors(
     cursors: &HashMap<String, crate::mls::EventCursor>,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     for (group_id, cursor) in cursors {
         conn.execute(
@@ -222,10 +210,8 @@ pub async fn save_mls_event_cursors<R: Runtime>(
 }
 
 /// Load MLS event cursors from SQL database (plaintext)
-pub async fn load_mls_event_cursors<R: Runtime>(
-    handle: &AppHandle<R>,
-) -> Result<HashMap<String, crate::mls::EventCursor>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+pub async fn load_mls_event_cursors() -> Result<HashMap<String, crate::mls::EventCursor>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT group_id, last_seen_event_id, last_seen_at FROM mls_event_cursors"
@@ -248,11 +234,10 @@ pub async fn load_mls_event_cursors<R: Runtime>(
 }
 
 /// Save MLS device ID to SQL database (plaintext)
-pub async fn save_mls_device_id<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_mls_device_id(
     device_id: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_device_id', ?1)",
@@ -265,10 +250,8 @@ pub async fn save_mls_device_id<R: Runtime>(
 }
 
 /// Load MLS device ID from SQL database (plaintext)
-pub async fn load_mls_device_id<R: Runtime>(
-    handle: &AppHandle<R>,
-) -> Result<Option<String>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+pub async fn load_mls_device_id() -> Result<Option<String>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let device_id: Option<String> = conn.query_row(
         "SELECT value FROM settings WHERE key = 'mls_device_id'",

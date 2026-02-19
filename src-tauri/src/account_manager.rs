@@ -1,8 +1,26 @@
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, RwLock, Mutex, OnceLock};
 use std::ops::{Deref, DerefMut};
 use lazy_static::lazy_static;
 use tauri::{AppHandle, Runtime, Manager};
+
+// ============================================================================
+// Static App Data Directory (headless-safe — no AppHandle required)
+// ============================================================================
+
+/// App data directory, set once at startup (Tauri setup) or by background service.
+/// All DB/MLS path resolution can use this instead of `handle.path().app_data_dir()`.
+static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the app data directory (call once at Tauri startup or background service init).
+pub fn set_app_data_dir(path: PathBuf) {
+    let _ = APP_DATA_DIR.set(path);
+}
+
+/// Get the app data directory (headless-safe).
+pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
+    APP_DATA_DIR.get().ok_or_else(|| "App data directory not initialized".to_string())
+}
 
 lazy_static! {
     /// Global state tracking the currently active account (npub)
@@ -95,6 +113,22 @@ pub fn get_db_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<Conn
 /// Get the WRITE connection wrapped in an RAII guard (auto-returned on drop).
 pub fn get_write_connection_guard<R: Runtime>(handle: &AppHandle<R>) -> Result<WriteConnectionGuard, String> {
     let conn = get_write_connection(handle)?;
+    Ok(WriteConnectionGuard::new(conn))
+}
+
+// ============================================================================
+// Static Connection Guards (headless-safe — no AppHandle required)
+// ============================================================================
+
+/// Get a READ connection guard using static APP_DATA_DIR (no AppHandle needed).
+pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
+    let conn = get_db_connection_static()?;
+    Ok(ConnectionGuard::new(conn))
+}
+
+/// Get the WRITE connection guard using static APP_DATA_DIR (no AppHandle needed).
+pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
+    let conn = get_write_connection_static()?;
     Ok(WriteConnectionGuard::new(conn))
 }
 
@@ -314,6 +348,47 @@ pub fn get_mls_directory<R: Runtime>(
         std::fs::create_dir_all(&mls_dir)
             .map_err(|e| format!("Failed to create MLS directory: {}", e))?;
         println!("[Account Manager] Created MLS directory: {}", mls_dir.display());
+    }
+
+    Ok(mls_dir)
+}
+
+// ============================================================================
+// Static Path Helpers (headless-safe — no AppHandle required)
+// ============================================================================
+
+/// Get the profile directory using static APP_DATA_DIR (no AppHandle needed).
+pub fn get_profile_directory_static(npub: &str) -> Result<PathBuf, String> {
+    let app_data = get_app_data_dir()?;
+
+    if !npub.starts_with("npub1") {
+        return Err(format!("Invalid npub format: {}", npub));
+    }
+
+    let profile_dir = app_data.join(npub);
+
+    if !profile_dir.exists() {
+        std::fs::create_dir_all(&profile_dir)
+            .map_err(|e| format!("Failed to create profile directory: {}", e))?;
+    }
+
+    Ok(profile_dir)
+}
+
+/// Get the database path using static APP_DATA_DIR (no AppHandle needed).
+pub fn get_database_path_static(npub: &str) -> Result<PathBuf, String> {
+    let profile_dir = get_profile_directory_static(npub)?;
+    Ok(profile_dir.join("vector.db"))
+}
+
+/// Get the MLS directory using static APP_DATA_DIR (no AppHandle needed).
+pub fn get_mls_directory_static(npub: &str) -> Result<PathBuf, String> {
+    let profile_dir = get_profile_directory_static(npub)?;
+    let mls_dir = profile_dir.join("mls");
+
+    if !mls_dir.exists() {
+        std::fs::create_dir_all(&mls_dir)
+            .map_err(|e| format!("Failed to create MLS directory: {}", e))?;
     }
 
     Ok(mls_dir)
@@ -542,6 +617,70 @@ pub fn get_write_connection<R: Runtime>(handle: &AppHandle<R>) -> Result<rusqlit
 pub fn return_write_connection(conn: rusqlite::Connection) {
     let mut writer = DB_WRITE_CONN.lock().unwrap();
     *writer = Some(conn);
+}
+
+// ============================================================================
+// Static Connection Functions (headless-safe — no AppHandle required)
+// ============================================================================
+
+/// Get a READ connection using static APP_DATA_DIR (no AppHandle needed).
+fn get_db_connection_static() -> Result<rusqlite::Connection, String> {
+    {
+        let mut pool = DB_READ_POOL.lock().unwrap();
+        if let Some(conn) = pool.pop() {
+            return Ok(conn);
+        }
+    }
+    let npub = get_current_account()?;
+    let db_path = get_database_path_static(&npub)?;
+    open_db_connection(&db_path)
+}
+
+/// Get the WRITE connection using static APP_DATA_DIR (no AppHandle needed).
+fn get_write_connection_static() -> Result<rusqlite::Connection, String> {
+    {
+        let mut writer = DB_WRITE_CONN.lock().unwrap();
+        if let Some(conn) = writer.take() {
+            return Ok(conn);
+        }
+    }
+    let npub = get_current_account()?;
+    let db_path = get_database_path_static(&npub)?;
+    open_db_connection(&db_path)
+}
+
+/// Initialize the DB pool using static path (for headless/background service).
+pub fn init_db_pool_static(db_path: &std::path::Path) -> Result<(), String> {
+    // Skip if pool already has connections
+    if DB_READ_POOL.lock().unwrap().len() > 0 {
+        return Ok(());
+    }
+
+    let mut conn = open_db_connection(db_path)?;
+    conn.execute_batch(SQL_SCHEMA)
+        .map_err(|e| format!("Failed to apply schema: {}", e))?;
+    run_migrations(&mut conn)?;
+
+    // Pre-warm read pool
+    {
+        let mut pool = DB_READ_POOL.lock().unwrap();
+        for _ in 0..3 {
+            if let Ok(extra) = open_db_connection(db_path) {
+                pool.push(extra);
+            }
+        }
+        pool.push(conn);
+    }
+
+    // Pre-warm write connection
+    {
+        if let Ok(writer) = open_db_connection(db_path) {
+            *DB_WRITE_CONN.lock().unwrap() = Some(writer);
+        }
+    }
+
+    println!("[Account Manager] Static DB pool initialized (4 readers + 1 writer)");
+    Ok(())
 }
 
 // ============================================================================
@@ -1486,7 +1625,7 @@ pub async fn switch_account<R: Runtime>(
 
     // Clear old account's ID caches and preload new account's caches
     crate::db::clear_id_caches();
-    if let Err(e) = crate::db::preload_id_caches(&handle).await {
+    if let Err(e) = crate::db::preload_id_caches().await {
         eprintln!("[Account Manager] Failed to preload ID caches: {}", e);
     }
 

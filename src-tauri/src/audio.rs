@@ -807,12 +807,12 @@ pub fn play_notification_if_enabled<R: Runtime>(handle: &AppHandle<R>) -> Result
 fn load_notification_settings_internal<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<NotificationSettings, String> {
-    let global_mute = match db::get_sql_setting(handle.clone(), "notif_global_mute".to_string()) {
+    let global_mute = match db::get_sql_setting("notif_global_mute".to_string()) {
         Ok(Some(val)) => val == "true",
         _ => false,
     };
 
-    let sound = match db::get_sql_setting(handle.clone(), "notif_sound".to_string()) {
+    let sound = match db::get_sql_setting("notif_sound".to_string()) {
         Ok(Some(val)) => parse_notification_sound(&val),
         _ => NotificationSound::Default,
     };
@@ -826,14 +826,12 @@ fn save_notification_settings_internal<R: Runtime>(
     settings: &NotificationSettings,
 ) -> Result<(), String> {
     db::set_sql_setting(
-        handle.clone(),
         "notif_global_mute".to_string(),
         settings.global_mute.to_string(),
     )
     .map_err(|e| format!("Failed to save global_mute: {}", e))?;
 
     db::set_sql_setting(
-        handle.clone(),
         "notif_sound".to_string(),
         serialize_notification_sound(&settings.sound),
     )

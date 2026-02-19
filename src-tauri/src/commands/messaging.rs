@@ -25,7 +25,7 @@ pub async fn get_chat_messages_paginated<R: Runtime>(
     offset: usize,
 ) -> Result<Vec<Message>, String> {
     // Load messages from database
-    let messages = db::get_chat_messages_paginated(&handle, &chat_id, limit, offset).await?;
+    let messages = db::get_chat_messages_paginated(&chat_id, limit, offset).await?;
 
     // Also add these messages to the backend state for cache synchronization
     // This ensures operations like fetch_msg_metadata can find the messages
@@ -60,7 +60,7 @@ pub async fn get_chat_message_count<R: Runtime>(
     handle: AppHandle<R>,
     chat_id: String,
 ) -> Result<usize, String> {
-    db::get_chat_message_count(&handle, &chat_id).await
+    db::get_chat_message_count(&chat_id).await
 }
 
 /// Get message views (composed from events table) for a chat
@@ -73,10 +73,10 @@ pub async fn get_message_views<R: Runtime>(
     offset: usize,
 ) -> Result<Vec<Message>, String> {
     // Convert chat identifier to database ID
-    let chat_int_id = db::get_chat_id_by_identifier(&handle, &chat_id)?;
+    let chat_int_id = db::get_chat_id_by_identifier(&chat_id)?;
 
     // Get materialized message views from events
-    let messages = db::get_message_views(&handle, chat_int_id, limit, offset).await?;
+    let messages = db::get_message_views(chat_int_id, limit, offset).await?;
 
     // Sync to backend state for cache compatibility (batch insert for efficiency)
     // Clone for return, move originals to batch (zero-copy in batch insert)
@@ -113,7 +113,7 @@ pub async fn get_messages_around_id<R: Runtime>(
     target_message_id: String,
     context_before: usize,
 ) -> Result<Vec<Message>, String> {
-    let messages = db::get_messages_around_id(&handle, &chat_id, &target_message_id, context_before).await?;
+    let messages = db::get_messages_around_id(&chat_id, &target_message_id, context_before).await?;
 
     // Sync to backend state so fetch_msg_metadata and other functions can find these messages
     // Clone for return, move originals to batch (zero-copy in batch insert)
@@ -152,7 +152,7 @@ pub async fn get_system_events<R: Runtime>(
     handle: AppHandle<R>,
     conversation_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let events = db::get_system_events_for_chat(&handle, &conversation_id).await?;
+    let events = db::get_system_events_for_chat(&conversation_id).await?;
 
     // Convert StoredEvents to frontend-friendly format
     let system_events: Vec<serde_json::Value> = events.iter().map(|event| {

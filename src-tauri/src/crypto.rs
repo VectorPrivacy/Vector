@@ -243,7 +243,7 @@ pub fn is_encryption_enabled() -> bool {
 
 /// Conditionally encrypt content based on encryption_enabled setting.
 /// If encryption is disabled, returns the input unchanged.
-pub async fn maybe_encrypt<R: tauri::Runtime>(_handle: &tauri::AppHandle<R>, input: String) -> String {
+pub async fn maybe_encrypt(input: String) -> String {
     if is_encryption_enabled() {
         internal_encrypt(input, None).await
     } else {
@@ -260,7 +260,7 @@ pub async fn maybe_encrypt<R: tauri::Runtime>(_handle: &tauri::AppHandle<R>, inp
 /// - We detect this by checking if failed-to-decrypt content "looks encrypted"
 /// - If it doesn't look encrypted, it's probably already-decrypted plaintext → return as-is
 /// - If it does look encrypted but decryption failed, that's a genuine error → propagate
-pub async fn maybe_decrypt<R: tauri::Runtime>(_handle: &tauri::AppHandle<R>, input: String) -> Result<String, ()> {
+pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
     if is_encryption_enabled() {
         // Encryption enabled - try to decrypt
         match internal_decrypt(input.clone(), None).await {

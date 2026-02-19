@@ -55,12 +55,10 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
         }
         
         // Cache miss - check database as fallback (for events older than cache window)
-        if let Some(handle) = TAURI_APP.get() {
-            if let Ok(exists) = db::wrapper_event_exists(handle, &wrapper_event_id).await {
-                if exists {
-                    // Already processed this giftwrap, skip (DB hit)
-                    return false;
-                }
+        if let Ok(exists) = db::wrapper_event_exists(&wrapper_event_id).await {
+            if exists {
+                // Already processed this giftwrap, skip (DB hit)
+                return false;
             }
         }
     }
@@ -245,11 +243,11 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         RumorProcessingResult::Ignored => false,
                         RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                             // Save PIVX payment event to database
-                            if let Some(handle) = TAURI_APP.get() {
-                                let event_timestamp = event.created_at;
-                                let _ = db::save_pivx_payment_event(handle, &contact, event).await;
+                            let event_timestamp = event.created_at;
+                            let _ = db::save_pivx_payment_event(&contact, event).await;
 
-                                // Emit PIVX payment event to frontend for DMs
+                            // Emit PIVX payment event to frontend for DMs
+                            if let Some(handle) = TAURI_APP.get() {
                                 let _ = handle.emit("pivx_payment_received", serde_json::json!({
                                     "conversation_id": contact,
                                     "gift_code": gift_code,
@@ -265,18 +263,16 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
                         }
                         RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
                             // Skip if this edit event was already processed (deduplication)
-                            if let Some(handle) = TAURI_APP.get() {
-                                if db::event_exists(handle, &event.id).unwrap_or(false) {
-                                    return true; // Already processed, skip
-                                }
-
-                                // Save edit event to database with proper chat_id
-                                if let Ok(chat_id) = db::get_chat_id_by_identifier(handle, &contact) {
-                                    event.chat_id = chat_id;
-                                }
-                                event.wrapper_event_id = Some(wrapper_event_id.clone());
-                                let _ = db::save_event(handle, &event).await;
+                            if db::event_exists(&event.id).unwrap_or(false) {
+                                return true; // Already processed, skip
                             }
+
+                            // Save edit event to database with proper chat_id
+                            if let Ok(chat_id) = db::get_chat_id_by_identifier(&contact) {
+                                event.chat_id = chat_id;
+                            }
+                            event.wrapper_event_id = Some(wrapper_event_id.clone());
+                            let _ = db::save_event(&event).await;
 
                             // Update message in state and emit to frontend
                             let msg_for_emit = {
@@ -312,30 +308,26 @@ pub(crate) async fn handle_event(event: Event, is_new: bool) -> bool {
 /// Handle a processed text message
 async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
-    if let Some(handle) = TAURI_APP.get() {
-        if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
-            if exists {
-                // Message already in DB but we got here (wrapper check passed)
-                // Try to backfill the wrapper_event_id for future fast lookups
-                // If backfill fails (message already has a different wrapper), add this wrapper to cache
-                // to prevent repeated processing of duplicate giftwraps
-                if let Ok(updated) = db::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
-                    if !updated {
-                        // Message has a different wrapper_id - add this duplicate wrapper to cache
-                        let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id_bytes);
-                    }
+    if let Ok(exists) = db::message_exists_in_db(&msg.id).await {
+        if exists {
+            // Message already in DB but we got here (wrapper check passed)
+            // Try to backfill the wrapper_event_id for future fast lookups
+            // If backfill fails (message already has a different wrapper), add this wrapper to cache
+            // to prevent repeated processing of duplicate giftwraps
+            if let Ok(updated) = db::update_wrapper_event_id(&msg.id, wrapper_event_id).await {
+                if !updated {
+                    // Message has a different wrapper_id - add this duplicate wrapper to cache
+                    let mut cache = WRAPPER_ID_CACHE.lock().await;
+                    cache.insert(wrapper_event_id_bytes);
                 }
-                return false;
             }
+            return false;
         }
     }
 
     // Populate reply context before emitting (for replies to old messages not in frontend cache)
     if !msg.replied_to.is_empty() {
-        if let Some(handle) = TAURI_APP.get() {
-            let _ = db::populate_reply_context(&handle, &mut msg).await;
-        }
+        let _ = db::populate_reply_context(&mut msg).await;
     }
 
     // Add the message to the state and handle database save in one operation to avoid multiple locks
@@ -383,10 +375,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
         }
 
         // Save the new message to DB (chat_id = contact npub for DMs)
-        if let Some(handle) = TAURI_APP.get() {
-            // Only save the single new message (efficient!)
-            let _ = db::save_message(handle.clone(), contact, &msg).await;
-        }
+        let _ = db::save_message(contact, &msg).await;
         // Ensure OS badge is updated immediately after accepting the message
         if let Some(handle) = TAURI_APP.get() {
             let _ = commands::messaging::update_unread_counter(handle.clone()).await;
@@ -399,30 +388,26 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
 /// Handle a processed file attachment
 async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
-    if let Some(handle) = TAURI_APP.get() {
-        if let Ok(exists) = db::message_exists_in_db(&handle, &msg.id).await {
-            if exists {
-                // Message already in DB but we got here (wrapper check passed)
-                // Try to backfill the wrapper_event_id for future fast lookups
-                // If backfill fails (message already has a different wrapper), add this wrapper to cache
-                // to prevent repeated processing of duplicate giftwraps
-                if let Ok(updated) = db::update_wrapper_event_id(&handle, &msg.id, wrapper_event_id).await {
-                    if !updated {
-                        // Message has a different wrapper_id - add this duplicate wrapper to cache
-                        let mut cache = WRAPPER_ID_CACHE.lock().await;
-                        cache.insert(wrapper_event_id_bytes);
-                    }
+    if let Ok(exists) = db::message_exists_in_db(&msg.id).await {
+        if exists {
+            // Message already in DB but we got here (wrapper check passed)
+            // Try to backfill the wrapper_event_id for future fast lookups
+            // If backfill fails (message already has a different wrapper), add this wrapper to cache
+            // to prevent repeated processing of duplicate giftwraps
+            if let Ok(updated) = db::update_wrapper_event_id(&msg.id, wrapper_event_id).await {
+                if !updated {
+                    // Message has a different wrapper_id - add this duplicate wrapper to cache
+                    let mut cache = WRAPPER_ID_CACHE.lock().await;
+                    cache.insert(wrapper_event_id_bytes);
                 }
-                return false;
             }
+            return false;
         }
     }
 
     // Populate reply context before emitting (for replies to old messages not in frontend cache)
     if !msg.replied_to.is_empty() {
-        if let Some(handle) = TAURI_APP.get() {
-            let _ = db::populate_reply_context(&handle, &mut msg).await;
-        }
+        let _ = db::populate_reply_context(&mut msg).await;
     }
 
     // Get file extension for notification
@@ -434,10 +419,10 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
     let (was_msg_added_to_state, _active_typers) = {
         let mut state = STATE.lock().await;
         let added = state.add_message_to_participant(contact, msg.clone());
-        
+
         // Clear typing indicator for the sender (they just sent a message)
         let typers = state.update_typing_and_get_active(contact, contact, 0);
-        
+
         (added, typers)
     };
 
@@ -481,10 +466,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
         }
 
         // Save the new message to DB (chat_id = contact npub for DMs)
-        if let Some(handle) = TAURI_APP.get() {
-            // Only save the single new message (efficient!)
-            let _ = db::save_message(handle.clone(), contact, &msg).await;
-        }
+        let _ = db::save_message(contact, &msg).await;
         // Ensure OS badge is updated immediately after accepting the attachment
         if let Some(handle) = TAURI_APP.get() {
             let _ = commands::messaging::update_unread_counter(handle.clone()).await;
@@ -512,16 +494,16 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
 
     // Save the updated message with the new reaction to our DB (outside of state lock)
     if let Some(chat_id) = chat_id_for_save {
-        if let Some(handle) = TAURI_APP.get() {
-            // Get only the message that was updated
-            let updated_message = {
-                let state = STATE.lock().await;
-                state.find_message(&reaction.reference_id)
-                    .map(|(_, msg)| msg.clone())
-            };
-            
-            if let Some(msg) = updated_message {
-                let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
+        // Get only the message that was updated
+        let updated_message = {
+            let state = STATE.lock().await;
+            state.find_message(&reaction.reference_id)
+                .map(|(_, msg)| msg.clone())
+        };
+
+        if let Some(msg) = updated_message {
+            let _ = db::save_message(&chat_id, &msg).await;
+            if let Some(handle) = TAURI_APP.get() {
                 let _ = handle.emit("message_update", serde_json::json!({
                     "old_id": &reaction.reference_id,
                     "message": &msg,
@@ -537,30 +519,28 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
 /// Handle an unknown event type - store for future compatibility
 async fn handle_unknown_event(mut event: StoredEvent, contact: &str) -> bool {
     // Get the chat_id for this contact
-    if let Some(handle) = TAURI_APP.get() {
-        match db::get_chat_id_by_identifier(&handle, contact) {
-            Ok(chat_id) => {
-                event.chat_id = chat_id;
-                // Save the event to the database
-                if let Err(e) = db::save_event(&handle, &event).await {
-                    eprintln!("Failed to save unknown event: {}", e);
-                    return false;
-                }
-                // Emit event to frontend (it can render as "Unknown Event" placeholder)
+    match db::get_chat_id_by_identifier(contact) {
+        Ok(chat_id) => {
+            event.chat_id = chat_id;
+            // Save the event to the database
+            if let Err(e) = db::save_event(&event).await {
+                eprintln!("Failed to save unknown event: {}", e);
+                return false;
+            }
+            // Emit event to frontend (it can render as "Unknown Event" placeholder)
+            if let Some(handle) = TAURI_APP.get() {
                 let _ = handle.emit("event_new", serde_json::json!({
                     "event": event,
                     "chat_id": contact
                 }));
-                true
             }
-            Err(_) => {
-                // Chat doesn't exist yet, skip this event
-                eprintln!("Cannot save unknown event: chat not found for {}", contact);
-                false
-            }
+            true
         }
-    } else {
-        false
+        Err(_) => {
+            // Chat doesn't exist yet, skip this event
+            eprintln!("Cannot save unknown event: chat not found for {}", contact);
+            false
+        }
     }
 }
 

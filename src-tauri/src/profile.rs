@@ -286,7 +286,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
             let slim = state.serialize_profile(id).unwrap();
             handle.emit("profile_update", &slim).ok();
             drop(state);
-            db::set_profile(handle.clone(), slim).await.ok();
+            db::set_profile(slim).await.ok();
         }
     }
 }
@@ -344,7 +344,7 @@ pub async fn cache_all_profile_images() {
                             let slim = state.serialize_profile(id).unwrap();
                             handle.emit("profile_update", &slim).ok();
                             drop(state);
-                            db::set_profile(handle.clone(), slim).await.ok();
+                            db::set_profile(slim).await.ok();
                         }
                     }
                 }
@@ -369,7 +369,7 @@ pub async fn cache_all_profile_images() {
                             let slim = state.serialize_profile(id).unwrap();
                             handle.emit("profile_update", &slim).ok();
                             drop(state);
-                            db::set_profile(handle.clone(), slim).await.ok();
+                            db::set_profile(slim).await.ok();
                         }
                     }
                 }
@@ -506,7 +506,7 @@ pub async fn load_profile(npub: String) -> bool {
 
                 if let Some((slim, avatar_url, banner_url)) = save_data {
                     let handle = TAURI_APP.get().unwrap();
-                    db::set_profile(handle.clone(), slim).await.unwrap();
+                    db::set_profile(slim).await.unwrap();
 
                     // Cache avatar/banner images in the background for offline access
                     let npub_clone = npub.clone();
@@ -655,7 +655,7 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
             }; // Drop STATE lock before async operations
 
             let handle = TAURI_APP.get().unwrap();
-            db::set_profile(handle.clone(), slim).await.ok();
+            db::set_profile(slim).await.ok();
 
             // Cache avatar/banner images in the background for offline access
             let npub_clone = npub.clone();
@@ -813,7 +813,7 @@ pub async fn toggle_muted(npub: String) -> bool {
     }; // Drop STATE lock before async DB operation
 
     if let Some(slim) = slim {
-        db::set_profile(handle.clone(), slim).await.unwrap();
+        db::set_profile(slim).await.unwrap();
     }
 
     // Refresh unread badge count to reflect mute changes immediately
@@ -841,7 +841,7 @@ pub async fn set_nickname(npub: String, nickname: String) -> bool {
         }
         let slim = state.serialize_profile(id).unwrap();
         drop(state);
-        db::set_profile(handle.clone(), slim).await.unwrap();
+        db::set_profile(slim).await.unwrap();
         true
     } else {
         false

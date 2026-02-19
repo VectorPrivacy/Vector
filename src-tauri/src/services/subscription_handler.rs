@@ -91,8 +91,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                     if let Some(group_wire_id) = group_wire_id_opt {
                         // Check if we are a member of this group (metadata check) without constructing MLS engine
-                        let handle = TAURI_APP.get().unwrap().clone();
-                        let is_member: bool = if let Ok(groups) = db::load_mls_groups(&handle).await {
+                        let is_member: bool = if let Ok(groups) = db::load_mls_groups().await {
                             groups.iter().any(|g| {
                                 g.group_id == group_wire_id || g.engine_group_id == group_wire_id
                             })
@@ -135,7 +134,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                             let _guard = rt.block_on(group_lock.lock());
 
                             // EventTracker: Skip if already processed (pre-check before MDK call)
-                            if crate::mls::is_mls_event_processed(&app_handle, &ev.id.to_hex()) {
+                            if crate::mls::is_mls_event_processed(&ev.id.to_hex()) {
                                 // Already processed by sync or previous live handler - skip
                                 return None;
                             }
@@ -178,9 +177,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                             RumorProcessingResult::TextMessage(mut message) => {
                                                                 // Populate reply context for old messages not in frontend cache
                                                                 if !message.replied_to.is_empty() {
-                                                                    if let Some(handle) = TAURI_APP.get() {
-                                                                        let _ = db::populate_reply_context(&handle, &mut message).await;
-                                                                    }
+                                                                    let _ = db::populate_reply_context(&mut message).await;
                                                                 }
 
                                                                 // Clear typing indicator for this sender (they just sent a message)
@@ -239,19 +236,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                 // Save to database if message was added
                                                                 if was_added {
-                                                                    if let Some(handle) = TAURI_APP.get() {
-                                                                        // Save chat metadata + the single new message
-                                                                        let slim = {
-                                                                            let state = crate::STATE.lock().await;
-                                                                            state.get_chat(&group_id_for_persist).map(|c| {
-                                                                                crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
-                                                                            })
-                                                                        };
+                                                                    // Save chat metadata + the single new message
+                                                                    let slim = {
+                                                                        let state = crate::STATE.lock().await;
+                                                                        state.get_chat(&group_id_for_persist).map(|c| {
+                                                                            crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
+                                                                        })
+                                                                    };
 
-                                                                        if let Some(slim) = slim {
-                                                                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
-                                                                            let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
-                                                                        }
+                                                                    if let Some(slim) = slim {
+                                                                        let _ = crate::db::chats::save_slim_chat(slim).await;
+                                                                        let _ = db::save_message(&group_id_for_persist, &message).await;
                                                                     }
                                                                     Some(message)
                                                                 } else {
@@ -261,9 +256,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                             RumorProcessingResult::FileAttachment(mut message) => {
                                                                 // Populate reply context for old messages not in frontend cache
                                                                 if !message.replied_to.is_empty() {
-                                                                    if let Some(handle) = TAURI_APP.get() {
-                                                                        let _ = db::populate_reply_context(&handle, &mut message).await;
-                                                                    }
+                                                                    let _ = db::populate_reply_context(&mut message).await;
                                                                 }
 
                                                                 // Clear typing indicator for this sender (they just sent a message)
@@ -332,19 +325,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                 // Save to database if message was added
                                                                 if was_added {
-                                                                    if let Some(handle) = TAURI_APP.get() {
-                                                                        // Get chat and save it
-                                                                        let slim = {
-                                                                            let state = crate::STATE.lock().await;
-                                                                            state.get_chat(&group_id_for_persist).map(|c| {
-                                                                                crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
-                                                                            })
-                                                                        };
+                                                                    // Get chat and save it
+                                                                    let slim = {
+                                                                        let state = crate::STATE.lock().await;
+                                                                        state.get_chat(&group_id_for_persist).map(|c| {
+                                                                            crate::db::chats::SlimChatDB::from_chat(c, &state.interner)
+                                                                        })
+                                                                    };
 
-                                                                        if let Some(slim) = slim {
-                                                                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
-                                                                            let _ = db::save_message(handle.clone(), &group_id_for_persist, &message).await;
-                                                                        }
+                                                                    if let Some(slim) = slim {
+                                                                        let _ = crate::db::chats::save_slim_chat(slim).await;
+                                                                        let _ = db::save_message(&group_id_for_persist, &message).await;
                                                                     }
                                                                     Some(message)
                                                                 } else {
@@ -366,15 +357,15 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                 // Save the updated message to database immediately (like DM reactions)
                                                                 if was_added {
                                                                     if let Some(chat_id) = chat_id_for_save {
-                                                                        if let Some(handle) = TAURI_APP.get() {
-                                                                            let updated_message = {
-                                                                                let state = crate::STATE.lock().await;
-                                                                                state.find_message(&reaction.reference_id)
-                                                                                    .map(|(_, msg)| msg.clone())
-                                                                            };
-                                                                            
-                                                                            if let Some(msg) = updated_message {
-                                                                                let _ = db::save_message(handle.clone(), &chat_id, &msg).await;
+                                                                        let updated_message = {
+                                                                            let state = crate::STATE.lock().await;
+                                                                            state.find_message(&reaction.reference_id)
+                                                                                .map(|(_, msg)| msg.clone())
+                                                                        };
+
+                                                                        if let Some(msg) = updated_message {
+                                                                            let _ = db::save_message(&chat_id, &msg).await;
+                                                                            if let Some(handle) = TAURI_APP.get() {
                                                                                 let _ = handle.emit("message_update", serde_json::json!({
                                                                                     "old_id": &reaction.reference_id,
                                                                                     "message": &msg,
@@ -406,7 +397,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                             }
                                                             RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
                                                                 // Deduplicate by event ID - skip if already processed
-                                                                if db::event_exists(&app_handle, &event_id).unwrap_or(false) {
+                                                                if db::event_exists(&event_id).unwrap_or(false) {
                                                                     println!("[MLS] Live: Skipping duplicate leave request: {}", event_id);
                                                                     return None;
                                                                 }
@@ -462,7 +453,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                         // Save system event - only emit if actually inserted (not duplicate)
                                                                         let was_inserted = db::save_system_event_by_id(
-                                                                            handle,
                                                                             &event_id,
                                                                             &group_id_for_persist,
                                                                             crate::db::SystemEventType::MemberLeft,
@@ -504,20 +494,18 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                             RumorProcessingResult::UnknownEvent(mut event) => {
                                                                 // Store unknown events for future compatibility
                                                                 // Get chat_id and save the event
-                                                                if let Some(handle) = TAURI_APP.get() {
-                                                                    if let Ok(chat_id) = db::get_chat_id_by_identifier(handle, &group_id_for_persist) {
-                                                                        event.chat_id = chat_id;
-                                                                        let _ = db::save_event(handle, &event).await;
-                                                                    }
+                                                                if let Ok(chat_id) = db::get_chat_id_by_identifier(&group_id_for_persist) {
+                                                                    event.chat_id = chat_id;
+                                                                    let _ = db::save_event(&event).await;
                                                                 }
                                                                 None // Don't emit as message
                                                             }
                                                             RumorProcessingResult::Ignored => None,
                                                             RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
                                                                 // Save PIVX payment event and emit to frontend
+                                                                let event_timestamp = event.created_at;
+                                                                let _ = db::save_pivx_payment_event(&group_id_for_persist, event).await;
                                                                 if let Some(handle) = TAURI_APP.get() {
-                                                                    let event_timestamp = event.created_at;
-                                                                    let _ = db::save_pivx_payment_event(handle, &group_id_for_persist, event).await;
 
                                                                     let sender_npub = msg.pubkey.to_bech32().unwrap_or_default();
                                                                     let _ = handle.emit("pivx_payment_received", serde_json::json!({
@@ -535,17 +523,15 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                             }
                                                             RumorProcessingResult::Edit { message_id, new_content, edited_at, event } => {
                                                                 // Skip if this edit event was already processed (deduplication)
-                                                                if let Some(handle) = TAURI_APP.get() {
-                                                                    if db::event_exists(handle, &event.id).unwrap_or(false) {
-                                                                        return None; // Already processed, skip
-                                                                    }
+                                                                if db::event_exists(&event.id).unwrap_or(false) {
+                                                                    return None; // Already processed, skip
+                                                                }
 
-                                                                    // Save edit event to database
-                                                                    if let Ok(chat_id) = db::get_chat_id_by_identifier(handle, &group_id_for_persist) {
-                                                                        let mut event_with_chat = event;
-                                                                        event_with_chat.chat_id = chat_id;
-                                                                        let _ = db::save_event(handle, &event_with_chat).await;
-                                                                    }
+                                                                // Save edit event to database
+                                                                if let Ok(chat_id) = db::get_chat_id_by_identifier(&group_id_for_persist) {
+                                                                    let mut event_with_chat = event;
+                                                                    event_with_chat.chat_id = chat_id;
+                                                                    let _ = db::save_event(&event_with_chat).await;
                                                                 }
 
                                                                 // Update message in state and emit to frontend
@@ -577,7 +563,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                             });
 
                                             // EventTracker: Track as processed after successful handling
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
 
                                             processed
                                         }
@@ -625,7 +611,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                 }
                                             }
                                             // EventTracker: Track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Proposal(_update_result) => {
@@ -637,17 +623,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                 })).ok();
                                             }
                                             // EventTracker: Track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::PendingProposal { .. } => {
                                             // Pending proposal - track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::IgnoredProposal { .. } => {
                                             // Ignored proposal - track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                         mdk_core::prelude::MessageProcessingResult::Unprocessable { mls_group_id: _ } => {
@@ -659,7 +645,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                         // Other message types (ExternalJoinProposal) are not persisted as chat messages
                                         _ => {
                                             // EventTracker: Track as processed
-                                            let _ = crate::mls::track_mls_event_processed(&app_handle, &ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
+                                            let _ = crate::mls::track_mls_event_processed(&ev.id.to_hex(), &group_id_for_persist, ev.created_at.as_secs());
                                             None
                                         }
                                     }
@@ -691,10 +677,12 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                         if let Some(record) = emit_record {
                             // Emit UI event (no MLS operations here, just event emission)
-                            let _ = handle.emit("mls_message_new", serde_json::json!({
-                                "group_id": group_id_for_emit,
-                                "message": record
-                            }));
+                            if let Some(handle) = TAURI_APP.get() {
+                                let _ = handle.emit("mls_message_new", serde_json::json!({
+                                    "group_id": group_id_for_emit,
+                                    "message": record
+                                }));
+                            }
                         }
                     }
                 }

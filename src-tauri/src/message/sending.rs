@@ -55,7 +55,7 @@ async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
             "message": &msg,
             "chat_id": &chat_id
         })).unwrap();
-        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
+        let _ = crate::db::save_message(&chat_id, &msg).await;
     }
 }
 
@@ -429,7 +429,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     "message": &msg,
                     "chat_id": &receiver
                 })).unwrap();
-                let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
+                let _ = crate::db::save_message(&receiver, &msg).await;
             }
 
             return Ok(MessageSendResult {
@@ -466,7 +466,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
             // Fallback: check database if not found in memory (covers all stored attachments)
             if found_attachment.is_none() {
-                if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(handle, &file_hash).await {
+                if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(&file_hash).await {
                     found_attachment = Some(Attachment {
                         id: attachment_ref.hash,
                         url: attachment_ref.url,
@@ -889,8 +889,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 "message": &msg,
                                 "chat_id": &receiver
                             }));
-                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
-                            let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
+                            let _ = crate::db::chats::save_slim_chat(slim).await;
+                            let _ = crate::db::save_message(&receiver, &msg).await;
                         }
                         
                         break;

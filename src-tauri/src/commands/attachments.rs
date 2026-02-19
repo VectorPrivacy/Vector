@@ -255,7 +255,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 drop(state); // Release lock before DB call
 
                                 let _ = db::update_attachment_downloaded_status(
-                                    handle,
                                     &chat_id_for_db,
                                     &msg_id_clone,
                                     &attachment_id_clone,
@@ -426,7 +425,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     // Drop the STATE lock before performing async I/O
                     drop(state);
 
-                    let _ = db::save_message(handle.clone(), &npub, &updated_message).await;
+                    let _ = db::save_message(&npub, &updated_message).await;
                 }
             }
 

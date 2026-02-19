@@ -437,7 +437,7 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
                 })
             };
             if let Some(slim) = slim {
-                let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
+                let _ = crate::db::chats::save_slim_chat(slim).await;
             }
         }
     }

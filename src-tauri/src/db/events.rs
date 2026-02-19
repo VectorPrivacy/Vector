@@ -7,7 +7,6 @@
 //! - Reply context population
 
 use std::collections::HashMap;
-use tauri::{AppHandle, Runtime};
 
 use crate::{Message, Attachment, Reaction};
 use crate::message::EditEntry;
@@ -23,11 +22,10 @@ use super::{get_or_create_chat_id, SystemEventType};
 ///
 /// This is the primary storage function for the flat event architecture.
 /// All events (messages, reactions, attachments, etc.) are stored as flat rows.
-pub async fn save_event<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn save_event(
     event: &StoredEvent,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     // Serialize tags to JSON
     let tags_json = serde_json::to_string(&event.tags)
@@ -38,7 +36,7 @@ pub async fn save_event<R: Runtime>(
         || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
         || event.kind == event_kind::MESSAGE_EDIT
     {
-        maybe_encrypt(handle, event.content.clone()).await
+        maybe_encrypt(event.content.clone()).await
     } else {
         event.content.clone()
     };
@@ -76,17 +74,16 @@ pub async fn save_event<R: Runtime>(
 /// Save a PIVX payment event to the events table
 ///
 /// Resolves the chat_id from the conversation identifier and saves the event.
-pub async fn save_pivx_payment_event<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn save_pivx_payment_event(
     conversation_id: &str,
     mut event: StoredEvent,
 ) -> Result<(), String> {
     // Resolve chat_id from conversation identifier
-    let chat_id = get_or_create_chat_id(handle, conversation_id)?;
+    let chat_id = get_or_create_chat_id(conversation_id)?;
     event.chat_id = chat_id;
 
     // Save the event
-    save_event(handle, &event).await
+    save_event(&event).await
 }
 
 /// Save a system event (member joined/left) to the events table
@@ -94,8 +91,7 @@ pub async fn save_pivx_payment_event<R: Runtime>(
 /// Uses INSERT OR IGNORE for deduplication. Returns `true` if the event was
 /// actually inserted (new), `false` if it already existed (duplicate).
 /// Callers should only emit frontend events if this returns `true`.
-pub async fn save_system_event_by_id<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn save_system_event_by_id(
     event_id: &str,
     conversation_id: &str,
     event_type: SystemEventType,
@@ -105,7 +101,7 @@ pub async fn save_system_event_by_id<R: Runtime>(
     use crate::stored_event::event_kind;
 
     // Resolve chat_id from conversation identifier
-    let chat_id = get_or_create_chat_id(handle, conversation_id)?;
+    let chat_id = get_or_create_chat_id(conversation_id)?;
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -126,7 +122,7 @@ pub async fn save_system_event_by_id<R: Runtime>(
     let tags_json = serde_json::to_string(&tags)
         .map_err(|e| format!("Failed to serialize tags: {}", e))?;
 
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     // Use INSERT OR IGNORE - returns 0 rows affected if duplicate
     let rows_affected = conn.execute(
@@ -161,11 +157,10 @@ pub async fn save_system_event_by_id<R: Runtime>(
 /// Get PIVX payment events for a chat
 ///
 /// Returns all PIVX payment events (kind 30078 with d=pivx-payment tag) for a conversation.
-pub async fn get_pivx_payments_for_chat<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_pivx_payments_for_chat(
     conversation_id: &str,
 ) -> Result<Vec<StoredEvent>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Get chat_id from conversation identifier
     let chat_id: i64 = conn.query_row(
@@ -234,11 +229,10 @@ pub async fn get_pivx_payments_for_chat<R: Runtime>(
 /// Get system events for a chat (member joined/left, etc.)
 ///
 /// Returns all system events (kind 30078 with d=system-event tag) for a conversation.
-pub async fn get_system_events_for_chat<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_system_events_for_chat(
     conversation_id: &str,
 ) -> Result<Vec<StoredEvent>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Get chat_id from conversation identifier
     let chat_id: i64 = conn.query_row(
@@ -307,8 +301,7 @@ pub async fn get_system_events_for_chat<R: Runtime>(
 ///
 /// Reactions are stored as separate events referencing the message they react to.
 /// This is the Nostr-standard way to store reactions (NIP-25).
-pub async fn save_reaction_event<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn save_reaction_event(
     reaction: &Reaction,
     chat_id: i64,
     user_id: Option<i64>,
@@ -340,15 +333,14 @@ pub async fn save_reaction_event<R: Runtime>(
         preview_metadata: None,
     };
 
-    save_event(handle, &event).await
+    save_event(&event).await
 }
 
 /// Save a message edit as a kind=16 event in the events table
 ///
 /// Edit events reference the original message and contain the new content.
 /// The content is encrypted just like DM content.
-pub async fn save_edit_event<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn save_edit_event(
     edit_id: &str,
     message_id: &str,
     new_content: &str,
@@ -386,15 +378,14 @@ pub async fn save_edit_event<R: Runtime>(
         preview_metadata: None,
     };
 
-    save_event(handle, &event).await
+    save_event(&event).await
 }
 
 /// Check if an event exists in the events table
-pub fn event_exists<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn event_exists(
     event_id: &str,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
@@ -410,8 +401,7 @@ pub fn event_exists<R: Runtime>(
 ///
 /// Returns events ordered by created_at descending (newest first).
 /// Optionally filter by event kinds.
-pub async fn get_events<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_events(
     chat_id: i64,
     kinds: Option<&[u16]>,
     limit: usize,
@@ -420,7 +410,7 @@ pub async fn get_events<R: Runtime>(
     // Do all SQLite work synchronously in a block to avoid Send issues
     // Connection guard ensures connection is returned even on early error returns
     let events: Vec<StoredEvent> = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
 
         // Build query based on whether kinds filter is provided
         if let Some(k) = kinds {
@@ -499,7 +489,7 @@ pub async fn get_events<R: Runtime>(
     let mut decrypted_events = Vec::with_capacity(events.len());
     for mut event in events {
         if event.kind == event_kind::MLS_CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
-            event.content = maybe_decrypt(handle, event.content).await
+            event.content = maybe_decrypt(event.content).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
         }
         decrypted_events.push(event);
@@ -536,15 +526,14 @@ fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
 ///
 /// Used to fetch reactions and attachments for a set of messages.
 /// This is the core function for building materialized views.
-pub async fn get_related_events<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_related_events(
     reference_ids: &[String],
 ) -> Result<Vec<StoredEvent>, String> {
     if reference_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let placeholders: String = reference_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
@@ -603,8 +592,7 @@ struct ReplyContext {
 
 /// Fetch reply context for a list of message IDs
 /// Returns a HashMap of message_id -> ReplyContext
-async fn get_reply_contexts<R: Runtime>(
-    handle: &AppHandle<R>,
+async fn get_reply_contexts(
     message_ids: &[String],
 ) -> Result<HashMap<String, ReplyContext>, String> {
     if message_ids.is_empty() {
@@ -614,7 +602,7 @@ async fn get_reply_contexts<R: Runtime>(
     // Do all SQLite work synchronously in a block to avoid Send issues
     // Connection guard ensures connection is returned even on early error returns
     let (events, edits): (Vec<(String, i32, String, Option<String>)>, Vec<(String, String)>) = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
 
         // Build placeholders for IN clause
         let placeholders: String = (0..message_ids.len())
@@ -698,7 +686,7 @@ async fn get_reply_contexts<R: Runtime>(
         let decrypted_content = if kind == event_kind::MLS_CHAT_MESSAGE as i32
             || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
         {
-            maybe_decrypt(handle, content_to_decrypt).await
+            maybe_decrypt(content_to_decrypt).await
                 .unwrap_or_else(|_| "[Decryption failed]".to_string())
         } else {
             // File attachments don't have displayable content
@@ -717,15 +705,14 @@ async fn get_reply_contexts<R: Runtime>(
 
 /// Populate reply context for a single message before emitting to frontend
 /// This is used for real-time messages that don't go through get_message_views
-pub async fn populate_reply_context<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn populate_reply_context(
     message: &mut Message,
 ) -> Result<(), String> {
     if message.replied_to.is_empty() {
         return Ok(());
     }
 
-    let contexts = get_reply_contexts(handle, &[message.replied_to.clone()]).await?;
+    let contexts = get_reply_contexts(&[message.replied_to.clone()]).await?;
 
     if let Some(ctx) = contexts.get(&message.replied_to) {
         message.replied_to_content = Some(ctx.content.clone());
@@ -740,15 +727,14 @@ pub async fn populate_reply_context<R: Runtime>(
 ///
 /// This function performs a single efficient query to get messages and their
 /// related events, then composes them into Message structs for the frontend.
-pub async fn get_message_views<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_message_views(
     chat_id: i64,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
     // Step 1: Get message events (kind 9, 14, and 15)
     let message_kinds = [event_kind::MLS_CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT];
-    let message_events = get_events(handle, chat_id, Some(&message_kinds), limit, offset).await?;
+    let message_events = get_events(chat_id, Some(&message_kinds), limit, offset).await?;
 
     if message_events.is_empty() {
         return Ok(Vec::new());
@@ -756,7 +742,7 @@ pub async fn get_message_views<R: Runtime>(
 
     // Step 2: Get related events (reactions, edits) for these messages
     let message_ids: Vec<String> = message_events.iter().map(|e| e.id.clone()).collect();
-    let related_events = get_related_events(handle, &message_ids).await?;
+    let related_events = get_related_events(&message_ids).await?;
 
     // Group reactions and edits by message ID
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
@@ -776,7 +762,7 @@ pub async fn get_message_views<R: Runtime>(
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
                     // Edit content is encrypted, decrypt it here
-                    let decrypted_content = maybe_decrypt(handle, event.content.clone()).await
+                    let decrypted_content = maybe_decrypt(event.content.clone()).await
                         .unwrap_or_else(|_| event.content.clone());
                     let timestamp_ms = event.created_at * 1000; // Convert to ms
                     edits_by_msg.entry(ref_id.clone()).or_default().push((timestamp_ms, decrypted_content));
@@ -822,7 +808,7 @@ pub async fn get_message_views<R: Runtime>(
     // Fall back to messages table for old migrated events without attachments tag
     // NOTE: This is a legacy fallback - the messages table may have been dropped
     if !events_needing_legacy_lookup.is_empty() {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
 
         // Check if messages table exists before querying it
         let has_messages_table: bool = conn.query_row(
@@ -933,7 +919,7 @@ pub async fn get_message_views<R: Runtime>(
 
     if !reply_ids.is_empty() {
         // Fetch the replied-to events from the database
-        let reply_contexts = get_reply_contexts(handle, &reply_ids).await?;
+        let reply_contexts = get_reply_contexts(&reply_ids).await?;
 
         // Populate reply context for each message
         for message in &mut messages {
@@ -986,8 +972,7 @@ fn extract_reply_tag_from_json(tags_json: &str) -> Option<String> {
 /// Uses correlated subquery with rowid join for fast per-chat lookups.
 ///
 /// Returns: HashMap<chat_identifier, Vec<Message>> (Vec will have 0 or 1 message)
-pub async fn get_all_chats_last_messages<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_all_chats_last_messages(
 ) -> Result<HashMap<String, Vec<Message>>, String> {
     let fn_start = std::time::Instant::now();
 
@@ -995,7 +980,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
     // Uses rowid join (integer) instead of text PK join for faster lookups
     // Tags JSON stored raw - parsed on-demand in Steps 3/4 to avoid 111 upfront JSON parses
     let message_events: Vec<(String, StoredEvent, String)> = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
 
         let sql = r#"
             SELECT c.chat_identifier,
@@ -1056,7 +1041,7 @@ pub async fn get_all_chats_last_messages<R: Runtime>(
     // Step 2: Get related events (reactions, edits) for all these messages
     let step2_start = std::time::Instant::now();
     let message_ids: Vec<String> = message_events.iter().map(|(_, e, _)| e.id.clone()).collect();
-    let related_events = get_related_events(handle, &message_ids).await?;
+    let related_events = get_related_events(&message_ids).await?;
     println!("[Boot]     Step 2 (related events): {:?}", step2_start.elapsed());
 
     // Check encryption status once for the entire function

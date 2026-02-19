@@ -163,8 +163,8 @@ pub fn set_encryption_enabled(enabled: bool) {
 
 /// Initialize the encryption-enabled flag from the database at boot.
 /// Call once after DB is available (e.g., in login_from_stored_key).
-pub fn init_encryption_enabled<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
-    let enabled = crate::db::get_sql_setting(handle.clone(), "encryption_enabled".to_string())
+pub fn init_encryption_enabled() {
+    let enabled = crate::db::get_sql_setting("encryption_enabled".to_string())
         .ok()
         .flatten()
         .map(|v| v != "false")

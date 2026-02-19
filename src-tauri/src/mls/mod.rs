@@ -527,10 +527,8 @@ impl MlsService {
             drop(state);
 
             if let Some(slim) = slim {
-                if let Some(handle) = TAURI_APP.get() {
-                    if let Err(e) = save_slim_chat(handle.clone(), slim).await {
-                        eprintln!("[MLS] Failed to save chat after group creation: {}", e);
-                    }
+                if let Err(e) = save_slim_chat(slim).await {
+                    eprintln!("[MLS] Failed to save chat after group creation: {}", e);
                 }
             }
         }
@@ -724,14 +722,11 @@ impl MlsService {
             }
 
             // Track the event as processed only after merge succeeds
-            if let Some(handle) = TAURI_APP.get() {
-                let _ = track_mls_event_processed(
-                    handle,
-                    &evolution_event.id.to_hex(),
-                    &group_id_owned,
-                    evolution_event.created_at.as_secs(),
-                );
-            }
+            let _ = track_mls_event_processed(
+                &evolution_event.id.to_hex(),
+                &group_id_owned,
+                evolution_event.created_at.as_secs(),
+            );
 
             // 4. Send welcome messages (only after commit is on relay and merged)
             if let Some(welcome_rumors) = welcome_rumors {
@@ -750,16 +745,16 @@ impl MlsService {
             if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_owned.clone()).await {
                 eprintln!("[MLS] Failed to sync participants after add: {}", e);
             }
-            if let Some(handle) = TAURI_APP.get() {
-                if let Ok(mut groups) = crate::db::load_mls_groups(handle).await {
-                    if let Some(group) = groups.iter_mut().find(|g| g.group_id == group_id_owned) {
-                        group.updated_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-                        let _ = crate::db::save_mls_groups(handle.clone(), &groups).await;
-                    }
+            if let Ok(mut groups) = crate::db::load_mls_groups().await {
+                if let Some(group) = groups.iter_mut().find(|g| g.group_id == group_id_owned) {
+                    group.updated_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let _ = crate::db::save_mls_groups(&groups).await;
                 }
+            }
+            if let Some(handle) = TAURI_APP.get() {
                 handle.emit("mls_group_updated", serde_json::json!({
                     "group_id": group_id_owned
                 })).ok();
@@ -942,14 +937,11 @@ impl MlsService {
             }
 
             // Track the event as processed only after merge succeeds
-            if let Some(handle) = TAURI_APP.get() {
-                let _ = track_mls_event_processed(
-                    handle,
-                    &evolution_event.id.to_hex(),
-                    &group_id_owned,
-                    evolution_event.created_at.as_secs(),
-                );
-            }
+            let _ = track_mls_event_processed(
+                &evolution_event.id.to_hex(),
+                &group_id_owned,
+                evolution_event.created_at.as_secs(),
+            );
 
             // 4. Send welcome messages concurrently, pairing each welcome with its recipient
             if let Some(welcome_rumors) = welcome_rumors {
@@ -1000,16 +992,16 @@ impl MlsService {
             if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_owned.clone()).await {
                 eprintln!("[MLS] Failed to sync participants after add: {}", e);
             }
-            if let Some(handle) = TAURI_APP.get() {
-                if let Ok(mut groups) = crate::db::load_mls_groups(handle).await {
-                    if let Some(group) = groups.iter_mut().find(|g| g.group_id == group_id_owned) {
-                        group.updated_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-                        let _ = crate::db::save_mls_groups(handle.clone(), &groups).await;
-                    }
+            if let Ok(mut groups) = crate::db::load_mls_groups().await {
+                if let Some(group) = groups.iter_mut().find(|g| g.group_id == group_id_owned) {
+                    group.updated_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let _ = crate::db::save_mls_groups(&groups).await;
                 }
+            }
+            if let Some(handle) = TAURI_APP.get() {
                 handle.emit("mls_group_updated", serde_json::json!({
                     "group_id": group_id_owned
                 })).ok();
@@ -1264,14 +1256,11 @@ impl MlsService {
             }
 
             // Track the event as processed only after merge succeeds
-            if let Some(handle) = TAURI_APP.get() {
-                let _ = track_mls_event_processed(
-                    handle,
-                    &evolution_event.id.to_hex(),
-                    &group_id_owned,
-                    evolution_event.created_at.as_secs(),
-                );
-            }
+            let _ = track_mls_event_processed(
+                &evolution_event.id.to_hex(),
+                &group_id_owned,
+                evolution_event.created_at.as_secs(),
+            );
 
             // 3. Sync participants + emit UI refresh
             if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_owned.clone()).await {
@@ -1321,9 +1310,9 @@ impl MlsService {
 
         // EventTracker cleanup: Remove old processed events (older than 7 days) to prevent unbounded growth.
         // Run this once per sync cycle. Errors are logged but don't fail the sync.
-        if let Some(handle) = TAURI_APP.get() {
+        {
             let seven_days_secs = 7 * 24 * 60 * 60;
-            if let Err(e) = cleanup_old_processed_events(handle, seven_days_secs) {
+            if let Err(e) = cleanup_old_processed_events(seven_days_secs) {
                 eprintln!("[MLS] EventTracker cleanup failed: {}", e);
             }
         }
@@ -1583,13 +1572,11 @@ impl MlsService {
 
                 // EventTracker: Skip if already processed (pre-check before MDK call)
                 // This avoids expensive process_message() calls for already-handled events.
-                if let Some(handle) = TAURI_APP.get() {
-                    if is_mls_event_processed(handle, &ev.id.to_hex()) {
-                        // Already processed - just update cursor tracking
-                        last_seen_id = Some(ev.id);
-                        last_seen_at = ev.created_at.as_secs();
-                        continue;
-                    }
+                if is_mls_event_processed(&ev.id.to_hex()) {
+                    // Already processed - just update cursor tracking
+                    last_seen_id = Some(ev.id);
+                    last_seen_at = ev.created_at.as_secs();
+                    continue;
                 }
 
                 match engine.process_message(ev) {
@@ -1754,11 +1741,9 @@ impl MlsService {
 
         // EventTracker: Mark all successfully processed events as tracked
         if !events_to_track.is_empty() {
-            if let Some(handle) = TAURI_APP.get() {
-                for (event_id, created_at) in events_to_track.iter() {
-                    if let Err(e) = track_mls_event_processed(handle, event_id, &gid_for_fetch, *created_at) {
-                        eprintln!("[MLS] Failed to track processed event {}: {}", event_id, e);
-                    }
+            for (event_id, created_at) in events_to_track.iter() {
+                if let Err(e) = track_mls_event_processed(event_id, &gid_for_fetch, *created_at) {
+                    eprintln!("[MLS] Failed to track processed event {}: {}", event_id, e);
                 }
             }
         }
@@ -1795,13 +1780,11 @@ impl MlsService {
 
                 for ev in pending_retry.iter() {
                     // EventTracker: Skip if already processed
-                    if let Some(handle) = TAURI_APP.get() {
-                        if is_mls_event_processed(handle, &ev.id.to_hex()) {
-                            // Already processed (maybe by live handler) - skip
-                            last_seen_id = Some(ev.id);
-                            last_seen_at = ev.created_at.as_secs();
-                            continue;
-                        }
+                    if is_mls_event_processed(&ev.id.to_hex()) {
+                        // Already processed (maybe by live handler) - skip
+                        last_seen_id = Some(ev.id);
+                        last_seen_at = ev.created_at.as_secs();
+                        continue;
                     }
 
                     match engine.process_message(ev) {
@@ -1825,9 +1808,7 @@ impl MlsService {
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
                                     // Track as processed
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                                    }
+                                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     println!("[MLS] ✓ Retry succeeded (message): id={}", ev.id.to_hex());
                                 }
                                 MessageProcessingResult::Commit { mls_group_id: _ } => {
@@ -1863,9 +1844,7 @@ impl MlsService {
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
                                     // Track as processed
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                                    }
+                                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     println!("[MLS] ✓ Retry succeeded (commit): id={}", ev.id.to_hex());
                                 }
                                 MessageProcessingResult::Proposal(_) => {
@@ -1873,9 +1852,9 @@ impl MlsService {
                                         handle.emit("mls_group_updated", serde_json::json!({
                                             "group_id": gid_for_fetch
                                         })).ok();
-                                        // Track as processed
-                                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     }
+                                    // Track as processed
+                                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     processed = processed.saturating_add(1);
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
@@ -1886,27 +1865,21 @@ impl MlsService {
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
                                     // Track as processed
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                                    }
+                                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     println!("[MLS] ✓ Retry succeeded (external join): id={}", ev.id.to_hex());
                                 }
                                 MessageProcessingResult::PendingProposal { .. } => {
                                     processed = processed.saturating_add(1);
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                                    }
+                                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     println!("[MLS] ✓ Retry succeeded (pending proposal): id={}", ev.id.to_hex());
                                 }
                                 MessageProcessingResult::IgnoredProposal { .. } => {
                                     processed = processed.saturating_add(1);
                                     last_seen_id = Some(ev.id);
                                     last_seen_at = ev.created_at.as_secs();
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                                    }
+                                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                                     println!("[MLS] ✓ Retry succeeded (ignored proposal): id={}", ev.id.to_hex());
                                 }
                                 MessageProcessingResult::Unprocessable { mls_group_id } => {
@@ -1967,9 +1940,7 @@ impl MlsService {
                 // These events are permanently unprocessable (wrong epoch, already failed in MDK, etc.)
                 // Track them as processed and advance cursor past them so they're never re-fetched.
                 for ev in &pending_retry {
-                    if let Some(handle) = TAURI_APP.get() {
-                        let _ = track_mls_event_processed(handle, &ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
-                    }
+                    let _ = track_mls_event_processed(&ev.id.to_hex(), &gid_for_fetch, ev.created_at.as_secs());
                     // Advance cursor past these permanently-failed events
                     last_seen_id = Some(ev.id);
                     last_seen_at = ev.created_at.as_secs();
@@ -2023,10 +1994,8 @@ impl MlsService {
 
             // Save chat to disk if metadata was updated
             if let Some(slim) = slim_to_save {
-                if let Some(handle) = TAURI_APP.get() {
-                    if let Err(e) = save_slim_chat(handle.clone(), slim).await {
-                        eprintln!("[MLS] Failed to save chat after metadata update: {}", e);
-                    }
+                if let Err(e) = save_slim_chat(slim).await {
+                    eprintln!("[MLS] Failed to save chat after metadata update: {}", e);
                 }
             }
             
@@ -2044,12 +2013,10 @@ impl MlsService {
                         match result {
                             RumorProcessingResult::TextMessage(msg) | RumorProcessingResult::FileAttachment(msg) => {
                                 // Check if message already exists in database (important for sync with partial message loading)
-                                if let Some(handle) = TAURI_APP.get() {
-                                    if let Ok(exists) = crate::db::message_exists_in_db(&handle, &msg.id).await {
-                                        if exists {
-                                            // Message already in DB, skip processing
-                                            continue;
-                                        }
+                                if let Ok(exists) = crate::db::message_exists_in_db(&msg.id).await {
+                                    if exists {
+                                        // Message already in DB, skip processing
+                                        continue;
                                     }
                                 }
 
@@ -2071,9 +2038,7 @@ impl MlsService {
                                     }
                                     
                                     // Save the new message to database immediately
-                                    if let Some(handle) = TAURI_APP.get() {
-                                        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
-                                    }
+                                    let _ = crate::db::save_message(&chat_id, &msg).await;
                                 }
                             }
                             RumorProcessingResult::Reaction(reaction) => {
@@ -2091,16 +2056,14 @@ impl MlsService {
                                 // Save the updated message to database immediately (like DM reactions)
                                 if was_added {
                                     if let Some(chat_id) = chat_id_for_save {
-                                        if let Some(handle) = TAURI_APP.get() {
-                                            let updated_message = {
-                                                let state = STATE.lock().await;
-                                                state.find_message(&reaction.reference_id)
-                                                    .map(|(_, msg)| msg.clone())
-                                            };
-                                            
-                                            if let Some(msg) = updated_message {
-                                                let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
-                                            }
+                                        let updated_message = {
+                                            let state = STATE.lock().await;
+                                            state.find_message(&reaction.reference_id)
+                                                .map(|(_, msg)| msg.clone())
+                                        };
+
+                                        if let Some(msg) = updated_message {
+                                            let _ = crate::db::save_message(&chat_id, &msg).await;
                                         }
                                     }
                                 }
@@ -2122,11 +2085,9 @@ impl MlsService {
                             }
                             RumorProcessingResult::LeaveRequest { event_id, member_pubkey } => {
                                 // Deduplicate by event ID
-                                if let Some(handle) = TAURI_APP.get() {
-                                    if crate::db::event_exists(handle, &event_id).unwrap_or(false) {
-                                        println!("[MLS] Sync: Skipping duplicate leave request: {}", event_id);
-                                        continue;
-                                    }
+                                if crate::db::event_exists(&event_id).unwrap_or(false) {
+                                    println!("[MLS] Sync: Skipping duplicate leave request: {}", event_id);
+                                    continue;
                                 }
 
                                 // A member is requesting to leave - if we're admin, auto-remove them
@@ -2158,7 +2119,6 @@ impl MlsService {
                                         // Save system event using the leave request event_id
                                         // Returns true if inserted, false if duplicate (INSERT OR IGNORE)
                                         let was_inserted = crate::db::save_system_event_by_id(
-                                            handle,
                                             &event_id,
                                             &gid_for_fetch,
                                             crate::db::SystemEventType::MemberLeft,
@@ -2204,11 +2164,9 @@ impl MlsService {
                             }
                             RumorProcessingResult::UnknownEvent(mut event) => {
                                 // Store unknown events for future compatibility
-                                if let Some(handle) = TAURI_APP.get() {
-                                    if let Ok(chat_int_id) = crate::db::get_chat_id_by_identifier(handle, &chat_id) {
-                                        event.chat_id = chat_int_id;
-                                        let _ = crate::db::save_event(handle, &event).await;
-                                    }
+                                if let Ok(chat_int_id) = crate::db::get_chat_id_by_identifier(&chat_id) {
+                                    event.chat_id = chat_int_id;
+                                    let _ = crate::db::save_event(&event).await;
                                 }
                             }
                             RumorProcessingResult::Ignored => {
@@ -2218,7 +2176,7 @@ impl MlsService {
                                 // Save PIVX payment event to database and emit to frontend
                                 if let Some(handle) = TAURI_APP.get() {
                                     let event_timestamp = event.created_at;
-                                    let _ = crate::db::save_pivx_payment_event(handle, &gid_for_fetch, event).await;
+                                    let _ = crate::db::save_pivx_payment_event(&gid_for_fetch, event).await;
 
                                     handle.emit("pivx_payment_received", serde_json::json!({
                                         "conversation_id": gid_for_fetch,
@@ -2236,17 +2194,15 @@ impl MlsService {
                             }
                             RumorProcessingResult::Edit { message_id, new_content, edited_at, event } => {
                                 // Skip if this edit event was already processed (deduplication)
-                                if let Some(handle) = TAURI_APP.get() {
-                                    if crate::db::event_exists(handle, &event.id).unwrap_or(false) {
-                                        continue; // Already processed, skip
-                                    }
+                                if crate::db::event_exists(&event.id).unwrap_or(false) {
+                                    continue; // Already processed, skip
+                                }
 
-                                    // Save edit event to database
-                                    if let Ok(chat_int_id) = crate::db::get_chat_id_by_identifier(handle, &chat_id) {
-                                        let mut event_with_chat = event;
-                                        event_with_chat.chat_id = chat_int_id;
-                                        let _ = crate::db::save_event(handle, &event_with_chat).await;
-                                    }
+                                // Save edit event to database
+                                if let Ok(chat_int_id) = crate::db::get_chat_id_by_identifier(&chat_id) {
+                                    let mut event_with_chat = event;
+                                    event_with_chat.chat_id = chat_int_id;
+                                    let _ = crate::db::save_event(&event_with_chat).await;
                                 }
 
                                 // Update message in state and emit to frontend
@@ -2279,7 +2235,7 @@ impl MlsService {
             }
             
             // Persist the chat and new messages using unified storage
-            if let Some(handle) = TAURI_APP.get() {
+            {
                 let (slim, messages_to_save) = {
                     let state = STATE.lock().await;
                     if let Some(chat) = state.get_chat(&chat_id) {
@@ -2300,10 +2256,10 @@ impl MlsService {
                 }; // Drop STATE lock before async DB operations
 
                 if let Some(slim) = slim {
-                    let _ = save_slim_chat(handle.clone(), slim).await;
+                    let _ = save_slim_chat(slim).await;
 
                     if !messages_to_save.is_empty() {
-                        let _ = save_chat_messages(handle.clone(), &chat_id, &messages_to_save).await;
+                        let _ = save_chat_messages(&chat_id, &messages_to_save).await;
                     }
                 }
             }
@@ -2383,8 +2339,7 @@ impl MlsService {
         
         // 2. If we found the group, update only that specific group
         if let Some(group_to_update) = marked_group {
-            let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-            if let Err(e) = crate::db::save_mls_group(handle, &group_to_update).await {
+            if let Err(e) = crate::db::save_mls_group(&group_to_update).await {
                 eprintln!("[MLS] Failed to mark group as evicted: {}", e);
             }
         }
@@ -2396,10 +2351,8 @@ impl MlsService {
         }
         
         // 4. Delete from database
-        if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = crate::db::delete_chat(handle.clone(), group_id).await {
-                eprintln!("[MLS] Failed to delete chat from storage: {}", e);
-            }
+        if let Err(e) = crate::db::delete_chat(group_id).await {
+            eprintln!("[MLS] Failed to delete chat from storage: {}", e);
         }
         
         // 5. Emit event to frontend
@@ -2419,16 +2372,14 @@ impl MlsService {
     
     /// Read and decrypt group metadata from database
     pub async fn read_groups(&self) -> Result<Vec<MlsGroupMetadata>, MlsError> {
-        let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db::load_mls_groups(&handle)
+        crate::db::load_mls_groups()
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
 
     /// Write encrypted group metadata to database
     pub async fn write_groups(&self, groups: &[MlsGroupMetadata]) -> Result<(), MlsError> {
-        let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db::save_mls_groups(handle, groups)
+        crate::db::save_mls_groups(groups)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
@@ -2436,8 +2387,7 @@ impl MlsService {
     /// Read keypackage index from database
     #[allow(dead_code)]
     async fn read_keypackage_index(&self) -> Result<Vec<KeyPackageIndexEntry>, MlsError> {
-        let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        let packages = crate::db::load_mls_keypackages(&handle)
+        let packages = crate::db::load_mls_keypackages()
             .await
             .map_err(|e| MlsError::StorageError(e))?;
         
@@ -2452,14 +2402,12 @@ impl MlsService {
     /// Write keypackage index to database
     #[allow(dead_code)]
     async fn write_keypackage_index(&self, index: &[KeyPackageIndexEntry]) -> Result<(), MlsError> {
-        let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        
         // Convert to JSON values
         let packages: Vec<serde_json::Value> = index.iter()
             .filter_map(|entry| serde_json::to_value(entry).ok())
             .collect();
-        
-        crate::db::save_mls_keypackages(handle, &packages)
+
+        crate::db::save_mls_keypackages(&packages)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
@@ -2467,8 +2415,7 @@ impl MlsService {
     /// Read event cursors from database
     #[allow(dead_code)]
     pub async fn read_event_cursors(&self) -> Result<HashMap<String, EventCursor>, MlsError> {
-        let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db::load_mls_event_cursors(&handle)
+        crate::db::load_mls_event_cursors()
             .await
             .map_err(|e| MlsError::StorageError(e))
     }
@@ -2476,8 +2423,7 @@ impl MlsService {
     /// Write event cursors to database
     #[allow(dead_code)]
     pub async fn write_event_cursors(&self, cursors: &HashMap<String, EventCursor>) -> Result<(), MlsError> {
-        let handle = TAURI_APP.get().ok_or(MlsError::NotInitialized)?.clone();
-        crate::db::save_mls_event_cursors(handle, cursors)
+        crate::db::save_mls_event_cursors(cursors)
             .await
             .map_err(|e| MlsError::StorageError(e))
     }

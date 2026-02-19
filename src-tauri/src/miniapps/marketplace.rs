@@ -624,7 +624,6 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     // Include categories, marketplace_id, and version for proper linking
     let categories_str = app.categories.join(",");
     if let Err(e) = crate::db::record_miniapp_opened_with_metadata(
-        handle,
         app.name.clone(),
         path_str.clone(),
         path_str.clone(), // attachment_ref
@@ -691,7 +690,7 @@ pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
 
     // Remove from miniapps_history in the database
     // We need to find the entry by name (which is unique)
-    if let Err(e) = crate::db::remove_miniapp_from_history(handle, app_name) {
+    if let Err(e) = crate::db::remove_miniapp_from_history(app_name) {
         warn!("Failed to remove app from history: {}", e);
         // Don't fail the uninstall if history removal fails
     }
@@ -826,7 +825,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     if let Some(ref old_hash) = old_file_hash {
         if old_hash != &new_file_hash {
             info!("Migrating permissions from {} to {}", old_hash, new_file_hash);
-            if let Err(e) = crate::db::copy_miniapp_permissions(handle, old_hash, &new_file_hash) {
+            if let Err(e) = crate::db::copy_miniapp_permissions(old_hash, &new_file_hash) {
                 warn!("Failed to migrate permissions: {}", e);
                 // Don't fail the update if permission migration fails
             }
@@ -850,7 +849,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     }));
 
     // Update the version in the database
-    if let Err(e) = crate::db::update_miniapp_version(handle, app_id, &app.version) {
+    if let Err(e) = crate::db::update_miniapp_version(app_id, &app.version) {
         warn!("Failed to update app version in history: {}", e);
         // Don't fail the update if version recording fails
     }

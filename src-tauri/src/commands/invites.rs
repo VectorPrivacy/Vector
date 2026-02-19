@@ -46,7 +46,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
 
     // Check if we already have a stored invite code
-    if let Ok(Some(existing_code)) = db::get_sql_setting(handle.clone(), "invite_code".to_string()) {
+    if let Ok(Some(existing_code)) = db::get_sql_setting("invite_code".to_string()) {
         return Ok(existing_code);
     }
 
@@ -75,7 +75,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
             if let Some(r_tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
                 if let Some(code) = r_tag.content() {
                     // Store it locally
-                    db::set_sql_setting(handle.clone(), "invite_code".to_string(), code.to_string())
+                    db::set_sql_setting("invite_code".to_string(), code.to_string())
                         .map_err(|e| e.to_string())?;
                     return Ok(code.to_string());
                 }
@@ -98,7 +98,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     client.send_event_to(active_trusted_relays().await.into_iter(), &event).await.map_err(|e| e.to_string())?;
 
     // Store locally
-    db::set_sql_setting(handle.clone(), "invite_code".to_string(), new_code.clone())
+    db::set_sql_setting("invite_code".to_string(), new_code.clone())
         .map_err(|e| e.to_string())?;
 
     Ok(new_code)

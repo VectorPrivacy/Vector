@@ -5,8 +5,6 @@
 //! - Converting messages to stored events
 //! - Batch message saving
 
-use tauri::{AppHandle, Runtime};
-
 use crate::Message;
 use crate::stored_event::{StoredEvent, event_kind};
 use super::{get_or_create_chat_id, get_or_create_user_id, save_event, event_exists, save_reaction_event};
@@ -16,36 +14,35 @@ use super::{get_or_create_chat_id, get_or_create_user_id, save_event, event_exis
 /// This function saves to the `events` table using the flat event architecture.
 /// The old `messages` table is no longer written to - it only exists for
 /// backward compatibility with migrated data (read-only fallback).
-pub async fn save_message<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_message(
     chat_id: &str,
     message: &Message
 ) -> Result<(), String> {
     // Get or create integer chat ID
-    let chat_int_id = get_or_create_chat_id(&handle, chat_id)?;
+    let chat_int_id = get_or_create_chat_id(chat_id)?;
 
     // Get or create integer user ID from npub
     let user_int_id = if let Some(ref npub_str) = message.npub {
-        get_or_create_user_id(&handle, npub_str)?
+        get_or_create_user_id(npub_str)?
     } else {
         None
     };
 
     // Save to events table (flat event architecture)
     let event = message_to_stored_event(message, chat_int_id, user_int_id);
-    save_event(&handle, &event).await?;
+    save_event(&event).await?;
 
     // Also save any reactions as separate kind=7 events
     for reaction in &message.reactions {
         // Check if reaction event already exists to avoid duplicates
-        if !event_exists(&handle, &reaction.id)? {
-            let user_id = get_or_create_user_id(&handle, &reaction.author_id)?;
+        if !event_exists(&reaction.id)? {
+            let user_id = get_or_create_user_id(&reaction.author_id)?;
             let is_mine = if let Ok(current_npub) = crate::account_manager::get_current_account() {
                 reaction.author_id == current_npub
             } else {
                 false
             };
-            save_reaction_event(&handle, reaction, chat_int_id, user_id, is_mine).await?;
+            save_reaction_event(reaction, chat_int_id, user_id, is_mine).await?;
         }
     }
 
@@ -117,8 +114,7 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
 ///
 /// This uses the flat event architecture - each message is stored as an event.
 /// Reactions are stored as separate kind=7 events.
-pub async fn save_chat_messages<R: Runtime>(
-    handle: AppHandle<R>,
+pub async fn save_chat_messages(
     chat_id: &str,
     messages: &[Message]
 ) -> Result<(), String> {
@@ -129,7 +125,7 @@ pub async fn save_chat_messages<R: Runtime>(
 
     // Save each message using the event-based save_message function
     for message in messages {
-        if let Err(e) = save_message(handle.clone(), chat_id, message).await {
+        if let Err(e) = save_message(chat_id, message).await {
             eprintln!("Failed to save message {}: {}", &message.id[..8.min(message.id.len())], e);
         }
     }

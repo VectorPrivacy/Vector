@@ -328,7 +328,7 @@ impl ChatState {
     ///     msg.preview_metadata = Some(Box::new(metadata));
     /// });
     /// if let Some((chat_id, message)) = result {
-    ///     db::save_message(handle, &chat_id, &message).await;
+    ///     db::save_message(&chat_id, &message).await;
     /// }
     /// ```
     pub fn update_message<F>(&mut self, message_id: &str, f: F) -> Option<(String, Message)>

@@ -23,7 +23,6 @@
 //! Typical performance: ~10μs per lookup after initial ~250ms build.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
 use std::collections::HashMap;
 
 use crate::{Message, Attachment};
@@ -168,7 +167,7 @@ impl UltraPackedFileHashIndex {
     ///
     /// Prefer using [`lookup_attachment_cached`] which manages a singleton
     /// cache, rather than calling this directly.
-    pub async fn build<R: Runtime>(handle: &AppHandle<R>) -> Result<Self, String> {
+    pub async fn build() -> Result<Self, String> {
         use crate::stored_event::event_kind;
 
         // String interning tables
@@ -237,7 +236,7 @@ impl UltraPackedFileHashIndex {
 
         // Query attachment data (only need tags - no chat_id or message_id needed)
         let attachment_data: Vec<String> = {
-            let conn = crate::account_manager::get_db_connection_guard(handle)?;
+            let conn = crate::account_manager::get_db_connection_guard_static()?;
             let mut stmt = conn.prepare(
                 "SELECT tags FROM events WHERE kind = ?1"
             ).map_err(|e| format!("Failed to prepare attachment query: {}", e))?;
@@ -406,8 +405,7 @@ static CACHED_FILE_HASH_INDEX: OnceLock<RwLock<Option<UltraPackedFileHashIndex>>
 ///
 /// A reference to the global `RwLock` containing the cached index.
 /// The index will be built on first access if not already cached.
-pub async fn get_cached_file_hash_index<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_cached_file_hash_index(
 ) -> Result<&'static RwLock<Option<UltraPackedFileHashIndex>>, String> {
     let lock = CACHED_FILE_HASH_INDEX.get_or_init(|| RwLock::new(None));
 
@@ -429,7 +427,7 @@ pub async fn get_cached_file_hash_index<R: Runtime>(
         }
 
         // Build the index (we hold the write lock, so only one task builds)
-        let index = UltraPackedFileHashIndex::build(handle).await?;
+        let index = UltraPackedFileHashIndex::build().await?;
         *write_guard = Some(index);
     }
 
@@ -443,7 +441,6 @@ pub async fn get_cached_file_hash_index<R: Runtime>(
 ///
 /// # Arguments
 ///
-/// * `handle` - Tauri app handle for database access
 /// * `file_hash` - The SHA256 hash of the original (unencrypted) file
 ///
 /// # Returns
@@ -456,11 +453,10 @@ pub async fn get_cached_file_hash_index<R: Runtime>(
 ///
 /// * First call: ~250ms (builds index from database)
 /// * Subsequent calls: ~10μs (binary search in cached index)
-pub async fn lookup_attachment_cached<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn lookup_attachment_cached(
     file_hash: &str,
 ) -> Result<Option<AttachmentRef>, String> {
-    let lock = get_cached_file_hash_index(handle).await?;
+    let lock = get_cached_file_hash_index().await?;
     let guard = lock.read().await;
 
     if let Some(index) = guard.as_ref() {
@@ -507,7 +503,7 @@ pub fn is_file_hash_cache_built() -> bool {
 /// 1. Checks if cache is already built (skips if so)
 /// 2. Checks if any attachments exist in database (skips if none)
 /// 3. Builds the cache (~250ms for 6000+ attachments)
-pub async fn warm_file_hash_cache<R: Runtime>(handle: &AppHandle<R>) {
+pub async fn warm_file_hash_cache() {
     // Skip if already built
     if is_file_hash_cache_built() {
         println!("[FileHashIndex] Cache already built, skipping warm-up");
@@ -516,7 +512,7 @@ pub async fn warm_file_hash_cache<R: Runtime>(handle: &AppHandle<R>) {
 
     // Check if there are any attachments worth caching (EXISTS is faster than COUNT)
     let has_attachments = {
-        if let Ok(conn) = crate::account_manager::get_db_connection_guard(handle) {
+        if let Ok(conn) = crate::account_manager::get_db_connection_guard_static() {
             conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE kind = 15)",
                 [],
@@ -535,7 +531,7 @@ pub async fn warm_file_hash_cache<R: Runtime>(handle: &AppHandle<R>) {
     // Build the cache
     println!("[FileHashIndex] Warming cache in background...");
     let start = std::time::Instant::now();
-    match get_cached_file_hash_index(handle).await {
+    match get_cached_file_hash_index().await {
         Ok(_) => println!("[FileHashIndex] Cache warmed in {:?}", start.elapsed()),
         Err(e) => eprintln!("[FileHashIndex] Cache warm-up failed: {}", e),
     }
@@ -551,25 +547,23 @@ pub async fn warm_file_hash_cache<R: Runtime>(handle: &AppHandle<R>) {
 ///
 /// Returns messages in chronological order (oldest first within the batch)
 /// NOTE: This now uses the events table via get_message_views
-pub async fn get_chat_messages_paginated<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_chat_messages_paginated(
     chat_id: &str,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
     // Get integer chat ID
-    let chat_int_id = get_chat_id_by_identifier(handle, chat_id)?;
+    let chat_int_id = get_chat_id_by_identifier(chat_id)?;
     // Use the events-based message views
-    get_message_views(handle, chat_int_id, limit, offset).await
+    get_message_views(chat_int_id, limit, offset).await
 }
 
 /// Get the total message count for a chat
 /// This is useful for the frontend to know how many messages exist without loading them all
-pub async fn get_chat_message_count<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_chat_message_count(
     chat_id: &str,
 ) -> Result<usize, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Get integer chat ID from identifier
     let chat_int_id: i64 = conn.query_row(
@@ -593,17 +587,16 @@ pub async fn get_chat_message_count<R: Runtime>(
 /// Get messages around a specific message ID
 /// Returns messages from (target - context_before) to the most recent
 /// This is used for scrolling to old replied-to messages
-pub async fn get_messages_around_id<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn get_messages_around_id(
     chat_id: &str,
     target_message_id: &str,
     context_before: usize,
 ) -> Result<Vec<Message>, String> {
-    let chat_int_id = get_chat_id_by_identifier(handle, chat_id)?;
+    let chat_int_id = get_chat_id_by_identifier(chat_id)?;
 
     // First, find the timestamp of the target message (don't require chat_id match in case of edge cases)
     let target_timestamp: i64 = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         // Try to find in the specified chat first
         let ts_result = conn.query_row(
             "SELECT created_at FROM events WHERE id = ?1 AND chat_id = ?2",
@@ -628,7 +621,7 @@ pub async fn get_messages_around_id<R: Runtime>(
 
     // Count how many messages are older than the target in this chat
     let older_count: i64 = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let count = conn.query_row(
             "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind IN (9, 14, 15) AND created_at < ?2",
             rusqlite::params![chat_int_id, target_timestamp],
@@ -639,7 +632,7 @@ pub async fn get_messages_around_id<R: Runtime>(
     };
 
     // Get total message count for this chat
-    let total_count = get_chat_message_count(handle, chat_id).await?;
+    let total_count = get_chat_message_count(chat_id).await?;
 
     // Calculate the starting position (from oldest = 0)
     // We want messages from (target - context_before) to the newest
@@ -651,17 +644,16 @@ pub async fn get_messages_around_id<R: Runtime>(
     let limit = total_count.saturating_sub(start_position);
 
     // offset = 0 to start from the newest and get all messages back to start_position
-    get_message_views(handle, chat_int_id, limit, 0).await
+    get_message_views(chat_int_id, limit, 0).await
 }
 
 /// Check if a message/event exists in the database by its ID
 /// This is used to prevent duplicate processing during sync
-pub async fn message_exists_in_db<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn message_exists_in_db(
     message_id: &str,
 ) -> Result<bool, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection_guard(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard_static() {
         Ok(c) => c,
         Err(_) => return Ok(false), // No DB, let in-memory check handle it
     };
@@ -680,12 +672,11 @@ pub async fn message_exists_in_db<R: Runtime>(
 
 /// Check if a wrapper (giftwrap) event ID exists in the database
 /// This allows skipping the expensive unwrap operation for already-processed events
-pub async fn wrapper_event_exists<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn wrapper_event_exists(
     wrapper_event_id: &str,
 ) -> Result<bool, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection_guard(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard_static() {
         Ok(c) => c,
         Err(_) => return Ok(false), // No DB, can't check
     };
@@ -705,13 +696,12 @@ pub async fn wrapper_event_exists<R: Runtime>(
 /// Update the wrapper event ID for an existing event
 /// This is called when we process an event that was previously stored without its wrapper ID
 /// Returns: Ok(true) if updated, Ok(false) if event already had a wrapper_id (duplicate giftwrap)
-pub async fn update_wrapper_event_id<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn update_wrapper_event_id(
     event_id: &str,
     wrapper_event_id: &str,
 ) -> Result<bool, String> {
     // Try to get the write connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_write_connection_guard(handle) {
+    let conn = match crate::account_manager::get_write_connection_guard_static() {
         Ok(c) => c,
         Err(_) => return Ok(false), // No DB, nothing to update
     };
@@ -730,12 +720,11 @@ pub async fn update_wrapper_event_id<R: Runtime>(
 /// This preloads wrapper_ids from the last N days to avoid SQL queries during sync
 ///
 /// Returns Vec<[u8; 32]> for memory-efficient storage (76% less than HashSet<String>)
-pub async fn load_recent_wrapper_ids<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn load_recent_wrapper_ids(
     days: u64,
 ) -> Result<Vec<[u8; 32]>, String> {
     // Try to get a database connection - if it fails, we're not using DB mode
-    let conn = match crate::account_manager::get_db_connection_guard(handle) {
+    let conn = match crate::account_manager::get_db_connection_guard_static() {
         Ok(c) => c,
         Err(_) => return Ok(Vec::new()), // No DB, return empty vec
     };
@@ -785,15 +774,14 @@ pub async fn load_recent_wrapper_ids<R: Runtime>(
 }
 
 /// Update the downloaded status of an attachment in the database
-pub fn update_attachment_downloaded_status<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn update_attachment_downloaded_status(
     _chat_id: &str,  // No longer needed - we query by event ID directly
     msg_id: &str,
     attachment_id: &str,
     downloaded: bool,
     path: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Get the current tags JSON from the events table
     let tags_json: String = conn.query_row(
@@ -854,15 +842,14 @@ pub fn update_attachment_downloaded_status<R: Runtime>(
 /// Check all downloaded attachments in the database for missing files.
 /// Updates the database directly for any files that no longer exist.
 /// Returns (total_checked, missing_count, elapsed_time).
-pub async fn check_downloaded_attachments_integrity<R: Runtime>(
-    handle: &AppHandle<R>,
+pub async fn check_downloaded_attachments_integrity(
 ) -> Result<(usize, usize, std::time::Duration), String> {
     let start = std::time::Instant::now();
 
     // Query all events with file attachments that have downloaded files
     // Using JSON extract to filter only events with downloaded attachments
     let events_with_downloaded: Vec<(String, String)> = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
 
         // Query all file attachment events - we'll filter in Rust for downloaded=true
         // This is more reliable than JSON filtering in SQLite
@@ -919,7 +906,7 @@ pub async fn check_downloaded_attachments_integrity<R: Runtime>(
 
     // Batch update all modified events
     if !updates.is_empty() {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         for (event_id, tags_json) in updates {
             conn.execute(
                 "UPDATE events SET tags = ?1 WHERE id = ?2",

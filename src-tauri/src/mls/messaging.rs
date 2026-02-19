@@ -165,7 +165,7 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                                     "message": &msg,
                                     "chat_id": &group_id
                                 })).ok();
-                                let _ = crate::db::save_message(handle.clone(), &group_id, &msg).await;
+                                let _ = crate::db::save_message(&group_id, &msg).await;
                             }
                         }
                     }

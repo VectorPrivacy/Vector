@@ -148,25 +148,25 @@ pub async fn fetch_messages<R: Runtime>(
                 let (profiles_result, slim_chats_result, mls_groups_result, last_messages_result) = tokio::join!(
                     async {
                         let t = std::time::Instant::now();
-                        let r = db::get_all_profiles(&handle).await;
+                        let r = db::get_all_profiles().await;
                         println!("[Boot]   get_all_profiles: {:?}", t.elapsed());
                         r
                     },
                     async {
                         let t = std::time::Instant::now();
-                        let r = db::get_all_chats(&handle).await;
+                        let r = db::get_all_chats().await;
                         println!("[Boot]   get_all_chats: {:?}", t.elapsed());
                         r
                     },
                     async {
                         let t = std::time::Instant::now();
-                        let r = db::load_mls_groups(&handle).await;
+                        let r = db::load_mls_groups().await;
                         println!("[Boot]   load_mls_groups: {:?}", t.elapsed());
                         r
                     },
                     async {
                         let t = std::time::Instant::now();
-                        let r = db::get_all_chats_last_messages(&handle).await;
+                        let r = db::get_all_chats_last_messages().await;
                         println!("[Boot]   get_all_chats_last_messages: {:?}", t.elapsed());
                         r
                     }
@@ -269,16 +269,15 @@ pub async fn fetch_messages<R: Runtime>(
             }
 
             // Check filesystem integrity for downloaded attachments (queries DB directly)
-            let handle_for_integrity = handle.clone();
             tokio::spawn(async move {
-                if let Err(e) = db::check_downloaded_attachments_integrity(&handle_for_integrity).await {
+                if let Err(e) = db::check_downloaded_attachments_integrity().await {
                     eprintln!("[Integrity] Check failed: {}", e);
                 }
             });
 
             // Preload ID caches (fast, needed for serialization)
             let cache_start = std::time::Instant::now();
-            if let Err(e) = db::preload_id_caches(&handle).await {
+            if let Err(e) = db::preload_id_caches().await {
                 eprintln!("[Cache] Failed to preload ID caches: {}", e);
             }
             println!("[Boot] preload_id_caches in {:?}", cache_start.elapsed());
@@ -309,10 +308,9 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Background preload wrapper IDs for sync deduplication (non-blocking)
             // DB fallback in handle_event ensures correctness if this completes after sync starts
-            let handle_for_wrapper = handle.clone();
             tokio::spawn(async move {
                 let t = std::time::Instant::now();
-                match db::load_recent_wrapper_ids(&handle_for_wrapper, 30).await {
+                match db::load_recent_wrapper_ids(30).await {
                     Ok(wrapper_ids) => {
                         let mut cache = WRAPPER_ID_CACHE.lock().await;
                         cache.load(wrapper_ids);
@@ -578,9 +576,8 @@ pub async fn fetch_messages<R: Runtime>(
 
         // Warm the file hash cache in the background (for attachment deduplication)
         // Only builds if there are attachments and cache wasn't already built during sync
-        let handle_for_cache = handle.clone();
         tokio::task::spawn(async move {
-            db::warm_file_hash_cache(&handle_for_cache).await;
+            db::warm_file_hash_cache().await;
         });
 
         if relay_url.is_none() {
@@ -588,7 +585,6 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Now that regular sync is complete and chats are loaded, sync MLS groups
             // This ensures chat data is in memory before MLS tries to sync participants
-            let handle_clone = handle.clone();
             tokio::task::spawn(async move {
                 // Small delay to ensure init_finished has been processed
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -598,7 +594,7 @@ pub async fn fetch_messages<R: Runtime>(
 
                 // After MLS sync completes, check if weekly VACUUM is needed
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if let Err(e) = db::check_and_vacuum_if_needed(&handle_clone).await {
+                if let Err(e) = db::check_and_vacuum_if_needed().await {
                     eprintln!("[Maintenance] Weekly VACUUM check failed: {}", e);
                 }
             });

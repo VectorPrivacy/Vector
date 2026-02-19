@@ -675,7 +675,6 @@ pub async fn miniapp_open(
         // Record to Mini Apps history
         let attachment_ref = file_path.clone();
         if let Err(e) = crate::db::record_miniapp_opened(
-            &app,
             package.manifest.name.clone(),
             file_path.clone(),
             attachment_ref,
@@ -856,7 +855,6 @@ pub async fn miniapp_open(
     // Use file_path as attachment_ref since it uniquely identifies the Mini App
     let attachment_ref = file_path.clone();
     if let Err(e) = crate::db::record_miniapp_opened(
-        &app,
         package.manifest.name.clone(),
         file_path.clone(),
         attachment_ref,
@@ -1350,7 +1348,7 @@ pub async fn miniapp_record_opened(
     src_url: String,
     attachment_ref: String,
 ) -> Result<(), Error> {
-    crate::db::record_miniapp_opened(&app, name, src_url, attachment_ref)
+    crate::db::record_miniapp_opened(name, src_url, attachment_ref)
         .map_err(|e| Error::DatabaseError(e))
 }
 
@@ -1361,7 +1359,7 @@ pub async fn miniapp_get_history(
     app: AppHandle,
     limit: Option<i64>,
 ) -> Result<Vec<crate::db::MiniAppHistoryEntry>, Error> {
-    crate::db::get_miniapps_history(&app, limit)
+    crate::db::get_miniapps_history(limit)
         .map_err(|e| Error::DatabaseError(e))
 }
 
@@ -1371,7 +1369,7 @@ pub async fn miniapp_remove_from_history(
     app: AppHandle,
     name: String,
 ) -> Result<(), Error> {
-    crate::db::remove_miniapp_from_history(&app, &name)
+    crate::db::remove_miniapp_from_history(&name)
         .map_err(|e| Error::DatabaseError(e))
 }
 
@@ -1380,7 +1378,7 @@ pub async fn miniapp_toggle_favorite(
     app: AppHandle,
     id: i64,
 ) -> Result<bool, Error> {
-    crate::db::toggle_miniapp_favorite(&app, id)
+    crate::db::toggle_miniapp_favorite(id)
         .map_err(|e| Error::DatabaseError(e))
 }
 
@@ -1390,7 +1388,7 @@ pub async fn miniapp_set_favorite(
     id: i64,
     is_favorite: bool,
 ) -> Result<(), Error> {
-    crate::db::set_miniapp_favorite(&app, id, is_favorite)
+    crate::db::set_miniapp_favorite(id, is_favorite)
         .map_err(|e| Error::DatabaseError(e))
 }
 
@@ -1482,7 +1480,7 @@ pub async fn marketplace_sync_install_status(
     for (app_id, marketplace_version) in apps_info {
         if let Some(path) = super::marketplace::check_app_installed(&app, &app_id).await {
             // App is installed, check version for updates
-            let installed_version = crate::db::get_miniapp_installed_version(&app, &app_id)
+            let installed_version = crate::db::get_miniapp_installed_version(&app_id)
                 .unwrap_or(None);
 
             let update_available = match &installed_version {
@@ -1643,7 +1641,7 @@ pub async fn miniapp_get_granted_permissions(
     app: AppHandle,
     file_hash: String,
 ) -> Result<String, Error> {
-    crate::db::get_miniapp_granted_permissions(&app, &file_hash)
+    crate::db::get_miniapp_granted_permissions(&file_hash)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }
 
@@ -1655,7 +1653,7 @@ pub async fn miniapp_set_permission(
     permission: String,
     granted: bool,
 ) -> Result<(), Error> {
-    crate::db::set_miniapp_permission(&app, &file_hash, &permission, granted)
+    crate::db::set_miniapp_permission(&file_hash, &permission, granted)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }
 
@@ -1669,7 +1667,7 @@ pub async fn miniapp_set_permissions(
     let perm_refs: Vec<(&str, bool)> = permissions.iter()
         .map(|(p, g)| (p.as_str(), *g))
         .collect();
-    crate::db::set_miniapp_permissions(&app, &file_hash, &perm_refs)
+    crate::db::set_miniapp_permissions(&file_hash, &perm_refs)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }
 
@@ -1679,7 +1677,7 @@ pub async fn miniapp_has_permission_prompt(
     app: AppHandle,
     file_hash: String,
 ) -> Result<bool, Error> {
-    crate::db::has_miniapp_permission_prompt(&app, &file_hash)
+    crate::db::has_miniapp_permission_prompt(&file_hash)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }
 
@@ -1689,7 +1687,7 @@ pub async fn miniapp_revoke_all_permissions(
     app: AppHandle,
     file_hash: String,
 ) -> Result<(), Error> {
-    crate::db::revoke_all_miniapp_permissions(&app, &file_hash)
+    crate::db::revoke_all_miniapp_permissions(&file_hash)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }
 
@@ -1711,7 +1709,7 @@ pub async fn miniapp_get_granted_permissions_for_window(
     let state = app.state::<MiniAppsState>();
     if let Some(instance) = state.get_instance(label).await {
         // Use the file hash for permission lookup - this is secure and content-based
-        crate::db::get_miniapp_granted_permissions(&app, &instance.package.file_hash)
+        crate::db::get_miniapp_granted_permissions(&instance.package.file_hash)
             .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
     } else {
         Err(Error::Anyhow(anyhow::anyhow!("Could not find Mini App instance")))

@@ -195,10 +195,15 @@ pub fn run() {
             {
                 let handle_clone = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Ok(Some(id)) = db::load_mls_device_id(&handle_clone).await {
+                    if let Ok(Some(id)) = db::load_mls_device_id().await {
                         println!("[MLS] Found persistent mls_device_id at startup: {}", id);
                     }
                 });
+            }
+
+            // Set the static app data directory (headless-safe path resolution)
+            if let Ok(data_dir) = handle.path().app_data_dir() {
+                account_manager::set_app_data_dir(data_dir);
             }
 
             // Set as our accessible static app handle

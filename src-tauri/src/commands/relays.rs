@@ -867,7 +867,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
         };
 
         // Check if migration flagged a forced keypackage regeneration
-        let force_regen = db::get_sql_setting(handle.clone(), "mls_force_keypackage_regen".into())
+        let force_regen = db::get_sql_setting("mls_force_keypackage_regen".into())
             .ok()
             .flatten()
             .map(|v| v == "1")
@@ -880,7 +880,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
                     let device_id = info.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
                     println!("[MLS] Device KeyPackage regenerated (new format): device_id={}", device_id);
                     // Clear the flag so we don't regenerate again
-                    let _ = db::remove_setting(handle, "mls_force_keypackage_regen".into());
+                    let _ = db::remove_setting("mls_force_keypackage_regen".into());
                 }
                 Err(e) => println!("[MLS] Device KeyPackage regeneration FAILED: {}", e),
             }

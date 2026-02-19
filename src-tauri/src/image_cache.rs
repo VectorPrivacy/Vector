@@ -514,14 +514,14 @@ pub async fn clear_image_cache<R: Runtime>(
         }
         for id in cleared_ids {
             if let Some(slim) = state.serialize_profile(id) {
-                crate::db::set_profile(handle.clone(), slim).await.ok();
+                crate::db::set_profile(slim).await.ok();
             }
         }
     }
 
     // Clear stale cached path references in MLS groups (DB) and notify frontend
-    if crate::db::clear_all_mls_group_avatar_cache(&handle).is_ok() {
-        if let Ok(groups) = crate::db::load_mls_groups(&handle).await {
+    if crate::db::clear_all_mls_group_avatar_cache().is_ok() {
+        if let Ok(groups) = crate::db::load_mls_groups().await {
             for meta in groups.iter().filter(|g| !g.evicted) {
                 crate::mls::emit_group_metadata_event(meta);
             }

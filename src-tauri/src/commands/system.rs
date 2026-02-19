@@ -228,7 +228,7 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
                 .collect();
 
             // Save updated messages to database
-            db::save_chat_messages(handle.clone(), &chat_id, &messages_to_update).await
+            db::save_chat_messages(&chat_id, &messages_to_update).await
                 .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
 
             // Emit message_update events for each updated message
@@ -267,14 +267,14 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     }
     for id in cleared_ids {
         if let Some(slim) = state.serialize_profile(id) {
-            db::set_profile(handle.clone(), slim).await.ok();
+            db::set_profile(slim).await.ok();
         }
     }
 
     // Clear cached avatar paths from all MLS groups in DB and notify frontend
-    if db::clear_all_mls_group_avatar_cache(&handle).is_ok() {
+    if db::clear_all_mls_group_avatar_cache().is_ok() {
         // Reload (now all avatar_cached = NULL) and emit events so frontend switches to placeholders
-        if let Ok(groups) = db::load_mls_groups(&handle).await {
+        if let Ok(groups) = db::load_mls_groups().await {
             for meta in groups.iter().filter(|g| !g.evicted) {
                 crate::mls::emit_group_metadata_event(meta);
             }

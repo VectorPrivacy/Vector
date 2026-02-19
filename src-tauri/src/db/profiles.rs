@@ -5,7 +5,7 @@
 //! - Profile CRUD operations
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, command, Runtime};
+use tauri::command;
 
 use crate::{Profile, Status};
 use crate::profile::ProfileFlags;
@@ -123,8 +123,8 @@ impl SlimProfile {
 }
 
 // Function to get all profiles
-pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimProfile>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
@@ -172,8 +172,8 @@ pub async fn get_all_profiles<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<S
 
 // Public command to set a profile
 #[command]
-pub async fn set_profile<R: Runtime>(handle: AppHandle<R>, profile: SlimProfile) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached)

@@ -23,8 +23,7 @@ use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 /// Load MLS device ID for the current account
 #[tauri::command]
 pub async fn load_mls_device_id() -> Result<Option<String>, String> {
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    match db::load_mls_device_id(&handle).await {
+    match db::load_mls_device_id().await {
         Ok(Some(id)) => Ok(Some(id)),
         Ok(None) => Ok(None),
         Err(e) => Err(e.to_string()),
@@ -34,8 +33,7 @@ pub async fn load_mls_device_id() -> Result<Option<String>, String> {
 /// Load MLS keypackages for the current account
 #[tauri::command]
 pub async fn load_mls_keypackages() -> Result<Vec<serde_json::Value>, String> {
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    db::load_mls_keypackages(&handle).await
+    db::load_mls_keypackages().await
         .map_err(|e| e.to_string())
 }
 
@@ -48,7 +46,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
 
     // Ensure a persistent device_id exists
-    let device_id: String = match db::load_mls_device_id(&handle).await {
+    let device_id: String = match db::load_mls_device_id().await {
         Ok(Some(id)) => id,
         _ => {
             let id: String = thread_rng()
@@ -57,7 +55,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
                 .map(char::from)
                 .collect::<String>()
                 .to_lowercase();
-            let _ = db::save_mls_device_id(handle.clone(), &id).await;
+            let _ = db::save_mls_device_id(&id).await;
             id
         }
     };
@@ -70,7 +68,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
     if cache {
         // Load existing keypackage index and verify it exists on relay before returning cached
         let cached_kp_ref: Option<String> = {
-            let index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
+            let index = db::load_mls_keypackages().await.unwrap_or_default();
 
             index.iter().find(|entry| {
                 entry.get("owner_pubkey").and_then(|v| v.as_str()) == Some(owner_pubkey_b32.as_str())
@@ -199,7 +197,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
 
     // Upsert into mls_keypackage_index
     {
-        let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
+        let mut index = db::load_mls_keypackages().await.unwrap_or_default();
         let now = Timestamp::now().as_secs();
         let new_kp_ref = kp_event.id.to_hex();
 
@@ -223,7 +221,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
             "expires_at": 0u64
         }));
 
-        let _ = db::save_mls_keypackages(handle.clone(), &index).await;
+        let _ = db::save_mls_keypackages(&index).await;
     }
 
     Ok(serde_json::json!({
@@ -241,8 +239,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
 /// List all MLS group IDs
 #[tauri::command]
 pub async fn list_mls_groups() -> Result<Vec<String>, String> {
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    match db::load_mls_groups(&handle).await {
+    match db::load_mls_groups().await {
         Ok(groups) => {
             let ids = groups.into_iter()
                 .map(|g| g.group_id)
@@ -256,8 +253,7 @@ pub async fn list_mls_groups() -> Result<Vec<String>, String> {
 /// Get metadata for all MLS groups (filtered to non-evicted groups)
 #[tauri::command]
 pub async fn get_mls_group_metadata() -> Result<Vec<serde_json::Value>, String> {
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    let groups = db::load_mls_groups(&handle)
+    let groups = db::load_mls_groups()
         .await
         .map_err(|e| format!("Failed to load MLS group metadata: {}", e))?;
 
@@ -457,10 +453,9 @@ pub async fn refresh_keypackages_for_contact(
     }
 
     // Update local plaintext index after network await
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
 
     // Load existing index
-    let mut index = db::load_mls_keypackages(&handle).await.unwrap_or_default();
+    let mut index = db::load_mls_keypackages().await.unwrap_or_default();
 
     // Dedup existing entries by keypackage_ref — keep first occurrence per ref.
     // This cleans up stale duplicates where the same keypackage was stored twice
@@ -502,7 +497,7 @@ pub async fn refresh_keypackages_for_contact(
     // Only persist if the index was actually modified — avoids overwriting
     // concurrent writes from regenerate_device_keypackage with stale data
     if index_changed {
-        let _ = db::save_mls_keypackages(handle.clone(), &index).await;
+        let _ = db::save_mls_keypackages(&index).await;
     }
 
     Ok(results)
@@ -632,7 +627,7 @@ pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, Stri
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
 
     // Load group metadata from SQL
-    let groups = db::load_mls_groups(&handle).await
+    let groups = db::load_mls_groups().await
         .map_err(|e| format!("Failed to load MLS groups: {}", e))?;
     let meta = groups.iter().find(|g| g.group_id == group_id)
         .ok_or_else(|| format!("Group not found: {}", group_id))?;
@@ -751,7 +746,7 @@ pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, Stri
     // Update avatar_cached in DB with a targeted UPDATE (no full reload)
     let needs_ref = avatar_ref.is_none() || avatar_ref.as_deref() == Some("");
     let ref_to_set = if needs_ref && !successful_url.is_empty() { Some(successful_url.as_str()) } else { None };
-    db::update_mls_group_avatar(&handle, &group_id, &cached_path, ref_to_set)
+    db::update_mls_group_avatar(&group_id, &cached_path, ref_to_set)
         .map_err(|e| format!("Failed to update group avatar in DB: {}", e))?;
 
     // Emit metadata event from the already-loaded metadata (mutated in place)
@@ -1065,7 +1060,7 @@ pub async fn sync_mls_groups_now(
                     .map_err(|e| e.to_string())
             } else {
                 // Multi-group sync: load MLS groups from SQL and sync each
-                let group_ids: Vec<String> = match db::load_mls_groups(&handle).await {
+                let group_ids: Vec<String> = match db::load_mls_groups().await {
                     Ok(groups) => {
                         groups.into_iter()
                             .filter(|g| !g.evicted) // Skip evicted groups
@@ -1135,8 +1130,8 @@ pub async fn sync_mls_group_participants(group_id: String) -> Result<(), String>
         let slim = db::chats::SlimChatDB::from_chat(&state.chats[chat_idx], &state.interner);
         drop(state);
 
-        if let Some(handle) = TAURI_APP.get() {
-            if let Err(e) = db::chats::save_slim_chat(handle.clone(), slim).await {
+        if let Some(_handle) = TAURI_APP.get() {
+            if let Err(e) = db::chats::save_slim_chat(slim).await {
                 eprintln!("[MLS] Failed to save chat after syncing participants: {}", e);
             }
         }
@@ -1385,7 +1380,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                         crate::image_cache::get_cached_path(&handle, hash, crate::image_cache::ImageType::Avatar)
                     });
                     // Update only the specific group instead of all groups
-                    db::save_mls_group(handle.clone(), &groups[idx]).await.map_err(|e| e.to_string())?;
+                    db::save_mls_group(&groups[idx]).await.map_err(|e| e.to_string())?;
                     mls::emit_group_metadata_event(&groups[idx]);
                 } else {
                     println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
@@ -1416,7 +1411,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     evicted: false,                           // Accepting a welcome means we're joining, not evicted
                 };
 
-                db::save_mls_group(handle.clone(), &metadata).await.map_err(|e| e.to_string())?;
+                db::save_mls_group(&metadata).await.map_err(|e| e.to_string())?;
                 mls::emit_group_metadata_event(&metadata);
 
                 // Create the Chat in STATE with metadata and save to disk
@@ -1437,7 +1432,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     drop(state);
 
                     if let Some(slim) = slim {
-                        if let Err(e) = db::chats::save_slim_chat(handle.clone(), slim).await {
+                        if let Err(e) = db::chats::save_slim_chat(slim).await {
                             eprintln!("[MLS] Failed to save chat after welcome acceptance: {}", e);
                         }
                     }

@@ -314,7 +314,7 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
     };
 
     // Look up granted permissions for this app using the file hash (content-based security)
-    let granted_permissions = crate::db::get_miniapp_granted_permissions(app_handle, &instance.package.file_hash)
+    let granted_permissions = crate::db::get_miniapp_granted_permissions(&instance.package.file_hash)
         .unwrap_or_default();
 
     let path = request.uri().path();

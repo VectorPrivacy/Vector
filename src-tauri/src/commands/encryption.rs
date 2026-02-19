@@ -50,11 +50,11 @@ pub async fn get_encryption_status<R: Runtime>(
     };
 
     // Initialize the cached flag from DB (first call seeds the AtomicBool)
-    crate::state::init_encryption_enabled(&handle);
+    crate::state::init_encryption_enabled();
     let enabled = is_encryption_enabled();
 
     let security_type = if enabled {
-        crate::db::get_sql_setting(handle.clone(), "security_type".to_string())
+        crate::db::get_sql_setting("security_type".to_string())
             .ok().flatten().unwrap_or_else(|| "pin".to_string())
     } else {
         "pin".to_string()
@@ -91,11 +91,11 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
     }
 
     // Initialize the cached flag from DB (first call seeds the AtomicBool)
-    crate::state::init_encryption_enabled(&handle);
+    crate::state::init_encryption_enabled();
     let enabled = is_encryption_enabled();
 
     let security_type = if enabled {
-        crate::db::get_sql_setting(handle.clone(), "security_type".to_string())
+        crate::db::get_sql_setting("security_type".to_string())
             .ok().flatten().unwrap_or_else(|| "pin".to_string())
     } else {
         "pin".to_string()

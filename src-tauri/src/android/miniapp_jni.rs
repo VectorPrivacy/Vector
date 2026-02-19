@@ -789,8 +789,7 @@ fn get_granted_permissions_for_package(package_path: &str) -> Result<String, Str
     let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
 
     // Look up permissions from database using file_hash
-    let handle = TAURI_APP.get().ok_or("Tauri app not initialized")?;
-    crate::db::get_miniapp_granted_permissions(handle, &file_hash)
+    crate::db::get_miniapp_granted_permissions(&file_hash)
 }
 
 fn serve_file_from_package(

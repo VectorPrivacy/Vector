@@ -248,8 +248,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
 /// Export account keys (nsec and seed phrase if available)
 #[tauri::command]
 pub async fn export_keys() -> Result<serde_json::Value, String> {
-    let handle = TAURI_APP.get().unwrap();
-    let stored = db::get_pkey(handle.clone())?
+    let stored = db::get_pkey()?
         .ok_or("No nsec found in database")?;
 
     // If encryption is disabled the stored value is already plaintext
@@ -264,7 +263,7 @@ pub async fn export_keys() -> Result<serde_json::Value, String> {
     let seed_phrase = if let Some(seed) = MNEMONIC_SEED.get() {
         Some(seed.clone())
     } else {
-        match db::get_seed(handle.clone()).await {
+        match db::get_seed().await {
             Ok(Some(seed)) => Some(seed),
             _ => None,
         }
@@ -293,8 +292,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
     match MNEMONIC_SEED.get() {
         Some(seed) => {
             // Save the seed phrase to the database
-            let handle = TAURI_APP.get().unwrap();
-            let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+            let _ = db::set_seed(seed.to_string()).await;
         }
         _ => ()
     }
@@ -343,11 +341,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
         }
 
         // Skip if a forced regen is pending (connect() post-connect handler owns this)
-        let handle = match TAURI_APP.get() {
-            Some(h) => h.clone(),
-            None => return,
-        };
-        let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+        let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
             .ok().flatten().map(|v| v == "1").unwrap_or(false);
         if force_pending {
             println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
@@ -388,11 +382,7 @@ pub async fn decrypt(ciphertext: String, password: Option<String>) -> Result<Str
             }
 
             // Skip if a forced regen is pending (connect() post-connect handler owns this)
-            let handle = match TAURI_APP.get() {
-                Some(h) => h.clone(),
-                None => return,
-            };
-            let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+            let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
                 .ok().flatten().map(|v| v == "1").unwrap_or(false);
             if force_pending {
                 println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
@@ -432,7 +422,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     }
 
     let handle = TAURI_APP.get().ok_or("App not initialized")?;
-    let stored_pkey = db::get_pkey(handle.clone())?
+    let stored_pkey = db::get_pkey()?
         .ok_or("No private key found")?;
 
     // Decrypt if password provided
@@ -496,12 +486,12 @@ pub async fn setup_encryption<R: Runtime>(
     db::set_pkey(handle.clone(), encrypted).await?;
 
     // Set security type and ensure encryption flag is cached
-    db::set_sql_setting(handle.clone(), "security_type".to_string(), security_type)?;
+    db::set_sql_setting("security_type".to_string(), security_type)?;
     crate::state::set_encryption_enabled(true);
 
     // Save seed phrase if available
     if let Some(seed) = MNEMONIC_SEED.get() {
-        let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+        let _ = db::set_seed(seed.to_string()).await;
     }
 
     // Broadcast pending invite acceptance
@@ -544,12 +534,12 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     db::set_pkey(handle.clone(), nsec).await?;
 
     // Mark encryption as disabled
-    db::set_sql_setting(handle.clone(), "encryption_enabled".to_string(), "false".to_string())?;
+    db::set_sql_setting("encryption_enabled".to_string(), "false".to_string())?;
     crate::state::set_encryption_enabled(false);
 
     // Save seed phrase if available (stored plaintext since encryption is disabled)
     if let Some(seed) = MNEMONIC_SEED.get() {
-        let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+        let _ = db::set_seed(seed.to_string()).await;
     }
 
     Ok(())
@@ -565,11 +555,7 @@ fn spawn_mls_bootstrap() {
             return;
         }
 
-        let handle = match TAURI_APP.get() {
-            Some(h) => h.clone(),
-            None => return,
-        };
-        let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+        let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
             .ok().flatten().map(|v| v == "1").unwrap_or(false);
         if force_pending {
             println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending");
