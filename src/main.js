@@ -5871,18 +5871,21 @@ async function executeDeepLinkAction(payload) {
         // Open the profile for the given npub
         // First, try to find an existing profile in our cache
         let profile = arrProfiles.find(p => p.id === target);
-        
+
         if (!profile) {
             // Profile not in cache - create a minimal profile object
             // The openProfile function will trigger a refresh from the network
             profile = { id: target };
         }
-        
+
         // Store the current chat so we can return to it
         previousChatBeforeProfile = strOpenChat;
-        
+
         // Open the profile view
         await openProfile(profile);
+    } else if (action_type === 'chat') {
+        // Open a specific chat (triggered by tapping a notification)
+        await openChat(target);
     }
 }
 
@@ -6600,17 +6603,15 @@ async function login(skipAnimations = false) {
             initializeUpdater();
 
             // Execute any pending deep link action that was received before login
-            setTimeout(async () => {
-                try {
-                    const pendingAction = await invoke('get_pending_deep_link');
-                    if (pendingAction) {
-                        console.log('Executing pending deep link action:', pendingAction);
-                        await executeDeepLinkAction(pendingAction);
-                    }
-                } catch (e) {
-                    console.error('Failed to check for pending deep link:', e);
+            try {
+                const pendingAction = await invoke('get_pending_deep_link');
+                if (pendingAction) {
+                    console.log('Executing pending deep link action:', pendingAction);
+                    await executeDeepLinkAction(pendingAction);
                 }
-            }, 1000);
+            } catch (e) {
+                console.error('Failed to check for pending deep link:', e);
+            }
         });
 
         // Wait for connect + all listener registrations to complete

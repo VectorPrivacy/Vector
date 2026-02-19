@@ -24,6 +24,8 @@ class MainActivity : TauriActivity() {
         external fun nativeOnResume()
         @JvmStatic
         external fun nativeOnPause()
+        @JvmStatic
+        external fun nativeOnNotificationTap(chatId: String)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,6 +44,15 @@ class MainActivity : TauriActivity() {
         } else {
             startService(serviceIntent)
         }
+
+        // Handle notification tap that launched the app
+        handleNotificationIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Handle notification tap when app is already running
+        handleNotificationIntent(intent)
     }
 
     override fun onResume() {
@@ -52,6 +63,15 @@ class MainActivity : TauriActivity() {
     override fun onPause() {
         super.onPause()
         try { nativeOnPause() } catch (_: Exception) {}
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        val chatId = intent?.getStringExtra("chat_id")
+        if (!chatId.isNullOrEmpty()) {
+            intent.removeExtra("chat_id") // Consume to prevent re-processing
+            android.util.Log.d("MainActivity", "Notification tap → chat: ${chatId.take(20)}")
+            try { nativeOnNotificationTap(chatId) } catch (_: Exception) {}
+        }
     }
 
     private fun requestNotificationPermission() {

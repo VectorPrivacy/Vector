@@ -39,11 +39,13 @@ pub struct NotificationData {
     pub sender_name: Option<String>,
     /// Optional cached avatar file path for the sender
     pub avatar_path: Option<String>,
+    /// Chat identifier for notification tap navigation (npub for DMs, group_id for groups)
+    pub chat_id: Option<String>,
 }
 
 impl NotificationData {
     /// Create a DM notification (works for both text and file attachments)
-    pub fn direct_message(sender_name: String, content: String, avatar_path: Option<String>) -> Self {
+    pub fn direct_message(sender_name: String, content: String, avatar_path: Option<String>, chat_id: String) -> Self {
         Self {
             notification_type: NotificationType::DirectMessage,
             title: sender_name.clone(),
@@ -51,11 +53,12 @@ impl NotificationData {
             group_name: None,
             sender_name: Some(sender_name),
             avatar_path,
+            chat_id: Some(chat_id),
         }
     }
 
     /// Create a group message notification (works for both text and file attachments)
-    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>) -> Self {
+    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>, chat_id: String) -> Self {
         Self {
             notification_type: NotificationType::GroupMessage,
             title: format!("{} - {}", sender_name, group_name),
@@ -63,6 +66,7 @@ impl NotificationData {
             group_name: Some(group_name),
             sender_name: Some(sender_name),
             avatar_path,
+            chat_id: Some(chat_id),
         }
     }
 
@@ -76,6 +80,7 @@ impl NotificationData {
             group_name: Some(group_name),
             sender_name: Some(inviter_name),
             avatar_path,
+            chat_id: None, // No chat to navigate to yet (pending welcome)
         }
     }
 }
@@ -88,7 +93,7 @@ pub fn show_notification_generic(data: NotificationData) {
     // notifications when the user is actively using the app.
     #[cfg(target_os = "android")]
     {
-        crate::android::background_sync::post_notification_jni(&data.title, &data.body, data.avatar_path.as_deref());
+        crate::android::background_sync::post_notification_jni(&data.title, &data.body, data.avatar_path.as_deref(), data.chat_id.as_deref());
         return;
     }
 

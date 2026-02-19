@@ -431,7 +431,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                 }
             };
             if let Some((display_name, content, avatar)) = display_info {
-                let notification = NotificationData::direct_message(display_name, content, avatar);
+                let notification = NotificationData::direct_message(display_name, content, avatar, contact.to_string());
                 show_notification_generic(notification);
             }
         }
@@ -527,7 +527,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
             };
             if let Some((display_name, file_extension, avatar)) = display_info {
                 let file_description = "Sent a ".to_string() + &get_file_type_description(&file_extension);
-                let notification = NotificationData::direct_message(display_name, file_description, avatar);
+                let notification = NotificationData::direct_message(display_name, file_description, avatar, contact.to_string());
                 show_notification_generic(notification);
             }
         }

@@ -135,6 +135,17 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
     }
 }
 
+/// Store a pending notification tap action (called from Android JNI when user taps a notification)
+pub fn set_pending_notification_action(chat_id: &str) {
+    if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+        *pending = Some(DeepLinkAction {
+            action_type: "chat".to_string(),
+            target: chat_id.to_string(),
+        });
+        println!("[DeepLink] Stored pending notification action for chat: {}", &chat_id[..chat_id.len().min(20)]);
+    }
+}
+
 /// Get and clear any pending deep link action
 ///
 /// This should be called by the frontend after login to check if there's a pending

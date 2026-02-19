@@ -113,6 +113,36 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
     }
 }
 
+/// Called from MainActivity when user taps a notification with a chat_id extra.
+/// Stores the chat_id as a pending deep link action and emits to the frontend.
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnNotificationTap(
+    mut env: JNIEnv,
+    _class: JClass,
+    chat_id: JString<'_>,
+) {
+    let chat_id: String = env.get_string(&chat_id)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    if chat_id.is_empty() {
+        return;
+    }
+    logcat(&format!("Notification tap → chat: {}...", &chat_id[..chat_id.len().min(20)]));
+
+    // Store as pending action (frontend may not be ready yet)
+    crate::deep_link::set_pending_notification_action(&chat_id);
+
+    // Emit to frontend immediately if Tauri is running
+    if let Some(handle) = crate::TAURI_APP.get() {
+        use tauri::Emitter;
+        let action = crate::deep_link::DeepLinkAction {
+            action_type: "chat".to_string(),
+            target: chat_id,
+        };
+        let _ = handle.emit("deep_link_action", &action);
+    }
+}
+
 /// Called by VectorNotificationService when the foreground service starts.
 /// Stores JNI refs and data_dir for later use. In service-only mode (no Activity),
 /// immediately starts the standalone sync. In full-app mode, standalone sync is
@@ -301,7 +331,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         ).await;
                     } else {
                         // Encrypted account — can't decrypt, but we know something arrived
-                        post_notification_jni("Vector", "You have a new message", None);
+                        post_notification_jni("Vector", "You have a new message", None, None);
                     }
 
                     // Cap the seen set to prevent unbounded memory growth
@@ -499,7 +529,7 @@ async fn preload_profiles_into_state() {
 /// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
 ///
 /// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
-pub fn post_notification_jni(title: &str, body: &str, avatar_path: Option<&str>) {
+pub fn post_notification_jni(title: &str, body: &str, avatar_path: Option<&str>, chat_id: Option<&str>) {
     // Don't post notifications when the user is actively using the app
     if is_activity_in_foreground() {
         return;
@@ -563,12 +593,14 @@ pub fn post_notification_jni(title: &str, body: &str, avatar_path: Option<&str>)
             .map_err(|e| format!("Failed to create body string: {:?}", e))?;
         let javatar = env.new_string(avatar_path.unwrap_or(""))
             .map_err(|e| format!("Failed to create avatar string: {:?}", e))?;
+        let jchat_id = env.new_string(chat_id.unwrap_or(""))
+            .map_err(|e| format!("Failed to create chat_id string: {:?}", e))?;
 
         env.call_static_method(
             &service_jclass,
             "showMessageNotification",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-            &[context.into(), (&jtitle).into(), (&jbody).into(), (&javatar).into()],
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[context.into(), (&jtitle).into(), (&jbody).into(), (&javatar).into(), (&jchat_id).into()],
         )
         .map_err(|e| format!("Failed to call showMessageNotification: {:?}", e))?;
 

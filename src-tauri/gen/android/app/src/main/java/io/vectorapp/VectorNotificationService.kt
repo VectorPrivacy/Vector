@@ -39,12 +39,15 @@ class VectorNotificationService : Service() {
          * when called from JNI-attached threads.
          */
         @JvmStatic
-        fun showMessageNotification(context: android.content.Context, title: String, body: String, avatarPath: String) {
+        fun showMessageNotification(context: android.content.Context, title: String, body: String, avatarPath: String, chatId: String) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val notificationId = notificationCounter.getAndIncrement()
 
             val launchIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+                if (chatId.isNotEmpty()) {
+                    putExtra("chat_id", chatId)
+                }
             }
             val pendingIntent = PendingIntent.getActivity(
                 context, notificationId, launchIntent,
@@ -73,7 +76,7 @@ class VectorNotificationService : Service() {
                 .build()
 
             manager.notify(notificationId, notification)
-            android.util.Log.d("VectorNotificationService", "Posted notification: $title (avatar: ${avatarPath.isNotEmpty()})")
+            android.util.Log.d("VectorNotificationService", "Posted notification: $title (avatar: ${avatarPath.isNotEmpty()}, chat: ${chatId.take(20)})")
         }
     }
 

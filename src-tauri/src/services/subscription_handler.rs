@@ -235,7 +235,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     };
 
                                                                     // Create notification for text message
-                                                                    let notification = NotificationData::group_message(sender_name, group_name, message.content.clone(), avatar);
+                                                                    let notification = NotificationData::group_message(sender_name, group_name, message.content.clone(), avatar, group_id_for_persist.clone());
                                                                     show_notification_generic(notification);
                                                                 }
 
@@ -329,7 +329,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                                                                     } else {
                                                                         message.content.clone()
                                                                     };
-                                                                    let notification = NotificationData::group_message(sender_name, group_name, content, avatar);
+                                                                    let notification = NotificationData::group_message(sender_name, group_name, content, avatar, group_id_for_persist.clone());
 
                                                                     show_notification_generic(notification);
                                                                 }
