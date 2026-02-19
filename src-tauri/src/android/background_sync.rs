@@ -24,6 +24,38 @@ use crate::commands::relays::DEFAULT_RELAYS;
 /// Flag indicating whether background sync is active
 static BACKGROUND_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the Activity is currently in the foreground (visible and focused).
+/// Set by JNI calls from MainActivity.onResume/onPause.
+/// When true, notifications are suppressed (user is looking at the app).
+static ACTIVITY_IN_FOREGROUND: AtomicBool = AtomicBool::new(false);
+
+/// Check if the Activity is currently in the foreground
+pub fn is_activity_in_foreground() -> bool {
+    ACTIVITY_IN_FOREGROUND.load(Ordering::Acquire)
+}
+
+/// Called from MainActivity.onResume via JNI
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    ensure_android_logger();
+    ACTIVITY_IN_FOREGROUND.store(true, Ordering::Release);
+    info!("[BackgroundSync] Activity resumed (foreground)");
+}
+
+/// Called from MainActivity.onPause via JNI
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    ensure_android_logger();
+    ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
+    info!("[BackgroundSync] Activity paused (background)");
+}
+
 /// Signal to stop the standalone sync thread
 static STOP_STANDALONE_SYNC: AtomicBool = AtomicBool::new(false);
 
@@ -425,7 +457,13 @@ async fn poll_and_notify(
 /// Post a notification by calling VectorNotificationService.showMessageNotification() in Kotlin.
 /// Uses the stored JavaVM + GlobalRef context (captured during JNI entry) instead of
 /// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
-fn post_notification_jni(title: &str, body: &str) {
+///
+/// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
+pub fn post_notification_jni(title: &str, body: &str) {
+    // Don't post notifications when the user is actively using the app
+    if is_activity_in_foreground() {
+        return;
+    }
     let vm = match BG_JAVA_VM.get() {
         Some(vm) => vm,
         None => {

@@ -15,6 +15,15 @@ class MainActivity : TauriActivity() {
 
     companion object {
         private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
+
+        init {
+            System.loadLibrary("vector_lib")
+        }
+
+        @JvmStatic
+        external fun nativeOnResume()
+        @JvmStatic
+        external fun nativeOnPause()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,6 +45,16 @@ class MainActivity : TauriActivity() {
         } else {
             startService(serviceIntent)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try { nativeOnResume() } catch (_: Exception) {}
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { nativeOnPause() } catch (_: Exception) {}
     }
 
     private fun requestNotificationPermission() {

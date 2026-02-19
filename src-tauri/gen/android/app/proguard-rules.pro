@@ -67,3 +67,8 @@
 
 # Keep BootReceiver (referenced in AndroidManifest)
 -keep class io.vectorapp.BootReceiver { *; }
+
+# Keep MainActivity native JNI methods (foreground state tracking)
+-keepclassmembers class io.vectorapp.MainActivity {
+    native <methods>;
+}
