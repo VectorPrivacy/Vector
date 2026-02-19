@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_PUBLIC_KEY, STATE};
+use crate::{NOSTR_CLIENT, MY_PUBLIC_KEY};
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
@@ -228,12 +228,12 @@ fn run_standalone_sync_loop(data_dir: &str) {
         info!("[BackgroundSync] Waiting for incoming GiftWrap events...");
 
         // Live event handler — runs until stop signal or disconnect
-        // Uses the shared pipeline: decrypt → persist to DB → show notification
+        // Uses the shared pipeline: decrypt → persist to DB → show notification.
+        // Notifications are handled inside handle_event_with_context via
+        // show_notification_generic → post_notification_jni (no extra unwrap needed).
         let client_for_handler = client.clone();
-        let client_for_notif = client.clone();
         let result = client.handle_notifications(move |notification| {
             let client = client_for_handler.clone();
-            let client_notif = client_for_notif.clone();
             let seen = seen_events.clone();
             let sub_id = gift_sub_id.clone();
 
@@ -252,20 +252,10 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         return Ok(false);
                     }
 
-                    // Process through shared pipeline (decrypts, persists to DB)
-                    let processed = handle_event_with_context(
+                    // Process through shared pipeline (decrypts, persists to DB, notifies)
+                    handle_event_with_context(
                         (*event).clone(), true, &client, my_public_key
                     ).await;
-
-                    // Post notification for new incoming messages
-                    if processed {
-                        if let Some((title, body)) = get_notification_data(
-                            &client_notif, &event, my_public_key
-                        ).await {
-                            info!("[BackgroundSync] New message from {}, posting notification...", title);
-                            post_notification_jni(&title, &body);
-                        }
-                    }
 
                     // Cap the seen set to prevent unbounded memory growth
                     let seen_len = seen.lock().unwrap().len();
@@ -418,52 +408,6 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     Ok(npub)
 }
 
-/// Extract notification display data for a processed event.
-/// Checks STATE for profile display names (populated by the pipeline),
-/// falling back to truncated npub if no profile is available.
-async fn get_notification_data(
-    client: &Client,
-    event: &nostr_sdk::Event,
-    my_public_key: PublicKey,
-) -> Option<(String, String)> {
-    let gift = client.unwrap_gift_wrap(event).await.ok()?;
-    let sender = gift.sender;
-
-    // Skip our own messages
-    if sender == my_public_key {
-        return None;
-    }
-
-    let sender_npub = sender.to_bech32().ok()?;
-
-    // Try to get display name from STATE (populated by handle_event_with_context)
-    let display_name = {
-        let state = STATE.lock().await;
-        state.get_profile(&sender_npub).and_then(|p| {
-            if !p.nickname.is_empty() {
-                Some(p.nickname.to_string())
-            } else if !p.name.is_empty() {
-                Some(p.name.to_string())
-            } else {
-                None
-            }
-        })
-    };
-
-    let title = display_name.unwrap_or_else(|| {
-        let end = sender_npub.len().min(4);
-        format!("{}...{}", &sender_npub[..10.min(sender_npub.len())], &sender_npub[sender_npub.len() - end..])
-    });
-
-    let body = if gift.rumor.content.is_empty() {
-        "New message".to_string()
-    } else {
-        gift.rumor.content.chars().take(200).collect()
-    };
-
-    Some((title, body))
-}
-
 /// Poll relays for new GiftWrap events and post notifications for unseen messages.
 /// Returns the number of new notifications posted.
 async fn poll_and_notify(
@@ -498,17 +442,13 @@ async fn poll_and_notify(
             continue;
         }
 
-        // Process through shared pipeline (decrypts, persists to DB)
+        // Process through shared pipeline (decrypts, persists to DB, notifies)
         let processed = handle_event_with_context(
             event.clone(), true, client, my_public_key
         ).await;
 
         if processed {
-            if let Some((title, body)) = get_notification_data(client, &event, my_public_key).await {
-                info!("[BackgroundSync] New message from {}", title);
-                post_notification_jni(&title, &body);
-                new_notifications += 1;
-            }
+            new_notifications += 1;
         }
     }
 
