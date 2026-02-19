@@ -7,11 +7,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
+import androidx.core.graphics.drawable.IconCompat
 import java.util.concurrent.atomic.AtomicInteger
 
 class VectorNotificationService : Service() {
@@ -21,8 +24,15 @@ class VectorNotificationService : Service() {
         const val MESSAGES_CHANNEL_ID = "vector_messages_v2"
         const val SERVICE_NOTIFICATION_ID = 1
 
-        /** Incrementing counter for unique message notification IDs (enables stacking). */
+        /** Incrementing counter for unique notification IDs (DMs and non-chat notifications). */
         private val notificationCounter = AtomicInteger(100)
+
+        /** Stable notification ID per chat — lets MessagingStyle accumulate messages in one notification. */
+        private val chatNotificationIds = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+        /** Message history per chat — MessagingStyle requires replaying all messages on each update. */
+        private data class ChatMessage(val senderName: String, val senderAvatarPath: String, val body: String, val timestamp: Long)
+        private val chatMessageHistory = java.util.concurrent.ConcurrentHashMap<String, MutableList<ChatMessage>>()
 
         init {
             System.loadLibrary("vector_lib")
@@ -37,11 +47,38 @@ class VectorNotificationService : Service() {
          * Post a message notification. Called from Rust JNI via the app's class loader.
          * Must be static and use applicationContext to avoid class loader issues
          * when called from JNI-attached threads.
+         *
+         * For group messages (groupName non-empty), uses MessagingStyle with:
+         * - Group avatar as the large icon
+         * - Sender avatar inline with their name
+         * - Conversation title = group name
+         *
+         * For DMs (groupName empty), uses a simple notification with sender avatar.
          */
         @JvmStatic
-        fun showMessageNotification(context: android.content.Context, title: String, body: String, avatarPath: String, chatId: String) {
+        fun showMessageNotification(
+            context: android.content.Context,
+            title: String,
+            body: String,
+            avatarPath: String,
+            chatId: String,
+            senderName: String,
+            groupName: String,
+            groupAvatarPath: String,
+        ) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val notificationId = notificationCounter.getAndIncrement()
+            val isGroup = groupName.isNotEmpty()
+            val historyKey = chatId.ifEmpty { title }
+
+            // Stable notification ID per chat so messages stack in one entry
+            val notificationId = if (chatId.isNotEmpty()) {
+                chatNotificationIds.getOrPut(chatId) { notificationCounter.getAndIncrement() }
+            } else {
+                notificationCounter.getAndIncrement()
+            }
+
+            // Fresh requestCode per post — avoids PendingIntent caching issues with FLAG_IMMUTABLE
+            val pendingRequestCode = notificationCounter.getAndIncrement()
 
             val launchIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -50,33 +87,91 @@ class VectorNotificationService : Service() {
                 }
             }
             val pendingIntent = PendingIntent.getActivity(
-                context, notificationId, launchIntent,
+                context, pendingRequestCode, launchIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            // Use sender's cached avatar if available, otherwise fall back to app icon
-            val largeIcon = if (avatarPath.isNotEmpty()) {
-                try {
-                    BitmapFactory.decodeFile(avatarPath)
-                } catch (e: Exception) {
-                    android.util.Log.w("VectorNotificationService", "Failed to load avatar: ${e.message}")
-                    null
-                }
-            } else null
-            val finalLargeIcon = largeIcon ?: BitmapFactory.decodeResource(context.resources, R.drawable.ic_large_icon)
+            // DeleteIntent to clear message history when notification is swiped away
+            val deleteIntent = Intent(context, NotificationDismissReceiver::class.java).apply {
+                putExtra("history_key", historyKey)
+            }
+            val deletePendingIntent = PendingIntent.getBroadcast(
+                context, pendingRequestCode, deleteIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // Accumulate message history for this chat
+            val history = chatMessageHistory.getOrPut(historyKey) { mutableListOf() }
+            history.add(ChatMessage(
+                if (isGroup) senderName.ifEmpty { "Someone" } else senderName.ifEmpty { title },
+                avatarPath, body, System.currentTimeMillis()
+            ))
+            while (history.size > 8) history.removeAt(0)
+
+            // Build MessagingStyle — used for both groups and DMs
+            val messagingStyle = NotificationCompat.MessagingStyle(
+                Person.Builder().setName("Me").build()
+            )
+            if (isGroup) {
+                messagingStyle.setConversationTitle(groupName)
+                messagingStyle.setGroupConversation(true)
+            }
+
+            for (msg in history) {
+                val icon = loadBitmapIcon(msg.senderAvatarPath)
+                val person = Person.Builder()
+                    .setName(msg.senderName)
+                    .apply { icon?.let { setIcon(it) } }
+                    .build()
+                messagingStyle.addMessage(msg.body, msg.timestamp, person)
+            }
+
+            val largeIcon = if (isGroup) {
+                loadBitmap(groupAvatarPath) ?: loadBitmap(avatarPath)
+            } else {
+                loadBitmap(avatarPath)
+            } ?: BitmapFactory.decodeResource(context.resources, R.drawable.ic_large_icon)
 
             val notification = NotificationCompat.Builder(context, MESSAGES_CHANNEL_ID)
-                .setContentTitle(title)
-                .setContentText(body)
                 .setSmallIcon(R.drawable.ic_notification)
-                .setLargeIcon(finalLargeIcon)
+                .setLargeIcon(largeIcon)
+                .setStyle(messagingStyle)
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pendingIntent)
+                .setDeleteIntent(deletePendingIntent)
                 .build()
 
             manager.notify(notificationId, notification)
-            android.util.Log.d("VectorNotificationService", "Posted notification: $title (avatar: ${avatarPath.isNotEmpty()}, chat: ${chatId.take(20)})")
+
+            android.util.Log.d("VectorNotificationService", "Posted notification #$notificationId: $title (group: $isGroup, chat: ${chatId.take(20)})")
+        }
+
+        /** Clear all message history (called when Activity resumes — notifications are no longer relevant). */
+        @JvmStatic
+        fun clearAllMessageHistory() {
+            chatMessageHistory.clear()
+            chatNotificationIds.clear()
+        }
+
+        /** Clear message history for a specific chat (called when a notification is dismissed). */
+        @JvmStatic
+        fun clearMessageHistory(historyKey: String) {
+            chatMessageHistory.remove(historyKey)
+            chatNotificationIds.remove(historyKey)
+        }
+
+        private fun loadBitmap(path: String): Bitmap? {
+            if (path.isEmpty()) return null
+            return try {
+                BitmapFactory.decodeFile(path)
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        private fun loadBitmapIcon(path: String): IconCompat? {
+            return loadBitmap(path)?.let { IconCompat.createWithBitmap(it) }
         }
     }
 

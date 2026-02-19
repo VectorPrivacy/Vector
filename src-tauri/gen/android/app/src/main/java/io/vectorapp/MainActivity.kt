@@ -58,6 +58,8 @@ class MainActivity : TauriActivity() {
     override fun onResume() {
         super.onResume()
         try { nativeOnResume() } catch (_: Exception) {}
+        // Clear notification message history — user is in the app, stale history is irrelevant
+        VectorNotificationService.clearAllMessageHistory()
     }
 
     override fun onPause() {

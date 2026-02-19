@@ -274,11 +274,31 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         };
 
+        // Subscribe to MLS group messages (only useful for unencrypted accounts that can decrypt)
+        let mls_sub_id = if can_decrypt {
+            let mls_filter = Filter::new()
+                .kind(Kind::MlsGroupMessage)
+                .limit(0);
+            match client.subscribe(mls_filter, None).await {
+                Ok(output) => {
+                    logcat("Live MLS group message subscription active");
+                    Some(output.val)
+                }
+                Err(e) => {
+                    logcat(&format!("Failed to subscribe to MLS messages: {:?}", e));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Preload profiles AFTER subscribe — runs while relay TCP/TLS handshakes complete.
         // Profiles are only needed when a notification arrives (to resolve display names).
         // Skip for encrypted accounts (can't read profiles from encrypted DB).
         if can_decrypt {
             preload_profiles_into_state().await;
+            preload_mls_groups_into_state().await;
         }
 
         // Spawn a stop-checker task that disconnects the client when stop is signaled.
@@ -298,16 +318,17 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // Track seen event IDs to deduplicate across relays
         let seen_events: Arc<Mutex<HashSet<EventId>>> = Arc::new(Mutex::new(HashSet::new()));
 
-        logcat("Waiting for incoming GiftWrap events...");
+        logcat("Waiting for incoming events...");
 
         // Live event handler — runs until stop signal or disconnect.
-        // Full mode: decrypt → persist to DB → show rich notification.
-        // Read-only mode (encrypted account): show generic "New message" notification.
+        // Routes GiftWrap events through the DM/file handler and MLS group messages
+        // through the shared MLS handler for full state consistency.
         let client_for_handler = client.clone();
         let result = client.handle_notifications(move |notification| {
             let client = client_for_handler.clone();
             let seen = seen_events.clone();
-            let sub_id = gift_sub_id.clone();
+            let gift_id = gift_sub_id.clone();
+            let mls_id = mls_sub_id.clone();
 
             async move {
                 if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
@@ -315,7 +336,11 @@ fn run_standalone_sync_loop(data_dir: &str) {
                 }
 
                 if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
-                    if subscription_id != sub_id {
+                    // Route by subscription
+                    let is_gift = subscription_id == gift_id;
+                    let is_mls = mls_id.as_ref().map_or(false, |id| subscription_id == *id);
+
+                    if !is_gift && !is_mls {
                         return Ok(false);
                     }
 
@@ -324,14 +349,21 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         return Ok(false);
                     }
 
-                    if can_decrypt {
-                        // Full pipeline — decrypt, persist to DB, show rich notification
-                        handle_event_with_context(
-                            (*event).clone(), true, &client, my_public_key
+                    if is_gift {
+                        if can_decrypt {
+                            // Full pipeline — decrypt, persist to DB, show rich notification
+                            handle_event_with_context(
+                                (*event).clone(), true, &client, my_public_key
+                            ).await;
+                        } else {
+                            // Encrypted account — can't decrypt, but we know something arrived
+                            post_notification_jni("Vector", "You have a new message", None, None, None, None, None);
+                        }
+                    } else if is_mls {
+                        // MLS group message — process through shared handler
+                        crate::services::subscription_handler::handle_mls_group_message(
+                            (*event).clone(), my_public_key
                         ).await;
-                    } else {
-                        // Encrypted account — can't decrypt, but we know something arrived
-                        post_notification_jni("Vector", "You have a new message", None, None);
                     }
 
                     // Cap the seen set to prevent unbounded memory growth
@@ -524,12 +556,42 @@ async fn preload_profiles_into_state() {
     }
 }
 
+/// Load MLS group metadata from the database into STATE so that group message
+/// notifications can show real group names instead of "Group Chat".
+async fn preload_mls_groups_into_state() {
+    match crate::db::load_mls_groups().await {
+        Ok(groups) => {
+            let count = groups.iter().filter(|g| !g.evicted).count();
+            let mut state = crate::STATE.lock().await;
+            for group in groups {
+                if group.evicted { continue; }
+                state.create_or_get_mls_group_chat(&group.group_id, vec![]);
+                if let Some(chat) = state.get_chat_mut(&group.group_id) {
+                    chat.metadata.set_name(group.name.clone());
+                }
+            }
+            logcat(&format!("Preloaded {} MLS groups into STATE", count));
+        }
+        Err(e) => {
+            logcat(&format!("Failed to preload MLS groups: {}", e));
+        }
+    }
+}
+
 /// Post a notification by calling VectorNotificationService.showMessageNotification() in Kotlin.
 /// Uses the stored JavaVM + GlobalRef context (captured during JNI entry) instead of
 /// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
 ///
 /// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
-pub fn post_notification_jni(title: &str, body: &str, avatar_path: Option<&str>, chat_id: Option<&str>) {
+pub fn post_notification_jni(
+    title: &str,
+    body: &str,
+    avatar_path: Option<&str>,
+    chat_id: Option<&str>,
+    sender_name: Option<&str>,
+    group_name: Option<&str>,
+    group_avatar_path: Option<&str>,
+) {
     // Don't post notifications when the user is actively using the app
     if is_activity_in_foreground() {
         return;
@@ -595,12 +657,18 @@ pub fn post_notification_jni(title: &str, body: &str, avatar_path: Option<&str>,
             .map_err(|e| format!("Failed to create avatar string: {:?}", e))?;
         let jchat_id = env.new_string(chat_id.unwrap_or(""))
             .map_err(|e| format!("Failed to create chat_id string: {:?}", e))?;
+        let jsender_name = env.new_string(sender_name.unwrap_or(""))
+            .map_err(|e| format!("Failed to create sender_name string: {:?}", e))?;
+        let jgroup_name = env.new_string(group_name.unwrap_or(""))
+            .map_err(|e| format!("Failed to create group_name string: {:?}", e))?;
+        let jgroup_avatar = env.new_string(group_avatar_path.unwrap_or(""))
+            .map_err(|e| format!("Failed to create group_avatar string: {:?}", e))?;
 
         env.call_static_method(
             &service_jclass,
             "showMessageNotification",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-            &[context.into(), (&jtitle).into(), (&jbody).into(), (&javatar).into(), (&jchat_id).into()],
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[context.into(), (&jtitle).into(), (&jbody).into(), (&javatar).into(), (&jchat_id).into(), (&jsender_name).into(), (&jgroup_name).into(), (&jgroup_avatar).into()],
         )
         .map_err(|e| format!("Failed to call showMessageNotification: {:?}", e))?;
 

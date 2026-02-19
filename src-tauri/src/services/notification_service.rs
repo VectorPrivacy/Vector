@@ -39,6 +39,8 @@ pub struct NotificationData {
     pub sender_name: Option<String>,
     /// Optional cached avatar file path for the sender
     pub avatar_path: Option<String>,
+    /// Optional cached avatar file path for the group (MLS groups only)
+    pub group_avatar_path: Option<String>,
     /// Chat identifier for notification tap navigation (npub for DMs, group_id for groups)
     pub chat_id: Option<String>,
 }
@@ -53,12 +55,13 @@ impl NotificationData {
             group_name: None,
             sender_name: Some(sender_name),
             avatar_path,
+            group_avatar_path: None,
             chat_id: Some(chat_id),
         }
     }
 
     /// Create a group message notification (works for both text and file attachments)
-    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>, chat_id: String) -> Self {
+    pub fn group_message(sender_name: String, group_name: String, content: String, avatar_path: Option<String>, group_avatar_path: Option<String>, chat_id: String) -> Self {
         Self {
             notification_type: NotificationType::GroupMessage,
             title: format!("{} - {}", sender_name, group_name),
@@ -66,6 +69,7 @@ impl NotificationData {
             group_name: Some(group_name),
             sender_name: Some(sender_name),
             avatar_path,
+            group_avatar_path,
             chat_id: Some(chat_id),
         }
     }
@@ -80,6 +84,7 @@ impl NotificationData {
             group_name: Some(group_name),
             sender_name: Some(inviter_name),
             avatar_path,
+            group_avatar_path: None,
             chat_id: None, // No chat to navigate to yet (pending welcome)
         }
     }
@@ -93,7 +98,15 @@ pub fn show_notification_generic(data: NotificationData) {
     // notifications when the user is actively using the app.
     #[cfg(target_os = "android")]
     {
-        crate::android::background_sync::post_notification_jni(&data.title, &data.body, data.avatar_path.as_deref(), data.chat_id.as_deref());
+        crate::android::background_sync::post_notification_jni(
+            &data.title,
+            &data.body,
+            data.avatar_path.as_deref(),
+            data.chat_id.as_deref(),
+            data.sender_name.as_deref(),
+            data.group_name.as_deref(),
+            data.group_avatar_path.as_deref(),
+        );
         return;
     }
 
