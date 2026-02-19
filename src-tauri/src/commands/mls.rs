@@ -129,7 +129,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
 
     // Create device KeyPackage using persistent MLS engine inside a no-await scope
     let (kp_encoded, kp_tags) = {
-        let mls_service = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+        let mls_service = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
         let engine = mls_service.engine().map_err(|e| e.to_string())?;
         engine
             .create_key_package_for_event(&my_pubkey, relay_urls)
@@ -271,7 +271,7 @@ pub async fn list_group_cursors() -> Result<serde_json::Value, String> {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             let cursors = mls.read_event_cursors().await.map_err(|e| e.to_string())?;
             serde_json::to_value(&cursors).map_err(|e| e.to_string())
         })
@@ -292,7 +292,7 @@ pub async fn leave_mls_group(group_id: String) -> Result<(), String> {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             mls.leave_group(&group_id)
                 .await
                 .map_err(|e| e.to_string())
@@ -322,7 +322,7 @@ pub async fn get_mls_group_members(group_id: String) -> Result<GroupMembers, Str
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             // Initialise persistent MLS
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             // Map wire-id/engine-id using encrypted metadata
             let meta_groups = mls.read_groups().await.unwrap_or_default();
             let (wire_id, engine_id) = if let Some(m) = meta_groups
@@ -519,7 +519,7 @@ pub async fn add_mls_member_device(
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             mls.add_member_device(&group_id, &member_npub, &device_id)
                 .await
                 .map_err(|e| e.to_string())
@@ -646,7 +646,7 @@ pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, Stri
     let image_data = tokio::task::spawn_blocking({
         let handle = handle.clone();
         move || -> Result<Option<([u8; 32], [u8; 32], [u8; 12])>, String> {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             let engine = mls.engine().map_err(|e| e.to_string())?;
 
             // Find our group in the engine by engine_group_id
@@ -876,7 +876,7 @@ pub async fn create_mls_group(
         // Use tokio runtime to run async code from blocking context
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             mls.create_group(
                 &name,
                 avatar_ref.as_deref(),
@@ -998,7 +998,7 @@ pub async fn invite_member_to_group(
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             mls.add_member_devices(&group_id_clone, &member_devices)
                 .await
                 .map_err(|e| e.to_string())
@@ -1025,7 +1025,7 @@ pub async fn remove_mls_member_device(
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             mls.remove_member_device(&group_id_clone, &member_npub, &device_id)
                 .await
                 .map_err(|e| e.to_string())
@@ -1051,7 +1051,7 @@ pub async fn sync_mls_groups_now(
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
 
             if let Some(id) = group_id {
                 // Sync specific group since last cursor
@@ -1183,7 +1183,7 @@ pub async fn list_pending_mls_welcomes() -> Result<Vec<SimpleWelcome>, String> {
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
             let engine = mls.engine().map_err(|e| e.to_string())?;
 
             let pending = engine.get_pending_welcomes(None).map_err(|e| e.to_string())?;
@@ -1282,7 +1282,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
         let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
-            let mls = MlsService::new_persistent(&handle).map_err(|e| e.to_string())?;
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
 
             // Get welcome details and accept it (engine work in no-await scope)
             let (nostr_group_id, engine_group_id, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex) = {

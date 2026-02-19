@@ -319,7 +319,7 @@ async fn parse_mls_imeta_attachments(
         }
     };
 
-    let mls_service = match MlsService::new_persistent(handle) {
+    let mls_service = match MlsService::new_persistent_static() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[MIP-04] Failed to create MLS service: {}", e);

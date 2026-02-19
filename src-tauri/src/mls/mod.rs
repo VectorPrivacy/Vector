@@ -130,6 +130,22 @@ impl MlsService {
         let mls_dir = crate::account_manager::get_mls_directory(handle, &npub)
             .map_err(|e| MlsError::StorageError(format!("Failed to get MLS directory: {}", e)))?;
 
+        Self::init_at_path(mls_dir)
+    }
+
+    /// Create a new MLS service using the static APP_DATA_DIR (headless-safe, no AppHandle needed).
+    pub fn new_persistent_static() -> Result<Self, MlsError> {
+        let npub = crate::account_manager::get_current_account()
+            .map_err(|e| MlsError::StorageError(format!("No account selected: {}", e)))?;
+
+        let mls_dir = crate::account_manager::get_mls_directory_static(&npub)
+            .map_err(|e| MlsError::StorageError(format!("Failed to get MLS directory: {}", e)))?;
+
+        Self::init_at_path(mls_dir)
+    }
+
+    /// Shared init logic: given an MLS directory, set up the database and return the service.
+    fn init_at_path(mls_dir: std::path::PathBuf) -> Result<Self, MlsError> {
         let db_path = mls_dir.join("vector-mls.db");
 
         // v0.2.x → v0.3.0: The old MDK used a dual-connection architecture with incompatible
@@ -2137,7 +2153,7 @@ impl MlsService {
                                             }));
 
                                             // Use a fresh MLS service for the removal
-                                            let mls_service = match MlsService::new_persistent(handle) {
+                                            let mls_service = match MlsService::new_persistent_static() {
                                                 Ok(s) => s,
                                                 Err(e) => {
                                                     eprintln!("[MLS] Failed to create MLS service for auto-remove: {}", e);

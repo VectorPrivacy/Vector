@@ -24,18 +24,14 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
     
     // Run non-Send MLS engine work on blocking thread
     tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get()
-            .ok_or_else(|| "App handle not initialized".to_string())?
-            .clone();
-        
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             // Get the Nostr client
             let client = NOSTR_CLIENT.get()
                 .ok_or_else(|| "Nostr client not initialized".to_string())?;
-            
+
             // Create MLS service instance
-            let service = MlsService::new_persistent(&handle)
+            let service = MlsService::new_persistent_static()
                 .map_err(|e| format!("Failed to create MLS service: {}", e))?;
             
             // Look up the group to get the engine_group_id (do this before getting engine)

@@ -29,7 +29,7 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
     // Decrypt the attachment using the appropriate method
     let decrypted_data = if let Some(ref group_id) = attachment.group_id {
         // MLS attachment - use MDK's MIP-04 decryption
-        decrypt_mls_attachment(handle, encrypted_data, attachment, group_id).await?
+        decrypt_mls_attachment(encrypted_data, attachment, group_id).await?
     } else {
         // DM attachment - use explicit key/nonce with AES-GCM
         crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
@@ -66,8 +66,7 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
 /// This derives the encryption key from the MLS group secret using the original file hash
 /// and other metadata stored in the MediaReference. MDK internally handles epoch fallback,
 /// trying historical epoch secrets if the current epoch's key doesn't work.
-async fn decrypt_mls_attachment<R: Runtime>(
-    handle: &AppHandle<R>,
+async fn decrypt_mls_attachment(
     encrypted_data: &[u8],
     attachment: &Attachment,
     group_id: &str,
@@ -75,7 +74,7 @@ async fn decrypt_mls_attachment<R: Runtime>(
     use mdk_core::encrypted_media::MediaReference;
 
     // Create MLS service
-    let mls_service = mls::MlsService::new_persistent(handle)
+    let mls_service = mls::MlsService::new_persistent_static()
         .map_err(|e| format!("Failed to create MLS service: {}", e))?;
 
     // Look up the group metadata to get the engine_group_id

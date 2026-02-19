@@ -80,8 +80,7 @@ pub struct MlsMediaUploadResult {
 ///
 /// This uses the MDK's EncryptedMediaManager to encrypt files with keys derived
 /// from the MLS group secret, creating a White Noise-compatible imeta tag.
-async fn encrypt_and_upload_mls_media<R: Runtime>(
-    handle: &AppHandle<R>,
+async fn encrypt_and_upload_mls_media(
     group_id: &str,
     file: &AttachmentFile,
     filename: &str,
@@ -90,7 +89,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     use mdk_core::encrypted_media::MediaProcessingOptions;
 
     // Get the MDK engine and create media manager for this group
-    let mls_service = MlsService::new_persistent(handle)
+    let mls_service = MlsService::new_persistent_static()
         .map_err(|e| format!("Failed to create MLS service: {}", e))?;
 
     // Look up the group metadata to get the engine_group_id
@@ -330,7 +329,6 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
             // Encrypt and upload using MIP-04 (always fresh - no deduplication for MLS)
             let mls_upload_result = match encrypt_and_upload_mls_media(
-                handle,
                 &receiver,
                 &attached_file,
                 &filename,

@@ -129,15 +129,10 @@ pub(crate) async fn handle_event_with_context(
                 if let Some(unsigned) = unsigned_opt {
                     // Outer giftwrap id is our wrapper id for dedup/logs
                     let wrapper_id = event.id;
-                    let app_handle = TAURI_APP.get().cloned();
 
                     // Use blocking thread for non-Send MLS engine
                     let processed = tokio::task::spawn_blocking(move || {
-                        if app_handle.is_none() {
-                            return false;
-                        }
-                        let handle = app_handle.unwrap();
-                        let svc = MlsService::new_persistent(&handle);
+                        let svc = MlsService::new_persistent_static();
                         if let Ok(mls) = svc {
                             if let Ok(engine) = mls.engine() {
                                 match engine.process_welcome(&wrapper_id, &unsigned) {

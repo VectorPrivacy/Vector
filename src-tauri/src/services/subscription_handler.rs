@@ -119,7 +119,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         }
 
                         // Process with non-Send MLS engine on a blocking thread (no awaits in scope)
-                        let app_handle = TAURI_APP.get().unwrap().clone();
                         let my_npub_for_block = my_pubkey_bech32.clone();
                         let group_id_for_persist = group_wire_id.clone();
                         let group_id_for_emit = group_wire_id.clone();
@@ -140,7 +139,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                             }
 
                             // Create MLS service and process message
-                            let svc = MlsService::new_persistent(&app_handle).ok()?;
+                            let svc = MlsService::new_persistent_static().ok()?;
                             let engine = svc.engine().ok()?;
 
                             match engine.process_message(&ev) {
@@ -418,7 +417,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
                                                                 // Check if we're admin for this group
                                                                 if let Some(handle) = TAURI_APP.get() {
-                                                                    let mls_svc = match MlsService::new_persistent(handle) {
+                                                                    let mls_svc = match MlsService::new_persistent_static() {
                                                                         Ok(s) => s,
                                                                         Err(e) => {
                                                                             eprintln!("[MLS] Live: Failed to create MLS service: {}", e);
