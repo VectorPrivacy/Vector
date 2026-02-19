@@ -145,11 +145,11 @@ class VectorNotificationService : Service() {
     private fun createNotificationChannels() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        // Low-priority persistent "running" channel
+        // Minimum-priority persistent "running" channel (hidden from status bar)
         val serviceChannel = NotificationChannel(
             SERVICE_CHANNEL_ID,
             "Background Service",
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_MIN
         ).apply {
             description = "Keeps Vector connected for real-time messages"
             setShowBadge(false)
@@ -168,6 +168,15 @@ class VectorNotificationService : Service() {
         manager.createNotificationChannel(messagesChannel)
     }
 
+    /** Warm taglines — one is picked at random per service boot. */
+    private val serviceTagline: String by lazy {
+        listOf(
+            "Keeping watch",
+            "You won't miss a thing",
+            "Standing by",
+        ).random()
+    }
+
     private fun buildServiceNotification(): Notification {
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -177,9 +186,13 @@ class VectorNotificationService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val body = android.text.SpannableStringBuilder()
+            .append("Listening for messages \u00B7 ")
+            .append(serviceTagline, android.text.style.StyleSpan(android.graphics.Typeface.ITALIC), android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+
         return NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setContentTitle("Vector")
-            .setContentText("Connected for messages")
+            .setContentText(body)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
