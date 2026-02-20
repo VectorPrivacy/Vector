@@ -2152,19 +2152,15 @@ async function showBackgroundServicePrompt() {
     );
 
     if (confirmed) {
-        // User chose "Enable" — request battery optimization exemption
+        // User chose "Enable" — explicitly persist enabled=true and request battery exemption
+        await invoke('set_background_service_enabled', { enabled: true });
         await invoke('request_battery_optimization');
-        // Wait for user to return from system dialog
+        // Best-effort wait for user to return from system dialog (non-blocking)
         await waitForVisibility();
-        const exempt = await invoke('check_battery_optimized');
-        if (!exempt) {
-            // User denied battery exemption — disable service
-            await invoke('set_background_service_enabled', { enabled: false });
-        }
-        // If exempt, service is already running with default enabled=true
+    } else {
+        // User chose "Not Now" — disable the background service
+        await invoke('set_background_service_enabled', { enabled: false });
     }
-    // "Not Now" — service keeps running with default enabled=true,
-    // user just skipped the battery optimization prompt
 
     // Refresh the settings UI to reflect current state
     const warning = document.getElementById('battery-warning');
