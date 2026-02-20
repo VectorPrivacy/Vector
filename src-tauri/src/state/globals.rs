@@ -2,13 +2,13 @@
 //!
 //! These globals provide shared access to core application state and configuration.
 
-use lazy_static::lazy_static;
 use nostr_sdk::prelude::*;
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use tokio::sync::Mutex;
 use tauri::AppHandle;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
 
 use super::ChatState;
 
@@ -114,7 +114,7 @@ pub async fn active_trusted_relays() -> Vec<&'static str> {
 ///
 /// A list of Blossom servers for file uploads with automatic failover.
 /// The system will try each server in order until one succeeds.
-pub static BLOSSOM_SERVERS: OnceCell<std::sync::Mutex<Vec<String>>> = OnceCell::new();
+pub static BLOSSOM_SERVERS: OnceLock<std::sync::Mutex<Vec<String>>> = OnceLock::new();
 
 /// Initialize default Blossom servers
 pub fn init_blossom_servers() -> Vec<String> {
@@ -133,7 +133,7 @@ pub fn get_blossom_servers() -> Vec<String> {
 }
 
 /// Mnemonic seed for wallet/key derivation
-pub static MNEMONIC_SEED: OnceCell<String> = OnceCell::new();
+pub static MNEMONIC_SEED: OnceLock<String> = OnceLock::new();
 
 /// Temporary nsec storage between create_account/login and setup_encryption/skip_encryption.
 /// The private key is set here and consumed by encryption setup — it never crosses IPC.
@@ -173,18 +173,18 @@ pub fn init_encryption_enabled() {
 }
 
 /// Global Nostr client instance
-pub static NOSTR_CLIENT: OnceCell<Client> = OnceCell::new();
+pub static NOSTR_CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// Cached signer keys — set once at login, never changes during a session.
 /// `Keys` implements `NostrSigner`, so this can be used directly for signing.
-pub static MY_KEYS: OnceCell<Keys> = OnceCell::new();
+pub static MY_KEYS: OnceLock<Keys> = OnceLock::new();
 
 /// Cached public key — set once at login, never changes during a session.
 /// Avoids redundant async signer→get_public_key derivations.
-pub static MY_PUBLIC_KEY: OnceCell<PublicKey> = OnceCell::new();
+pub static MY_PUBLIC_KEY: OnceLock<PublicKey> = OnceLock::new();
 
 /// Global Tauri app handle for accessing app resources
-pub static TAURI_APP: OnceCell<AppHandle> = OnceCell::new();
+pub static TAURI_APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// Pending invite acceptance data
 #[derive(Clone)]
@@ -194,27 +194,21 @@ pub struct PendingInviteAcceptance {
 }
 
 /// Static storage for pending invite acceptance
-pub static PENDING_INVITE: OnceCell<PendingInviteAcceptance> = OnceCell::new();
+pub static PENDING_INVITE: OnceLock<PendingInviteAcceptance> = OnceLock::new();
 
-lazy_static! {
-    /// Track which MLS welcomes we've already sent notifications for (by wrapper_event_id)
-    pub static ref NOTIFIED_WELCOMES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
-}
+/// Track which MLS welcomes we've already sent notifications for (by wrapper_event_id)
+pub static NOTIFIED_WELCOMES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-lazy_static! {
-    /// TEMPORARY cache of wrapper_event_ids for fast duplicate detection during INIT SYNC ONLY
-    /// - Populated at init with recent wrapper_ids (last 30 days) to avoid SQL queries for each historical event
-    /// - Only used for historical sync events (is_new = false), NOT for real-time new events
-    /// - Cleared when sync finishes to free memory
-    ///
-    /// Uses hybrid approach: sorted Vec (historical) + HashSet (pending) for 76% memory reduction
-    pub static ref WRAPPER_ID_CACHE: Mutex<WrapperIdCache> = Mutex::new(WrapperIdCache::new());
-}
+/// TEMPORARY cache of wrapper_event_ids for fast duplicate detection during INIT SYNC ONLY
+/// - Populated at init with recent wrapper_ids (last 30 days) to avoid SQL queries for each historical event
+/// - Only used for historical sync events (is_new = false), NOT for real-time new events
+/// - Cleared when sync finishes to free memory
+///
+/// Uses hybrid approach: sorted Vec (historical) + HashSet (pending) for 76% memory reduction
+pub static WRAPPER_ID_CACHE: LazyLock<Mutex<WrapperIdCache>> = LazyLock::new(|| Mutex::new(WrapperIdCache::new()));
 
-lazy_static! {
-    /// Global chat state containing profiles, chats, and sync status
-    pub static ref STATE: Mutex<ChatState> = Mutex::new(ChatState::new());
-}
+/// Global chat state containing profiles, chats, and sync status
+pub static STATE: LazyLock<Mutex<ChatState>> = LazyLock::new(|| Mutex::new(ChatState::new()));
 
 // ============================================================================
 // Processing Gate - Controls event processing during encryption migration
@@ -224,11 +218,9 @@ lazy_static! {
 /// Used during bulk encryption/decryption migrations to ensure atomic state transitions.
 pub static PROCESSING_GATE: AtomicBool = AtomicBool::new(true);
 
-lazy_static! {
-    /// Queue for events received while the processing gate is closed.
-    /// Events are drained and processed after migration completes.
-    pub static ref PENDING_EVENTS: Mutex<Vec<(Event, bool)>> = Mutex::new(Vec::new());
-}
+/// Queue for events received while the processing gate is closed.
+/// Events are drained and processed after migration completes.
+pub static PENDING_EVENTS: LazyLock<Mutex<Vec<(Event, bool)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Check if event processing is allowed (gate is open)
 #[inline]

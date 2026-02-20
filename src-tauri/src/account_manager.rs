@@ -1,7 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, Mutex, OnceLock};
+use std::sync::{Arc, RwLock, Mutex, OnceLock, LazyLock};
 use std::ops::{Deref, DerefMut};
-use lazy_static::lazy_static;
 use tauri::{AppHandle, Runtime, Manager};
 
 // ============================================================================
@@ -22,23 +21,21 @@ pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
     APP_DATA_DIR.get().ok_or_else(|| "App data directory not initialized".to_string())
 }
 
-lazy_static! {
-    /// Global state tracking the currently active account (npub)
-    static ref CURRENT_ACCOUNT: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+/// Global state tracking the currently active account (npub)
+static CURRENT_ACCOUNT: LazyLock<Arc<RwLock<Option<String>>>> = LazyLock::new(|| Arc::new(RwLock::new(None)));
 
-    /// Pending account waiting for encryption (npub stored before database creation)
-    static ref PENDING_ACCOUNT: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+/// Pending account waiting for encryption (npub stored before database creation)
+static PENDING_ACCOUNT: LazyLock<Arc<RwLock<Option<String>>>> = LazyLock::new(|| Arc::new(RwLock::new(None)));
 
-    /// Read connection pool — multiple connections for parallel reads (WAL mode).
-    /// Pre-warmed at login so boot queries get instant connections.
-    static ref DB_READ_POOL: Arc<Mutex<Vec<rusqlite::Connection>>> =
-        Arc::new(Mutex::new(Vec::new()));
+/// Read connection pool — multiple connections for parallel reads (WAL mode).
+/// Pre-warmed at login so boot queries get instant connections.
+static DB_READ_POOL: LazyLock<Arc<Mutex<Vec<rusqlite::Connection>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
-    /// Single write connection — all writes go through this to avoid SQLITE_BUSY.
-    /// Protected by Mutex so only one write operation runs at a time.
-    static ref DB_WRITE_CONN: Arc<Mutex<Option<rusqlite::Connection>>> =
-        Arc::new(Mutex::new(None));
-}
+/// Single write connection — all writes go through this to avoid SQLITE_BUSY.
+/// Protected by Mutex so only one write operation runs at a time.
+static DB_WRITE_CONN: LazyLock<Arc<Mutex<Option<rusqlite::Connection>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 /// RAII guard for READ connections — auto-returns to the read pool on drop.
 pub struct ConnectionGuard {

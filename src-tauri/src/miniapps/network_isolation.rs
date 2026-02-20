@@ -27,16 +27,17 @@ use std::str::FromStr;
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
 use anyhow::{anyhow, Context};
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
-use log::{error, info};
+
+
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
 use url::Url;
 
 /// The URL is in the form of `socks5://127.0.0.1:54321`,
 /// where only port is variable.
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
-pub static DUMMY_LOCALHOST_PROXY_URL: Lazy<Result<Url, ()>> = Lazy::new(|| {
+pub static DUMMY_LOCALHOST_PROXY_URL: LazyLock<Result<Url, ()>> = LazyLock::new(|| {
     DUMMY_LOCALHOST_PROXY_AND_URL
         .as_ref()
         .map(|(_listener, url)| url.clone())
@@ -47,12 +48,12 @@ pub static DUMMY_LOCALHOST_PROXY_URL: Lazy<Result<Url, ()>> = Lazy::new(|| {
 // because dropping `TcpListener` will automatically cause it
 // to stop listening.
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
-static DUMMY_LOCALHOST_PROXY_AND_URL: Lazy<Result<(TcpListener, Url), ()>> = Lazy::new(|| {
+static DUMMY_LOCALHOST_PROXY_AND_URL: LazyLock<Result<(TcpListener, Url), ()>> = LazyLock::new(|| {
     listen()
         .context("failed to make dummy blackhole proxy listener")
         // It's a pain to try to clone Error for users of `DUMMY_PROXY_URL`,
         // so let's just print and return `Err(())`.
-        .inspect_err(|err| error!("{err}"))
+        .inspect_err(|err| log_error!("{err}"))
         .map_err(|_err| ())
 });
 
@@ -78,7 +79,7 @@ fn listen() -> anyhow::Result<(TcpListener, Url)> {
             }
         };
 
-    info!("Dummy blackhole proxy listening on {listen_addr}");
+    log_info!("Dummy blackhole proxy listening on {listen_addr}");
 
     Ok((
         listener,

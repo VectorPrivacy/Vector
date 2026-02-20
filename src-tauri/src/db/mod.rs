@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // Submodules
 mod maintenance;
@@ -64,13 +64,13 @@ pub use events::{
 
 /// In-memory cache for chat_identifier → integer ID mappings
 /// This avoids database lookups on every message operation
-static CHAT_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+static CHAT_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// In-memory cache for npub → integer ID mappings
 /// This avoids database lookups on every message operation
-static USER_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// System event types for MLS groups (stored as integers for efficiency)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

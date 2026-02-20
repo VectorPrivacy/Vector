@@ -1,12 +1,12 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use crate::audio;
 
-static RECORDER: OnceCell<AudioRecorder> = OnceCell::new();
+static RECORDER: OnceLock<AudioRecorder> = OnceLock::new();
 
 // Standard sample rate for voice recording with good quality-to-size ratio
 const TARGET_SAMPLE_RATE: u32 = 22000;

@@ -242,7 +242,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
                 avatar_cached = path;
             }
             CacheResult::Failed(e) => {
-                log::warn!("[Profile] Failed to cache avatar for {}: {}", npub, e);
+                log_warn!("[Profile] Failed to cache avatar for {}: {}", npub, e);
             }
         }
     }
@@ -254,7 +254,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
                 banner_cached = path;
             }
             CacheResult::Failed(e) => {
-                log::warn!("[Profile] Failed to cache banner for {}: {}", npub, e);
+                log_warn!("[Profile] Failed to cache banner for {}: {}", npub, e);
             }
         }
     }
@@ -316,7 +316,7 @@ pub async fn cache_all_profile_images() {
         return;
     }
 
-    log::info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
+    log_info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
 
     // Spawn caching tasks for each profile (they run concurrently with semaphore limiting)
     for (npub, avatar_url, banner_url) in profiles_to_cache {

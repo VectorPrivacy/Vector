@@ -1,4 +1,4 @@
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use blurhash::decode;
@@ -50,7 +50,7 @@ pub fn extract_https_urls(text: &str) -> Vec<String> {
 /// Creates a description of a file type based on its extension.
 pub fn get_file_type_description(extension: &str) -> String {
     // Define file types with descriptions
-    static FILE_TYPES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+    static FILE_TYPES: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
         let mut map = HashMap::new();
 
         // Images
@@ -482,7 +482,7 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
 }
 
 // ===== MIME & Extension Conversion Utilities =====
-static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+static EXT_TO_MIME: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 
     // Images
@@ -601,7 +601,7 @@ static EXT_TO_MIME: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m
 });
 
-static MIME_TO_EXT: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+static MIME_TO_EXT: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 
     // Images

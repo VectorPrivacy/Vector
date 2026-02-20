@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use nostr_sdk::prelude::*;
 use tokio::sync::Mutex as TokioMutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use crate::util;
 use crate::shared::image::read_file_checked;
@@ -22,12 +22,12 @@ use super::sending::{message, MessageSendResult};
 use crate::android::filesystem;
 
 /// Cache for bytes received from JavaScript (for Android file handling)
-static JS_FILE_CACHE: Lazy<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
-    Lazy::new(|| std::sync::Mutex::new(None));
+static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Cache for compressed bytes from JavaScript file
-static JS_COMPRESSION_CACHE: Lazy<TokioMutex<Option<CachedCompressedImage>>> =
-    Lazy::new(|| TokioMutex::new(None));
+static JS_COMPRESSION_CACHE: LazyLock<TokioMutex<Option<CachedCompressedImage>>> =
+    LazyLock::new(|| TokioMutex::new(None));
 
 /// Response from caching file bytes, includes preview for images
 #[derive(serde::Serialize)]

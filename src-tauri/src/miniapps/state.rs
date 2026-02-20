@@ -329,7 +329,7 @@ impl MiniAppsState {
             
             if before_count != after_count {
                 let topic_encoded = crate::miniapps::realtime::encode_topic_id(topic);
-                log::debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
+                log_debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
                     before_count - after_count, topic_encoded);
             }
             

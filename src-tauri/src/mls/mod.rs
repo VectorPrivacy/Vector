@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use tokio::sync::Mutex as TokioMutex;
 use mdk_core::prelude::*;
 use mdk_sqlite_storage::MdkSqliteStorage;
@@ -32,8 +32,8 @@ use tracking::wipe_legacy_mls_database;
 
 /// Per-group lock to ensure only one sync/process_message runs at a time for a given MLS group.
 /// Prevents concurrent relay syncs from interleaving epoch-sequential commits.
-static GROUP_SYNC_LOCKS: Lazy<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
-    Lazy::new(|| StdMutex::new(HashMap::new()));
+static GROUP_SYNC_LOCKS: LazyLock<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// Get or create a per-group sync lock
 pub fn get_group_sync_lock(group_id: &str) -> Arc<TokioMutex<()>> {

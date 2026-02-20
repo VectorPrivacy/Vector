@@ -4,7 +4,7 @@ use std::time::Duration;
 use jni::objects::{JClass, JObject, JValue};
 use jni::sys::{jboolean, jint, JNI_TRUE};
 use jni::JNIEnv;
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 
 use super::utils::with_android_context;
 
@@ -28,7 +28,7 @@ pub fn check_audio_permission() -> Result<bool, String> {
     })
 }
 
-static PERMISSION_CALLBACK: OnceCell<Arc<(Mutex<Option<bool>>, Condvar)>> = OnceCell::new();
+static PERMISSION_CALLBACK: OnceLock<Arc<(Mutex<Option<bool>>, Condvar)>> = OnceLock::new();
 
 #[cfg(target_os = "android")]
 pub fn request_audio_permission_blocking() -> Result<bool, String> {

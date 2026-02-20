@@ -7,7 +7,6 @@
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
-use log::{debug, error, info, warn};
 use std::io::Read;
 use std::path::Path;
 use tauri::{Emitter, Manager};
@@ -50,7 +49,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return;
         }
     };
@@ -58,7 +57,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
     let chat_id: String = match env.get_string(&chat_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get chat_id: {:?}", e);
+            log_error!("Failed to get chat_id: {:?}", e);
             return;
         }
     };
@@ -66,12 +65,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
     let message_id: String = match env.get_string(&message_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get message_id: {:?}", e);
+            log_error!("Failed to get message_id: {:?}", e);
             return;
         }
     };
 
-    info!(
+    log_info!(
         "Mini App opened (JNI callback): {} (chat: {}, message: {})",
         miniapp_id, chat_id, message_id
     );
@@ -89,12 +88,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return;
         }
     };
 
-    info!("Mini App closed (JNI callback): {}", miniapp_id);
+    log_info!("Mini App closed (JNI callback): {}", miniapp_id);
 
     // Clean up realtime channel and instance state, notify frontend
     if let Some(app) = TAURI_APP.get() {
@@ -120,13 +119,13 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                         iroh.leave_channel(channel.topic),
                     ).await {
                         Ok(Ok(())) => {
-                            info!("[WEBXDC] Left Iroh channel on Mini App close: {}", miniapp_id_owned);
+                            log_info!("[WEBXDC] Left Iroh channel on Mini App close: {}", miniapp_id_owned);
                         }
                         Ok(Err(e)) => {
-                            warn!("[WEBXDC] Failed to leave Iroh channel on close: {}", e);
+                            log_warn!("[WEBXDC] Failed to leave Iroh channel on close: {}", e);
                         }
                         Err(_) => {
-                            warn!("[WEBXDC] Timed out leaving Iroh channel on close: {}", miniapp_id_owned);
+                            log_warn!("[WEBXDC] Timed out leaving Iroh channel on close: {}", miniapp_id_owned);
                         }
                     }
 
@@ -143,7 +142,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                         "is_active": false,
                         "has_pending_peers": peer_count > 0,
                     }));
-                    info!("[WEBXDC] Emitted miniapp_realtime_status: active=false, peer_count={} for topic {}", peer_count, topic_encoded);
+                    log_info!("[WEBXDC] Emitted miniapp_realtime_status: active=false, peer_count={} for topic {}", peer_count, topic_encoded);
                 }
             }
 
@@ -187,7 +186,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
         Err(e) => return create_error_string(&mut env, &format!("Failed to get args: {:?}", e)),
     };
 
-    debug!("[{}] invokeNative: {} (args: {})", miniapp_id, command, args);
+    log_debug!("[{}] invokeNative: {} (args: {})", miniapp_id, command, args);
 
     // Route to appropriate handler
     let result = match command.as_str() {
@@ -199,7 +198,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
             }
         }
         _ => {
-            warn!("[{}] Unknown command: {}", miniapp_id, command);
+            log_warn!("[{}] Unknown command: {}", miniapp_id, command);
             format!(r#"{{"error":"Unknown command: {}"}}"#, command)
         }
     };
@@ -207,7 +206,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
     match env.new_string(&result) {
         Ok(s) => s.into_raw(),
         Err(e) => {
-            error!("Failed to create result string: {:?}", e);
+            log_error!("Failed to create result string: {:?}", e);
             std::ptr::null_mut()
         }
     }
@@ -225,7 +224,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return;
         }
     };
@@ -233,7 +232,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
     let update: String = match env.get_string(&update) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get update: {:?}", e);
+            log_error!("Failed to get update: {:?}", e);
             return;
         }
     };
@@ -241,12 +240,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
     let description: String = match env.get_string(&description) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get description: {:?}", e);
+            log_error!("Failed to get description: {:?}", e);
             return;
         }
     };
 
-    info!(
+    log_info!(
         "[{}] sendUpdate: {} ({})",
         miniapp_id, description, update
     );
@@ -267,7 +266,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getUpdatesNative(
         Err(e) => return create_error_string(&mut env, &format!("Failed to get miniapp_id: {:?}", e)),
     };
 
-    debug!(
+    log_debug!(
         "[{}] getUpdates since serial: {}",
         miniapp_id, last_known_serial
     );
@@ -290,17 +289,17 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return std::ptr::null_mut();
         }
     };
 
-    info!("[{}] joinRealtimeChannel", miniapp_id);
+    log_info!("[{}] joinRealtimeChannel", miniapp_id);
 
     let app = match TAURI_APP.get() {
         Some(a) => a.clone(),
         None => {
-            error!("[{}] TAURI_APP not initialized", miniapp_id);
+            log_error!("[{}] TAURI_APP not initialized", miniapp_id);
             return std::ptr::null_mut();
         }
     };
@@ -313,7 +312,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
     {
         Ok(rt) => rt,
         Err(e) => {
-            error!("[{}] Failed to create tokio runtime: {:?}", miniapp_id, e);
+            log_error!("[{}] Failed to create tokio runtime: {:?}", miniapp_id, e);
             return std::ptr::null_mut();
         }
     };
@@ -341,7 +340,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
 
         // If channel already active, just return the topic (skip re-join)
         if state.has_realtime_channel(&miniapp_id).await {
-            info!("[WEBXDC] Android: Realtime channel already active for: {}", miniapp_id);
+            log_info!("[WEBXDC] Android: Realtime channel already active for: {}", miniapp_id);
             return Ok((None, topic, topic_encoded));
         }
 
@@ -358,7 +357,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
     let (instance_opt, topic, topic_encoded) = match setup {
         Ok(r) => r,
         Err(e) => {
-            error!("[{}] joinRealtimeChannel setup failed: {}", miniapp_id, e);
+            log_error!("[{}] joinRealtimeChannel setup failed: {}", miniapp_id, e);
             return std::ptr::null_mut();
         }
     };
@@ -374,7 +373,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         }
     };
 
-    info!("[{}] Joining realtime channel with topic: {}", miniapp_id, topic_encoded);
+    log_info!("[{}] Joining realtime channel with topic: {}", miniapp_id, topic_encoded);
 
     // Create bounded mpsc channel for event delivery to Android WebView
     let (tx, rx) = tokio::sync::mpsc::channel::<crate::miniapps::realtime::RealtimeEvent>(256);
@@ -390,7 +389,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         let iroh = match state.realtime.get_or_init().await {
             Ok(iroh) => iroh,
             Err(e) => {
-                error!("[WEBXDC] Android: Failed to initialize Iroh: {}", e);
+                log_error!("[WEBXDC] Android: Failed to initialize Iroh: {}", e);
                 // Clean up the channel state we set synchronously
                 state.remove_realtime_channel(&miniapp_id_for_join).await;
                 return;
@@ -402,13 +401,13 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         match iroh.join_channel(topic, vec![], event_target, Some(app_for_join.clone())).await {
             Ok((is_rejoin, _)) => {
                 if is_rejoin {
-                    info!("[WEBXDC] Android: Re-joined existing channel for topic: {}", topic_encoded_for_join);
+                    log_info!("[WEBXDC] Android: Re-joined existing channel for topic: {}", topic_encoded_for_join);
                 } else {
-                    info!("[WEBXDC] Android: Joined new channel for topic: {}", topic_encoded_for_join);
+                    log_info!("[WEBXDC] Android: Joined new channel for topic: {}", topic_encoded_for_join);
                 }
             }
             Err(e) => {
-                error!("[WEBXDC] Android: Failed to join channel: {}", e);
+                log_error!("[WEBXDC] Android: Failed to join channel: {}", e);
                 // Clean up the channel state we set synchronously
                 state.remove_realtime_channel(&miniapp_id_for_join).await;
                 return;
@@ -419,11 +418,11 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         let pending_peers = state.take_pending_peers(&topic).await;
         let pending_peer_count = pending_peers.len();
         if !pending_peers.is_empty() {
-            info!("[WEBXDC] Android: Adding {} pending peers", pending_peer_count);
+            log_info!("[WEBXDC] Android: Adding {} pending peers", pending_peer_count);
             for pending in pending_peers {
                 let node_id = pending.node_addr.node_id;
                 if let Err(e) = iroh.add_peer(topic, pending.node_addr).await {
-                    warn!("[WEBXDC] Android: Failed to add pending peer {}: {}", node_id, e);
+                    log_warn!("[WEBXDC] Android: Failed to add pending peer {}: {}", node_id, e);
                 }
             }
         }
@@ -459,12 +458,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
                         });
                     }
                     Err(e) => {
-                        warn!("[WEBXDC] Android: Failed to encode node addr: {}", e);
+                        log_warn!("[WEBXDC] Android: Failed to encode node addr: {}", e);
                     }
                 }
             }
             Err(e) => {
-                warn!("[WEBXDC] Android: Failed to get node addr: {}", e);
+                log_warn!("[WEBXDC] Android: Failed to get node addr: {}", e);
             }
         }
 
@@ -501,7 +500,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return;
         }
     };
@@ -509,12 +508,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
     let bytes = match env.convert_byte_array(data) {
         Ok(b) => b,
         Err(e) => {
-            error!("Failed to convert byte array: {:?}", e);
+            log_error!("Failed to convert byte array: {:?}", e);
             return;
         }
     };
 
-    debug!(
+    log_debug!(
         "[{}] sendRealtimeData: {} bytes",
         miniapp_id,
         bytes.len()
@@ -522,14 +521,14 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
 
     // Validate data size
     if bytes.len() > REALTIME_DATA_MAX_SIZE {
-        error!("[{}] sendRealtimeData: data too large ({} bytes)", miniapp_id, bytes.len());
+        log_error!("[{}] sendRealtimeData: data too large ({} bytes)", miniapp_id, bytes.len());
         return;
     }
 
     let app = match TAURI_APP.get() {
         Some(a) => a.clone(),
         None => {
-            error!("[{}] TAURI_APP not initialized", miniapp_id);
+            log_error!("[{}] TAURI_APP not initialized", miniapp_id);
             return;
         }
     };
@@ -543,7 +542,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
         let topic = match state.get_realtime_channel(&miniapp_id_owned).await {
             Some(t) => t,
             None => {
-                warn!("[WEBXDC] Android sendRealtimeData: no active channel for {}", miniapp_id_owned);
+                log_warn!("[WEBXDC] Android sendRealtimeData: no active channel for {}", miniapp_id_owned);
                 return;
             }
         };
@@ -552,13 +551,13 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
         let iroh = match state.realtime.get_or_init().await {
             Ok(iroh) => iroh,
             Err(e) => {
-                error!("[WEBXDC] Android sendRealtimeData: failed to get Iroh: {}", e);
+                log_error!("[WEBXDC] Android sendRealtimeData: failed to get Iroh: {}", e);
                 return;
             }
         };
 
         if let Err(e) = iroh.send_data(topic, data).await {
-            error!("[WEBXDC] Android sendRealtimeData: failed to send: {}", e);
+            log_error!("[WEBXDC] Android sendRealtimeData: failed to send: {}", e);
         }
     });
 }
@@ -573,17 +572,17 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return;
         }
     };
 
-    info!("[{}] leaveRealtimeChannel", miniapp_id);
+    log_info!("[{}] leaveRealtimeChannel", miniapp_id);
 
     let app = match TAURI_APP.get() {
         Some(a) => a.clone(),
         None => {
-            error!("[{}] TAURI_APP not initialized", miniapp_id);
+            log_error!("[{}] TAURI_APP not initialized", miniapp_id);
             return;
         }
     };
@@ -597,15 +596,15 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
             let iroh = match state.realtime.get_or_init().await {
                 Ok(iroh) => iroh,
                 Err(e) => {
-                    error!("[WEBXDC] Android leaveRealtimeChannel: failed to get Iroh: {}", e);
+                    log_error!("[WEBXDC] Android leaveRealtimeChannel: failed to get Iroh: {}", e);
                     return;
                 }
             };
 
             if let Err(e) = iroh.leave_channel(channel_state.topic).await {
-                error!("[WEBXDC] Android leaveRealtimeChannel: failed to leave: {}", e);
+                log_error!("[WEBXDC] Android leaveRealtimeChannel: failed to leave: {}", e);
             } else {
-                info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
+                log_info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
             }
         }
     });
@@ -654,7 +653,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getGrantedPermissionsNati
     let package_path: String = match env.get_string(&package_path) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get package_path: {:?}", e);
+            log_error!("Failed to get package_path: {:?}", e);
             return std::ptr::null_mut();
         }
     };
@@ -683,7 +682,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get miniapp_id: {:?}", e);
+            log_error!("Failed to get miniapp_id: {:?}", e);
             return std::ptr::null_mut();
         }
     };
@@ -691,7 +690,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
     let package_path: String = match env.get_string(&package_path) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get package_path: {:?}", e);
+            log_error!("Failed to get package_path: {:?}", e);
             return std::ptr::null_mut();
         }
     };
@@ -699,18 +698,18 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
     let path: String = match env.get_string(&path) {
         Ok(s) => s.into(),
         Err(e) => {
-            error!("Failed to get path: {:?}", e);
+            log_error!("Failed to get path: {:?}", e);
             return std::ptr::null_mut();
         }
     };
 
-    debug!("[{}] handleMiniAppRequest: {}", miniapp_id, path);
+    log_debug!("[{}] handleMiniAppRequest: {}", miniapp_id, path);
 
     // Serve file from .xdc package
     match serve_file_from_package(&mut env, &package_path, &path) {
         Ok(response) => response,
         Err(e) => {
-            error!("[{}] Failed to serve {}: {}", miniapp_id, path, e);
+            log_error!("[{}] Failed to serve {}: {}", miniapp_id, path, e);
             std::ptr::null_mut()
         }
     }
@@ -991,7 +990,7 @@ fn create_web_resource_response(
 async fn android_realtime_delivery_loop(
     mut rx: tokio::sync::mpsc::Receiver<crate::miniapps::realtime::RealtimeEvent>,
 ) {
-    info!("[WEBXDC] Android realtime delivery loop started");
+    log_info!("[WEBXDC] Android realtime delivery loop started");
     let mut consecutive_failures: u32 = 0;
 
     while let Some(event) = rx.recv().await {
@@ -1008,11 +1007,11 @@ async fn android_realtime_delivery_loop(
                 }
                 Ok(Err(e)) => {
                     consecutive_failures += 1;
-                    warn!("[WEBXDC] Android: Failed to deliver data to WebView: {} (failures: {})", e, consecutive_failures);
+                    log_warn!("[WEBXDC] Android: Failed to deliver data to WebView: {} (failures: {})", e, consecutive_failures);
                 }
                 Err(_) => {
                     consecutive_failures += 1;
-                    error!("[WEBXDC] Android: JNI delivery panicked, recovering (failures: {})", consecutive_failures);
+                    log_error!("[WEBXDC] Android: JNI delivery panicked, recovering (failures: {})", consecutive_failures);
                 }
             }
 
@@ -1024,5 +1023,5 @@ async fn android_realtime_delivery_loop(
         }
         // Connected, PeerJoined, PeerLeft are handled by emit_realtime_status
     }
-    info!("[WEBXDC] Android realtime delivery loop ended (channel closed)");
+    log_info!("[WEBXDC] Android realtime delivery loop ended (channel closed)");
 }

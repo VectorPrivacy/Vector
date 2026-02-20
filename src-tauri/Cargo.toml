@@ -38,8 +38,6 @@ scraper = "0.24.0"
 aes = "0.8.4"
 aes-gcm = "0.10.3"
 sha2 = "0.10.9"
-once_cell = "1.21.3"
-lazy_static = "1.5.0"
 argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
 tauri-plugin-opener = "2.5.3"
@@ -63,24 +61,18 @@ rayon = "1.11.0"
 zip = "2.4"
 toml = "0.8.23"
 anyhow = "1.0.99"
-log = "0.4.27"
 http = "1.3"
 url = "2.5.7"
-mime_guess = "2.0.5"
 
 # Realtime peer channels (Iroh P2P)
 iroh = "0.34"
 iroh-gossip = "0.34"
-parking_lot = "0.12.4"
-data-encoding = "2.9"
 rand = "0.8"
 
 # PIVX Promos (addressless crypto payments)
 secp256k1 = { version = "0.29", features = ["rand", "hashes"] }
 ripemd = "0.1.3"
 bs58 = "0.5.1"
-num-bigint = "0.4.6"
-num-traits = "0.2.19"
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

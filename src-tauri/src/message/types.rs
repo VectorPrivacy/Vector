@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::Mutex as TokioMutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use crate::net;
 use crate::TAURI_APP;
@@ -24,14 +24,14 @@ pub struct CachedCompressedImage {
 }
 
 /// Global cache for pre-compressed images
-pub static COMPRESSION_CACHE: Lazy<TokioMutex<HashMap<String, Option<CachedCompressedImage>>>> =
-    Lazy::new(|| TokioMutex::new(HashMap::new()));
+pub static COMPRESSION_CACHE: LazyLock<TokioMutex<HashMap<String, Option<CachedCompressedImage>>>> =
+    LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
 /// Cache for Android file bytes: uri -> (bytes, extension, name, size)
 /// This is used to cache file bytes immediately after file selection on Android,
 /// before the temporary content URI permission expires.
-pub static ANDROID_FILE_CACHE: Lazy<std::sync::Mutex<HashMap<String, (Arc<Vec<u8>>, String, String, u64)>>> =
-    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+pub static ANDROID_FILE_CACHE: LazyLock<std::sync::Mutex<HashMap<String, (Arc<Vec<u8>>, String, String, u64)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct Message {

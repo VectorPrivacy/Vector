@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -91,12 +91,12 @@ fn default_relay_mode() -> String {
 // ============================================================================
 
 /// Global storage for relay metrics
-static RELAY_METRICS: Lazy<RwLock<HashMap<String, RelayMetrics>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+static RELAY_METRICS: LazyLock<RwLock<HashMap<String, RelayMetrics>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Global storage for relay logs (max 10 per relay)
-static RELAY_LOGS: Lazy<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+static RELAY_LOGS: LazyLock<RwLock<HashMap<String, VecDeque<RelayLog>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 // ============================================================================
 // Helper Functions

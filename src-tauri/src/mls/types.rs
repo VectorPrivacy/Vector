@@ -9,13 +9,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex as TokioMutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 /// Tracks consecutive processing failures per group for desync detection.
 /// If a group has too many consecutive failures, it likely means the member
 /// missed commits and is permanently desynced (can't decrypt new messages).
-static GROUP_FAILURE_COUNTS: Lazy<TokioMutex<HashMap<String, u32>>> =
-    Lazy::new(|| TokioMutex::new(HashMap::new()));
+static GROUP_FAILURE_COUNTS: LazyLock<TokioMutex<HashMap<String, u32>>> =
+    LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
 /// Threshold for consecutive failures before considering a group desynced.
 /// After this many consecutive unprocessable/error events, we alert the user.

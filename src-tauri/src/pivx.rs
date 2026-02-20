@@ -12,7 +12,7 @@ use ripemd::Ripemd160;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use tauri::{AppHandle, Runtime, Emitter};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -44,14 +44,14 @@ const PROMO_KEY_ITERATIONS: u32 = 12_500_000;
 const BALANCE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// HTTP client for Blockbook API calls
-static PIVX_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+static PIVX_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .build()
         .expect("Failed to create HTTP client")
 });
 
 /// Balance cache: address -> (balance_piv, last_fetch_time)
-static BALANCE_CACHE: Lazy<RwLock<HashMap<String, (f64, Instant)>>> = Lazy::new(|| {
+static BALANCE_CACHE: LazyLock<RwLock<HashMap<String, (f64, Instant)>>> = LazyLock::new(|| {
     RwLock::new(HashMap::new())
 });
 
@@ -160,72 +160,16 @@ fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
     hasher.finalize().into()
 }
 
-/// Base58 encoding
+/// Base58 encoding (delegates to the `bs58` crate)
 fn base58_encode(data: &[u8]) -> String {
-    // Handle leading zeros
-    let mut leading_zeros = 0;
-    for byte in data {
-        if *byte == 0 {
-            leading_zeros += 1;
-        } else {
-            break;
-        }
-    }
-
-    // Convert to big integer (simple implementation)
-    let mut num = data.iter().fold(
-        num_bigint::BigUint::from(0u32),
-        |acc, &byte| acc * 256u32 + byte as u32,
-    );
-
-    let mut result = Vec::new();
-    let base = num_bigint::BigUint::from(58u32);
-
-    while num > num_bigint::BigUint::from(0u32) {
-        let remainder = (&num % &base).to_u32_digits();
-        let idx = if remainder.is_empty() { 0 } else { remainder[0] as usize };
-        result.push(BASE58_ALPHABET[idx]);
-        num /= &base;
-    }
-
-    // Add leading '1's for zero bytes
-    for _ in 0..leading_zeros {
-        result.push(b'1');
-    }
-
-    result.reverse();
-    String::from_utf8(result).unwrap_or_default()
+    bs58::encode(data).into_string()
 }
 
-/// Base58 decoding
+/// Base58 decoding (delegates to the `bs58` crate)
 fn base58_decode(encoded: &str) -> Result<Vec<u8>, String> {
-    let mut num = num_bigint::BigUint::from(0u32);
-    let base = num_bigint::BigUint::from(58u32);
-
-    let mut leading_ones = 0;
-    for c in encoded.chars() {
-        if c == '1' {
-            leading_ones += 1;
-        } else {
-            break;
-        }
-    }
-
-    for c in encoded.chars() {
-        let idx = BASE58_ALPHABET
-            .iter()
-            .position(|&b| b as char == c)
-            .ok_or_else(|| format!("Invalid Base58 character: {}", c))?;
-        num = num * &base + idx as u32;
-    }
-
-    let mut bytes = num.to_bytes_be();
-
-    // Add leading zeros
-    let mut result = vec![0u8; leading_ones];
-    result.append(&mut bytes);
-
-    Ok(result)
+    bs58::decode(encoded)
+        .into_vec()
+        .map_err(|e| format!("Base58 decode error: {}", e))
 }
 
 /// Derive PIVX address from private key
@@ -1159,9 +1103,6 @@ pub async fn pivx_refresh_balances<R: Runtime>(
 
     Ok(results)
 }
-
-// We need num-bigint for Base58 encoding
-use num_bigint;
 
 // ============================================================================
 // Send PIVX Payment via Chat

@@ -20,8 +20,7 @@ use std::time::Duration;
 use sha2::{Sha256, Digest};
 use tauri::{AppHandle, Runtime, Manager, Emitter};
 use tokio::sync::Semaphore;
-use once_cell::sync::Lazy;
-use log::{info, warn, debug};
+use std::sync::LazyLock;
 use serde_json::json;
 
 use crate::net::{ProgressReporter, download_with_reporter};
@@ -30,17 +29,17 @@ use std::collections::HashSet;
 use tokio::sync::Mutex;
 
 /// Maximum concurrent image downloads
-static DOWNLOAD_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(4));
+static DOWNLOAD_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
 
 /// Track URLs currently being downloaded to prevent duplicate downloads
 /// (e.g., when messages re-render from Pending to Sent)
-static DOWNLOADS_IN_PROGRESS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static DOWNLOADS_IN_PROGRESS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Maximum entries in DOWNLOADS_IN_PROGRESS before forced cleanup
 const MAX_IN_PROGRESS_ENTRIES: usize = 100;
 
 /// HTTP client for downloading images
-static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
@@ -263,7 +262,7 @@ pub fn precache_image_bytes<R: Runtime>(
     let extension = match validate_image(bytes) {
         Some(ext) => ext,
         None => {
-            warn!("[ImageCache] Invalid image data for precache: {}", url);
+            log_warn!("[ImageCache] Invalid image data for precache: {}", url);
             return CacheResult::Failed("Invalid image format".to_string());
         }
     };
@@ -281,12 +280,12 @@ pub fn precache_image_bytes<R: Runtime>(
 
     // Write the file
     if let Err(e) = std::fs::write(&file_path, bytes) {
-        warn!("[ImageCache] Failed to write precache file: {}", e);
+        log_warn!("[ImageCache] Failed to write precache file: {}", e);
         return CacheResult::Failed(format!("Failed to write: {}", e));
     }
 
     let path_str = file_path.to_string_lossy().to_string();
-    info!("[ImageCache] Pre-cached {:?} {} -> {}", image_type, url, path_str);
+    log_info!("[ImageCache] Pre-cached {:?} {} -> {}", image_type, url, path_str);
 
     CacheResult::Cached(path_str)
 }
@@ -316,12 +315,12 @@ pub async fn cache_image<R: Runtime>(
     }
 
     // Download the image
-    debug!("[ImageCache] Downloading {} for {:?}", url, image_type);
+    log_debug!("[ImageCache] Downloading {} for {:?}", url, image_type);
 
     let response = match HTTP_CLIENT.get(url).send().await {
         Ok(resp) => resp,
         Err(e) => {
-            warn!("[ImageCache] Failed to download {}: {}", url, e);
+            log_warn!("[ImageCache] Failed to download {}: {}", url, e);
             return CacheResult::Failed(format!("Download failed: {}", e));
         }
     };
@@ -349,7 +348,7 @@ pub async fn cache_image<R: Runtime>(
     let extension = match validate_image(&bytes) {
         Some(ext) => ext,
         None => {
-            warn!("[ImageCache] Invalid image data from {}", url);
+            log_warn!("[ImageCache] Invalid image data from {}", url);
             return CacheResult::Failed("Invalid or corrupted image".to_string());
         }
     };
@@ -370,7 +369,7 @@ pub async fn cache_image<R: Runtime>(
     }
 
     let path_str = file_path.to_string_lossy().to_string();
-    info!("[ImageCache] Cached {} -> {}", url, path_str);
+    log_info!("[ImageCache] Cached {} -> {}", url, path_str);
 
     CacheResult::Cached(path_str)
 }
@@ -410,7 +409,7 @@ pub fn remove_cached_image<R: Runtime>(
     if let Some(path) = get_cached_path(handle, url, image_type) {
         std::fs::remove_file(&path)
             .map_err(|e| format!("Failed to remove cached image: {}", e))?;
-        info!("[ImageCache] Removed cached image: {}", path);
+        log_info!("[ImageCache] Removed cached image: {}", path);
     }
     Ok(())
 }
@@ -433,7 +432,7 @@ pub fn clear_cache<R: Runtime>(
         }
     }
 
-    info!("[ImageCache] Cleared {} {:?} images", count, image_type);
+    log_info!("[ImageCache] Cleared {} {:?} images", count, image_type);
     Ok(count)
 }
 
@@ -484,7 +483,7 @@ pub async fn get_or_cache_image<R: Runtime>(
     match cache_image(&handle, &url, img_type).await {
         CacheResult::Cached(path) | CacheResult::AlreadyCached(path) => Ok(Some(path)),
         CacheResult::Failed(e) => {
-            warn!("[ImageCache] Failed to cache {}: {}", url, e);
+            log_warn!("[ImageCache] Failed to cache {}: {}", url, e);
             Ok(None)
         }
     }
@@ -613,7 +612,7 @@ pub async fn cleanup_stale_downloads() {
     let mut in_progress = DOWNLOADS_IN_PROGRESS.lock().await;
     if in_progress.len() > MAX_IN_PROGRESS_ENTRIES {
         // If we have too many entries, something is wrong - clear them all
-        warn!("[ImageCache] Clearing {} stale in-progress entries", in_progress.len());
+        log_warn!("[ImageCache] Clearing {} stale in-progress entries", in_progress.len());
         in_progress.clear();
     }
 }
@@ -653,7 +652,7 @@ pub async fn cache_url_image<R: Runtime>(
     {
         let mut in_progress = DOWNLOADS_IN_PROGRESS.lock().await;
         if in_progress.contains(&url) {
-            debug!("[ImageCache] Download already in progress, frontend will get path via event: {}", url);
+            log_debug!("[ImageCache] Download already in progress, frontend will get path via event: {}", url);
             return Ok(None);
         }
         // Mark as in-progress (clone here is necessary for the set)
@@ -687,12 +686,12 @@ pub async fn cache_url_image<R: Runtime>(
     };
 
     // Download with progress reporting (10s timeout)
-    debug!("[ImageCache] Downloading inline image with progress: {}", url);
+    log_debug!("[ImageCache] Downloading inline image with progress: {}", url);
     let bytes = match download_with_reporter(&url, &reporter, Some(Duration::from_secs(10))).await {
         Ok(b) => b,
         Err(e) => {
             cleanup().await;
-            warn!("[ImageCache] Failed to download inline image {}: {}", url, e);
+            log_warn!("[ImageCache] Failed to download inline image {}: {}", url, e);
             emit_failure(&handle, &url);
             return Ok(None);
         }
@@ -703,7 +702,7 @@ pub async fn cache_url_image<R: Runtime>(
         Some(ext) => ext,
         None => {
             cleanup().await;
-            warn!("[ImageCache] Invalid image data from {}", url);
+            log_warn!("[ImageCache] Invalid image data from {}", url);
             emit_failure(&handle, &url);
             return Ok(None);
         }
@@ -724,7 +723,7 @@ pub async fn cache_url_image<R: Runtime>(
     // Write the file
     if let Err(e) = std::fs::write(&file_path, &bytes) {
         cleanup().await;
-        warn!("[ImageCache] Failed to write cache file: {}", e);
+        log_warn!("[ImageCache] Failed to write cache file: {}", e);
         return Ok(None);
     }
 
@@ -732,7 +731,7 @@ pub async fn cache_url_image<R: Runtime>(
     cleanup().await;
 
     let path_str = file_path.to_string_lossy().to_string();
-    info!("[ImageCache] Cached inline image {} -> {}", url, path_str);
+    log_info!("[ImageCache] Cached inline image {} -> {}", url, path_str);
 
     // Emit completion event so ALL loading indicators for this URL get updated
     // (handles cases like message re-rendering or multiple instances of same image)

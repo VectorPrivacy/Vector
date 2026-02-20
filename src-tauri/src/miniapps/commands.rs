@@ -4,12 +4,9 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri::ipc::Channel;
 use futures_util::future::join_all;
-use log::{info, warn, trace};
 
 #[cfg(not(target_os = "android"))]
 use std::sync::Arc;
-#[cfg(not(target_os = "android"))]
-use log::error;
 #[cfg(not(target_os = "android"))]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use serde::{Deserialize, Serialize};
@@ -583,7 +580,7 @@ pub async fn miniapp_open(
         format!("miniapp:{}:{}", chat_id, message_id)
     };
     
-    trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
+    log_trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
     
     let state = app.state::<MiniAppsState>();
     
@@ -599,7 +596,7 @@ pub async fn miniapp_open(
                 return Ok(());
             } else {
                 // Overlay was closed, clean up state
-                warn!("Instance exists but overlay closed, cleaning up: {}", existing_label);
+                log_warn!("Instance exists but overlay closed, cleaning up: {}", existing_label);
                 state.remove_instance(&existing_label).await;
             }
         }
@@ -614,7 +611,7 @@ pub async fn miniapp_open(
                     // Append href to the base URL (href should start with / or be a relative path)
                     let href_path = href_value.trim_start_matches('/');
                     nav_url.set_path(&format!("/{}", href_path));
-                    trace!("Navigating existing Mini App to: {}", nav_url);
+                    log_trace!("Navigating existing Mini App to: {}", nav_url);
                     window.navigate(nav_url)?;
                 }
                 window.show()?;
@@ -622,7 +619,7 @@ pub async fn miniapp_open(
                 return Ok(());
             } else {
                 // Window was closed but instance still exists, clean up
-                warn!("Instance exists but window missing, cleaning up: {}", existing_label);
+                log_warn!("Instance exists but window missing, cleaning up: {}", existing_label);
                 state.remove_instance(&existing_label).await;
             }
         }
@@ -636,7 +633,7 @@ pub async fn miniapp_open(
         match super::realtime::decode_topic_id(topic_str) {
             Ok(topic) => Some(topic),
             Err(e) => {
-                warn!("Failed to decode topic ID '{}': {}", topic_str, e);
+                log_warn!("Failed to decode topic ID '{}': {}", topic_str, e);
                 None
             }
         }
@@ -661,7 +658,7 @@ pub async fn miniapp_open(
     // ========================================
     #[cfg(target_os = "android")]
     {
-        info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
+        log_info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
 
         // Open the native overlay WebView
         crate::android::miniapp::open_miniapp_overlay(
@@ -679,7 +676,7 @@ pub async fn miniapp_open(
             file_path.clone(),
             attachment_ref,
         ) {
-            warn!("Failed to record Mini App to history: {}", e);
+            log_warn!("Failed to record Mini App to history: {}", e);
         }
 
         return Ok(());
@@ -696,7 +693,7 @@ pub async fn miniapp_open(
         // Append href to the base URL (href should start with / or be a relative path)
         let href_path = href_value.trim_start_matches('/');
         initial_url.set_path(&format!("/{}", href_path));
-        trace!("Mini App will open at: {}", initial_url);
+        log_trace!("Mini App will open at: {}", initial_url);
     }
     let initial_url_clone = initial_url.clone();
     
@@ -727,7 +724,7 @@ pub async fn miniapp_open(
         let scheme = url.scheme();
         let allowed = scheme == "webxdc" || (scheme == "http" && url.host_str() == Some("webxdc.localhost"));
         if !allowed {
-            warn!("Blocked navigation to: {}", url);
+            log_warn!("Blocked navigation to: {}", url);
         }
         allowed
     });
@@ -769,7 +766,7 @@ pub async fn miniapp_open(
     window.on_window_event(move |event| {
         match event {
             tauri::WindowEvent::Destroyed => {
-                info!("Mini App window destroyed: {}", window_label_for_handler);
+                log_info!("Mini App window destroyed: {}", window_label_for_handler);
                 let app_handle = app_handle_for_handler.clone();
                 let label = window_label_for_handler.clone();
                 tauri::async_runtime::spawn(async move {
@@ -815,22 +812,22 @@ pub async fn miniapp_open(
                 // This is a workaround for https://github.com/deltachat/deltachat-desktop/issues/3321
                 let is_closing_already = is_closing.swap(true, std::sync::atomic::Ordering::Relaxed);
                 if is_closing_already {
-                    trace!("Second CloseRequested event, closing now");
+                    log_trace!("Second CloseRequested event, closing now");
                     return;
                 }
                 
-                trace!("CloseRequested on Mini App window, will delay close");
+                log_trace!("CloseRequested on Mini App window, will delay close");
                 
                 // Navigate to webxdc.js to trigger unload events
                 // This allows sendUpdate() calls in visibilitychange/unload handlers to complete
                 if let Err(err) = window_clone.navigate(webxdc_js_url.clone()) {
-                    error!("Failed to navigate before close: {err}");
+                    log_error!("Failed to navigate before close: {err}");
                     return;
                 }
                 
                 // Hide the window immediately for better UX
                 window_clone.hide()
-                    .inspect_err(|err| warn!("Failed to hide window: {err}"))
+                    .inspect_err(|err| log_warn!("Failed to hide window: {err}"))
                     .ok();
                 
                 api.prevent_close();
@@ -839,9 +836,9 @@ pub async fn miniapp_open(
                 tauri::async_runtime::spawn(async move {
                     // Wait a bit for any pending sendUpdate() calls
                     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                    trace!("Delay elapsed, closing Mini App window");
+                    log_trace!("Delay elapsed, closing Mini App window");
                     window_clone2.close()
-                        .inspect_err(|err| error!("Failed to close window: {err}"))
+                        .inspect_err(|err| log_error!("Failed to close window: {err}"))
                         .ok();
                 });
             }
@@ -849,7 +846,7 @@ pub async fn miniapp_open(
         }
     });
     
-    info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
+    log_info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
     
     // Record to Mini Apps history
     // Use file_path as attachment_ref since it uniquely identifies the Mini App
@@ -859,7 +856,7 @@ pub async fn miniapp_open(
         file_path.clone(),
         attachment_ref,
     ) {
-        warn!("Failed to record Mini App to history: {}", e);
+        log_warn!("Failed to record Mini App to history: {}", e);
     }
 
     Ok(())
@@ -912,7 +909,7 @@ pub async fn miniapp_get_updates(
     
     // TODO: Implement actual update storage and retrieval
     // For now, return empty array
-    trace!("Mini App {} requesting updates since serial {}", label, last_known_serial);
+    log_trace!("Mini App {} requesting updates since serial {}", label, last_known_serial);
     
     Ok("[]".to_string())
 }
@@ -935,7 +932,7 @@ pub async fn miniapp_send_update(
     let instance = state.get_instance(label).await
         .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
     
-    info!(
+    log_info!(
         "Mini App {} sending update: {} ({})",
         instance.package.manifest.name,
         description,
@@ -1045,10 +1042,10 @@ pub async fn miniapp_join_realtime_channel(
     
     if is_rejoin {
         // Re-joining an existing channel - just update the event channel
-        info!("Re-joined existing realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
+        log_info!("Re-joined existing realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
         println!("[WEBXDC] Re-joining existing channel, updating event channel for window: {}", label);
     } else {
-        info!("Joined new realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
+        log_info!("Joined new realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
     }
     
     // Store/update the channel state
@@ -1062,9 +1059,9 @@ pub async fn miniapp_join_realtime_channel(
     // Check for pending peers that advertised before we joined
     let pending_peers = state.take_pending_peers(&topic).await;
     let pending_peer_count = pending_peers.len();
-    info!("[WEBXDC] Checking for pending peers for topic {}: found {}", topic_encoded, pending_peer_count);
+    log_info!("[WEBXDC] Checking for pending peers for topic {}: found {}", topic_encoded, pending_peer_count);
     if !pending_peers.is_empty() {
-        info!("[WEBXDC] Found {} pending peers for topic {}, adding concurrently", pending_peer_count, topic_encoded);
+        log_info!("[WEBXDC] Found {} pending peers for topic {}, adding concurrently", pending_peer_count, topic_encoded);
         
         // Add all pending peers concurrently for faster connection establishment
         let add_peer_futures: Vec<_> = pending_peers.into_iter().map(|pending| {
@@ -1073,11 +1070,11 @@ pub async fn miniapp_join_realtime_channel(
                 let node_id = pending.node_addr.node_id;
                 match iroh_ref.add_peer(topic, pending.node_addr).await {
                     Ok(_) => {
-                        info!("[WEBXDC] Successfully added pending peer {} to realtime channel", node_id);
+                        log_info!("[WEBXDC] Successfully added pending peer {} to realtime channel", node_id);
                         Ok(node_id)
                     }
                     Err(e) => {
-                        warn!("[WEBXDC] Failed to add pending peer {}: {}", node_id, e);
+                        log_warn!("[WEBXDC] Failed to add pending peer {}: {}", node_id, e);
                         Err((node_id, e))
                     }
                 }
@@ -1089,12 +1086,12 @@ pub async fn miniapp_join_realtime_channel(
         let fail_count = results.len() - success_count;
         
         if fail_count > 0 {
-            warn!("[WEBXDC] Added {}/{} pending peers ({} failed)", success_count, results.len(), fail_count);
+            log_warn!("[WEBXDC] Added {}/{} pending peers ({} failed)", success_count, results.len(), fail_count);
         } else {
-            info!("[WEBXDC] Successfully added all {} pending peers", success_count);
+            log_info!("[WEBXDC] Successfully added all {} pending peers", success_count);
         }
     } else {
-        trace!("[WEBXDC] No pending peers found for topic {}", topic_encoded);
+        log_trace!("[WEBXDC] No pending peers found for topic {}", topic_encoded);
     }
     
     // Get our node address and send a peer advertisement to the chat
@@ -1187,7 +1184,7 @@ pub async fn miniapp_send_realtime_data(
     iroh.send_data(topic, data).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
-    trace!("Sent realtime data for Mini App: {}", label);
+    log_trace!("Sent realtime data for Mini App: {}", label);
     
     Ok(())
 }
@@ -1213,7 +1210,7 @@ pub async fn miniapp_leave_realtime_channel(
         iroh.leave_channel(channel_state.topic).await
             .map_err(|e| Error::RealtimeError(e.to_string()))?;
         
-        info!("Left realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&channel_state.topic));
+        log_info!("Left realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&channel_state.topic));
     }
     
     Ok(())
@@ -1247,7 +1244,7 @@ pub async fn miniapp_add_realtime_peer(
     iroh.add_peer(topic, peer).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
-    info!("Added peer to realtime channel for Mini App: {}", label);
+    log_info!("Added peer to realtime channel for Mini App: {}", label);
     
     Ok(())
 }

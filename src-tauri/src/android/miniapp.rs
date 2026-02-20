@@ -5,7 +5,6 @@
 
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::JNIEnv;
-use log::{info, debug};
 
 use super::utils::with_android_context;
 
@@ -62,7 +61,7 @@ pub fn open_miniapp_overlay(
     message_id: &str,
     href: Option<&str>,
 ) -> Result<(), String> {
-    info!(
+    log_info!(
         "Opening Mini App overlay: {} (chat: {}, message: {})",
         miniapp_id, chat_id, message_id
     );
@@ -114,14 +113,14 @@ pub fn open_miniapp_overlay(
         )
         .map_err(|e| format!("Failed to call MiniAppManager.openMiniApp: {:?}", e))?;
 
-        info!("Mini App overlay open request sent");
+        log_info!("Mini App overlay open request sent");
         Ok(())
     })
 }
 
 /// Close the currently open Mini App overlay.
 pub fn close_miniapp_overlay() -> Result<(), String> {
-    info!("Closing Mini App overlay");
+    log_info!("Closing Mini App overlay");
 
     with_android_context(|env, activity| {
         let manager_class = load_class_from_activity(env, activity, "io/vectorapp/miniapp/MiniAppManager")
@@ -130,14 +129,14 @@ pub fn close_miniapp_overlay() -> Result<(), String> {
         env.call_static_method(manager_class, "closeMiniApp", "()V", &[])
             .map_err(|e| format!("Failed to call MiniAppManager.closeMiniApp: {:?}", e))?;
 
-        info!("Mini App overlay close request sent");
+        log_info!("Mini App overlay close request sent");
         Ok(())
     })
 }
 
 /// Send an event to the currently open Mini App.
 pub fn send_to_miniapp(event: &str, data: &str) -> Result<(), String> {
-    debug!("Sending event to Mini App: {}", event);
+    log_debug!("Sending event to Mini App: {}", event);
 
     with_android_context(|env, activity| {
         let manager_class = load_class_from_activity(env, activity, "io/vectorapp/miniapp/MiniAppManager")
@@ -166,7 +165,7 @@ pub fn send_to_miniapp(event: &str, data: &str) -> Result<(), String> {
 /// Send realtime data to the Mini App.
 #[allow(dead_code)]
 pub fn send_realtime_data_to_miniapp(data: &[u8]) -> Result<(), String> {
-    debug!("Sending {} bytes realtime data to Mini App", data.len());
+    log_debug!("Sending {} bytes realtime data to Mini App", data.len());
 
     with_android_context(|env, activity| {
         let manager_class = load_class_from_activity(env, activity, "io/vectorapp/miniapp/MiniAppManager")

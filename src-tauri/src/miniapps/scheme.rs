@@ -9,16 +9,16 @@ use tauri::{
     utils::config::{Csp, CspDirectiveSources},
     Manager, UriSchemeContext, UriSchemeResponder,
 };
-use log::{error, trace};
+
 use nostr_sdk::prelude::ToBech32;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use super::state::MiniAppsState;
 use crate::STATE;
 
 /// Content Security Policy for Mini Apps - very restrictive for security
 /// Based on DeltaChat's implementation
-static CSP: Lazy<String> = Lazy::new(|| {
+static CSP: LazyLock<String> = LazyLock::new(|| {
     let mut m: HashMap<String, CspDirectiveSources> = HashMap::new();
     
     // Only allow resources from self (the webxdc:// origin)
@@ -267,7 +267,7 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
     request: http::Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
-    trace!(
+    log_trace!(
         "webxdc_protocol: {} {}",
         request.uri(),
         request.uri().path()
@@ -281,7 +281,7 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
     
     // Security: Only allow Mini App windows to access this scheme
     if !webview_label.starts_with("miniapp:") {
-        error!(
+        log_error!(
             "Prevented non-miniapp window from accessing webxdc:// scheme (webview label: {webview_label})"
         );
         responder.respond(make_error_response(http::StatusCode::FORBIDDEN, "Access denied", ""));
@@ -308,7 +308,7 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
     let instance = match state.get_instance(window_label).await {
         Some(inst) => inst,
         None => {
-            error!("Mini App instance not found for window: {window_label}");
+            log_error!("Mini App instance not found for window: {window_label}");
             return make_error_response(http::StatusCode::NOT_FOUND, "Mini App not found", "");
         }
     };
@@ -391,7 +391,7 @@ async fn get_user_info() -> (String, String) {
             }
             Err(_) => {
                 // STATE is locked, use npub as fallback
-                trace!("STATE is locked, using npub as display name fallback");
+                log_trace!("STATE is locked, using npub as display name fallback");
                 user_npub.clone()
             }
         }

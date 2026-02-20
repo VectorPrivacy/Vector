@@ -7,7 +7,7 @@
 //! - WebXDC peer advertisements
 //! - Unknown event storage for future compatibility
 
-use log::warn;
+
 use nostr_sdk::prelude::*;
 use tauri::{Emitter, Manager};
 
@@ -340,13 +340,13 @@ pub(crate) async fn handle_event_with_context(
                     }
                 }
                 Err(e) => {
-                    warn!("[EventHandler] Failed to process rumor: {}", e);
+                    log_warn!("[EventHandler] Failed to process rumor: {}", e);
                     false
                 }
             }
         }
         Err(e) => {
-            warn!("[EventHandler] Failed to unwrap gift wrap: {:?}", e);
+            log_warn!("[EventHandler] Failed to unwrap gift wrap: {:?}", e);
             false
         }
     }
@@ -616,7 +616,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_e
     let topic = match decode_topic_id(topic_id) {
         Ok(t) => t,
         Err(e) => {
-            log::warn!("Failed to decode topic ID in peer advertisement: {}", e);
+            log_warn!("Failed to decode topic ID in peer advertisement: {}", e);
             return false;
         }
     };
@@ -625,7 +625,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_e
     let node_addr = match decode_node_addr(node_addr_encoded) {
         Ok(addr) => addr,
         Err(e) => {
-            log::warn!("Failed to decode node address in peer advertisement: {}", e);
+            log_warn!("Failed to decode node address in peer advertisement: {}", e);
             return false;
         }
     };

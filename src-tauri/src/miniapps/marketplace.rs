@@ -47,8 +47,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::net::ProgressReporter;
-use log::{info, warn};
-
 use crate::blossom;
 use crate::NOSTR_CLIENT;
 use crate::image_cache::{self, CacheResult, ImageType};
@@ -245,9 +243,7 @@ impl MarketplaceState {
 }
 
 // Global marketplace state
-lazy_static::lazy_static! {
-    pub static ref MARKETPLACE_STATE: Arc<RwLock<MarketplaceState>> = Arc::new(RwLock::new(MarketplaceState::new()));
-}
+pub static MARKETPLACE_STATE: std::sync::LazyLock<Arc<RwLock<MarketplaceState>>> = std::sync::LazyLock::new(|| Arc::new(RwLock::new(MarketplaceState::new())));
 
 /// Parse a Nostr event into a MarketplaceApp
 pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
@@ -480,7 +476,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
         .unwrap_or_default()
         .as_secs();
 
-    info!("Fetched {} marketplace apps", apps.len());
+    log_info!("Fetched {} marketplace apps", apps.len());
 
     // Spawn background tasks to cache icons for apps that have icon URLs but no cached path
     // Cache is stored globally (not per-account) for deduplication across accounts
@@ -514,11 +510,11 @@ async fn cache_miniapp_icon<R: Runtime>(
             let mut state = MARKETPLACE_STATE.write().await;
             if let Some(app) = state.apps.get_mut(app_id) {
                 app.icon_cached = Some(path.clone());
-                info!("[Marketplace] Cached icon for app {}: {}", app_id, path);
+                log_info!("[Marketplace] Cached icon for app {}: {}", app_id, path);
             }
         }
         CacheResult::Failed(e) => {
-            warn!("[Marketplace] Failed to cache icon for {}: {}", app_id, e);
+            log_warn!("[Marketplace] Failed to cache icon for {}: {}", app_id, e);
         }
     }
 }
@@ -533,7 +529,7 @@ async fn recache_miniapp_icon<R: Runtime>(
     // Remove old cached icon first to force re-download
     if let Err(e) = image_cache::remove_cached_image(handle, icon_url, ImageType::MiniAppIcon) {
         // Log but don't fail - the old cache might not exist
-        info!("[Marketplace] Could not remove old icon cache for {}: {}", app_id, e);
+        log_info!("[Marketplace] Could not remove old icon cache for {}: {}", app_id, e);
     }
 
     // Now cache the (potentially new) icon
@@ -572,7 +568,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     let file_name = format!("{}.xdc", app.id);
     let file_path = miniapps_dir.join(&file_name);
 
-    info!("Downloading marketplace app {} from {}", app_id, app.download_url);
+    log_info!("Downloading marketplace app {} from {}", app_id, app.download_url);
 
     // Use the same download system as attachments for consistent progress reporting
     let reporter = MarketplaceProgressReporter::new(handle, app_id);
@@ -631,7 +627,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
         Some(app.id.clone()),
         Some(app.version.clone()),
     ) {
-        warn!("Failed to record installed app to history: {}", e);
+        log_warn!("Failed to record installed app to history: {}", e);
         // Don't fail the install if history recording fails
     }
 
@@ -645,7 +641,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
         });
     }
 
-    info!("Successfully installed marketplace app {} to {}", app_id, path_str);
+    log_info!("Successfully installed marketplace app {} to {}", app_id, path_str);
     Ok(path_str)
 }
 
@@ -685,13 +681,13 @@ pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
     if file_path.exists() {
         std::fs::remove_file(&file_path)
             .map_err(|e| format!("Failed to delete app file: {}", e))?;
-        info!("Deleted marketplace app file: {}", file_path.display());
+        log_info!("Deleted marketplace app file: {}", file_path.display());
     }
 
     // Remove from miniapps_history in the database
     // We need to find the entry by name (which is unique)
     if let Err(e) = crate::db::remove_miniapp_from_history(app_name) {
-        warn!("Failed to remove app from history: {}", e);
+        log_warn!("Failed to remove app from history: {}", e);
         // Don't fail the uninstall if history removal fails
     }
 
@@ -701,7 +697,7 @@ pub async fn uninstall_marketplace_app<R: tauri::Runtime>(
         state.set_install_status(app_id, InstallStatus::NotInstalled);
     }
 
-    info!("Successfully uninstalled marketplace app: {}", app_id);
+    log_info!("Successfully uninstalled marketplace app: {}", app_id);
     Ok(())
 }
 
@@ -749,7 +745,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
                 Some(bytes_to_hex_string(hasher.finalize().as_slice()))
             }
             Err(e) => {
-                warn!("Failed to read old app file for hash: {}", e);
+                log_warn!("Failed to read old app file for hash: {}", e);
                 None
             }
         }
@@ -802,7 +798,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     // Remove the old file (if it exists)
     if file_path.exists() {
         if let Err(e) = std::fs::remove_file(&file_path) {
-            warn!("Failed to remove old app file: {}. Attempting to overwrite.", e);
+            log_warn!("Failed to remove old app file: {}. Attempting to overwrite.", e);
         }
     }
 
@@ -824,9 +820,9 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     // Migrate permissions from old hash to new hash
     if let Some(ref old_hash) = old_file_hash {
         if old_hash != &new_file_hash {
-            info!("Migrating permissions from {} to {}", old_hash, new_file_hash);
+            log_info!("Migrating permissions from {} to {}", old_hash, new_file_hash);
             if let Err(e) = crate::db::copy_miniapp_permissions(old_hash, &new_file_hash) {
-                warn!("Failed to migrate permissions: {}", e);
+                log_warn!("Failed to migrate permissions: {}", e);
                 // Don't fail the update if permission migration fails
             }
         }
@@ -850,7 +846,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
 
     // Update the version in the database
     if let Err(e) = crate::db::update_miniapp_version(app_id, &app.version) {
-        warn!("Failed to update app version in history: {}", e);
+        log_warn!("Failed to update app version in history: {}", e);
         // Don't fail the update if version recording fails
     }
 
@@ -864,7 +860,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
         });
     }
 
-    info!("Successfully updated marketplace app {} to version {} at {}", app_id, app.version, path_str);
+    log_info!("Successfully updated marketplace app {} to version {} at {}", app_id, app.version, path_str);
     Ok(path_str)
 }
 
@@ -901,7 +897,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     
     // Upload icon to Blossom if available, tracking both URL and MIME type
     let icon_info: Option<(String, &'static str)> = if let Some(icon_data) = icon_bytes {
-        info!("Uploading app icon to Blossom...");
+        log_info!("Uploading app icon to Blossom...");
         
         // Detect MIME type from icon bytes
         let mime_type = detect_image_mime_type(&icon_data);
@@ -915,22 +911,22 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         .await
         {
             Ok(url) => {
-                info!("Uploaded icon to Blossom: {} ({})", url, mime_type);
+                log_info!("Uploaded icon to Blossom: {} ({})", url, mime_type);
                 Some((url, mime_type))
             }
             Err(e) => {
                 // Log warning but continue without icon
-                info!("Warning: Failed to upload icon: {}. Continuing without icon.", e);
+                log_info!("Warning: Failed to upload icon: {}. Continuing without icon.", e);
                 None
             }
         }
     } else {
-        info!("No icon found in .xdc file");
+        log_info!("No icon found in .xdc file");
         None
     };
 
     // Upload .xdc file to Blossom
-    info!("Uploading {} to Blossom...", xdc_path);
+    log_info!("Uploading {} to Blossom...", xdc_path);
     
     let download_url = blossom::upload_blob_with_failover(
         signer.clone(),
@@ -940,7 +936,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     )
     .await?;
 
-    info!("Uploaded to Blossom: {}", download_url);
+    log_info!("Uploaded to Blossom: {}", download_url);
 
     // Build and publish the marketplace event
     let event = build_marketplace_event(
@@ -968,7 +964,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         .await
         .map_err(|e| format!("Failed to publish marketplace event: {}", e))?;
 
-    info!("Published marketplace event for app: {}", app_id);
+    log_info!("Published marketplace event for app: {}", app_id);
     Ok(event.id.to_hex())
 }
 
