@@ -400,6 +400,37 @@ impl ChatMetadata {
 // Tauri Commands
 // ============================================================================
 
+/// Headless mark-as-read: updates STATE + persists to DB without requiring TAURI_APP.
+/// Used by both the Tauri command and the Android notification action (JNI).
+/// If the Tauri app handle is available (backgrounded app mode), emits a
+/// `chat_mark_read` event so the frontend can update its unread state.
+pub async fn mark_as_read_headless(chat_id: &str) -> bool {
+    let (slim, last_read_hex) = {
+        let mut state = crate::STATE.lock().await;
+        let idx = match state.chats.iter().position(|c| c.id == chat_id) {
+            Some(i) => i,
+            None => return false,
+        };
+        if !state.chats[idx].set_as_read() {
+            return false;
+        }
+        let lr = crate::message::compact::decode_message_id(&state.chats[idx].last_read);
+        (crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner), lr)
+    };
+    let _ = crate::db::chats::save_slim_chat(slim).await;
+
+    // Notify the frontend if TAURI_APP is available (backgrounded app mode)
+    if let Some(handle) = crate::TAURI_APP.get() {
+        use tauri::Emitter;
+        let _ = handle.emit("chat_mark_read", serde_json::json!({
+            "chat_id": chat_id,
+            "last_read": last_read_hex,
+        }));
+    }
+
+    true
+}
+
 /// Marks a specific message as read for a chat.
 #[tauri::command]
 pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {

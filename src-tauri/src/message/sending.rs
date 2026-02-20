@@ -201,6 +201,111 @@ async fn encrypt_and_upload_mls_media(
     })
 }
 
+/// Headless text-only reply: sends a DM or MLS message without requiring TAURI_APP.
+/// Used by Android notification inline-reply (JNI). Sends first, then adds to STATE,
+/// persists to DB, emits to frontend (if available), and marks the chat as read.
+pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let milliseconds = current_time.as_millis() % 1000;
+
+    // Detect chat type
+    let is_group = {
+        let state = STATE.lock().await;
+        state.get_chat(chat_id).map_or(!chat_id.starts_with("npub1"), |c| c.is_mls_group())
+    };
+
+    // Parse receiver pubkey once for DMs (used for both rumor build and send)
+    let receiver_pubkey = if !is_group {
+        Some(PublicKey::from_bech32(chat_id)
+            .map_err(|e| format!("Invalid npub: {}", e))?)
+    } else {
+        None
+    };
+
+    // Build rumor
+    let rumor = if is_group {
+        EventBuilder::new(
+            Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
+            content,
+        )
+    } else {
+        EventBuilder::private_msg_rumor(receiver_pubkey.unwrap(), content)
+    }
+    .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
+    .build(my_public_key);
+
+    let rumor_id = rumor.id.ok_or("Rumor has no id")?.to_hex();
+
+    // Send first — only add to STATE after successful delivery
+    if is_group {
+        crate::mls::send_mls_message(chat_id, rumor, None).await?;
+    } else {
+        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey.unwrap(), rumor, [])
+            .await
+            .map_err(|e| format!("Gift wrap failed: {}", e))?;
+    }
+
+    // Build message and add to STATE only after successful send
+    let msg = Message {
+        id: rumor_id.clone(),
+        content: content.to_string(),
+        replied_to: String::new(),
+        replied_to_content: None,
+        replied_to_npub: None,
+        replied_to_has_attachment: None,
+        preview_metadata: None,
+        at: current_time.as_millis() as u64,
+        attachments: Vec::new(),
+        reactions: Vec::new(),
+        pending: false,
+        failed: false,
+        mine: true,
+        npub: my_public_key.to_bech32().ok(),
+        wrapper_event_id: None,
+        edited: false,
+        edit_history: None,
+    };
+
+    {
+        let mut state = STATE.lock().await;
+        if is_group {
+            state.create_or_get_mls_group_chat(chat_id, vec![]);
+            state.add_message_to_chat(chat_id, msg.clone());
+        } else {
+            state.add_message_to_participant(chat_id, msg.clone());
+        }
+    }
+
+    // Emit to frontend if TAURI_APP is available (backgrounded app mode)
+    if let Some(handle) = TAURI_APP.get() {
+        use tauri::Emitter;
+        if is_group {
+            let _ = handle.emit("mls_message_new", serde_json::json!({
+                "group_id": chat_id,
+                "message": &msg
+            }));
+        } else {
+            let _ = handle.emit("message_new", serde_json::json!({
+                "message": &msg,
+                "chat_id": chat_id
+            }));
+        }
+    }
+
+    // Persist message to DB
+    let _ = crate::db::save_message(chat_id, &msg).await;
+
+    // Mark chat as read (we just replied, so we've seen everything)
+    crate::chat::mark_as_read_headless(chat_id).await;
+
+    Ok(rumor_id)
+}
+
 #[tauri::command]
 pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<MessageSendResult, String> {
     // Immediately add the message to our state as "Pending" with an ID derived from the current nanosecond, we'll update it as either Sent (non-pending) or Failed in the future

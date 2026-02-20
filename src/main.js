@@ -5767,6 +5767,22 @@ async function setupRustListeners() {
         }
     });
 
+    // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
+    _on('chat_mark_read', (evt) => {
+        const { chat_id, last_read } = evt.payload;
+        const cChat = getChat(chat_id);
+        if (cChat && last_read) {
+            cChat.last_read = last_read;
+            // Re-render the chat preview element in-place (border, font color, etc. all depend on unread state)
+            const oldEl = document.getElementById(`chatlist-${chat_id}`);
+            if (oldEl) {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                const newEl = renderChat(cChat, primaryColor);
+                oldEl.replaceWith(newEl);
+            }
+        }
+    });
+
     // Listen for attachment URL updates (for file uploads and reuse)
     _on('attachment_update', (evt) => {
         const { chat_id, message_id, attachment_id, url } = evt.payload;

@@ -69,3 +69,6 @@
 -keepclassmembers class io.vectorapp.MainActivity {
     native <methods>;
 }
+
+# Keep NotificationActionReceiver JNI methods and constants (inline reply + mark as read)
+-keep class io.vectorapp.NotificationActionReceiver { *; }

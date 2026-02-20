@@ -256,6 +256,11 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         };
 
+        // Store the client and public key in globals so headless operations
+        // (notification reply, mark-as-read) can use them in service-only mode.
+        let _ = NOSTR_CLIENT.set(client.clone());
+        let _ = MY_PUBLIC_KEY.set(my_public_key);
+
         // Subscribe to GiftWraps addressed to us (DMs, files, MLS welcomes)
         // limit(0) = only new events going forward (real-time streaming)
         let giftwrap_filter = Filter::new()
@@ -679,6 +684,136 @@ pub fn post_notification_jni(
     if let Err(e) = result {
         logcat(&format!("Failed to post notification: {}", e));
     }
+}
+
+/// Called from NotificationActionReceiver when the user taps "Mark as Read".
+/// Marks the chat as read in STATE + DB (headless, no TAURI_APP needed).
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeMarkAsRead(
+    mut env: JNIEnv,
+    _class: JClass,
+    chat_id: JString<'_>,
+) {
+    let chat_id: String = match env.get_string(&chat_id) {
+        Ok(s) => s.into(),
+        Err(_) => return,
+    };
+    if chat_id.is_empty() { return; }
+    logcat(&format!("Mark as read: {}...", &chat_id[..chat_id.len().min(20)]));
+
+    // Spawn a thread with its own tokio runtime (JNI calls are synchronous)
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => { logcat(&format!("mark_as_read rt error: {:?}", e)); return; }
+        };
+        rt.block_on(async {
+            let result = crate::chat::mark_as_read_headless(&chat_id).await;
+            logcat(&format!("mark_as_read_headless result: {}", result));
+        });
+    });
+}
+
+/// Called from NotificationActionReceiver when the user sends an inline reply.
+/// Sends a text message (DM or MLS) and marks the chat as read.
+/// On success, re-posts the notification with the reply appended.
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeSendReply(
+    mut env: JNIEnv,
+    _class: JClass,
+    chat_id: JString<'_>,
+    content: JString<'_>,
+) {
+    let chat_id: String = match env.get_string(&chat_id) {
+        Ok(s) => s.into(),
+        Err(_) => return,
+    };
+    let content: String = match env.get_string(&content) {
+        Ok(s) => s.into(),
+        Err(_) => return,
+    };
+    if chat_id.is_empty() || content.is_empty() { return; }
+    let chat_preview: String = chat_id.chars().take(20).collect();
+    let content_preview: String = content.chars().take(40).collect();
+    logcat(&format!("Inline reply to {}...: {}", chat_preview, content_preview));
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => { logcat(&format!("send_reply rt error: {:?}", e)); return; }
+        };
+        rt.block_on(async {
+            // Wait for background sync to finish initializing the client (up to 15s).
+            // This handles the race where the service just restarted and bootstrap
+            // hasn't completed yet when the user taps Reply.
+            let mut waited = 0u32;
+            while crate::NOSTR_CLIENT.get().is_none() && waited < 150 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if waited > 0 {
+                logcat(&format!("Waited {}ms for client init", waited * 100));
+            }
+
+            match crate::message::send_text_reply_headless(&chat_id, &content).await {
+                Ok(_) => {
+                    logcat("Inline reply sent successfully");
+                    // Look up our own profile for avatar and display name
+                    let (sender_label, avatar) = {
+                        let my_pk = crate::MY_PUBLIC_KEY.get()
+                            .and_then(|pk| pk.to_bech32().ok());
+                        match my_pk {
+                            Some(npub) => {
+                                let state = crate::STATE.lock().await;
+                                match state.get_profile(&npub) {
+                                    Some(profile) => {
+                                        let name = if !profile.display_name.is_empty() {
+                                            format!("Me ({})", &*profile.display_name)
+                                        } else if !profile.name.is_empty() {
+                                            format!("Me ({})", &*profile.name)
+                                        } else {
+                                            "Me".to_string()
+                                        };
+                                        let av = if !profile.avatar_cached.is_empty() {
+                                            Some(profile.avatar_cached.to_string())
+                                        } else {
+                                            None
+                                        };
+                                        (name, av)
+                                    }
+                                    None => ("Me".to_string(), None),
+                                }
+                            }
+                            None => ("Me".to_string(), None),
+                        }
+                    };
+                    // Re-post notification with our reply appended so the user sees confirmation
+                    post_notification_jni(
+                        &sender_label,
+                        &content,
+                        avatar.as_deref(),
+                        Some(&chat_id),
+                        Some(&sender_label),
+                        None,
+                        None,
+                    );
+                }
+                Err(e) => {
+                    logcat(&format!("Inline reply failed: {}", e));
+                    // Post a failure notice so the notification spinner clears
+                    post_notification_jni(
+                        "Vector",
+                        "Reply failed to send",
+                        None,
+                        Some(&chat_id),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
+        });
+    });
 }
 
 /// Check if background sync is currently active (foreground service running)
