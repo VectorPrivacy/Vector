@@ -259,7 +259,7 @@ pub fn run() {
             profile::update_status,
             profile::upload_avatar,
             chat::mark_as_read,
-            profile::toggle_muted,
+            chat::toggle_chat_mute,
             profile::set_nickname,
             message::message,
             message::paste_message,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-toggle-chat-mute"
+description = "Enables the toggle_chat_mute command without any pre-configured scope."
+commands.allow = ["toggle_chat_mute"]
+
+[[permission]]
+identifier = "deny-toggle-chat-mute"
+description = "Denies the toggle_chat_mute command without any pre-configured scope."
+commands.deny = ["toggle_chat_mute"]

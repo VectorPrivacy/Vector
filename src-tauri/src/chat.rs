@@ -475,3 +475,31 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
 
     result
 }
+
+/// Toggles the muted status of a chat (DM or group).
+#[tauri::command]
+pub async fn toggle_chat_mute(chat_id: String) -> bool {
+    let handle = crate::TAURI_APP.get().unwrap();
+
+    let (muted, slim) = {
+        let mut state = crate::STATE.lock().await;
+        let idx = match state.chats.iter().position(|c| c.id == chat_id) {
+            Some(i) => i,
+            None => return false,
+        };
+        state.chats[idx].muted = !state.chats[idx].muted;
+        let m = state.chats[idx].muted;
+        (m, crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner))
+    };
+
+    let _ = crate::db::chats::save_slim_chat(slim).await;
+
+    use tauri::Emitter;
+    handle.emit("chat_muted", serde_json::json!({
+        "chat_id": &chat_id,
+        "value": muted
+    })).ok();
+
+    let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+    muted
+}

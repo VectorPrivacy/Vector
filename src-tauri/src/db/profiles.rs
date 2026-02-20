@@ -32,7 +32,6 @@ pub struct SlimProfile {
     pub status: Status,
     pub last_updated: u64,
     pub mine: bool,
-    pub muted: bool,
     pub bot: bool,
     pub avatar_cached: String,
     pub banner_cached: String,
@@ -55,7 +54,6 @@ impl Default for SlimProfile {
             status: Status::new(),
             last_updated: 0,
             mine: false,
-            muted: false,
             bot: false,
             avatar_cached: String::new(),
             banner_cached: String::new(),
@@ -85,7 +83,6 @@ impl SlimProfile {
             },
             last_updated: secs_from_compact(profile.last_updated),
             mine: profile.flags.is_mine(),
-            muted: profile.flags.is_muted(),
             bot: profile.flags.is_bot(),
             avatar_cached: profile.avatar_cached.to_string(),
             banner_cached: profile.banner_cached.to_string(),
@@ -96,7 +93,6 @@ impl SlimProfile {
     pub fn to_profile(&self) -> crate::Profile {
         let mut flags = ProfileFlags::default();
         flags.set_mine(self.mine);
-        flags.set_muted(self.muted);
         flags.set_bot(self.bot);
 
         crate::Profile {
@@ -126,7 +122,7 @@ impl SlimProfile {
 pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
 
-    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached FROM profiles")
+    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
@@ -149,14 +145,13 @@ pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
             },
             last_updated: 0,
             mine: false,
-            muted: row.get::<_, i32>(13)? != 0,
-            bot: row.get::<_, i32>(14)? != 0,
+            bot: row.get::<_, i32>(13)? != 0,
             avatar_cached: {
-                let p: String = row.get(15)?;
+                let p: String = row.get(14)?;
                 if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
             },
             banner_cached: {
-                let p: String = row.get(16)?;
+                let p: String = row.get(15)?;
                 if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
             },
         })
@@ -176,8 +171,8 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
     let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
-        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, muted, bot, avatar_cached, banner_cached)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(npub) DO UPDATE SET
             name = excluded.name,
             display_name = excluded.display_name,
@@ -191,7 +186,6 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
             nip05 = excluded.nip05,
             status_content = excluded.status_content,
             status_url = excluded.status_url,
-            muted = excluded.muted,
             bot = excluded.bot,
             avatar_cached = excluded.avatar_cached,
             banner_cached = excluded.banner_cached",
@@ -209,7 +203,6 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
             profile.nip05,
             profile.status.title,
             profile.status.url,
-            profile.muted as i32,
             profile.bot as i32,
             profile.avatar_cached,
             profile.banner_cached,

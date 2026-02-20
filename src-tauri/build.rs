@@ -26,10 +26,10 @@ fn main() {
             "update_profile",
             "update_status",
             "upload_avatar",
-            "toggle_muted",
             "set_nickname",
             // Chat commands
             "mark_as_read",
+            "toggle_chat_mute",
             // Message commands
             "message",
             "paste_message",

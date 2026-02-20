@@ -404,23 +404,19 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                 } else {
                     match state.get_profile(contact) {
                         Some(profile) => {
-                            if profile.flags.is_muted() {
-                                None // Profile is muted, don't send notification
+                            let display_name = if !profile.nickname.is_empty() {
+                                profile.nickname.to_string()
+                            } else if !profile.name.is_empty() {
+                                profile.name.to_string()
                             } else {
-                                let display_name = if !profile.nickname.is_empty() {
-                                    profile.nickname.to_string()
-                                } else if !profile.name.is_empty() {
-                                    profile.name.to_string()
-                                } else {
-                                    String::from("New Message")
-                                };
-                                let avatar = if !profile.avatar_cached.is_empty() {
-                                    Some(profile.avatar_cached.to_string())
-                                } else {
-                                    None
-                                };
-                                Some((display_name, msg.content.clone(), avatar))
-                            }
+                                String::from("New Message")
+                            };
+                            let avatar = if !profile.avatar_cached.is_empty() {
+                                Some(profile.avatar_cached.to_string())
+                            } else {
+                                None
+                            };
+                            Some((display_name, msg.content.clone(), avatar))
                         }
                         None => Some((String::from("New Message"), msg.content.clone(), None)),
                     }
@@ -506,23 +502,19 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
                 } else {
                     match state.get_profile(contact) {
                         Some(profile) => {
-                            if profile.flags.is_muted() {
-                                None // Profile is muted, don't send notification
+                            let display_name = if !profile.nickname.is_empty() {
+                                profile.nickname.to_string()
+                            } else if !profile.name.is_empty() {
+                                profile.name.to_string()
                             } else {
-                                let display_name = if !profile.nickname.is_empty() {
-                                    profile.nickname.to_string()
-                                } else if !profile.name.is_empty() {
-                                    profile.name.to_string()
-                                } else {
-                                    String::from("New Message")
-                                };
-                                let avatar = if !profile.avatar_cached.is_empty() {
-                                    Some(profile.avatar_cached.to_string())
-                                } else {
-                                    None
-                                };
-                                Some((display_name, extension.clone(), avatar))
-                            }
+                                String::from("New Message")
+                            };
+                            let avatar = if !profile.avatar_cached.is_empty() {
+                                Some(profile.avatar_cached.to_string())
+                            } else {
+                                None
+                            };
+                            Some((display_name, extension.clone(), avatar))
                         }
                         None => Some((String::from("New Message"), extension.clone(), None)),
                     }

@@ -493,15 +493,6 @@ impl ChatState {
                 continue;
             }
 
-            // Skip if profile is muted (for DMs)
-            if matches!(chat.chat_type, ChatType::DirectMessage) {
-                if let Some(profile) = self.get_profile(&chat.id) {
-                    if profile.flags.is_muted() {
-                        continue;
-                    }
-                }
-            }
-
             let mut unread_count = 0;
             for msg in chat.iter_compact().rev() {
                 if msg.flags.is_mine() {

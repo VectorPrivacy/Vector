@@ -55,8 +55,8 @@ const domProfileBadgeFawkes = document.getElementById('profile-badge-fawkes');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
-const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
+const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileOptionShare = document.getElementById('profile-option-share');
 const domProfileId = document.getElementById('profile-id');
@@ -4312,7 +4312,7 @@ function generateChatlistStateHash() {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
         const cLastMsg = chat.messages[chat.messages.length - 1];
-        const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
+        const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
         const activeTypers = chat.active_typers || [];
 
         // Push values directly (faster than creating object)
@@ -4617,8 +4617,8 @@ function renderChat(chat, primaryColor) {
     const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
 
     // Collect the Unread Message count for 'Unread' emphasis and badging
-    // Ensure muted chats OR muted profiles do not show unread glow
-    const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
+    // Ensure muted chats do not show unread glow
+    const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
 
     // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
@@ -4920,8 +4920,8 @@ function updateChatBackNotification() {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
         
-        // Skip muted chats or muted profiles (same logic as chatlist rendering)
-        if (chat.muted || (profile && profile.muted)) return false;
+        // Skip muted chats
+        if (chat.muted) return false;
         
         // Check if this chat has unread messages
         return countUnreadMessages(chat) > 0;
@@ -5486,23 +5486,17 @@ async function setupRustListeners() {
         renderChatlist();
     });
 
-    _on('profile_muted', (evt) => {
-        // Update the chat's muted status
-        const cChat = getDMChat(evt.payload.profile_id);
+    _on('chat_muted', (evt) => {
+        const cChat = arrChats.find(c => c.id === evt.payload.chat_id);
         if (cChat) {
             cChat.muted = evt.payload.value;
         }
-        
-        // Also update profile if it exists
-        const cProfile = getProfile(evt.payload.profile_id);
-        if (cProfile) {
-            cProfile.muted = evt.payload.value;
-        }
 
-        // If this profile is Expanded, update the Mute UI
-        if (domProfileId.textContent === evt.payload.profile_id && cProfile) {
-            domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
-            domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
+        // If this chat's profile is expanded, update the Mute UI
+        const domMuteBtn = document.getElementById('profile-option-mute');
+        if (domMuteBtn && domProfileId.textContent === evt.payload.chat_id) {
+            domMuteBtn.querySelector('span').classList.replace('icon-volume-' + (evt.payload.value ? 'max' : 'mute'), 'icon-volume-' + (evt.payload.value ? 'mute' : 'max'));
+            domMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
         }
 
         // Re-render the chat list to immediately reflect glow/badge changes
@@ -6876,9 +6870,11 @@ function renderProfileTab(cProfile) {
         domProfileOptions.style.display = '';
 
         // Setup Mute option
-        domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
-        domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
-        domProfileOptionMute.onclick = () => invoke('toggle_muted', { npub: cProfile.id });
+        const cMuteChat = arrChats.find(c => c.id === cProfile.id);
+        const isMuted = cMuteChat ? cMuteChat.muted : false;
+        domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (isMuted ? 'max' : 'mute'), 'icon-volume-' + (isMuted ? 'mute' : 'max'));
+        domProfileOptionMute.querySelector('p').innerText = isMuted ? 'Unmute' : 'Mute';
+        domProfileOptionMute.onclick = () => invoke('toggle_chat_mute', { chatId: cProfile.id });
 
         // Setup Message option
         domProfileOptionMessage.onclick = () => openChat(cProfile.id);

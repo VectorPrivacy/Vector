@@ -17,7 +17,7 @@ use crate::message::AttachmentFile;
 use crate::android::filesystem;
 
 // ============================================================================
-// ProfileFlags — 3 bools packed into 1 byte
+// ProfileFlags — 2 bools packed into 1 byte
 // ============================================================================
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -25,15 +25,12 @@ pub struct ProfileFlags(u8);
 
 impl ProfileFlags {
     const MINE:  u8 = 0b001;
-    const MUTED: u8 = 0b010;
     const BOT:   u8 = 0b100;
 
     #[inline] pub fn is_mine(self) -> bool  { self.0 & Self::MINE != 0 }
-    #[inline] pub fn is_muted(self) -> bool { self.0 & Self::MUTED != 0 }
     #[inline] pub fn is_bot(self) -> bool   { self.0 & Self::BOT != 0 }
 
     #[inline] pub fn set_mine(&mut self, v: bool)  { if v { self.0 |= Self::MINE } else { self.0 &= !Self::MINE } }
-    #[inline] pub fn set_muted(&mut self, v: bool) { if v { self.0 |= Self::MUTED } else { self.0 &= !Self::MUTED } }
     #[inline] pub fn set_bot(&mut self, v: bool)   { if v { self.0 |= Self::BOT } else { self.0 &= !Self::BOT } }
 }
 
@@ -67,7 +64,7 @@ pub struct Profile {
     pub status_url: Box<str>,
     /// Compact timestamp: seconds since 2020 epoch (valid until 2156)
     pub last_updated: u32,
-    /// Packed boolean flags: mine | muted | bot
+    /// Packed boolean flags: mine | bot
     pub flags: ProfileFlags,
     /// Local cached path for avatar image (for offline support)
     pub avatar_cached: Box<str>,
@@ -785,41 +782,6 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     Ok(upload_url)
 }
 
-
-/// Toggles the muted status of a profile
-#[tauri::command]
-pub async fn toggle_muted(npub: String) -> bool {
-    let handle = TAURI_APP.get().unwrap();
-
-    let (muted, slim) = {
-        let mut state = STATE.lock().await;
-        if let Some(id) = state.interner.lookup(&npub) {
-            let muted_val = {
-                let profile = match state.get_profile_mut_by_id(id) {
-                    Some(p) => p,
-                    None => return false,
-                };
-                profile.flags.set_muted(!profile.flags.is_muted());
-                handle.emit("profile_muted", serde_json::json!({
-                    "profile_id": &npub,
-                    "value": profile.flags.is_muted()
-                })).unwrap();
-                profile.flags.is_muted()
-            };
-            (muted_val, state.serialize_profile(id))
-        } else {
-            (false, None)
-        }
-    }; // Drop STATE lock before async DB operation
-
-    if let Some(slim) = slim {
-        db::set_profile(slim).await.unwrap();
-    }
-
-    // Refresh unread badge count to reflect mute changes immediately
-    let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
-    muted
-}
 
 /// Sets a nickname for a profile
 #[tauri::command]
