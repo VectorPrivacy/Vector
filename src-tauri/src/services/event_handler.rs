@@ -88,28 +88,13 @@ pub(crate) async fn handle_event_with_context(
             let contact: String = if is_mine {
                 // Try to get the first public key from tags
                 match rumor.tags.public_keys().next() {
-                    Some(pub_key) => match pub_key.to_bech32() {
-                        Ok(p_tag_pubkey_bech32) => p_tag_pubkey_bech32,
-                        Err(_) => {
-                            eprintln!("Failed to convert public key to bech32");
-                            // If conversion fails, fall back to sender
-                            sender
-                                .to_bech32()
-                                .expect("Failed to convert sender's public key to bech32")
-                        }
-                    },
-                    None => {
-                        // If no public key found in tags, fall back to sender
-                        sender
-                            .to_bech32()
-                            .expect("Failed to convert sender's public key to bech32")
-                    }
+                    Some(pub_key) => pub_key.to_bech32()
+                        .or_else(|_| sender.to_bech32())
+                        .unwrap_or_default(),
+                    None => sender.to_bech32().unwrap_or_default(),
                 }
             } else {
-                // If not is_mine, just use sender's bech32
-                sender
-                    .to_bech32()
-                    .expect("Failed to convert sender's public key to bech32")
+                sender.to_bech32().unwrap_or_default()
             };
 
             // Special handling for MLS Welcomes (not processed by rumor processor)
@@ -232,8 +217,12 @@ pub(crate) async fn handle_event_with_context(
 
             // Convert rumor to RumorEvent for protocol-agnostic processing
             // Move content and tags instead of cloning (rumor is owned and not used after this)
+            let Some(rumor_id) = rumor.id else {
+                eprintln!("Unwrapped rumor missing event ID, skipping");
+                return false;
+            };
             let rumor_event = RumorEvent {
-                id: rumor.id.unwrap(),
+                id: rumor_id,
                 kind: rumor.kind,
                 content: rumor.content,
                 tags: rumor.tags,

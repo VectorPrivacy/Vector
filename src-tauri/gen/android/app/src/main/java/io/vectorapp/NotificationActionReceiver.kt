@@ -37,7 +37,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 // Dismiss the notification immediately
                 if (notificationId != -1) {
                     val manager = context.getSystemService(NotificationManager::class.java)
-                    manager.cancel(notificationId)
+                    manager?.cancel(notificationId)
                 }
                 VectorNotificationService.clearMessageHistory(chatId)
             }

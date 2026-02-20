@@ -55,7 +55,7 @@ object VectorBatteryHelper {
     @JvmStatic
     fun setBackgroundServiceEnabled(context: Context, enabled: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putBoolean(KEY_BG_SERVICE_ENABLED, enabled).apply()
+        prefs.edit().putBoolean(KEY_BG_SERVICE_ENABLED, enabled).commit()
     }
 
     @JvmStatic

@@ -443,7 +443,11 @@ function setAsyncInterval(callback, interval) {
     async function run() {
         while (true) {
             await new Promise(resolve => timer = setTimeout(resolve, interval));
-            await callback();
+            try {
+                await callback();
+            } catch (e) {
+                console.error('[setAsyncInterval] callback error:', e);
+            }
         }
     }
     run();

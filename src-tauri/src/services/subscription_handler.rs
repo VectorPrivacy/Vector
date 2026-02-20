@@ -109,7 +109,7 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                             pubkey: msg.pubkey,
                         };
 
-                        let is_mine = !my_npub.is_empty() && msg.pubkey.to_bech32().unwrap() == my_npub;
+                        let is_mine = !my_npub.is_empty() && msg.pubkey.to_bech32().ok().as_deref() == Some(my_npub.as_str());
 
                         let processed = rt.block_on(async {
                             use crate::rumor::{process_rumor, RumorContext, ConversationType, RumorProcessingResult};

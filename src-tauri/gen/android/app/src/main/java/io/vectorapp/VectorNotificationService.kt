@@ -100,13 +100,17 @@ class VectorNotificationService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            // Accumulate message history for this chat
-            val history = chatMessageHistory.getOrPut(historyKey) { mutableListOf() }
-            history.add(ChatMessage(
-                if (isGroup) senderName.ifEmpty { "Someone" } else senderName.ifEmpty { title },
-                avatarPath, body, System.currentTimeMillis()
-            ))
-            while (history.size > 8) history.removeAt(0)
+            // Accumulate message history for this chat (synchronized to prevent
+            // corruption if two notifications arrive simultaneously for the same chat)
+            val history = synchronized(chatMessageHistory) {
+                val h = chatMessageHistory.getOrPut(historyKey) { mutableListOf() }
+                h.add(ChatMessage(
+                    if (isGroup) senderName.ifEmpty { "Someone" } else senderName.ifEmpty { title },
+                    avatarPath, body, System.currentTimeMillis()
+                ))
+                while (h.size > 8) h.removeAt(0)
+                h.toList() // snapshot under lock
+            }
 
             // Build MessagingStyle — used for both groups and DMs
             val messagingStyle = NotificationCompat.MessagingStyle(

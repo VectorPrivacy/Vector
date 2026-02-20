@@ -54,7 +54,7 @@ async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
             "old_id": pending_id.as_ref(),
             "message": &msg,
             "chat_id": &chat_id
-        })).unwrap();
+        })).ok();
         let _ = crate::db::save_message(&chat_id, &msg).await;
     }
 }
@@ -427,7 +427,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     handle_for_callback.emit("attachment_upload_progress", serde_json::json!({
                         "id": pending_id_for_callback.as_ref(),
                         "progress": pct
-                    })).unwrap();
+                    })).ok();
                 }
                 Ok(())
             });
@@ -476,7 +476,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     handle.emit("mls_message_new", serde_json::json!({
                         "group_id": &receiver,
                         "message": msg
-                    })).unwrap();
+                    })).ok();
                 }
             }
 
@@ -531,7 +531,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     "old_id": old_id,
                     "message": &msg,
                     "chat_id": &receiver
-                })).unwrap();
+                })).ok();
                 let _ = crate::db::save_message(&receiver, &msg).await;
             }
 
@@ -689,12 +689,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     handle.emit("mls_message_new", serde_json::json!({
                         "group_id": &receiver,
                         "message": msg
-                    })).unwrap();
+                    })).ok();
                 } else {
                     handle.emit("message_new", serde_json::json!({
                         "message": msg,
                         "chat_id": &receiver
-                    })).unwrap();
+                    })).ok();
                 }
             }
         }
@@ -794,7 +794,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         handle.emit("attachment_upload_progress", serde_json::json!({
                             "id": pending_id_for_callback.as_ref(),
                             "progress": pct
-                        })).unwrap();
+                        })).ok();
                     }
                 Ok(())
             });
@@ -875,12 +875,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             handle.emit("mls_message_new", serde_json::json!({
                 "group_id": &receiver,
                 "message": &msg
-            })).unwrap();
+            })).ok();
         } else {
             handle.emit("message_new", serde_json::json!({
                 "message": &msg,
                 "chat_id": &receiver
-            })).unwrap();
+            })).ok();
         }
 
         if !is_group_chat {

@@ -2087,24 +2087,28 @@ function getMostUsedEmojis() {
  * @param {string} str - The string to check for emojis.
  * @returns {boolean} True if the string contains only emojis (ignoring whitespace), false otherwise.
  */
+/** Set of all emoji strings from our dataset, for fast lookup in isEmojiOnly. */
+const emojiDataSet = new Set(arrEmojis.map(e => e.emoji));
+
 function isEmojiOnly(str) {
     // Remove all whitespace from the string
     const strWithoutSpace = str.replace(/\s/g, '');
-    
+
     // If the string is empty after removing whitespace, return false
     if (strWithoutSpace.length === 0) return false;
-    
+
     // Use Intl.Segmenter to properly split the string into graphemes (including emoji sequences)
     const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
     const segments = [...segmenter.segment(strWithoutSpace)].map(s => s.segment);
-    
-    // Check if each segment is an emoji using a test for emoji presentation
+
+    // Check if each segment is an emoji
     return segments.every(segment => {
-        // Test for emoji property
-        return /\p{Emoji_Presentation}/u.test(segment) || 
-               // Handle basic emojis that need variation selectors
-               (/\p{Emoji}/u.test(segment) && 
-                !/\p{Number}|\p{Letter}/u.test(segment));
+        // Test for emoji property (Unicode regex — may miss newer emojis on older engines)
+        if (/\p{Emoji_Presentation}/u.test(segment)) return true;
+        // Handle basic emojis that need variation selectors
+        if (/\p{Emoji}/u.test(segment) && !/\p{Number}|\p{Letter}/u.test(segment)) return true;
+        // Fallback: check against our own emoji dataset (covers newer emojis on older Android WebViews)
+        return emojiDataSet.has(segment);
     });
 }
 
@@ -2128,6 +2132,13 @@ function isoToFlagEmoji(isoCode) {
  * @param {HTMLElement} domElement 
  */
 function twemojify(domElement) {
+    // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants
+    const walker = document.createTreeWalker(domElement, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const stripped = node.textContent.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '');
+        if (stripped !== node.textContent) node.textContent = stripped;
+    }
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });
 }
 
