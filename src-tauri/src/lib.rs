@@ -320,6 +320,12 @@ pub fn run() {
             commands::invites::check_fawkes_badge,
             commands::system::get_storage_info,
             commands::system::clear_storage,
+            commands::system::check_battery_optimized,
+            commands::system::request_battery_optimization,
+            commands::system::get_background_service_enabled,
+            commands::system::set_background_service_enabled,
+            commands::system::get_background_service_prompted,
+            commands::system::set_background_service_prompted,
             // MLS commands (commands/mls.rs)
             commands::mls::load_mls_device_id,
             commands::mls::load_mls_keypackages,

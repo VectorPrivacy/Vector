@@ -132,37 +132,7 @@ class VectorNotificationService : Service() {
                 loadBitmap(avatarPath)
             } ?: BitmapFactory.decodeResource(context.resources, R.drawable.ic_large_icon)
 
-            // --- Notification action buttons ---
-
-            // "Read" action — marks the chat as read and dismisses the notification
-            val markReadIntent = Intent(context, NotificationActionReceiver::class.java).apply {
-                action = NotificationActionReceiver.ACTION_MARK_READ
-                putExtra("chat_id", chatId)
-                putExtra("notification_id", notificationId)
-            }
-            val markReadPending = PendingIntent.getBroadcast(
-                context, notificationCounter.getAndIncrement(), markReadIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            // Inline "Reply" action with RemoteInput keyboard
-            val remoteInput = androidx.core.app.RemoteInput.Builder(NotificationActionReceiver.REPLY_KEY)
-                .setLabel("Reply")
-                .build()
-            val replyIntent = Intent(context, NotificationActionReceiver::class.java).apply {
-                action = NotificationActionReceiver.ACTION_REPLY
-                putExtra("chat_id", chatId)
-                putExtra("notification_id", notificationId)
-            }
-            val replyPending = PendingIntent.getBroadcast(
-                context, notificationCounter.getAndIncrement(), replyIntent,
-                PendingIntent.FLAG_MUTABLE  // Required for RemoteInput to write result back
-            )
-            val replyAction = NotificationCompat.Action.Builder(
-                R.drawable.ic_notification, "Reply", replyPending
-            ).addRemoteInput(remoteInput).build()
-
-            val notification = NotificationCompat.Builder(context, MESSAGES_CHANNEL_ID)
+            val builder = NotificationCompat.Builder(context, MESSAGES_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setLargeIcon(largeIcon)
                 .setStyle(messagingStyle)
@@ -170,9 +140,42 @@ class VectorNotificationService : Service() {
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pendingIntent)
                 .setDeleteIntent(deletePendingIntent)
-                .addAction(R.drawable.ic_notification, "Mark Read", markReadPending)
-                .addAction(replyAction)
-                .build()
+
+            // Only add Mark Read / Reply actions when we have a valid chatId.
+            // Encrypted account notifications pass empty chatId (can't decrypt),
+            // so these actions would be non-functional.
+            if (chatId.isNotEmpty()) {
+                val markReadIntent = Intent(context, NotificationActionReceiver::class.java).apply {
+                    action = NotificationActionReceiver.ACTION_MARK_READ
+                    putExtra("chat_id", chatId)
+                    putExtra("notification_id", notificationId)
+                }
+                val markReadPending = PendingIntent.getBroadcast(
+                    context, notificationCounter.getAndIncrement(), markReadIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val remoteInput = androidx.core.app.RemoteInput.Builder(NotificationActionReceiver.REPLY_KEY)
+                    .setLabel("Reply")
+                    .build()
+                val replyIntent = Intent(context, NotificationActionReceiver::class.java).apply {
+                    action = NotificationActionReceiver.ACTION_REPLY
+                    putExtra("chat_id", chatId)
+                    putExtra("notification_id", notificationId)
+                }
+                val replyPending = PendingIntent.getBroadcast(
+                    context, notificationCounter.getAndIncrement(), replyIntent,
+                    PendingIntent.FLAG_MUTABLE
+                )
+                val replyAction = NotificationCompat.Action.Builder(
+                    R.drawable.ic_notification, "Reply", replyPending
+                ).addRemoteInput(remoteInput).build()
+
+                builder.addAction(R.drawable.ic_notification, "Mark Read", markReadPending)
+                builder.addAction(replyAction)
+            }
+
+            val notification = builder.build()
 
             manager.notify(notificationId, notification)
 

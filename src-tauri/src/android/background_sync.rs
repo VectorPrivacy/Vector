@@ -57,10 +57,10 @@ static STOP_STANDALONE_SYNC: AtomicBool = AtomicBool::new(false);
 static STANDALONE_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Stored JavaVM for cross-thread JNI calls (set from JNI entry points)
-static BG_JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
+pub static BG_JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 
 /// Stored application context as GlobalRef (survives Activity destruction)
-static BG_APP_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
+pub static BG_APP_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
 
 /// Stored data directory path (captured from nativeStartBackgroundSync for later use in nativeOnPause)
 static BG_DATA_DIR: OnceLock<String> = OnceLock::new();
@@ -258,8 +258,13 @@ fn run_standalone_sync_loop(data_dir: &str) {
 
         // Store the client and public key in globals so headless operations
         // (notification reply, mark-as-read) can use them in service-only mode.
-        let _ = NOSTR_CLIENT.set(client.clone());
-        let _ = MY_PUBLIC_KEY.set(my_public_key);
+        // ONLY set for unencrypted accounts — encrypted accounts use a signerless
+        // client that would poison the OnceCell and prevent the full app from
+        // creating a proper client with signer after PIN unlock.
+        if can_decrypt {
+            let _ = NOSTR_CLIENT.set(client.clone());
+            let _ = MY_PUBLIC_KEY.set(my_public_key);
+        }
 
         // Subscribe to GiftWraps addressed to us (DMs, files, MLS welcomes)
         // limit(0) = only new events going forward (real-time streaming)
@@ -433,8 +438,12 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), S
     )
     .map_err(|e| format!("Failed to open database: {:?}", e))?;
 
-    // Check if encryption is enabled
-    let encryption_enabled: Option<String> = conn
+    // Detect encryption status from two DB keys:
+    // - encryption_enabled = "false" → explicitly disabled (skip_encryption or disable_encryption)
+    // - encryption_enabled missing + security_type exists → encrypted (setup_encryption)
+    // This handles the case where encryption was enabled then later disabled:
+    // security_type remains in DB but encryption_enabled is set to "false".
+    let encryption_enabled_val: Option<String> = conn
         .query_row(
             "SELECT value FROM settings WHERE key = 'encryption_enabled'",
             [],
@@ -442,7 +451,18 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), S
         )
         .ok();
 
-    let encrypted = encryption_enabled.as_deref() == Some("true");
+    let security_type: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'security_type'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let encrypted = match encryption_enabled_val.as_deref() {
+        Some("false") => false,
+        _ => security_type.is_some(),
+    };
 
     if encrypted {
         // Encrypted account — can't read nsec, but we can derive the pubkey from the

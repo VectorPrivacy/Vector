@@ -72,3 +72,6 @@
 
 # Keep NotificationActionReceiver JNI methods and constants (inline reply + mark as read)
 -keep class io.vectorapp.NotificationActionReceiver { *; }
+
+# Keep VectorBatteryHelper static methods (called from Rust via JNI)
+-keep class io.vectorapp.VectorBatteryHelper { *; }

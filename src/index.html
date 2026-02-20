@@ -958,6 +958,24 @@
           </div>
         </div>
 
+        <!-- Battery & Background Service Section (mobile only) -->
+        <div id="settings-battery" class="settings-section" style="display: none;">
+          <hr class="divider settings-divider">
+          <h2>Battery</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="battery-bg-service-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Run in Background</span>
+              <input type="checkbox" id="battery-bg-service-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div id="battery-warning" class="form-group" style="display: none; margin-bottom: 0; padding-bottom: 0;">
+            <p style="color: #FCE459; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px;"><span class="icon icon-battery-full" style="position: relative; width: 16px; height: 16px; min-width: 16px; margin: 0; background-color: #FCE459;"></span>Battery Optimization is active</p>
+          </div>
+        </div>
+
         <!-- Network Settings Section -->
         <div id="settings-network" class="settings-section">
           <hr class="divider settings-divider">

@@ -6536,6 +6536,23 @@ async function login(skipAnimations = false) {
 
                 // Adjust the Chat List sizes (deferred — layout reflows don't block first paint)
                 requestAnimationFrame(() => adjustSize());
+
+                // Prompt for background service / battery optimization (mobile only, once)
+                // Deferred so login animations finish first
+                if (platformFeatures.is_mobile) {
+                    setTimeout(async () => {
+                        try {
+                            const prompted = await invoke('get_background_service_prompted');
+                            console.log('[Battery] prompted =', prompted);
+                            if (!prompted) {
+                                await invoke('set_background_service_prompted');
+                                await showBackgroundServicePrompt();
+                            }
+                        } catch (e) {
+                            console.error('[Battery] prompt error:', e);
+                        }
+                    }, 1500);
+                }
             };
 
             if (skipAnimations) {
@@ -11486,6 +11503,14 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
     };
+    const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
+    if (domSettingsBatteryBgServiceInfo) {
+        domSettingsBatteryBgServiceInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.', true);
+        };
+    }
     domSettingsNotifMuteInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();

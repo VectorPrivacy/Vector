@@ -36,6 +36,10 @@
   mask-image: url("./icons/add-user.svg");
 }
 
+.icon-battery-full {
+  mask-image: url("./icons/battery-full.svg");
+}
+
 .icon-chats {
   mask-image: url("./icons/chats.svg");
 }

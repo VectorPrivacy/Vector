@@ -298,8 +298,168 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     }))
 }
 
+// ============================================================================
+// Battery Optimization & Background Service Commands
+// ============================================================================
+
+/// Check whether the app is exempt from battery optimizations (Android only).
+/// Returns `true` on non-Android platforms (no optimization needed).
+#[tauri::command]
+pub async fn check_battery_optimized() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_bool("isIgnoringBatteryOptimizations")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Open the system battery optimization dialog (Android only). No-op on other platforms.
+#[tauri::command]
+pub async fn request_battery_optimization() {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_void("requestBatteryOptimization");
+    }
+}
+
+/// Get the background service enabled preference.
+/// Returns `true` on non-Android platforms.
+#[tauri::command]
+pub async fn get_background_service_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_bool("getBackgroundServiceEnabled")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Set the background service enabled preference and start/stop the service accordingly.
+#[tauri::command]
+pub async fn set_background_service_enabled(enabled: bool) {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_set_enabled(enabled);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Check whether the user has been prompted for background service setup.
+/// Returns `true` on non-Android platforms (no prompt needed).
+#[tauri::command]
+pub async fn get_background_service_prompted() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_bool("getBackgroundServicePrompted")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Mark the user as having been prompted for background service setup.
+#[tauri::command]
+pub async fn set_background_service_prompted() {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_void("setBackgroundServicePrompted");
+    }
+}
+
+// ============================================================================
+// Android JNI helpers for VectorBatteryHelper
+// Uses ndk_context (Tauri's Activity context) — always available when Tauri
+// commands execute, unlike BG_JAVA_VM which depends on service startup timing.
+// ============================================================================
+
+#[cfg(target_os = "android")]
+fn call_battery_helper_bool(method: &str) -> bool {
+    let default = method == "getBackgroundServiceEnabled";
+    crate::android::utils::with_android_context(|env, activity| {
+        let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let class_name = env.new_string("io.vectorapp.VectorBatteryHelper")
+            .map_err(|e| format!("{:?}", e))?;
+        let helper_class = env.call_method(&class_loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let helper_jclass = jni::objects::JClass::from(helper_class);
+        let val = env.call_static_method(&helper_jclass, method, "(Landroid/content/Context;)Z",
+            &[activity.into()])
+            .map_err(|e| format!("{:?}", e))?.z().map_err(|e| format!("{:?}", e))?;
+        Ok(val)
+    }).unwrap_or(default)
+}
+
+#[cfg(target_os = "android")]
+fn call_battery_helper_void(method: &str) {
+    let _ = crate::android::utils::with_android_context(|env, activity| {
+        let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let class_name = env.new_string("io.vectorapp.VectorBatteryHelper")
+            .map_err(|e| format!("{:?}", e))?;
+        let helper_class = env.call_method(&class_loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let helper_jclass = jni::objects::JClass::from(helper_class);
+        env.call_static_method(&helper_jclass, method, "(Landroid/content/Context;)V",
+            &[activity.into()])
+            .map_err(|e| format!("{:?}", e))?;
+        Ok(())
+    });
+}
+
+#[cfg(target_os = "android")]
+fn call_battery_helper_set_enabled(enabled: bool) {
+    let _ = crate::android::utils::with_android_context(|env, activity| {
+        let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let class_name = env.new_string("io.vectorapp.VectorBatteryHelper")
+            .map_err(|e| format!("{:?}", e))?;
+        let helper_class = env.call_method(&class_loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let helper_jclass = jni::objects::JClass::from(helper_class);
+
+        // Set the preference
+        env.call_static_method(&helper_jclass, "setBackgroundServiceEnabled",
+            "(Landroid/content/Context;Z)V",
+            &[activity.into(), jni::objects::JValue::Bool(enabled as u8)])
+            .map_err(|e| format!("{:?}", e))?;
+
+        // Start or stop the service
+        let service_method = if enabled { "startBackgroundService" } else { "stopBackgroundService" };
+        env.call_static_method(&helper_jclass, service_method, "(Landroid/content/Context;)V",
+            &[activity.into()])
+            .map_err(|e| format!("{:?}", e))?;
+
+        Ok(())
+    });
+}
+
 // Handler list for this module (for reference):
 // - get_platform_features
 // - run_maintenance
 // - get_storage_info
 // - clear_storage
+// - check_battery_optimized
+// - request_battery_optimization
+// - get_background_service_enabled
+// - set_background_service_enabled
+// - get_background_service_prompted
+// - set_background_service_prompted

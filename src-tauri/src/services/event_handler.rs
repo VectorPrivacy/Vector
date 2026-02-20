@@ -407,27 +407,34 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
         if !is_mine && is_new {
             let display_info = {
                 let state = STATE.lock().await;
-                match state.get_profile(contact) {
-                    Some(profile) => {
-                        if profile.flags.is_muted() {
-                            None // Profile is muted, don't send notification
-                        } else {
-                            let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.to_string()
-                            } else if !profile.name.is_empty() {
-                                profile.name.to_string()
+                // Check chat-level mute (covers both DM and group mutes)
+                let chat_muted = state.get_chat(contact)
+                    .map_or(false, |c| c.muted);
+                if chat_muted {
+                    None
+                } else {
+                    match state.get_profile(contact) {
+                        Some(profile) => {
+                            if profile.flags.is_muted() {
+                                None // Profile is muted, don't send notification
                             } else {
-                                String::from("New Message")
-                            };
-                            let avatar = if !profile.avatar_cached.is_empty() {
-                                Some(profile.avatar_cached.to_string())
-                            } else {
-                                None
-                            };
-                            Some((display_name, msg.content.clone(), avatar))
+                                let display_name = if !profile.nickname.is_empty() {
+                                    profile.nickname.to_string()
+                                } else if !profile.name.is_empty() {
+                                    profile.name.to_string()
+                                } else {
+                                    String::from("New Message")
+                                };
+                                let avatar = if !profile.avatar_cached.is_empty() {
+                                    Some(profile.avatar_cached.to_string())
+                                } else {
+                                    None
+                                };
+                                Some((display_name, msg.content.clone(), avatar))
+                            }
                         }
+                        None => Some((String::from("New Message"), msg.content.clone(), None)),
                     }
-                    None => Some((String::from("New Message"), msg.content.clone(), None)),
                 }
             };
             if let Some((display_name, content, avatar)) = display_info {
@@ -502,27 +509,34 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
         if !is_mine && is_new {
             let display_info = {
                 let state = STATE.lock().await;
-                match state.get_profile(contact) {
-                    Some(profile) => {
-                        if profile.flags.is_muted() {
-                            None // Profile is muted, don't send notification
-                        } else {
-                            let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.to_string()
-                            } else if !profile.name.is_empty() {
-                                profile.name.to_string()
+                // Check chat-level mute (covers both DM and group mutes)
+                let chat_muted = state.get_chat(contact)
+                    .map_or(false, |c| c.muted);
+                if chat_muted {
+                    None
+                } else {
+                    match state.get_profile(contact) {
+                        Some(profile) => {
+                            if profile.flags.is_muted() {
+                                None // Profile is muted, don't send notification
                             } else {
-                                String::from("New Message")
-                            };
-                            let avatar = if !profile.avatar_cached.is_empty() {
-                                Some(profile.avatar_cached.to_string())
-                            } else {
-                                None
-                            };
-                            Some((display_name, extension.clone(), avatar))
+                                let display_name = if !profile.nickname.is_empty() {
+                                    profile.nickname.to_string()
+                                } else if !profile.name.is_empty() {
+                                    profile.name.to_string()
+                                } else {
+                                    String::from("New Message")
+                                };
+                                let avatar = if !profile.avatar_cached.is_empty() {
+                                    Some(profile.avatar_cached.to_string())
+                                } else {
+                                    None
+                                };
+                                Some((display_name, extension.clone(), avatar))
+                            }
                         }
+                        None => Some((String::from("New Message"), extension.clone(), None)),
                     }
-                    None => Some((String::from("New Message"), extension.clone(), None)),
                 }
             };
             if let Some((display_name, file_extension, avatar)) = display_info {

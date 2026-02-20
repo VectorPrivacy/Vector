@@ -37,12 +37,14 @@ class MainActivity : TauriActivity() {
         // Request notification permission (Android 13+)
         requestNotificationPermission()
 
-        // Start the foreground notification service
-        val serviceIntent = Intent(this, VectorNotificationService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
+        // Start the foreground notification service (only if user hasn't disabled it)
+        if (VectorBatteryHelper.getBackgroundServiceEnabled(this)) {
+            val serviceIntent = Intent(this, VectorNotificationService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
         }
 
         // Handle notification tap that launched the app

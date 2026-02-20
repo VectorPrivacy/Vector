@@ -1521,6 +1521,15 @@ async function initSettings() {
     const primaryDeviceStatus = document.getElementById('primary-device-status');
     primaryDeviceStatus.onclick = showPrimaryDeviceInfo;
 
+    // Initialize battery / background service settings (mobile only)
+    if (platformFeatures.is_mobile) {
+        try {
+            await initBatterySettings();
+        } catch (e) {
+            console.error('[Battery] initBatterySettings failed:', e);
+        }
+    }
+
     // Initialize encryption settings
     await initEncryptionSettings();
 }
@@ -2066,6 +2075,135 @@ function hideMigrationModal() {
  * @param {number} completed - Items completed
  * @param {string} phase - Current phase description
  */
+// ============================================================================
+// Battery & Background Service Settings (mobile only)
+// ============================================================================
+
+/**
+ * Initialize the battery settings section (toggle, warning).
+ */
+async function initBatterySettings() {
+    const section = document.getElementById('settings-battery');
+    if (!section) return;
+
+    section.style.display = 'block';
+
+    const toggle = document.getElementById('battery-bg-service-toggle');
+    const warning = document.getElementById('battery-warning');
+
+    // Load current state
+    const enabled = await invoke('get_background_service_enabled');
+    toggle.checked = enabled;
+
+    // Show warning if enabled but battery optimization is active
+    if (enabled) {
+        const exempt = await invoke('check_battery_optimized');
+        warning.style.display = exempt ? 'none' : '';
+    } else {
+        warning.style.display = 'none';
+    }
+
+    // Tap warning to open battery optimization dialog
+    warning.style.cursor = 'pointer';
+    warning.addEventListener('click', async () => {
+        await invoke('request_battery_optimization');
+        await waitForVisibility();
+        const nowExempt = await invoke('check_battery_optimized');
+        warning.style.display = nowExempt ? 'none' : '';
+    });
+
+    toggle.addEventListener('change', async () => {
+        if (toggle.checked) {
+            // Turning ON — check battery optimization first
+            const exempt = await invoke('check_battery_optimized');
+            if (!exempt) {
+                // Request exemption
+                await invoke('request_battery_optimization');
+                // Wait for user to return from system dialog
+                await waitForVisibility();
+                const nowExempt = await invoke('check_battery_optimized');
+                if (!nowExempt) {
+                    // User denied — revert toggle
+                    toggle.checked = false;
+                    warning.style.display = 'none';
+                    popupConfirm('Battery Optimization', 'Battery optimization must be disabled for reliable background notifications.', true, '', 'vector_warning.svg');
+                    return;
+                }
+            }
+            await invoke('set_background_service_enabled', { enabled: true });
+            warning.style.display = 'none';
+        } else {
+            // Turning OFF — stop service immediately
+            await invoke('set_background_service_enabled', { enabled: false });
+            warning.style.display = 'none';
+        }
+    });
+}
+
+/**
+ * Show a one-time prompt asking the user to enable the background service
+ * and battery optimization. Called once after first login.
+ */
+async function showBackgroundServicePrompt() {
+    const confirmed = await popupConfirm(
+        'Background Notifications',
+        'Vector can run in the background to deliver <b>instant notifications</b>.<br><br>This requires disabling battery optimization for Vector so Android doesn\'t kill the service.<br><br>You can change this later in Settings.',
+        false, '', 'vector_warning.svg'
+    );
+
+    if (confirmed) {
+        // User chose "Enable" — request battery optimization exemption
+        await invoke('request_battery_optimization');
+        // Wait for user to return from system dialog
+        await waitForVisibility();
+        const exempt = await invoke('check_battery_optimized');
+        if (!exempt) {
+            // User denied battery exemption — disable service
+            await invoke('set_background_service_enabled', { enabled: false });
+        }
+        // If exempt, service is already running with default enabled=true
+    }
+    // "Not Now" — service keeps running with default enabled=true,
+    // user just skipped the battery optimization prompt
+
+    // Refresh the settings UI to reflect current state
+    const warning = document.getElementById('battery-warning');
+    const toggle = document.getElementById('battery-bg-service-toggle');
+    if (warning && toggle) {
+        const enabled = await invoke('get_background_service_enabled');
+        const exempt = await invoke('check_battery_optimized');
+        toggle.checked = enabled;
+        warning.style.display = (enabled && !exempt) ? '' : 'none';
+    }
+}
+
+/**
+ * Returns a promise that resolves when the page becomes visible again
+ * after being hidden (e.g. user returns from system settings dialog).
+ * If the page never becomes hidden within 1s, resolves immediately
+ * (dialog may have been suppressed or instant-dismissed).
+ */
+function waitForVisibility() {
+    return new Promise(resolve => {
+        let hidden = document.hidden;
+        const handler = () => {
+            if (document.hidden) {
+                hidden = true;
+            } else if (hidden) {
+                // Page was hidden and is now visible again
+                document.removeEventListener('visibilitychange', handler);
+                setTimeout(resolve, 300);
+            }
+        };
+        document.addEventListener('visibilitychange', handler);
+        // Timeout: if the dialog never hid us, resolve after 1s
+        setTimeout(() => {
+            document.removeEventListener('visibilitychange', handler);
+            resolve();
+        }, 1000);
+    });
+}
+
 function updateMigrationProgress(total, completed, phase) {
     const phaseEl = document.getElementById('encryption-migration-phase');
     const progressFill = document.getElementById('encryption-migration-progress-fill');
