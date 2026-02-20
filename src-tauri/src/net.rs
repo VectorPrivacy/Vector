@@ -460,6 +460,8 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
                         // Normalize the favicon URL
                         let favicon_url = if href.starts_with("https://") {
                             href.to_string()
+                        } else if href.starts_with("http://") {
+                            format!("https://{}", &href[7..])
                         } else if href.starts_with("//") {
                             format!("https:{}", href)
                         } else if href.starts_with('/') {
@@ -520,6 +522,8 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
                     "og:image" => {
                         let image_url = if content.starts_with("https://") {
                             content.to_string()
+                        } else if content.starts_with("http://") {
+                            format!("https://{}", &content[7..])
                         } else if content.starts_with("//") {
                             format!("https:{}", content)
                         } else if content.starts_with('/') {
@@ -555,6 +559,8 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
                         if metadata.og_image.is_none() {
                             let image_url = if content.starts_with("https://") {
                                 content.to_string()
+                            } else if content.starts_with("http://") {
+                                format!("https://{}", &content[7..])
                             } else if content.starts_with("//") {
                                 format!("https:{}", content)
                             } else if content.starts_with('/') {

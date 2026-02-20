@@ -8835,6 +8835,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     softChatScroll();
                 }
             }, { once: true });
+            imgFavicon.addEventListener('error', () => {
+                imgFavicon.style.display = 'none';
+            }, { once: true });
 
             // Add the title (prefixed with the Favicon)
             const spanPreviewTitle = document.createElement('span');
