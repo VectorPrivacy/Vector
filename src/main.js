@@ -11389,6 +11389,20 @@ domChatMessageInput.oninput = async () => {
         openUrl('https://www.gitcoin.co');
     };
 
+    // Footer Hyperlinks
+    document.getElementById('footer-donate').onclick = (e) => {
+        e.preventDefault();
+        openUrl('https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations');
+    };
+    document.getElementById('footer-gitbook').onclick = (e) => {
+        e.preventDefault();
+        openUrl('https://docs.vectorapp.io');
+    };
+    document.getElementById('footer-privacy').onclick = (e) => {
+        e.preventDefault();
+        openUrl('https://vectorapp.io/privacy-policy');
+    };
+
     // Restore PIVX Wallet button - restores hidden PIVX app
     if (domRestorePivxBtn) {
         domRestorePivxBtn.onclick = async () => {

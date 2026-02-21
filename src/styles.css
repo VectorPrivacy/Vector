@@ -310,6 +310,17 @@ html, body {
   opacity: 0.5;
 }
 
+.settings-footer span {
+    color: #5B6060;
+    font-size: 13px;
+    cursor: pointer;
+    transition: color 0.2s ease;
+}
+
+.settings-footer span:hover {
+    color: #fff;
+}
+
 .popup-container {
   z-index: 10002;
   width: 100%;
