@@ -344,7 +344,7 @@ async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
     let html = oembed_data["html"].as_str().unwrap_or("");
     
     // Parse the HTML to extract the tweet text
-    let tweet_text = html_meta::extract_first_p_inner_html(html.as_bytes())
+    let tweet_text = html_meta::extract_first_p_inner_html(html)
         .map(|h| h.split("<a ").next().unwrap_or("").trim().to_string())
         .unwrap_or_default();
     
@@ -432,7 +432,7 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
     }
 
     let html_string = String::from_utf8(html_chunk).map_err(|e| e.to_string())?;
-    let parsed = html_meta::extract_html_meta(html_string.as_bytes());
+    let parsed = html_meta::extract_html_meta(&html_string);
 
     let mut metadata = SiteMetadata {
         domain: domain.clone(),

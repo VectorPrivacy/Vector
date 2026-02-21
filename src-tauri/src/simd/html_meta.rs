@@ -343,10 +343,9 @@ unsafe fn as_str_unchecked(bytes: &[u8]) -> &str {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-/// Extract metadata from an HTML byte slice (expects `<head>` content, <=32KB).
-///
-/// Input **must** be valid UTF-8 (e.g. from `str::as_bytes()`).
-pub fn extract_html_meta(html: &[u8]) -> HtmlMeta<'_> {
+/// Extract metadata from an HTML string (expects `<head>` content, <=32KB).
+pub fn extract_html_meta(input: &str) -> HtmlMeta<'_> {
+    let html = input.as_bytes();
     let mut meta = HtmlMeta {
         og_title: None,
         og_description: None,
@@ -533,8 +532,9 @@ pub fn extract_html_meta(html: &[u8]) -> HtmlMeta<'_> {
 
 /// Extract the first `<p>` tag's inner HTML (for Twitter oEmbed snippets).
 ///
-/// Input **must** be valid UTF-8. Returns `Cow::Borrowed` when no entities need decoding.
-pub fn extract_first_p_inner_html(html: &[u8]) -> Option<Cow<'_, str>> {
+/// Returns `Cow::Borrowed` when no entities need decoding.
+pub fn extract_first_p_inner_html(input: &str) -> Option<Cow<'_, str>> {
+    let html = input.as_bytes();
     let len = html.len();
     let mut pos = 0;
 
@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_basic_og_tags() {
-        let html = br#"<html><head>
+        let html = r#"<html><head>
             <meta property="og:title" content="Test Title">
             <meta property="og:description" content="Test Description">
             <meta property="og:image" content="https://example.com/image.png">
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_twitter_card_fallback() {
-        let html = br#"<head>
+        let html = r#"<head>
             <meta name="twitter:title" content="Tweet Title">
             <meta name="twitter:description" content="Tweet Desc">
             <meta name="twitter:image" content="https://img.twitter.com/pic.jpg">
@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_og_takes_priority_over_twitter() {
-        let html = br#"<head>
+        let html = r#"<head>
             <meta property="og:title" content="OG Title">
             <meta name="twitter:title" content="Twitter Title">
         </head>"#;
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn test_favicons() {
-        let html = br#"<head>
+        let html = r#"<head>
             <link rel="icon" href="/favicon.ico">
             <link rel="apple-touch-icon" href="/apple-icon.png">
             <link rel="shortcut icon" href="/shortcut.ico">
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_self_closing_meta() {
-        let html = br#"<head>
+        let html = r#"<head>
             <meta property="og:title" content="Self Close" />
             <meta name="description" content="Also self close"/>
         </head>"#;
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_html_entities() {
-        let html = br#"<head>
+        let html = r#"<head>
             <meta property="og:title" content="Tom &amp; Jerry &lt;3">
             <title>A &quot;quoted&quot; title</title>
         </head>"#;
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_single_quoted_attributes() {
-        let html = br#"<head>
+        let html = r#"<head>
             <meta property='og:title' content='Single Quotes'>
         </head>"#;
 
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_tags() {
-        let html = br#"<HEAD>
+        let html = r#"<HEAD>
             <META PROPERTY="og:title" CONTENT="Upper Case">
             <TITLE>Upper Title</TITLE>
         </HEAD>"#;
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_stops_at_head_close() {
-        let html = br#"<head>
+        let html = r#"<head>
             <meta property="og:title" content="In Head">
         </head>
         <body>
@@ -716,32 +716,32 @@ mod tests {
 
     #[test]
     fn test_extract_first_p() {
-        let html = br#"<blockquote><p>Hello world<br>Second line<a href="/">link</a></p></blockquote>"#;
+        let html = r#"<blockquote><p>Hello world<br>Second line<a href="/">link</a></p></blockquote>"#;
         let p = extract_first_p_inner_html(html);
         assert_eq!(p.as_deref(), Some("Hello world<br>Second line<a href=\"/\">link</a>"));
     }
 
     #[test]
     fn test_extract_p_with_entities() {
-        let html = br#"<p>Tom &amp; Jerry</p>"#;
+        let html = r#"<p>Tom &amp; Jerry</p>"#;
         let p = extract_first_p_inner_html(html);
         assert_eq!(p.as_deref(), Some("Tom & Jerry"));
     }
 
     #[test]
     fn test_empty_html() {
-        let meta = extract_html_meta(b"");
+        let meta = extract_html_meta("");
         assert!(meta.og_title.is_none());
         assert!(meta.title.is_none());
         assert!(meta.favicons.is_empty());
 
-        let p = extract_first_p_inner_html(b"");
+        let p = extract_first_p_inner_html("");
         assert!(p.is_none());
     }
 
     #[test]
     fn test_html_comment_skipped() {
-        let html = br#"<head>
+        let html = r#"<head>
             <!-- <meta property="og:title" content="Commented Out"> -->
             <meta property="og:title" content="Real Title">
         </head>"#;
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn test_numeric_entity() {
-        let html = br#"<head><title>Test&#39;s &amp; &#x27;stuff&#x27;</title></head>"#;
+        let html = r#"<head><title>Test&#39;s &amp; &#x27;stuff&#x27;</title></head>"#;
         let meta = extract_html_meta(html);
         assert_eq!(meta.title.as_deref(), Some("Test's & 'stuff'"));
     }
@@ -772,11 +772,11 @@ mod tests {
     #[test]
     fn test_zero_copy_no_entities() {
         // When no entities are present, Cow should be Borrowed (zero-alloc)
-        let html = br#"<head><meta property="og:title" content="Plain Title"></head>"#;
+        let html = r#"<head><meta property="og:title" content="Plain Title"></head>"#;
         let meta = extract_html_meta(html);
         assert!(matches!(meta.og_title, Some(Cow::Borrowed(_))));
 
-        let html2 = br#"<p>No entities here</p>"#;
+        let html2 = r#"<p>No entities here</p>"#;
         let p = extract_first_p_inner_html(html2);
         assert!(matches!(p, Some(Cow::Borrowed(_))));
     }
@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn test_owned_with_entities() {
         // When entities are present, Cow should be Owned (decoded)
-        let html = br#"<head><meta property="og:title" content="A &amp; B"></head>"#;
+        let html = r#"<head><meta property="og:title" content="A &amp; B"></head>"#;
         let meta = extract_html_meta(html);
         assert!(matches!(meta.og_title, Some(Cow::Owned(_))));
         assert_eq!(meta.og_title.as_deref(), Some("A & B"));
