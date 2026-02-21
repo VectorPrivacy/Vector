@@ -14,7 +14,7 @@
 }
 
 .popup {
-  background-color: rgba(0, 0, 0, 1);
+  background-color: #030303;
   box-shadow: 0 0 15px #F7931A20;
   border-color: #F7931A;
 }
@@ -332,7 +332,7 @@ select:disabled {
 
 #popupConfirm {
   background-color: #F7931A;
-  color: #ffffff;
+  color: #000;
 }
 
 /* File Preview Overlay Theme */

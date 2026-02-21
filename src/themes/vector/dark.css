@@ -13,9 +13,9 @@
 }
 
 .popup {
-  background-color: rgba(0, 0, 0, 1);
-  box-shadow: 0 0 15px rgba(90, 252, 180, 0.25);
-  border-color: rgba(90, 252, 180, 0.35);
+  background-color: #030303;
+  box-shadow: 0 0 15px #33DB9825;
+  border-color: #33DB98;
 }
 
 .text-gradient {
