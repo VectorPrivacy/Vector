@@ -4,7 +4,8 @@ use futures_util::StreamExt;
 use reqwest::{self, Client};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
-use scraper::{Html, Selector};
+
+use crate::simd::html_meta;
 
 /// Trait for reporting download progress
 pub trait ProgressReporter {
@@ -343,21 +344,8 @@ async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
     let html = oembed_data["html"].as_str().unwrap_or("");
     
     // Parse the HTML to extract the tweet text
-    let document = Html::parse_document(html);
-    let text_selector = Selector::parse("p").unwrap();
-    let tweet_text = document
-        .select(&text_selector)
-        .next()
-        .map(|el| {
-            // Get the inner HTML to preserve <br> tags
-            el.inner_html()
-                // Remove links to other tweets and media
-                .split("<a ")
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        })
+    let tweet_text = html_meta::extract_first_p_inner_html(html.as_bytes())
+        .map(|h| h.split("<a ").next().unwrap_or("").trim().to_string())
         .unwrap_or_default();
     
     // Note: Twitter's oEmbed API does not provide images for regular tweets
@@ -387,26 +375,35 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
         return fetch_twitter_metadata(url).await;
     }
     
-    // Extract and normalize domain
+    // Extract and normalize domain (zero-alloc scan, no Vec<&str>)
     let domain = {
-        let parts: Vec<&str> = url.split('/').collect();
-        if parts.len() >= 3 {
-            let mut domain = format!("{}://{}", parts[0].trim_end_matches(':'), parts[2]);
-            if !domain.ends_with('/') {
-                domain.push('/');
-            }
-            domain
+        // URL format: "scheme://host/..." — find the third '/'
+        let bytes = url.as_bytes();
+        let scheme_end = match bytes.iter().position(|&b| b == b':') {
+            Some(i) => i,
+            None => 0,
+        };
+        let host_start = if scheme_end + 2 < bytes.len() && bytes[scheme_end + 1] == b'/' && bytes[scheme_end + 2] == b'/' {
+            scheme_end + 3
         } else {
-            let mut domain = url.to_string();
-            if !domain.ends_with('/') {
-                domain.push('/');
-            }
-            domain
+            0
+        };
+        let host_end = bytes[host_start..].iter().position(|&b| b == b'/').map(|i| host_start + i).unwrap_or(bytes.len());
+        if host_start > 0 {
+            let mut d = String::with_capacity(host_end + 1);
+            d.push_str(&url[..host_end]);
+            d.push('/');
+            d
+        } else {
+            let mut d = String::with_capacity(url.len() + 1);
+            d.push_str(url);
+            if !d.ends_with('/') { d.push('/'); }
+            d
         }
     };
-    
+
     let mut html_chunk = Vec::new();
-    
+
     let client = reqwest::Client::new();
     let mut response = client
         .get(url)
@@ -414,175 +411,103 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    
-    // Read the response in chunks
+
+    // Read the response in chunks — SIMD scan for </head> on raw bytes (no clone, no UTF-8 re-check)
     loop {
         let chunk = response.chunk().await.map_err(|e| e.to_string())?;
         match chunk {
             Some(data) => {
+                let prev_len = html_chunk.len();
                 html_chunk.extend_from_slice(&data);
-                
-                if let Ok(current_html) = String::from_utf8(html_chunk.clone()) {
-                    if let Some(head_end) = current_html.find("</head>") {
-                        html_chunk.truncate(head_end + 7);
-                        break;
-                    }
+
+                // SIMD-scan only the new overlap region for </head>
+                let search_start = prev_len.saturating_sub(6);
+                if let Some(end) = html_meta::find_closing_head(&html_chunk, search_start) {
+                    html_chunk.truncate(end);
+                    break;
                 }
             }
             None => break,
         }
     }
-    
+
     let html_string = String::from_utf8(html_chunk).map_err(|e| e.to_string())?;
-    let document = Html::parse_document(&html_string);
-    let meta_selector = Selector::parse("meta").unwrap();
-    let link_selector = Selector::parse("link").unwrap();
-    
+    let parsed = html_meta::extract_html_meta(html_string.as_bytes());
+
     let mut metadata = SiteMetadata {
         domain: domain.clone(),
-        og_title: None,
-        og_description: None,
-        og_image: None,
-        og_url: Some(String::from(url)),
-        og_type: None,
-        title: None,
-        description: None,
+        og_title: parsed.og_title.map(|c| c.into_owned()),
+        og_description: parsed.og_description.map(|c| c.into_owned()),
+        og_image: parsed.og_image.map(|u| normalize_url(&u, &domain)),
+        og_url: parsed.og_url.map(|c| c.into_owned()).or(Some(url.to_string())),
+        og_type: parsed.og_type.map(|c| c.into_owned()),
+        title: parsed.title.map(|c| c.into_owned()),
+        description: parsed.description.map(|c| c.into_owned()),
         favicon: None,
     };
-    
-    // Process favicon links
-    let mut favicon_candidates = Vec::new();
-    for link in document.select(&link_selector) {
-        if let Some(rel) = link.value().attr("rel") {
-            if let Some(href) = link.value().attr("href") {
-                match rel.to_lowercase().as_str() {
-                    "icon" | "shortcut icon" | "apple-touch-icon" => {
-                        // Normalize the favicon URL
-                        let favicon_url = if href.starts_with("https://") {
-                            href.to_string()
-                        } else if href.starts_with("http://") {
-                            format!("https://{}", &href[7..])
-                        } else if href.starts_with("//") {
-                            format!("https:{}", href)
-                        } else if href.starts_with('/') {
-                            format!("{}{}", domain.trim_end_matches('/'), href)
-                        } else {
-                            format!("{}/{}", domain.trim_end_matches('/'), href)
-                        };
-                        
-                        favicon_candidates.push((favicon_url, rel.to_lowercase()));
-                    }
-                    _ => {}
-                }
-            }
-        }
+
+    // Favicon selection with priority order
+    let base = domain.trim_end_matches('/');
+    if parsed.favicons.is_empty() {
+        let mut s = String::with_capacity(base.len() + 12);
+        s.push_str(base);
+        s.push_str("/favicon.ico");
+        metadata.favicon = Some(s);
+    } else {
+        let favicon_candidates: Vec<(String, &str)> = parsed.favicons.iter()
+            .map(|f| (normalize_url(&f.href, &domain), f.rel.as_ref()))
+            .collect();
+
+        let favicon = favicon_candidates.iter()
+            .find(|(_, rel)| rel.eq_ignore_ascii_case("apple-touch-icon"))
+            .or_else(|| favicon_candidates.iter().find(|(url, _)| url.ends_with(".png")))
+            .or_else(|| favicon_candidates.iter().find(|(_, rel)|
+                rel.eq_ignore_ascii_case("icon") || rel.eq_ignore_ascii_case("shortcut icon")))
+            .map(|(url, _)| url.clone())
+            .unwrap_or_else(|| {
+                let mut s = String::with_capacity(base.len() + 12);
+                s.push_str(base);
+                s.push_str("/favicon.ico");
+                s
+            });
+
+        metadata.favicon = Some(favicon);
     }
 
-    // Set favicon with priority order
-    if favicon_candidates.is_empty() {
-        // If no favicon found in links, try the default /favicon.ico location
-        metadata.favicon = Some(format!("{}/favicon.ico", domain.trim_end_matches('/')));
-    } else {
-        // Priority order:
-        // 1. apple-touch-icon (highest quality)
-        // 2. icon with .png extension
-        // 3. shortcut icon with .png extension
-        // 4. any other icon
-        // 5. fallback to /favicon.ico
-        
-        let favicon = favicon_candidates.iter()
-            .find(|(_url, rel)| 
-                rel == "apple-touch-icon")
-            .or_else(|| 
-                favicon_candidates.iter()
-                    .find(|(url, _)| 
-                        url.ends_with(".png")))
-            .or_else(|| 
-                favicon_candidates.iter()
-                    .find(|(_, rel)| 
-                        rel == "icon" || rel == "shortcut icon"))
-            .map(|(url, _)| url.clone())
-            .or_else(|| 
-                // Fallback to /favicon.ico
-                Some(format!("{}/favicon.ico", domain.trim_end_matches('/')))
-            );
-        
-        metadata.favicon = favicon;
-    }
-    
-    // Process meta tags (existing code)
-    for meta in document.select(&meta_selector) {
-        let element = meta.value();
-        
-        if let Some(property) = element.attr("property") {
-            if let Some(content) = element.attr("content") {
-                match property {
-                    "og:title" => metadata.og_title = Some(content.to_string()),
-                    "og:description" => metadata.og_description = Some(content.to_string()),
-                    "og:image" => {
-                        let image_url = if content.starts_with("https://") {
-                            content.to_string()
-                        } else if content.starts_with("http://") {
-                            format!("https://{}", &content[7..])
-                        } else if content.starts_with("//") {
-                            format!("https:{}", content)
-                        } else if content.starts_with('/') {
-                            format!("{}{}", domain.trim_end_matches('/'), content)
-                        } else {
-                            format!("{}{}", domain.trim_end_matches('/'), content)
-                        };
-                        metadata.og_image = Some(image_url);
-                    },
-                    "og:url" => metadata.og_url = Some(content.to_string()),
-                    "og:type" => metadata.og_type = Some(content.to_string()),
-                    _ => {}
-                }
-            }
-        }
-        
-        if let Some(name) = element.attr("name") {
-            if let Some(content) = element.attr("content") {
-                match name {
-                    "description" => metadata.description = Some(content.to_string()),
-                    // Twitter/X specific meta tags
-                    "twitter:title" => {
-                        if metadata.og_title.is_none() {
-                            metadata.og_title = Some(content.to_string());
-                        }
-                    },
-                    "twitter:description" => {
-                        if metadata.og_description.is_none() {
-                            metadata.og_description = Some(content.to_string());
-                        }
-                    },
-                    "twitter:image" => {
-                        if metadata.og_image.is_none() {
-                            let image_url = if content.starts_with("https://") {
-                                content.to_string()
-                            } else if content.starts_with("http://") {
-                                format!("https://{}", &content[7..])
-                            } else if content.starts_with("//") {
-                                format!("https:{}", content)
-                            } else if content.starts_with('/') {
-                                format!("{}{}", domain.trim_end_matches('/'), content)
-                            } else {
-                                format!("{}{}", domain.trim_end_matches('/'), content)
-                            };
-                            metadata.og_image = Some(image_url);
-                        }
-                    },
-                    _ => {}
-                }
-            }
-        }
-    }
-    
-    // Extract title from title tag
-    if let Some(title_element) = document.select(&Selector::parse("title").unwrap()).next() {
-        metadata.title = Some(title_element.text().collect::<String>());
-    }
-    
     Ok(metadata)
+}
+
+/// Normalize a URL: upgrade http to https, resolve protocol-relative and path-relative URLs.
+/// Uses pre-calculated capacity + push_str (single alloc, no format! overhead).
+fn normalize_url(url: &str, domain: &str) -> String {
+    if url.starts_with("https://") {
+        url.to_string()
+    } else if url.starts_with("http://") {
+        let rest = &url[7..];
+        let mut s = String::with_capacity(8 + rest.len());
+        s.push_str("https://");
+        s.push_str(rest);
+        s
+    } else if url.starts_with("//") {
+        let mut s = String::with_capacity(6 + url.len());
+        s.push_str("https:");
+        s.push_str(url);
+        s
+    } else {
+        let base = domain.trim_end_matches('/');
+        if url.starts_with('/') {
+            let mut s = String::with_capacity(base.len() + url.len());
+            s.push_str(base);
+            s.push_str(url);
+            s
+        } else {
+            let mut s = String::with_capacity(base.len() + 1 + url.len());
+            s.push_str(base);
+            s.push('/');
+            s.push_str(url);
+            s
+        }
+    }
 }
 
 /// Check if a URL is live and accessible

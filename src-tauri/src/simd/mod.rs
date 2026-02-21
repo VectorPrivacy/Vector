@@ -10,12 +10,14 @@
 //! # Modules
 //!
 //! - [`hex`] - Hex encoding/decoding (~62x faster than format!)
+//! - [`html_meta`] - HTML metadata extraction (SIMD `<` scanner + scalar tag parser)
 //! - [`image`] - Image operations (~9x faster with parallel SIMD)
 //! - [`audio`] - Audio sample conversion (2.3x faster f32→i16)
 //! - [`url`] - URL delimiter scanning (4.7-5.2x faster)
 
 pub mod audio;
 pub mod hex;
+pub mod html_meta;
 pub mod image;
 pub mod url;
 
