@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-generate-thumbhash-preview"
+description = "Enables the generate_thumbhash_preview command without any pre-configured scope."
+commands.allow = ["generate_thumbhash_preview"]
+
+[[permission]]
+identifier = "deny-generate-thumbhash-preview"
+description = "Denies the generate_thumbhash_preview command without any pre-configured scope."
+commands.deny = ["generate_thumbhash_preview"]

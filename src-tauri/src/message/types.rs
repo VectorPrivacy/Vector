@@ -163,8 +163,8 @@ impl Message {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct ImageMetadata {
-    /// The Blurhash preview
-    pub blurhash: String,
+    /// The ThumbHash preview (base91-encoded)
+    pub thumbhash: String,
     /// Image pixel width
     pub width: u32,
     /// Image pixel height

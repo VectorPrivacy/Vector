@@ -124,10 +124,10 @@ async fn encrypt_and_upload_mls_media(
     };
 
     // Configure media processing options
-    // Disable blurhash generation since we already have it in img_meta
+    // Disable blurhash generation — we generate thumbhash ourselves
     let options = MediaProcessingOptions {
         sanitize_exif: true,
-        generate_blurhash: file.img_meta.is_none(), // Only generate if we don't have it
+        generate_blurhash: false,
         max_dimension: None,
         max_file_size: None,
         max_filename_length: None,
@@ -163,12 +163,11 @@ async fn encrypt_and_upload_mls_media(
     // because MDK also validates MIME types when parsing on the receive side.
     // The receiver can identify file type from the extension in the filename.
 
-    // Append our pre-generated blurhash and dimensions if available
-    // MDK doesn't include these when generate_blurhash is false
+    // Append our pre-generated thumbhash and dimensions if available
     if let Some(ref img_meta) = file.img_meta {
-        // Add blurhash if not already present
-        if !tag_values.iter().any(|s| s.starts_with("blurhash ")) && !img_meta.blurhash.is_empty() {
-            tag_values.push(format!("blurhash {}", img_meta.blurhash));
+        // Add thumbhash if not already present
+        if !tag_values.iter().any(|s| s.starts_with("thumbhash ")) && !img_meta.thumbhash.is_empty() {
+            tag_values.push(format!("thumbhash {}", img_meta.thumbhash));
         }
         // Add dimensions if not already present
         if !tag_values.iter().any(|s| s.starts_with("dim ")) {
@@ -759,7 +758,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 // Append image metadata if available
                 if let Some(ref img_meta) = attached_file.img_meta {
                     attachment_rumor = attachment_rumor
-                        .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
+                        .tag(Tag::custom(TagKind::custom("thumbhash"), [&img_meta.thumbhash]))
                         .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
                 }
 
@@ -841,7 +840,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     // Append image metadata if available
                     if let Some(ref img_meta) = attached_file.img_meta {
                         attachment_rumor = attachment_rumor
-                            .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
+                            .tag(Tag::custom(TagKind::custom("thumbhash"), [&img_meta.thumbhash]))
                             .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
                     }
 
@@ -1107,13 +1106,13 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     let encoded = crate::shared::image::encode_rgba_auto(&pixels, img.width(), img.height(), 85)?;
     let (encoded_bytes, extension) = (encoded.bytes, encoded.extension);
 
-    // Generate image metadata with Blurhash and dimensions
-    let img_meta: Option<ImageMetadata> = util::generate_blurhash_from_rgba(
+    // Generate image metadata with ThumbHash and dimensions
+    let img_meta: Option<ImageMetadata> = util::generate_thumbhash_from_rgba(
         img.as_raw(),
         img.width(),
         img.height()
-    ).map(|blurhash| ImageMetadata {
-        blurhash,
+    ).map(|thumbhash| ImageMetadata {
+        thumbhash,
         width: img.width(),
         height: img.height(),
     });

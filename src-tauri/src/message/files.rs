@@ -198,9 +198,9 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
     // Process images: generate metadata and optionally compress
     let (bytes, extension, img_meta) = if is_image {
         if let Ok(img) = ::image::load_from_memory(&original_bytes) {
-            let blurhash_meta = crate::util::generate_blurhash_from_image(&img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            let thumbhash_meta = crate::util::generate_thumbhash_from_image(&img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width: img.width(),
                     height: img.height(),
                 });
@@ -209,14 +209,14 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
             // Other images: compress if requested
             if original_extension == "gif" || !use_compression {
                 // No compression - just use original bytes with metadata
-                (original_bytes, original_extension, blurhash_meta)
+                (original_bytes, original_extension, thumbhash_meta)
             } else {
                 // Compress on-the-fly since pre-compression wasn't ready
                 use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
                 let rgba_img = img.to_rgba8();
                 match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
-                    Ok(encoded) => (Arc::new(encoded.bytes), encoded.extension.to_string(), blurhash_meta),
-                    Err(_) => (original_bytes, original_extension, blurhash_meta),
+                    Ok(encoded) => (Arc::new(encoded.bytes), encoded.extension.to_string(), thumbhash_meta),
+                    Err(_) => (original_bytes, original_extension, thumbhash_meta),
                 }
             }
         } else {
@@ -375,9 +375,9 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     // Generate image metadata if the file is an image
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
-            attachment_file.img_meta = util::generate_blurhash_from_image(&img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            attachment_file.img_meta = util::generate_thumbhash_from_image(&img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width: img.width(),
                     height: img.height(),
                 });
@@ -692,9 +692,9 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 img
             };
 
-            attachment_file.img_meta = crate::util::generate_blurhash_from_image(&resized_img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            attachment_file.img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width: resized_img.width(),
                     height: resized_img.height(),
                 });

@@ -463,8 +463,8 @@ pub fn run() {
             commands::relays::get_relay_logs,
             commands::relays::monitor_relay_connections,
             // Attachment commands (commands/attachments.rs)
-            commands::attachments::generate_blurhash_preview,
-            commands::attachments::decode_blurhash,
+            commands::attachments::generate_thumbhash_preview,
+            commands::attachments::decode_thumbhash,
             commands::attachments::download_attachment,
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,

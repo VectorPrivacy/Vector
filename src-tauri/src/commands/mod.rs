@@ -2,7 +2,7 @@
 //!
 //! This module organizes Tauri commands into logical categories:
 //! - `account`: Authentication and account management (5 commands)
-//! - `attachments`: File downloads and blurhash processing (3 commands)
+//! - `attachments`: File downloads and thumbhash processing (3 commands)
 //! - `invites`: Invite codes and badges (4 commands)
 //! - `media`: Voice recording and transcription (4 commands)
 //! - `relays`: Relay management, connection, monitoring (13 commands)

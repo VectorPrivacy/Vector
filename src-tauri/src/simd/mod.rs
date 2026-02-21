@@ -32,5 +32,5 @@ pub use image::{has_alpha_transparency, set_all_alpha_opaque};
 pub use image::has_all_alpha_near_zero;
 
 // Also available via crate::simd::image::*
-// - nearest_neighbor_downsample (used in util.rs for blurhash)
+// - nearest_neighbor_downsample (used in util.rs for thumbhash)
 // - rgb_to_rgba (used in util.rs for base64 image decoding)

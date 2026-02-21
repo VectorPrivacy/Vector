@@ -3072,51 +3072,49 @@ function prefetchTrendingGifs() {
         .catch(() => {}); // Silently fail - this is just an optimization
 }
 
-// ===== Blurhash Decoder (Rust Backend) =====
+// ===== ThumbHash Decoder (Rust Backend) =====
 // Uses efficient Rust-based decoder with LRU caching
-/** @type {Map<string, string>} Cache of decoded blurhash -> data URL */
-const blurhashCache = new Map();
-/** Maximum cached blurhash entries */
-const BLURHASH_CACHE_MAX_SIZE = 200;
+/** @type {Map<string, string>} Cache of decoded thumbhash -> data URL */
+const thumbhashCache = new Map();
+/** Maximum cached thumbhash entries */
+const THUMBHASH_CACHE_MAX_SIZE = 200;
 
 /**
- * Get a decoded blurhash data URL from cache, or decode via Rust backend
+ * Get a decoded thumbhash data URL from cache, or decode via Rust backend
  * Returns cached value synchronously if available, otherwise triggers async decode
- * @param {string} blurhash - The blurhash string
+ * @param {string} thumbhash - The base91-encoded thumbhash string
  * @returns {string|null} - Cached data URL or null (will be decoded async)
  */
-function getCachedBlurhash(blurhash) {
-    if (!blurhash || blurhash.length < 6) return null;
-    return blurhashCache.get(blurhash) || null;
+function getCachedThumbhash(thumbhash) {
+    if (!thumbhash) return null;
+    return thumbhashCache.get(thumbhash) || null;
 }
 
 /**
- * Pre-decode blurhashes for a batch of GIFs using the Rust backend
+ * Pre-decode thumbhashes for a batch of GIFs using the Rust backend
  * Results are cached for synchronous access during rendering
- * @param {Array<{b?: string}>} gifs - Array of GIF objects with optional blurhash field 'b'
+ * @param {Array<{th?: string}>} gifs - Array of GIF objects with optional thumbhash field 'th'
  */
-async function predecodeBlurhashes(gifs) {
-    const uncached = gifs.filter(g => g.b && !blurhashCache.has(g.b));
+async function predecodeThumbhashes(gifs) {
+    const uncached = gifs.filter(g => g.th && !thumbhashCache.has(g.th));
     if (uncached.length === 0) return;
 
     // Decode in parallel (Rust backend is efficient)
     const decodePromises = uncached.map(async (gif) => {
         try {
-            const dataUrl = await invoke('decode_blurhash', {
-                blurhash: gif.b,
-                width: 32,
-                height: 32
+            const dataUrl = await invoke('decode_thumbhash', {
+                thumbhash: gif.th
             });
             if (dataUrl && dataUrl.startsWith('data:')) {
                 // LRU eviction if cache is full
-                if (blurhashCache.size >= BLURHASH_CACHE_MAX_SIZE) {
-                    const firstKey = blurhashCache.keys().next().value;
-                    blurhashCache.delete(firstKey);
+                if (thumbhashCache.size >= THUMBHASH_CACHE_MAX_SIZE) {
+                    const firstKey = thumbhashCache.keys().next().value;
+                    thumbhashCache.delete(firstKey);
                 }
-                blurhashCache.set(gif.b, dataUrl);
+                thumbhashCache.set(gif.th, dataUrl);
             }
         } catch {
-            // Silently fail - blurhash is just for placeholder
+            // Silently fail - thumbhash is just for placeholder
         }
     });
 
@@ -3195,8 +3193,8 @@ async function loadTrendingGifs() {
     // Use cached data if fresh (only for first page)
     if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
         gifGrid.innerHTML = '';
-        // Blurhashes should already be cached, but ensure they are
-        await predecodeBlurhashes(cachedTrendingGifs);
+        // Thumbhashes should already be cached, but ensure they are
+        await predecodeThumbhashes(cachedTrendingGifs);
         renderGifs(cachedTrendingGifs, false);
         gifCurrentOffset = cachedTrendingGifs.length;
         gifHasMore = cachedTrendingGifs.length >= gifPageSize;
@@ -3216,8 +3214,8 @@ async function loadTrendingGifs() {
             // Cache the results
             cachedTrendingGifs = data.results;
             cachedTrendingTimestamp = Date.now();
-            // Pre-decode blurhashes before rendering
-            await predecodeBlurhashes(data.results);
+            // Pre-decode thumbhashes before rendering
+            await predecodeThumbhashes(data.results);
             renderGifs(data.results, false);
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -3262,8 +3260,8 @@ async function searchGifs(query) {
         gifSearchCache.delete(cacheKey);
         gifSearchCache.set(cacheKey, cached);
         gifGrid.innerHTML = '';
-        // Blurhashes should already be cached, but ensure they are
-        await predecodeBlurhashes(cached);
+        // Thumbhashes should already be cached, but ensure they are
+        await predecodeThumbhashes(cached);
         renderGifs(cached, false);
         gifCurrentOffset = cached.length;
         gifHasMore = cached.length >= gifPageSize;
@@ -3287,8 +3285,8 @@ async function searchGifs(query) {
             }
             gifSearchCache.set(cacheKey, data.results);
 
-            // Pre-decode blurhashes before rendering
-            await predecodeBlurhashes(data.results);
+            // Pre-decode thumbhashes before rendering
+            await predecodeThumbhashes(data.results);
             renderGifs(data.results, false);
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -3338,8 +3336,8 @@ async function loadMoreGifs() {
         gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
 
         if (data.results && data.results.length > 0) {
-            // Pre-decode blurhashes before rendering
-            await predecodeBlurhashes(data.results);
+            // Pre-decode thumbhashes before rendering
+            await predecodeThumbhashes(data.results);
             renderGifs(data.results, true); // Append mode
             gifCurrentOffset += data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -3410,15 +3408,15 @@ function renderGifs(gifs, append = false) {
         gifItem.dataset.gifId = gif.i;
         gifItem.dataset.gifTitle = gif.ti || '';
 
-        // Create placeholder with blurhash background
+        // Create placeholder with thumbhash background
         const placeholder = document.createElement('div');
         placeholder.className = 'gif-placeholder';
 
-        // Apply cached blurhash as background (pre-decoded via Rust backend)
-        if (gif.b) {
-            const cachedBlurhash = getCachedBlurhash(gif.b);
-            if (cachedBlurhash) {
-                placeholder.style.backgroundImage = `url(${cachedBlurhash})`;
+        // Apply cached thumbhash as background (pre-decoded via Rust backend)
+        if (gif.th) {
+            const cachedThumbhash = getCachedThumbhash(gif.th);
+            if (cachedThumbhash) {
+                placeholder.style.backgroundImage = `url(${cachedThumbhash})`;
                 placeholder.style.backgroundSize = 'cover';
             }
         }
@@ -8512,20 +8510,24 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 pMessage.appendChild(divBar);
             }
         } else if (cAttachment.downloading) {
-            // For images, show blurhash preview while downloading (only for formats that support blurhash)
+            // For images, show thumbhash preview while downloading (only for formats that support thumbhash)
             if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                // Generate blurhash preview for downloading image
+                // Generate thumbhash preview for downloading image
                 // For group chats, use chat ID; for DMs, use sender.id
-                const blurhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                invoke('generate_blurhash_preview', { npub: blurhashNpub2, msgId: msg.id })
+                const thumbhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                invoke('generate_thumbhash_preview', { npub: thumbhashNpub2, msgId: msg.id })
                     .then(base64Image => {
                         const imgPreview = document.createElement('img');
-                        imgPreview.style.width = `100%`;
+                        if (cAttachment.img_meta) {
+                            imgPreview.width = cAttachment.img_meta.width;
+                            imgPreview.height = cAttachment.img_meta.height;
+                        }
+                        imgPreview.style.maxWidth = `100%`;
                         imgPreview.style.height = `auto`;
                         imgPreview.style.borderRadius = `8px`;
                         imgPreview.style.opacity = `0.7`;
                         imgPreview.src = base64Image;
-                        // Add scroll correction on blurhash load
+                        // Add scroll correction on thumbhash load
                         imgPreview.addEventListener('load', () => {
                             if (proceduralScrollState.isLoadingOlderMessages) {
                                 correctScrollForMediaLoad();
@@ -8556,7 +8558,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         pMessage.appendChild(container);
                     })
                     .catch(() => {
-                        // Fallback to simple downloading indicator if blurhash fails
+                        // Fallback to simple downloading indicator if thumbhash fails
                         const iDownloading = document.createElement('i');
                         iDownloading.id = cAttachment.id;
                         iDownloading.textContent = `Downloading`;
@@ -8573,20 +8575,24 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // Check if this attachment will auto-download
                 const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES;
 
-                // For images, show blurhash preview with download button (unless auto-downloading)
+                // For images, show thumbhash preview with download button (unless auto-downloading)
                 if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                    // Generate blurhash preview for undownloaded image
+                    // Generate thumbhash preview for undownloaded image
                     // For group chats, use chat ID; for DMs, use sender.id
-                    const blurhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    invoke('generate_blurhash_preview', { npub: blurhashNpub, msgId: msg.id })
+                    const thumbhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('generate_thumbhash_preview', { npub: thumbhashNpub, msgId: msg.id })
                         .then(base64Image => {
                             const imgPreview = document.createElement('img');
-                            imgPreview.style.width = `100%`;
+                            if (cAttachment.img_meta) {
+                                imgPreview.width = cAttachment.img_meta.width;
+                                imgPreview.height = cAttachment.img_meta.height;
+                            }
+                            imgPreview.style.maxWidth = `100%`;
                             imgPreview.style.height = `auto`;
                             imgPreview.style.borderRadius = `8px`;
                             imgPreview.style.opacity = willAutoDownload ? `0.8` : `0.6`;
                             imgPreview.src = base64Image;
-                            // Add scroll correction on blurhash load
+                            // Add scroll correction on thumbhash load
                             imgPreview.addEventListener('load', () => {
                                 if (proceduralScrollState.isLoadingOlderMessages) {
                                     correctScrollForMediaLoad();
@@ -8643,7 +8649,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                             pMessage.appendChild(container);
                         })
                         .catch(() => {
-                            // Fallback when blurhash fails
+                            // Fallback when thumbhash fails
                             if (!willAutoDownload) {
                                 // Manual download: show download button
                                 let strSize = 'Unknown Size';
@@ -8690,7 +8696,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                 // If the size is known and within auto-download range; immediately begin downloading
                 if (willAutoDownload) {
-                    // For non-images (which don't have blurhash previews), create a placeholder for progress bar targeting
+                    // For non-images (which don't have thumbhash previews), create a placeholder for progress bar targeting
                     if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                         const iDownloading = document.createElement('i');
                         iDownloading.id = cAttachment.id;

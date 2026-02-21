@@ -1,7 +1,7 @@
 //! Attachment handling Tauri commands.
 //!
 //! This module handles attachment operations:
-//! - Blurhash preview generation and decoding
+//! - ThumbHash preview generation and decoding
 //! - Attachment download, decryption, and saving
 //! - MLS attachment decryption (MIP-04)
 
@@ -148,9 +148,9 @@ async fn decrypt_mls_attachment(
 // Tauri Commands
 // ============================================================================
 
-/// Generate a blurhash preview for an attachment
+/// Generate a thumbhash preview for an attachment
 #[tauri::command]
-pub async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<String, String> {
+pub async fn generate_thumbhash_preview(npub: String, msg_id: String) -> Result<String, String> {
     // Get the first attachment from the message by searching through chats
     let img_meta = {
         let state = STATE.lock().await;
@@ -180,22 +180,17 @@ pub async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<S
         found_attachment.ok_or_else(|| "No image attachment found".to_string())?
     };
 
-    // Generate the Base64 image using the decode_blurhash_to_base64 function
-    let base64_image = util::decode_blurhash_to_base64(
-        &img_meta.blurhash,
-        img_meta.width,
-        img_meta.height,
-        1.0 // Default punch value
-    );
+    // Generate the Base64 image using the decode_thumbhash_to_base64 function
+    let base64_image = util::decode_thumbhash_to_base64(&img_meta.thumbhash);
 
     Ok(base64_image)
 }
 
-/// Generic blurhash decoder - converts a blurhash string to a base64 data URL
+/// Generic thumbhash decoder - converts a thumbhash string to a base64 data URL
 /// Used by the GIF picker for placeholder backgrounds
 #[tauri::command]
-pub fn decode_blurhash(blurhash: String, width: u32, height: u32) -> String {
-    util::decode_blurhash_to_base64(&blurhash, width, height, 1.0)
+pub fn decode_thumbhash(thumbhash: String) -> String {
+    util::decode_thumbhash_to_base64(&thumbhash)
 }
 
 /// Download and decrypt an attachment
@@ -434,6 +429,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 }
 
 // Handler list for this module (for reference):
-// - generate_blurhash_preview
-// - decode_blurhash
+// - generate_thumbhash_preview
+// - decode_thumbhash
 // - download_attachment

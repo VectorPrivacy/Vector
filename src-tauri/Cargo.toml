@@ -47,7 +47,7 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-deep-link = "2.4.7"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico"] }
-blurhash = "0.2.3"
+fast-thumbhash = "0.2"
 base64 = "0.22.1"
 cpal = "0.16.0"
 hound = "3.5.1"

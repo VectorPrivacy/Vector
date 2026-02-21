@@ -398,22 +398,22 @@ async fn parse_mls_imeta_attachments(
 
         // Build image metadata from dimensions if available
         let img_meta = media_ref.dimensions.and_then(|(width, height)| {
-            // Look for blurhash in the original tag
-            let blurhash = tag.as_slice().iter()
-                .find(|s| s.starts_with("blurhash "))
-                .map(|s| s.strip_prefix("blurhash ").unwrap_or("").to_string());
+            // Look for thumbhash in the original tag
+            let thumbhash = tag.as_slice().iter()
+                .find(|s| s.starts_with("thumbhash "))
+                .map(|s| s.strip_prefix("thumbhash ").unwrap_or("").to_string());
 
-            // Only create ImageMetadata if we have a valid blurhash (at least 6 chars)
-            match blurhash {
-                Some(bh) if bh.len() >= 6 => Some(ImageMetadata {
-                    blurhash: bh,
+            // Only create ImageMetadata if we have a non-empty thumbhash
+            match thumbhash {
+                Some(th) if !th.is_empty() => Some(ImageMetadata {
+                    thumbhash: th,
                     width,
                     height,
                 }),
                 _ => {
-                    // Still return dimensions without blurhash for sizing purposes
+                    // Still return dimensions without thumbhash for sizing purposes
                     Some(ImageMetadata {
-                        blurhash: String::new(),
+                        thumbhash: String::new(),
                         width,
                         height,
                     })
@@ -486,7 +486,7 @@ fn extract_hash_from_blossom_url(url: &str) -> Option<String> {
 /// Handles encrypted file metadata including:
 /// - Decryption keys and nonces
 /// - Original file hashes (for deduplication)
-/// - Image metadata (blurhash, dimensions)
+/// - Image metadata (thumbhash, dimensions)
 /// - File extensions and mime types
 async fn process_file_attachment(
     rumor: RumorEvent,
@@ -523,11 +523,11 @@ async fn process_file_attachment(
     
     // Extract image metadata if provided
     let img_meta: Option<ImageMetadata> = {
-        let blurhash_opt = rumor.tags
-            .find(TagKind::Custom(Cow::Borrowed("blurhash")))
+        let thumbhash_opt = rumor.tags
+            .find(TagKind::Custom(Cow::Borrowed("thumbhash")))
             .and_then(|tag| tag.content())
             .map(|s| s.to_string());
-        
+
         let dimensions_opt = rumor.tags
             .find(TagKind::Custom(Cow::Borrowed("dim")))
             .and_then(|tag| tag.content())
@@ -542,12 +542,12 @@ async fn process_file_attachment(
                     None
                 }
             });
-        
+
         // Only create ImageMetadata if we have all required fields
-        match (blurhash_opt, dimensions_opt) {
-            (Some(blurhash), Some((width, height))) => {
+        match (thumbhash_opt, dimensions_opt) {
+            (Some(thumbhash), Some((width, height))) => {
                 Some(ImageMetadata {
-                    blurhash,
+                    thumbhash,
                     width,
                     height,
                 })

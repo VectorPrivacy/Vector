@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
-use blurhash::decode;
+use fast_thumbhash::{rgba_to_thumb_hash, thumb_hash_to_rgba, base91_encode, base91_decode};
 use base64::{Engine as _, engine::general_purpose};
 
 // Re-export SIMD-accelerated functions for backwards compatibility
@@ -364,97 +364,76 @@ pub fn nearest_neighbor_downsample(
     crate::simd::image::nearest_neighbor_downsample(pixels, src_width, src_height, dst_width, dst_height)
 }
 
-/// Generate a blurhash from RGBA8 image data with adaptive downscaling for optimal performance
+/// Generate a thumbhash from RGBA8 image data.
 ///
-/// This function uses adaptive downscaling based on image size:
-/// - 1% for 4K+ images (≥3840px)
-/// - 2.5% for large images (≥1920px)
-/// - 5% for medium images (≥960px)
-/// - 10% for smaller images (<960px)
-///
-/// Returns the blurhash string, or None if encoding fails
-pub fn generate_blurhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Option<String> {
-    // Adaptive downscaling based on image size for optimal blurhash performance
-    let max_dimension = width.max(height);
-    let scale_factor = if max_dimension >= 3840 {
-        0.01  // 1% for 4K+ images
-    } else if max_dimension >= 1920 {
-        0.025 // 2.5% for large images
-    } else if max_dimension >= 960 {
-        0.05  // 5% for medium images
+/// Downscales to fit within 100x100 (ThumbHash's max) while preserving aspect ratio.
+/// Returns the base91-encoded thumbhash string, or None if encoding fails.
+pub fn generate_thumbhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Option<String> {
+    const MAX_DIM: u32 = 100;
+
+    let (thumb_w, thumb_h) = if width <= MAX_DIM && height <= MAX_DIM {
+        (width, height)
+    } else if width > height {
+        (MAX_DIM, (MAX_DIM * height / width).max(1))
     } else {
-        0.10  // 10% for smaller images
+        ((MAX_DIM * width / height).max(1), MAX_DIM)
     };
-    
-    let thumbnail_width = (width as f32 * scale_factor).max(1.0) as u32;
-    let thumbnail_height = (height as f32 * scale_factor).max(1.0) as u32;
-    
+
     // Use fast nearest-neighbor downsampling
-    let thumbnail_pixels = nearest_neighbor_downsample(pixels, width, height, thumbnail_width, thumbnail_height);
-    
-    blurhash::encode(4, 3, thumbnail_width, thumbnail_height, &thumbnail_pixels).ok()
+    let thumbnail_pixels = nearest_neighbor_downsample(pixels, width, height, thumb_w, thumb_h);
+
+    let hash = rgba_to_thumb_hash(thumb_w as usize, thumb_h as usize, &thumbnail_pixels);
+    Some(base91_encode(&hash))
 }
 
-/// Generate a blurhash from a DynamicImage with minimal memory allocation.
-///
-/// Generate a blurhash from a DynamicImage.
+/// Generate a thumbhash from a DynamicImage with minimal memory allocation.
 ///
 /// Resizes to a small thumbnail before converting to RGBA,
 /// avoiding large temporary allocations for high-resolution images.
 #[inline]
-pub fn generate_blurhash_from_image(img: &image::DynamicImage) -> Option<String> {
-    // Target size for blurhash - 64x64 is more than enough for a 4x3 component hash
-    // Small thumbnail gives good quality blurhash with minimal allocation
-    const BLURHASH_SIZE: u32 = 64;
+pub fn generate_thumbhash_from_image(img: &image::DynamicImage) -> Option<String> {
+    const THUMBHASH_SIZE: u32 = 100;
 
     let (width, height) = (img.width(), img.height());
 
     // Calculate thumbnail dimensions maintaining aspect ratio
     let (thumb_w, thumb_h) = if width > height {
-        (BLURHASH_SIZE, (BLURHASH_SIZE * height / width).max(1))
+        (THUMBHASH_SIZE, (THUMBHASH_SIZE * height / width).max(1))
     } else {
-        ((BLURHASH_SIZE * width / height).max(1), BLURHASH_SIZE)
+        ((THUMBHASH_SIZE * width / height).max(1), THUMBHASH_SIZE)
     };
 
     let thumbnail = img.thumbnail(thumb_w, thumb_h);
     let rgba = thumbnail.to_rgba8();
-    blurhash::encode(4, 3, rgba.width(), rgba.height(), rgba.as_raw()).ok()
+    let hash = rgba_to_thumb_hash(rgba.width() as usize, rgba.height() as usize, rgba.as_raw());
+    Some(base91_encode(&hash))
 }
 
-/// Decode a blurhash string to a Base64-encoded PNG data URL
+/// Decode a thumbhash string to a Base64-encoded PNG data URL
 /// Returns a data URL string that can be used directly in an <img> src attribute
-pub fn decode_blurhash_to_base64(blurhash: &str, width: u32, height: u32, punch: f32) -> String {
+pub fn decode_thumbhash_to_base64(thumbhash: &str) -> String {
     const EMPTY_DATA_URL: &str = "data:image/png;base64,";
 
-    // Blurhash must be at least 6 characters - return early if invalid
-    if blurhash.len() < 6 {
+    if thumbhash.is_empty() {
         return EMPTY_DATA_URL.to_string();
     }
 
-    let decoded_data = match decode(blurhash, width, height, punch) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("Failed to decode blurhash: {}", e);
+    let hash_bytes = match base91_decode(thumbhash) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            eprintln!("Failed to decode thumbhash base91");
             return EMPTY_DATA_URL.to_string();
         }
     };
-    
-    let pixel_count = (width * height) as usize;
-    let bytes_per_pixel = decoded_data.len() / pixel_count;
-    
-    // Fast path for RGBA data
-    if bytes_per_pixel == 4 {
-        encode_rgba_to_png_base64(&decoded_data, width, height)
-    }
-    // Convert RGB to RGBA using SIMD-optimized function
-    else if bytes_per_pixel == 3 {
-        let rgba_data = crate::simd::image::rgb_to_rgba(&decoded_data);
-        encode_rgba_to_png_base64(&rgba_data, width, height)
-    } else {
-        eprintln!("Unexpected decoded data length: {} bytes for {} pixels", 
-                 decoded_data.len(), pixel_count);
-        EMPTY_DATA_URL.to_string()
-    }
+
+    let (w, h, rgba_data) = match thumb_hash_to_rgba(&hash_bytes) {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!("Failed to decode thumbhash");
+            return EMPTY_DATA_URL.to_string();
+        }
+    };
+    encode_rgba_to_png_base64(&rgba_data, w as u32, h as u32)
 }
 
 /// Helper function to encode RGBA data to PNG base64

@@ -4,7 +4,7 @@
 //! - Image compression with resize to max 1920px
 //! - GIF preservation (skip compression to keep animation)
 //! - PNG for transparent images, JPEG for opaque
-//! - Blurhash generation for previews
+//! - ThumbHash generation for previews
 
 use std::sync::Arc;
 
@@ -36,9 +36,9 @@ pub(super) fn compress_bytes_internal(
 
         let (width, height) = (img.width(), img.height());
 
-        let img_meta = crate::util::generate_blurhash_from_image(&img)
-            .map(|blurhash| ImageMetadata {
-                blurhash,
+        let img_meta = crate::util::generate_thumbhash_from_image(&img)
+            .map(|thumbhash| ImageMetadata {
+                thumbhash,
                 width,
                 height,
             });
@@ -71,10 +71,10 @@ pub(super) fn compress_bytes_internal(
     let actual_width = resized_img.width();
     let actual_height = resized_img.height();
 
-    // Generate metadata from final image only (avoid redundant blurhash generation)
-    let final_meta = crate::util::generate_blurhash_from_image(&resized_img)
-        .map(|blurhash| ImageMetadata {
-            blurhash,
+    // Generate metadata from final image only (avoid redundant thumbhash generation)
+    let final_meta = crate::util::generate_thumbhash_from_image(&resized_img)
+        .map(|thumbhash| ImageMetadata {
+            thumbhash,
             width: actual_width,
             height: actual_height,
         });
@@ -139,17 +139,17 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let original_size = bytes.len() as u64;
         
         // For GIFs, skip compression entirely to preserve animation
-        // Just decode first frame for blurhash, then return original bytes
+        // Just decode first frame for thumbhash, then return original bytes
         if extension == "gif" {
-            // Decode just to get dimensions and generate blurhash from first frame
+            // Decode just to get dimensions and generate thumbhash from first frame
             let img = ::image::load_from_memory(&bytes)
                 .map_err(|e| format!("Failed to decode GIF: {}", e))?;
 
             let (width, height) = (img.width(), img.height());
 
-            let img_meta = crate::util::generate_blurhash_from_image(&img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            let img_meta = crate::util::generate_thumbhash_from_image(&img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width,
                     height,
                 });
@@ -183,9 +183,9 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let actual_width = resized_img.width();
         let actual_height = resized_img.height();
 
-        let img_meta = crate::util::generate_blurhash_from_image(&resized_img)
-            .map(|blurhash| ImageMetadata {
-                blurhash,
+        let img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
+            .map(|thumbhash| ImageMetadata {
+                thumbhash,
                 width: actual_width,
                 height: actual_height,
             });
@@ -228,9 +228,9 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
 
             let (width, height) = (img.width(), img.height());
 
-            let img_meta = crate::util::generate_blurhash_from_image(&img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            let img_meta = crate::util::generate_thumbhash_from_image(&img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width,
                     height,
                 });
@@ -263,9 +263,9 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let actual_width = resized_img.width();
         let actual_height = resized_img.height();
 
-        let img_meta = crate::util::generate_blurhash_from_image(&resized_img)
-            .map(|blurhash| ImageMetadata {
-                blurhash,
+        let img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
+            .map(|thumbhash| ImageMetadata {
+                thumbhash,
                 width: actual_width,
                 height: actual_height,
             });
