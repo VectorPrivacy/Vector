@@ -167,6 +167,7 @@ const domSettingsChangePinLabel = document.getElementById('change-pin-label');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
 const domSettingsDonorsInfo = document.getElementById('donors-info');
 const domDonorPivx = document.getElementById('donor-pivx');
+const domDonorGitcoin = document.getElementById('donor-gitcoin');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 const domRestorePivxGroup = document.getElementById('restore-pivx-group');
@@ -11379,6 +11380,13 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         openUrl('https://pivx.org');
+    };
+
+    // Gitcoin donor logo click - opens gitcoin.co
+    domDonorGitcoin.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openUrl('https://www.gitcoin.co');
     };
 
     // Restore PIVX Wallet button - restores hidden PIVX app
