@@ -4487,7 +4487,7 @@ select:disabled:hover {
   cursor: pointer;
   font-size: 15px;
   font-family: inherit;
-  font-weight: 500;
+  font-weight: 600;
   transition: all 0.2s;
 }
 

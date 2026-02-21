@@ -870,21 +870,6 @@
           </div>
         </div>
 
-        <!-- Security Settings Section -->
-        <div id="settings-security" class="settings-section">
-          <hr class="divider settings-divider">
-          <h2>Security</h2>
-
-          <div class="form-group">
-            <label class="toggle-container">
-              <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
-              <input type="checkbox" id="security-encryption-toggle" checked>
-              <span class="neon-toggle"></span>
-            </label>
-          </div>
-          <button id="security-change-credential" class="btn cancel-btn" style="display: none;">Change PIN</button>
-        </div>
-
         <!-- Display Settings Section -->
         <div id="settings-display" class="settings-section">
           <hr class="divider settings-divider">
@@ -1002,7 +987,39 @@
               </div>
             </div>
             
-            <!-- Action buttons -->
+        <!-- Security Settings Section -->
+        <div id="settings-security" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Security</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
+              <input type="checkbox" id="security-encryption-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="danger-option">
+              <div class="left-group">
+                <span id="change-pin-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span id="change-pin-label">Change PIN</span>
+              </div>
+              <button id="security-change-credential" class="btn cancel-btn">Change</button>
+          </div>
+          
+          <div class="danger-option">
+              <div class="left-group">
+                <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Export Account</span>
+              </div>
+              <button id="export-account-btn" class="cancel-btn">
+                Export
+              </button>
+          </div>
+        </div>
+
+            <!-- Dangerzone (Irreversible Actions) buttons -->
             <button id="restart-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart Now</button>
           </div>
         </div>
@@ -1036,16 +1053,6 @@
               </div>
               <button id="deep-rescan-btn" class="cancel-btn">
                 Rescan
-              </button>
-            </div>
-
-            <div class="danger-option">
-              <div class="left-group">
-                <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
-                <span>Export Account</span>
-              </div>
-              <button id="export-account-btn" class="cancel-btn">
-                Export
               </button>
             </div>
 

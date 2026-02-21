@@ -1584,7 +1584,8 @@ function updateChangeCredentialButton() {
     if (!btn) return;
     if (fEncryptionEnabled) {
         btn.style.display = '';
-        btn.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
+        btn.textContent = 'Change';
+        domSettingsChangePinLabel.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
     } else {
         btn.style.display = 'none';
     }

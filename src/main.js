@@ -162,6 +162,8 @@ const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
+const domSettingsChangePinInfo = document.getElementById('change-pin-info');
+const domSettingsChangePinLabel = document.getElementById('change-pin-label');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
 const domSettingsDonorsInfo = document.getElementById('donors-info');
 const domDonorPivx = document.getElementById('donor-pivx');
@@ -11331,6 +11333,19 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
     };
+
+    domSettingsChangePinInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm(
+            fSecurityType === 'password' ? 'Change Password' : 'Change PIN',
+            fSecurityType === 'password'
+                ? 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.'
+                : 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.',
+            true
+        );
+    };
+    
 
     // Info button for Refresh KeyPackages
     const domRefreshKeypkgInfo = document.getElementById('refresh-keypkg-info');

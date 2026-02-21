@@ -196,7 +196,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
     domApp.classList.add('active');
 
     // Adjust the 'Confirm' button if this is only a notice
-    domPopupConfirmBtn.innerText = fNotice ? 'Okay!' : 'Confirm';
+    domPopupConfirmBtn.innerText = fNotice ? 'Okay' : 'Confirm';
     domPopupCancelBtn.style.display = fNotice ? 'none' : '';
 
     // If a string placeholder is specified, render it
