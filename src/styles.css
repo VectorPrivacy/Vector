@@ -897,7 +897,7 @@ html, body {
 }
 
 .profile-option:hover {
-  background-color: #161616;
+  background-color: #171717;
   border-color: #959899;
   color: white;
   opacity: 1;
@@ -3175,7 +3175,7 @@ audio {
 #settings {
   overflow-y: auto;
   height: 100%;
-  padding-bottom: 100px;
+  padding-bottom: 80px;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
@@ -3211,7 +3211,7 @@ select {
 }
 
 #whisper-model option {
-  background: #161616;
+  background: #171717;
   padding: 10px;
 }
 
@@ -3863,6 +3863,12 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 #theme-select {
   text-align: center;
   text-align-last: center;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 10px;
+  padding-right: 36px;
 }
 
 /* Remove default focus outline and apply custom styling */
@@ -3872,7 +3878,7 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 
 /* Style options to match whisper model */
 #theme-select option {
-  background: #161616;
+  background: #171717;
   text-align: center;
   padding: 10px;
 }
@@ -3895,9 +3901,20 @@ select:focus::-ms-value {
 
 /* Sound Notification Selection container styles */
 #notif-sound-select option {
-  background: #161616;
+  background: #171717;
   padding: 10px;
   text-align: center;
+}
+
+/* Down Arrow added to Dropdown Button */
+#notif-sound-select {
+    text-align: center;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 10px;
+    padding-right: 36px;
 }
 
 /* Delete model button with trash bin icon */
@@ -3983,7 +4000,7 @@ select:disabled:hover {
   margin-left: 10px;
   backdrop-filter: none;
   border-color: #ff2ea9;
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .cancel-btn:disabled,
@@ -4256,7 +4273,7 @@ select:disabled:hover {
   bottom: 0px;
   height: 65px;
   width: 100%;
-  background-color: #161616;
+  background-color: #171717;
   justify-content: space-evenly;
 }
 
@@ -7982,7 +7999,7 @@ hr {
   align-items: center;
   gap: 14px;
   padding: 14px;
-  background-color: #161616;
+  background-color: #171717;
   border-radius: 12px;
   cursor: pointer;
   transition: transform 0.2s, box-shadow 0.2s;
@@ -8384,7 +8401,7 @@ hr {
 }
 
 .publish-app-container {
-  background-color: #161616;
+  background-color: #171717;
   border-radius: 16px;
   width: 90%;
   max-width: 500px;

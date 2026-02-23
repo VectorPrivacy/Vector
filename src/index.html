@@ -909,16 +909,18 @@
             </label>
           </div>
 
-          <div class="form-group">
-            <label for="notif-sound-select">Notification Sound</label>
-            <div class="select-container" style="margin-top: 10px;">
-              <select id="notif-sound-select">
+          <div class="form-group" style="display: flex; align-items: center; gap: 5px;">
+            <div class="select-container" style="margin: 0; flex: 1">
+              <select id="notif-sound-select" style="margin-bottom: 0 !important;">
                 <option value="default">Prélude</option>
                 <option value="techno">Techno</option>
                 <option value="none">None</option>
                 <option value="custom">Custom...</option>
               </select>
             </div>
+            <button id="notif-preview-btn" class="btn cancel-btn" style="margin: 0; padding: 0 10px; min-width: auto; height: 42px; display: flex; align-items: center; justify-content: center;" title="Preview Sound">
+              <img src="./icons/speaker_volume.svg" alt="Preview" style="width: 18px; height: 18px;">
+            </button>
           </div>
 
           <div class="form-group" id="notif-custom-group" style="display: none;">
@@ -929,10 +931,6 @@
                 <button class="notif-sound-chip-clear" id="notif-custom-clear" title="Remove custom sound">×</button>
               </div>
             </div>
-          </div>
-
-          <div class="form-group">
-            <button id="notif-preview-btn" class="btn cancel-btn">Preview Sound</button>
           </div>
         </div>
 
