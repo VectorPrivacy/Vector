@@ -9675,7 +9675,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.14.1"
-source = "git+https://github.com/VectorPrivacy/whisper-rs.git?branch=master#17acb9fd49c4e7f90ddfe09155e08daa35cd364b"
+source = "git+https://github.com/VectorPrivacy/whisper-rs.git?branch=master#eb61d3d8d4127619aedbca7ae35864ad5079d465"
 dependencies = [
  "bindgen",
  "cfg-if",

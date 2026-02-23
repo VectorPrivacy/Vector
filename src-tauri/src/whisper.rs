@@ -154,7 +154,21 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
         let mut ctx_params = WhisperContextParameters::default();
         ctx_params.flash_attn(true);
         ctx_params.use_gpu(true);
-        let ctx = WhisperContext::new_with_params(&model_path, ctx_params)?;
+
+        let ctx = match WhisperContext::new_with_params(&model_path, ctx_params) {
+            Ok(ctx) => {
+                println!("[Whisper] GPU context initialized");
+                ctx
+            }
+            Err(gpu_err) => {
+                println!("[Whisper] GPU init failed ({}), falling back to CPU", gpu_err);
+                let mut cpu_params = WhisperContextParameters::default();
+                cpu_params.flash_attn(true);
+                cpu_params.use_gpu(false);
+                WhisperContext::new_with_params(&model_path, cpu_params)?
+            }
+        };
+
         *cache_guard = Some(CachedWhisperCtx {
             model_path: model_path.clone(),
             ctx,
