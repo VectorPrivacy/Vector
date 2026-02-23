@@ -891,20 +891,33 @@ domSettingsExport.onclick = async (evt) => {
         const keys = await invoke('export_keys');
         
         // Create the export content with security warnings
-        let exportContent = `<h3>Account Export</h3>
-            <p style="color: #ff2ea9; font-weight: bold;">SECURITY WARNING</p>
-            <p>These are your private keys. Anyone with access to them can access your account.</p>
-            <p>Store them securely and never share them with anyone.</p><br>`;
+        let exportContent = `
+        <div style="text-align: center; padding: 0 8px;">
+            <p style="color: #ff2ea9; font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">Security Warning. Do Not Lose.</p>
+            <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.</p>
+        `;
 
-        // Add seed phrase first if available (prioritized for users)
         if (keys.seed_phrase) {
-            exportContent += `<p><strong>Seed Phrase:</strong></p>
-                <p style="word-break: break-all; background: #1a1a1a; padding: 10px; border-radius: 5px; font-family: 'Courier New', monospace;">${keys.seed_phrase}</p><br>`;
+        exportContent += `
+            <div style="text-align: left; padding: 0 8px; margin-bottom: 12px;">
+            <p style="font-weight: bold; margin: 0 0 4px 0;">Seed Phrase</p>
+            <div style="display: flex; align-items: center; gap: 6px;">
+                <p style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${keys.seed_phrase}</p>
+                <button onclick="navigator.clipboard.writeText('${keys.seed_phrase}')" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
+            </div>
+            </div>
+        `;
         }
 
-        // Always add the private key (nsec)
-        exportContent += `<p><strong>Private Key (nsec):</strong></p>
-            <p style="word-break: break-all; background: #1a1a1a; padding: 10px; border-radius: 5px; font-family: 'Courier New', monospace;">${keys.nsec}</p>`;
+        exportContent += `
+        <div style="text-align: center; padding: 0 8px;">
+            <p style="font-weight: bold; margin: 0 0 4px 0;">Private Key (nsec)</p>
+            <div style="display: flex; align-items: center; gap: 6px;">
+            <p style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${keys.nsec}</p>
+            </div>
+            <p style="color: #4de0a0; font-size: 12px; margin: 8px 0 -10px 0; text-align: center;">Do Not Store on Device. Backup Offline.</p>
+        </div>
+        `;
 
         // Show the export information in a popup
         await popupConfirm('', exportContent, true, '', 'vector_warning.svg');
