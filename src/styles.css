@@ -5906,7 +5906,7 @@ select:disabled:hover {
   right: 20px;
   width: 40px;
   height: 40px;
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: #17171770;
   border: none;
   border-radius: 50%;
   cursor: pointer;
@@ -5918,7 +5918,7 @@ select:disabled:hover {
 }
 
 .image-viewer-close:hover {
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: #171717;
 }
 
 .image-viewer-close::before,
