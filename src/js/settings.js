@@ -920,7 +920,7 @@ domSettingsExport.onclick = async (evt) => {
         `;
 
         // Show the export information in a popup
-        await popupConfirm('', exportContent, true, '', 'vector_warning.svg');
+        await popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg');
     } catch (error) {
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
