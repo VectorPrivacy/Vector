@@ -917,13 +917,23 @@ html, body {
   margin-right: auto;
 }
 
+.npub-scroll-wrapper {
+  flex: 1;
+  overflow: hidden;
+  padding: 0 12px;
+}
+
 .profile-npub {
   font-size: 14px;
   opacity: 0.75;
-  word-break: break-all;
-  text-align: center;
-  flex: 1;
-  padding: 0 12px;
+  display: block;
+  white-space: nowrap;
+  animation: npub-scroll 12s linear infinite;
+}
+
+@keyframes npub-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
 }
 
 .profile-npub-copy {

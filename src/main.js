@@ -6656,7 +6656,7 @@ function renderProfileTab(cProfile) {
     // npub display
     const profileNpub = document.getElementById('profile-npub');
     if (profileNpub) {
-        profileNpub.textContent = cProfile.id;
+        profileNpub.textContent = cProfile.id + '     ' + cProfile.id;
     }
 
     // Description
@@ -6669,7 +6669,7 @@ function renderProfileTab(cProfile) {
 
     // Add npub copy functionality
     document.getElementById('profile-npub-copy').onclick = (e) => {
-        const npub = document.getElementById('profile-npub')?.textContent;
+        const npub = document.getElementById('profile-npub')?.textContent?.split('     ')[0];
         if (npub) {
             // Copy the full profile URL for easy sharing
             navigator.clipboard.writeText(npub).then(() => {
