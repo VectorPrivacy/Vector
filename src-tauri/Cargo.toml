@@ -11,6 +11,11 @@ edition = "2021"
 default = ["whisper"]
 whisper = ["dep:whisper-rs"]
 
+[profile.release]
+lto = "thin"
+opt-level = 3
+strip = true
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -51,7 +56,6 @@ fast-thumbhash = "0.2"
 base64 = "0.22.1"
 cpal = "0.16.0"
 hound = "3.5.1"
-rubato = "0.16.2"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rayon = "1.11.0"
@@ -78,20 +82,21 @@ bs58 = "0.5.1"
 jni = "0.21.1"
 ndk-context = "0.1.1"
 openssl = { version = "0.10.75", features = ["vendored"] }
+whisper-rs = { version = "0.15.1", optional = true } # CPU-only (ARM NEON SIMD)
 
-# Whisper (with cross-platform acceleration features - excluded on Android)
-[target.'cfg(all(not(target_os = "android"), target_os = "macos"))'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["metal"], optional = true }
+# Whisper (with platform-specific GPU acceleration)
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
 
-[target.'cfg(all(not(target_os = "android"), windows))'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["vulkan"], optional = true }
+[target.'cfg(windows)'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 
-[target.'cfg(all(not(target_os = "android"), target_os = "linux"))'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["vulkan"], optional = true }
+[target.'cfg(target_os = "linux")'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 
 # For other platforms (not Android, macOS, Windows, or Linux)
 [target.'cfg(all(not(target_os = "android"), not(target_os = "macos"), not(windows), not(target_os = "linux")))'.dependencies]
-whisper-rs = { version = "0.13.2", optional = true }
+whisper-rs = { version = "0.15.1", optional = true }
 
 # Desktop-only dependencies (deep link single-instance support)
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
@@ -105,3 +110,9 @@ tauri-plugin-mcp-bridge = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Cross-compilation fix: whisper-rs-sys build.rs uses cfg!(target_os = "macos") which
+# checks the HOST OS, not the cross-compilation target. Our fork fixes this so Android
+# builds from macOS don't try to link Apple's Accelerate/BLAS framework.
+[patch.crates-io]
+whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", branch = "master" }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-device-memory"
+description = "Enables the get_device_memory command without any pre-configured scope."
+commands.allow = ["get_device_memory"]
+
+[[permission]]
+identifier = "deny-get-device-memory"
+description = "Denies the get_device_memory command without any pre-configured scope."
+commands.deny = ["get_device_memory"]

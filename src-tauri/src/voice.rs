@@ -8,6 +8,59 @@ use crate::audio;
 
 static RECORDER: OnceLock<AudioRecorder> = OnceLock::new();
 
+/// Trim leading and trailing silence from i16 audio samples.
+/// Uses adaptive RMS threshold based on the recording's noise floor
+/// with a 250ms padding buffer to avoid clipping trailing speech.
+fn trim_silence_i16(samples: &[i16], sample_rate: u32) -> Vec<i16> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let chunk_size = (sample_rate as usize * 20) / 1000; // 20ms windows
+    let pad_samples = (sample_rate as usize * 250) / 1000; // 250ms padding
+
+    let rms = |chunk: &[i16]| -> f64 {
+        let sum: f64 = chunk.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        (sum / chunk.len() as f64).sqrt()
+    };
+
+    // Single pass: compute RMS for every chunk, reuse for threshold + scanning
+    let chunk_rms_vals: Vec<f64> = samples.chunks(chunk_size).map(|c| rms(c)).collect();
+
+    // Adaptive threshold from the quietest 10% of chunks (noise floor)
+    let mut sorted = chunk_rms_vals.clone();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let bottom_10 = std::cmp::max(1, sorted.len() / 10);
+    let noise_floor: f64 = sorted[..bottom_10].iter().sum::<f64>() / bottom_10 as f64;
+    let threshold = (noise_floor * 3.0).clamp(80.0, 400.0);
+
+    // Scan from the start to find first non-silent chunk
+    let start_chunk = chunk_rms_vals.iter().position(|&v| v > threshold).unwrap_or(chunk_rms_vals.len());
+    let start = start_chunk * chunk_size;
+
+    // Scan from the end to find last non-silent chunk
+    let end_chunk = chunk_rms_vals.iter().rposition(|&v| v > threshold).map(|i| i + 1).unwrap_or(0);
+    let end = std::cmp::min(end_chunk * chunk_size, samples.len());
+
+    // Apply padding (don't clip into speech)
+    let start = start.saturating_sub(pad_samples);
+    let end = std::cmp::min(end + pad_samples, samples.len());
+
+    // Safety: don't produce empty output from a non-empty input
+    if start >= end {
+        return samples.to_vec();
+    }
+
+    let trimmed = &samples[start..end];
+    let original_ms = samples.len() * 1000 / sample_rate as usize;
+    let trimmed_ms = trimmed.len() * 1000 / sample_rate as usize;
+    if original_ms != trimmed_ms {
+        println!("[Voice] Trimmed silence: {}ms -> {}ms (removed {}ms)", original_ms, trimmed_ms, original_ms - trimmed_ms);
+    }
+
+    trimmed.to_vec()
+}
+
 // Standard sample rate for voice recording with good quality-to-size ratio
 const TARGET_SAMPLE_RATE: u32 = 22000;
 
@@ -55,27 +108,37 @@ impl AudioRecorder {
 
         self.recording.store(true, Ordering::SeqCst);
 
+        let recording_flag = Arc::clone(&self.recording);
         std::thread::spawn(move || {
-            let stream = device
-                .build_input_stream(
-                    &config,
-                    move |data: &[f32], _: &_| {
-                        if recording.load(Ordering::SeqCst) {
-                            if let Ok(mut guard) = samples.lock() {
-                                guard.extend(data.chunks(channels).map(|chunk| {
-                                    let sum: f32 = chunk.iter().sum();
-                                    let avg = sum / channels as f32;
-                                    (avg.clamp(-1.0, 1.0) * 32767.0) as i16
-                                }));
-                            }
+            let stream = match device.build_input_stream(
+                &config,
+                move |data: &[f32], _: &_| {
+                    if recording.load(Ordering::SeqCst) {
+                        if let Ok(mut guard) = samples.lock() {
+                            guard.extend(data.chunks(channels).map(|chunk| {
+                                let sum: f32 = chunk.iter().sum();
+                                let avg = sum / channels as f32;
+                                (avg.clamp(-1.0, 1.0) * 32767.0) as i16
+                            }));
                         }
-                    },
-                    |err| eprintln!("Error: {}", err),
-                    None,
-                )
-                .unwrap();
+                    }
+                },
+                |err| eprintln!("Error: {}", err),
+                None,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[Voice] Failed to build input stream: {}", e);
+                    recording_flag.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
 
-            stream.play().unwrap();
+            if let Err(e) = stream.play() {
+                eprintln!("[Voice] Failed to start audio stream: {}", e);
+                recording_flag.store(false, Ordering::SeqCst);
+                return;
+            }
 
             // Wait for stop signal
             rx.recv().unwrap_or(());
@@ -100,6 +163,7 @@ impl AudioRecorder {
 
             let device_sample_rate = *self.device_sample_rate.lock().unwrap();
             let resampled_samples = audio::resample_mono_i16(&samples, device_sample_rate, TARGET_SAMPLE_RATE)?;
+            let resampled_samples = trim_silence_i16(&resampled_samples, TARGET_SAMPLE_RATE);
 
             let spec = hound::WavSpec {
                 channels: 1,

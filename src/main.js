@@ -480,12 +480,13 @@ function showToast(message) {
     toast.style.opacity = '1';
     backdrop.style.opacity = '1';
 
-    // Hide after 1 second
+    // Scale duration by message length: 1.5s base + 40ms per char, capped at 6s
+    const duration = Math.min(1500 + message.length * 40, 6000);
     clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => {
         backdrop.style.opacity = '0';
         toast.style.opacity = '0';
-    }, 1000);
+    }, duration);
 }
 
 /**
@@ -5802,9 +5803,17 @@ async function setupRustListeners() {
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
     _on('whisper_download_progress', async (evt) => {
-        // Update the progression UI
+        const { progress, downloaded_bytes, total_bytes, speed_bps } = evt.payload;
         const spanProgression = document.getElementById('voice-model-download-progression');
-        if (spanProgression) spanProgression.textContent = `(${evt.payload.progress}%)`;
+        if (spanProgression) {
+            if (downloaded_bytes && total_bytes) {
+                const dlMB = (downloaded_bytes / (1024 * 1024)).toFixed(1);
+                const totalMB = (total_bytes / (1024 * 1024)).toFixed(1);
+                spanProgression.textContent = `(${dlMB}/${totalMB} MB)`;
+            } else {
+                spanProgression.textContent = `(${progress}%)`;
+            }
+        }
     });
 
     // Listen for Windows-specific Overlay Icon update requests

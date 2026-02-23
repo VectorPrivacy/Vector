@@ -70,8 +70,8 @@ fn main() {
             "get_system_events",
             "get_chat_message_count",
             "evict_chat_messages",
-            "generate_blurhash_preview",
-            "decode_blurhash",
+            "generate_thumbhash_preview",
+            "decode_thumbhash",
             "download_attachment",
             "login",
             "login_from_stored_key",
@@ -92,6 +92,7 @@ fn main() {
             "logout",
             "create_account",
             "get_platform_features",
+            "get_device_memory",
             "transcribe",
             "download_whisper_model",
             "get_or_create_invite_code",
@@ -182,6 +183,7 @@ fn main() {
             "miniapp_revoke_all_permissions",
             // Whisper commands (conditional)
             "delete_whisper_model",
+            "cancel_whisper_download",
             "list_models",
             // Notification sound commands
             "get_notification_settings",

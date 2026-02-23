@@ -46,6 +46,7 @@ echo "Using OpenSSL: $OPENSSL_ANDROID_DIR"
 
 # Export environment variables for the build
 export ANDROID_NDK_HOME
+export ANDROID_NDK="$ANDROID_NDK_HOME"  # cmake's Platform/Android-Determine.cmake needs this
 export OPENSSL_STATIC=1
 export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
 

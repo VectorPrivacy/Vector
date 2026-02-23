@@ -382,23 +382,29 @@ class VoiceRecorder {
             this._stopTimer();
             this.audioData = new Uint8Array(wavData);
             
-            // Create blob URL for preview
+            // Create blob URL for preview (revoked on delete/send to avoid leak)
             const blob = new Blob([this.audioData], { type: 'audio/wav' });
-            const blobUrl = URL.createObjectURL(blob);
-            
+            this._blobUrl = URL.createObjectURL(blob);
+
             // Wait for audio to be fully loaded before showing preview
-            this.audioElement.src = blobUrl;
+            this.audioElement.src = this._blobUrl;
             this.audioElement.preload = 'auto';
             
-            // Wait for the audio to be ready
+            // Wait for the audio to be ready (with timeout to avoid hanging on corrupt data)
             await new Promise((resolve) => {
                 const onCanPlay = () => {
                     this.audioElement.removeEventListener('canplaythrough', onCanPlay);
+                    clearTimeout(timeout);
                     resolve();
                 };
                 this.audioElement.addEventListener('canplaythrough', onCanPlay);
-                // Also resolve if already ready
+                const timeout = setTimeout(() => {
+                    this.audioElement.removeEventListener('canplaythrough', onCanPlay);
+                    resolve();
+                }, 3000);
                 if (this.audioElement.readyState >= 4) {
+                    clearTimeout(timeout);
+                    this.audioElement.removeEventListener('canplaythrough', onCanPlay);
                     resolve();
                 }
             });
@@ -477,6 +483,7 @@ class VoiceRecorder {
      */
     _onPreviewDelete() {
         this.audioElement.pause();
+        if (this._blobUrl) { URL.revokeObjectURL(this._blobUrl); this._blobUrl = null; }
         this.audioElement.src = '';
         this.audioData = null;
         this._setState(RecordingState.IDLE);
@@ -492,6 +499,7 @@ class VoiceRecorder {
         
         const data = this.audioData;
         this.audioElement.pause();
+        if (this._blobUrl) { URL.revokeObjectURL(this._blobUrl); this._blobUrl = null; }
         this.audioElement.src = '';
         this.audioData = null;
         this._setState(RecordingState.IDLE);
@@ -959,11 +967,25 @@ class VoiceTranscriptionUI {
      */
     async ensureModelReady(transcribeBtn) {
         if (this.isSettingUp) return false;
-        
+
         const selectedModel = window.voiceSettings?.selectedModel || 'small';
         const model = window.voiceSettings?.models?.find(m => m.model.name === selectedModel);
         if (model?.downloaded) return true;
-        
+
+        // If no button provided (e.g. called from transcribeAudioFile), we can't show
+        // download progress inline — just attempt the download without UI feedback
+        if (!transcribeBtn) {
+            this.isSettingUp = true;
+            try {
+                await window.voiceSettings?.downloadModel(selectedModel);
+                return true;
+            } catch {
+                return false;
+            } finally {
+                this.isSettingUp = false;
+            }
+        }
+
         this.isSettingUp = true;
 
         // Store original button contents
@@ -1083,6 +1105,129 @@ class VoiceTranscriptionUI {
  * @param {HTMLAudioElement} audioElement - Audio player for seeking
  * @returns {HTMLSpanElement} The transcription section element
  */
+function slideTranscription(el, open, onOpen) {
+    if (el._slideRaf) { cancelAnimationFrame(el._slideRaf); el._slideRaf = null; }
+
+    // Ease-out cubic — fast start, gentle settle
+    const ease = t => 1 - Math.pow(1 - t, 3);
+    // Read resting CSS values from the stylesheet
+    const cs = getComputedStyle(el);
+
+    if (open) {
+        // Capture parent width before transcription forces it wider
+        const parentW = el.parentElement.getBoundingClientRect().width;
+
+        el.classList.remove('hidden');
+        // Measure natural dimensions at rest
+        el.style.height = 'auto';
+        const natural = el.getBoundingClientRect().height;
+        const naturalW = el.parentElement.getBoundingClientRect().width;
+        const pad = parseFloat(cs.paddingTop); // 10
+        const mt = parseFloat(cs.marginTop);   // 10
+        const bw = parseFloat(cs.borderTopWidth); // 1
+        const widthGrows = naturalW > parentW;
+        // Start at zero
+        el.style.overflow = 'hidden';
+        el.style.height = '0px';
+        el.style.paddingTop = '0px';
+        el.style.paddingBottom = '0px';
+        el.style.marginTop = '0px';
+        el.style.borderWidth = '0px';
+        if (widthGrows) el.style.maxWidth = '0px';
+        el.offsetHeight;
+
+        if (onOpen) onOpen();
+
+        const start = performance.now();
+        const dur = 350;
+        let lastTotal = 0;
+        (function frame(now) {
+            const t = Math.min((now - start) / dur, 1);
+            const e = ease(t);
+            const h = e * natural;
+            el.style.height = h + 'px';
+            el.style.paddingTop = (e * pad) + 'px';
+            el.style.paddingBottom = (e * pad) + 'px';
+            el.style.marginTop = (e * mt) + 'px';
+            el.style.borderWidth = (e * bw) + 'px';
+            if (widthGrows) el.style.maxWidth = (e * naturalW) + 'px';
+            const total = h + e * mt;
+            domChatMessages.scrollTop += total - lastTotal;
+            lastTotal = total;
+            if (t < 1) {
+                el._slideRaf = requestAnimationFrame(frame);
+            } else {
+                el.style.height = '';
+                el.style.overflow = '';
+                el.style.paddingTop = '';
+                el.style.paddingBottom = '';
+                el.style.marginTop = '';
+                el.style.borderWidth = '';
+                el.style.maxWidth = '';
+                el._slideRaf = null;
+            }
+        })(performance.now());
+    } else {
+        const current = el.getBoundingClientRect().height;
+        const currentW = el.getBoundingClientRect().width;
+        const pad = parseFloat(cs.paddingTop);
+        const mt = parseFloat(cs.marginTop);
+        const bw = parseFloat(cs.borderTopWidth);
+        el.style.overflow = 'hidden';
+
+        const start = performance.now();
+        const dur = 250;
+        let lastTotal = current + mt;
+        (function frame(now) {
+            const t = Math.min((now - start) / dur, 1);
+            const inv = 1 - ease(t);
+            const h = inv * current;
+            el.style.height = h + 'px';
+            el.style.paddingTop = (inv * pad) + 'px';
+            el.style.paddingBottom = (inv * pad) + 'px';
+            el.style.marginTop = (inv * mt) + 'px';
+            el.style.borderWidth = (inv * bw) + 'px';
+            el.style.maxWidth = (inv * currentW) + 'px';
+            const total = h + inv * mt;
+            domChatMessages.scrollTop += total - lastTotal;
+            lastTotal = total;
+            if (t < 1) {
+                el._slideRaf = requestAnimationFrame(frame);
+            } else {
+                el.classList.add('hidden');
+                el.style.height = '';
+                el.style.overflow = '';
+                el.style.paddingTop = '';
+                el.style.paddingBottom = '';
+                el.style.marginTop = '';
+                el.style.borderWidth = '';
+                el.style.maxWidth = '';
+                el._slideRaf = null;
+            }
+        })(performance.now());
+    }
+}
+
+function animateTranscriptionIn(container) {
+    const sections = container.querySelectorAll('.transcription-section');
+    // Set initial hidden state with transitions disabled
+    sections.forEach(el => {
+        el.style.transition = 'none';
+        el.style.opacity = '0';
+        el.style.filter = 'blur(4px)';
+    });
+    // Force reflow to commit the hidden state
+    container.offsetHeight;
+    // Stagger the reveal
+    sections.forEach((el, i) => {
+        setTimeout(() => {
+            el.style.transition = 'opacity 0.4s ease, filter 0.4s ease';
+            el.style.opacity = '';
+            el.style.filter = '';
+        }, i * 50);
+    });
+}
+
 function createTranscriptionSection(section, index, audioElement) {
     const sectionSpan = document.createElement('span');
     sectionSpan.classList.add('transcription-section');
@@ -1174,7 +1319,7 @@ function createTranscriptionUI(transcriptionData, audioElement) {
         transcriptionData.sections.forEach((section, index) => {
             const sectionSpan = createTranscriptionSection(section, index, audioElement);
             transcriptionText.appendChild(sectionSpan);
-            
+
             // Add space between sections (except for the last one)
             if (index < transcriptionData.sections.length - 1) {
                 transcriptionText.appendChild(document.createTextNode(' '));
@@ -1272,15 +1417,38 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     // Waveform visualization with real frequency data
     const waveform = document.createElement('div');
     waveform.classList.add('audio-waveform');
-    const barCount = 32; // Number of frequency bars
-    const bars = [];
-    
-    for (let i = 0; i < barCount; i++) {
-        const bar = document.createElement('div');
-        bar.classList.add('waveform-bar');
-        bar.setAttribute('data-index', i);
-        waveform.appendChild(bar);
-        bars.push(bar);
+    let bars = [];
+    let barCount = 0;
+
+    function syncBars() {
+        const w = waveform.clientWidth;
+        if (w === 0) return;
+        const target = Math.max(16, Math.min(64, Math.floor(w / 5)));
+        if (target === barCount) return;
+        // Capture old bar states before destroying
+        const oldStates = bars.map(b => ({
+            height: b.style.height,
+            opacity: b.style.opacity,
+            boxShadow: b.style.boxShadow,
+        }));
+        const oldCount = barCount;
+        barCount = target;
+        waveform.innerHTML = '';
+        bars = [];
+        for (let i = 0; i < barCount; i++) {
+            const bar = document.createElement('div');
+            bar.classList.add('waveform-bar');
+            // Map this bar's position to the nearest old bar and copy its state
+            if (oldCount > 0) {
+                const oldIdx = Math.min(Math.round(i * oldCount / barCount), oldCount - 1);
+                const s = oldStates[oldIdx];
+                bar.style.height = s.height;
+                bar.style.opacity = s.opacity;
+                bar.style.boxShadow = s.boxShadow;
+            }
+            waveform.appendChild(bar);
+            bars.push(bar);
+        }
     }
     
     // Web Audio API setup for frequency analysis
@@ -1288,6 +1456,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     let analyser = null;
     let source = null;
     let animationId = null;
+    const cachedGlowColor = getComputedStyle(document.documentElement).getPropertyValue('--voice-frequency-glow').trim();
     
     function initAudioAnalyser() {
         if (audioContext) return;
@@ -1382,9 +1551,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
             // Add glow effect for active frequencies with adjusted threshold
             if (scaledHeight > 50 && barProgress <= currentProgress) {
                 const glowIntensity = (scaledHeight - 50) / 3;
-                // Use theme's frequency glow color
-                const glowColor = getComputedStyle(document.documentElement).getPropertyValue('--voice-frequency-glow');
-                bar.style.boxShadow = `0 0 ${glowIntensity}px ${glowColor.trim()}`;
+                bar.style.boxShadow = `0 0 ${glowIntensity}px ${cachedGlowColor}`;
             } else {
                 bar.style.boxShadow = 'none';
             }
@@ -1400,6 +1567,11 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     
     audioContainer.appendChild(audPreview);
     audioContainer.appendChild(customPlayer);
+
+    // Initial bar sync once laid out, and on resize
+    requestAnimationFrame(syncBars);
+    const resizeObserver = new ResizeObserver(syncBars);
+    resizeObserver.observe(waveform);
 
     // Helper functions
     function formatTime(seconds) {
@@ -1553,15 +1725,23 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
         });
     });
     
-    // Cleanup audio context when element is removed
-    audioContainer.addEventListener('remove', () => {
-        if (animationId) {
-            cancelAnimationFrame(animationId);
-        }
-        if (audioContext) {
-            audioContext.close();
+    // Cleanup audio context and observers when element is removed from DOM
+    const cleanupObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            for (const node of m.removedNodes) {
+                if (node === audioContainer || node.contains?.(audioContainer)) {
+                    if (animationId) cancelAnimationFrame(animationId);
+                    if (audioContext) audioContext.close();
+                    resizeObserver.disconnect();
+                    cleanupObserver.disconnect();
+                    return;
+                }
+            }
         }
     });
+    if (audioContainer.parentNode) {
+        cleanupObserver.observe(audioContainer.parentNode, { childList: true });
+    }
 
     // Only add transcription UI for supported formats and platforms
     if (platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
@@ -1582,7 +1762,12 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
 
             // If already transcribed, just toggle visibility
             if (transcriptionResult.textContent.trim()) {
-                return transcriptionResult.classList.toggle('hidden');
+                const isOpen = transcriptionResult.classList.contains('hidden');
+                transcribeIcon.classList.replace(isOpen ? 'icon-file-plus' : 'icon-file-minus', isOpen ? 'icon-file-minus' : 'icon-file-plus');
+                slideTranscription(transcriptionResult, isOpen, () => {
+                    animateTranscriptionIn(transcriptionResult);
+                });
+                return;
             }
 
             // Show loading state
@@ -1604,15 +1789,17 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
                 transcribeBtn.innerHTML = '';
                 transcribeBtn.style.cursor = '';
                 transcribeBtn.appendChild(transcribeIcon);
-                transcribeIcon.classList.replace('icon-loading', 'icon-file-plus');
+                transcribeIcon.classList.replace('icon-loading', 'icon-file-minus');
                 transcribeIcon.classList.remove('spin');
-                
+
                 // Clear any existing content
                 transcriptionResult.innerHTML = '';
                 
                 const transcriptionUI = createTranscriptionUI(transcriptionData, audPreview);
                 transcriptionResult.appendChild(transcriptionUI);
-                transcriptionResult.classList.remove('hidden');
+                slideTranscription(transcriptionResult, true, () => {
+                    animateTranscriptionIn(transcriptionUI);
+                });
             } catch (err) {
                 console.error('Transcription error:', err);
                 

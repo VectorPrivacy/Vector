@@ -13,7 +13,7 @@ use crate::{db, image_cache, util::format_bytes};
 #[cfg(desktop)]
 use crate::audio;
 
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 use crate::whisper;
 
 // ============================================================================
@@ -54,7 +54,7 @@ pub async fn get_platform_features() -> PlatformFeatures {
     let is_mobile = cfg!(target_os = "android") || cfg!(target_os = "ios");
 
     PlatformFeatures {
-        transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
+        transcription: cfg!(feature = "whisper"),
         notification_sounds: cfg!(desktop),
         os: os.to_string(),
         is_mobile,
@@ -136,7 +136,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     }
 
     // Calculate Whisper models size if whisper feature is enabled
-    #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+    #[cfg(feature = "whisper")]
     {
         // Calculate total size of downloaded Whisper models
         let mut ai_models_size = 0;
@@ -452,11 +452,114 @@ fn call_battery_helper_set_enabled(enabled: bool) {
     });
 }
 
+// ============================================================================
+// Device Info
+// ============================================================================
+
+/// Returns total system RAM in bytes (0 = unknown, frontend treats as unlimited)
+#[tauri::command]
+pub async fn get_device_memory() -> u64 {
+    get_total_memory()
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn get_total_memory() -> u64 {
+    // Parse /proc/meminfo for MemTotal (always available on Linux/Android)
+    if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+        for line in contents.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                // Format: "       XXXX kB"
+                if let Some(kb_str) = rest.trim().strip_suffix("kB").or_else(|| rest.trim().strip_suffix("KB")) {
+                    if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                        return kb * 1024;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn get_total_memory() -> u64 {
+    // Use sysctl hw.memsize (returns total bytes directly)
+    extern "C" {
+        fn sysctl(
+            name: *const i32, namelen: u32,
+            oldp: *mut std::ffi::c_void, oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void, newlen: usize,
+        ) -> i32;
+    }
+    // CTL_HW = 6, HW_MEMSIZE = 24
+    let mib: [i32; 2] = [6, 24];
+    let mut memsize: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    unsafe {
+        if sysctl(
+            mib.as_ptr(), 2,
+            &mut memsize as *mut u64 as *mut _,
+            &mut size,
+            std::ptr::null_mut(), 0,
+        ) == 0
+        {
+            return memsize;
+        }
+    }
+    0
+}
+
+#[cfg(windows)]
+fn get_total_memory() -> u64 {
+    use std::mem;
+
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
+    }
+
+    extern "system" {
+        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+    }
+
+    let mut status = MemoryStatusEx {
+        dw_length: mem::size_of::<MemoryStatusEx>() as u32,
+        dw_memory_load: 0,
+        ull_total_phys: 0,
+        ull_avail_phys: 0,
+        ull_total_page_file: 0,
+        ull_avail_page_file: 0,
+        ull_total_virtual: 0,
+        ull_avail_virtual: 0,
+        ull_avail_extended_virtual: 0,
+    };
+
+    unsafe {
+        if GlobalMemoryStatusEx(&mut status) != 0 {
+            return status.ull_total_phys;
+        }
+    }
+    0
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos", windows)))]
+fn get_total_memory() -> u64 {
+    0
+}
+
 // Handler list for this module (for reference):
 // - get_platform_features
 // - run_maintenance
 // - get_storage_info
 // - clear_storage
+// - get_device_memory
 // - check_battery_optimized
 // - request_battery_optimization
 // - get_background_service_enabled

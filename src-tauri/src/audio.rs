@@ -2,7 +2,7 @@
 //!
 //! Provides centralized audio functionality:
 //! - Audio decoding (symphonia) - supports mp3, wav, flac, ogg, m4a
-//! - Audio resampling (rubato) - high-quality sinc interpolation
+//! - Audio resampling (SIMD linear interpolation) - NEON/SSE accelerated
 //! - Audio playback (cpal) - cross-platform output (desktop only)
 //!
 //! Used by: notification sounds (desktop), voice recording, whisper transcription
@@ -30,8 +30,6 @@ use tauri::{command, AppHandle, Manager, Runtime};
 #[cfg(desktop)]
 use crate::db;
 
-// Shared imports for resampling (all platforms)
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -286,145 +284,321 @@ fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32), String> {
 // Audio Resampling (public API for use by other modules)
 // ============================================================================
 
-/// Get the standard high-quality resampling parameters used throughout the app
-fn get_resampling_params() -> SincInterpolationParameters {
-    SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
-    }
-}
-
-/// Resample mono f32 audio samples to a target sample rate
+/// Resample mono f32 audio samples to a target sample rate (SIMD-accelerated)
 ///
 /// Used by: notification sounds, general audio processing
-#[allow(dead_code)]
 pub fn resample_mono_f32(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Result<Vec<f32>, String> {
     if from_rate == to_rate {
         return Ok(samples);
     }
-
-    let mut resampler = SincFixedIn::<f32>::new(
-        to_rate as f64 / from_rate as f64,
-        2.0,
-        get_resampling_params(),
-        samples.len(),
-        1, // mono
-    )
-    .map_err(|e| format!("Failed to create resampler: {}", e))?;
-
-    let waves_in = vec![samples];
-    let waves_out = resampler
-        .process(&waves_in, None)
-        .map_err(|e| format!("Failed to resample: {}", e))?;
-
-    Ok(waves_out.into_iter().next().unwrap_or_default())
+    Ok(crate::simd::audio::linear_resample_mono(&samples, from_rate, to_rate))
 }
 
-/// Resample mono i16 audio samples to a target sample rate
+/// Resample mono i16 audio samples to a target sample rate (SIMD-accelerated)
 ///
-/// Used by: voice recording (converts i16 -> f32 -> resample -> i16)
+/// Used by: voice recording (i16 → f32 resample → i16, all SIMD)
 pub fn resample_mono_i16(samples: &[i16], from_rate: u32, to_rate: u32) -> Result<Vec<i16>, String> {
     if from_rate == to_rate {
         return Ok(samples.to_vec());
     }
 
-    // Convert i16 to f32 (normalized to -1.0..1.0)
-    let samples_f32: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
+    // SIMD i16 → f32 (normalized to -1.0..1.0)
+    // Safety: i16 is 2 bytes, reinterpret as raw bytes for SIMD conversion.
+    // This assumes little-endian byte order (true for all target platforms).
+    #[cfg(not(target_endian = "little"))]
+    compile_error!("i16-to-bytes reinterpret requires little-endian target");
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
+    };
+    let samples_f32 = crate::simd::audio::i16_le_bytes_to_f32_mono(bytes);
 
-    let mut resampler = SincFixedIn::<f32>::new(
-        to_rate as f64 / from_rate as f64,
-        2.0,
-        get_resampling_params(),
-        samples.len(),
-        1, // mono
-    )
-    .map_err(|e| format!("Failed to create resampler: {}", e))?;
+    // SIMD resample
+    let resampled_f32 = crate::simd::audio::linear_resample_mono(&samples_f32, from_rate, to_rate);
 
-    let waves_in = vec![samples_f32];
-    let waves_out = resampler
-        .process(&waves_in, None)
-        .map_err(|e| format!("Failed to resample: {}", e))?;
-
-    // Convert back to i16 (SIMD-accelerated: 2.3x faster than scalar)
-    let f32_samples = waves_out.into_iter().next().unwrap_or_default();
-    let resampled = crate::simd::audio::f32_to_i16(&f32_samples);
-
-    Ok(resampled)
+    // SIMD f32 → i16
+    Ok(crate::simd::audio::f32_to_i16(&resampled_f32))
 }
 
-/// Resample multi-channel f32 audio to a target sample rate
+/// Decode audio for whisper: mono f32 at 16kHz, as fast as possible.
 ///
-/// Used by: whisper transcription (preserves channel layout)
-/// Input: Vec of channels, each channel is Vec<f32>
-/// Output: Vec of resampled channels
-#[allow(dead_code)]
-pub fn resample_multichannel_f32(
-    channels_data: Vec<Vec<f32>>,
-    from_rate: u32,
-    to_rate: u32,
-) -> Result<Vec<Vec<f32>>, String> {
-    if from_rate == to_rate {
-        return Ok(channels_data);
+/// Fast path (WAV PCM): Bypasses Symphonia entirely — parses the RIFF header
+/// directly and converts raw PCM bytes to f32 mono in a single pass. ~5ms.
+///
+/// Slow path (MP3/OGG/FLAC): Pre-reads file into RAM, Symphonia decode with
+/// inline mono mixdown, pre-allocated buffers. ~180ms.
+///
+/// Both paths use rayon parallel SIMD linear interpolation resampling to 16kHz. ~2ms.
+pub fn decode_for_whisper(path: &Path) -> Result<Vec<f32>, String> {
+    use rayon::prelude::*;
+
+    let t0 = std::time::Instant::now();
+
+    let file_bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+
+    // Try WAV fast path first — raw PCM byte conversion, no codec overhead
+    let (mono_samples, sample_rate) = match wav_fast_decode(&file_bytes, 16000) {
+        Some(result) => {
+            let t_decode = t0.elapsed();
+            println!("[Whisper]     decode: {:?} (WAV fast path)", t_decode);
+            result
+        }
+        None => {
+            let result = symphonia_decode_mono(file_bytes, path)?;
+            let t_decode = t0.elapsed();
+            println!("[Whisper]     decode: {:?} (Symphonia)", t_decode);
+            result
+        }
+    };
+
+    if sample_rate == 16000 {
+        println!("[Whisper]     resample: skipped (already 16kHz)");
+        return Ok(mono_samples);
     }
 
-    let num_channels = channels_data.len();
-    if num_channels == 0 {
-        return Ok(channels_data);
+    // Fast path: exact integer-ratio decimation (48kHz→16kHz = 3:1, 32kHz→16kHz = 2:1, etc.)
+    // Simple box-filter average — adequate for speech; avoids all resampler library overhead.
+    let t1 = std::time::Instant::now();
+    let ratio_int = sample_rate / 16000;
+    if ratio_int >= 2 && ratio_int * 16000 == sample_rate {
+        let n = ratio_int as usize;
+        let out_len = mono_samples.len() / n;
+        let mut result = Vec::with_capacity(out_len + 1);
+        let scale = 1.0 / n as f32;
+        for chunk in mono_samples.chunks_exact(n) {
+            let sum: f32 = chunk.iter().sum();
+            result.push(sum * scale);
+        }
+        let remainder = mono_samples.chunks_exact(n).remainder();
+        if !remainder.is_empty() {
+            let sum: f32 = remainder.iter().sum();
+            result.push(sum / remainder.len() as f32);
+        }
+        println!("[Whisper]     resample: {:?} ({}:1 integer decimation, {}Hz→16kHz)",
+            t1.elapsed(), n, sample_rate);
+        return Ok(result);
     }
 
-    let chunk_size = channels_data[0].len();
+    // Parallel SIMD linear interpolation — each rayon thread runs the SIMD lerp loop
+    // on its chunk. Combines parallelism (fast in debug) with SIMD (fast in release).
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| n.get()).unwrap_or(4);
+    let chunk_size = (mono_samples.len() / n_threads).max(16000);
 
-    let mut resampler = SincFixedIn::<f32>::new(
-        to_rate as f64 / from_rate as f64,
-        2.0,
-        get_resampling_params(),
-        chunk_size,
-        num_channels,
-    )
-    .map_err(|e| format!("Failed to create resampler: {}", e))?;
+    let resampled: Vec<Vec<f32>> = mono_samples
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            crate::simd::audio::linear_resample_mono(chunk, sample_rate, 16000)
+        })
+        .collect();
 
-    let resampled = Resampler::process(&mut resampler, &channels_data, None)
-        .map_err(|e| format!("Failed to resample: {}", e))?;
+    let mut result = Vec::with_capacity(resampled.iter().map(|v| v.len()).sum());
+    for chunk in resampled {
+        result.extend_from_slice(&chunk);
+    }
+    println!("[Whisper]     resample: {:?} ({}Hz→16kHz, SIMD linear interp, {} threads)",
+        t1.elapsed(), sample_rate, n_threads);
 
-    Ok(resampled)
+    Ok(result)
 }
 
-/// Decode an audio file and resample to a target rate
-///
-/// Used by: whisper transcription
-/// Returns interleaved samples (for multi-channel) at the target sample rate
-#[allow(dead_code)]
-pub fn decode_and_resample(path: &Path, target_rate: u32) -> Result<Vec<f32>, String> {
-    // Decode the file (get raw samples and metadata)
-    let (samples, sample_rate, channels) = decode_audio_file_raw(path)?;
+/// WAV fast path: parse RIFF header + convert raw PCM bytes to mono f32.
+/// Returns None for non-WAV, non-PCM, or unsupported bit depths (falls back to Symphonia).
+fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
+    // Validate RIFF/WAVE header
+    if bytes.len() < 12 { return None; }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" { return None; }
 
-    // If already at target rate and mono, return directly
-    if sample_rate == target_rate && channels == 1 {
-        return Ok(samples);
+    let mut pos = 12;
+    let mut audio_format = 0u16;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits_per_sample = 0u16;
+
+    // Scan chunks (handles LIST, fact, etc. between fmt and data)
+    while pos + 8 <= bytes.len() {
+        let chunk_id = &bytes[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(
+            bytes[pos + 4..pos + 8].try_into().ok()?
+        ) as usize;
+
+        if chunk_id == b"fmt " {
+            if chunk_size < 16 || pos + 8 + 16 > bytes.len() { return None; }
+            let d = &bytes[pos + 8..];
+            audio_format = u16::from_le_bytes([d[0], d[1]]);
+            channels = u16::from_le_bytes([d[2], d[3]]);
+            sample_rate = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
+            bits_per_sample = u16::from_le_bytes([d[14], d[15]]);
+        } else if chunk_id == b"data" {
+            // Only handle uncompressed PCM (format 1) or IEEE float (format 3)
+            if audio_format != 1 && audio_format != 3 { return None; }
+            if channels == 0 || sample_rate == 0 { return None; }
+
+            let data_end = (pos + 8 + chunk_size).min(bytes.len());
+            let data = &bytes[pos + 8..data_end];
+            let ch = channels as usize;
+
+            let mono = match (audio_format, bits_per_sample) {
+                // 16-bit PCM (most common for voice recordings)
+                (1, 16) => {
+                    // Check if exact integer decimation to target rate is possible
+                    // (e.g., 48kHz→16kHz = 3:1, 32kHz→16kHz = 2:1)
+                    // If so, skip fused path — regular SIMD + integer decimation in caller is faster
+                    let exact_ratio = sample_rate / target_rate;
+                    let is_exact = exact_ratio >= 2 && exact_ratio * target_rate == sample_rate;
+
+                    // SIMD fused: stereo→mono + 2:1 decimation in one pass
+                    // Only when exact integer decimation isn't possible (e.g., 44.1kHz→22.05kHz)
+                    // Halves the output allocation (2.3MB vs 4.6MB) — fewer page faults
+                    if ch == 2 && !is_exact && sample_rate / target_rate >= 2 {
+                        let output_rate = sample_rate / 2;
+                        return Some((crate::simd::audio::i16_le_stereo_decimate2_mono(data), output_rate));
+                    }
+
+                    // Regular SIMD path (no decimation possible, or mono input)
+                    if ch == 1 {
+                        return Some((crate::simd::audio::i16_le_bytes_to_f32_mono(data), sample_rate));
+                    } else if ch == 2 {
+                        return Some((crate::simd::audio::i16_le_stereo_to_f32_mono(data), sample_rate));
+                    }
+                    // 3+ channels: scalar fallback
+                    let frame_count = data.len() / (ch * 2);
+                    let mut out = Vec::with_capacity(frame_count);
+                    for frame in data.chunks_exact(ch * 2) {
+                        let mut sum = 0i32;
+                        for c in 0..ch {
+                            sum += i16::from_le_bytes([frame[c * 2], frame[c * 2 + 1]]) as i32;
+                        }
+                        out.push(sum as f32 / (ch as f32 * 32768.0));
+                    }
+                    out
+                }
+                // 32-bit float PCM
+                (3, 32) => {
+                    let frame_count = data.len() / (ch * 4);
+                    let mut out = Vec::with_capacity(frame_count);
+                    if ch == 1 {
+                        for quad in data.chunks_exact(4) {
+                            out.push(f32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]));
+                        }
+                    } else {
+                        for frame in data.chunks_exact(ch * 4) {
+                            let mut sum = 0.0f32;
+                            for c in 0..ch {
+                                sum += f32::from_le_bytes([
+                                    frame[c * 4], frame[c * 4 + 1],
+                                    frame[c * 4 + 2], frame[c * 4 + 3],
+                                ]);
+                            }
+                            out.push(sum / ch as f32);
+                        }
+                    }
+                    out
+                }
+                // 24-bit PCM
+                (1, 24) => {
+                    let frame_count = data.len() / (ch * 3);
+                    let mut out = Vec::with_capacity(frame_count);
+                    let scale = 1.0 / 8388608.0; // 2^23
+                    if ch == 1 {
+                        for triple in data.chunks_exact(3) {
+                            let s = ((triple[0] as i32) | ((triple[1] as i32) << 8)
+                                | ((triple[2] as i32) << 16)) << 8 >> 8; // sign-extend
+                            out.push(s as f32 * scale);
+                        }
+                    } else {
+                        for frame in data.chunks_exact(ch * 3) {
+                            let mut sum = 0i32;
+                            for c in 0..ch {
+                                let b = &frame[c * 3..];
+                                sum += ((b[0] as i32) | ((b[1] as i32) << 8)
+                                    | ((b[2] as i32) << 16)) << 8 >> 8;
+                            }
+                            out.push(sum as f32 * scale / ch as f32);
+                        }
+                    }
+                    out
+                }
+                _ => return None, // Unsupported bit depth — fall back to Symphonia
+            };
+
+            return Some((mono, sample_rate));
+        }
+
+        // Advance to next chunk (WAV chunks are 2-byte aligned)
+        pos += 8 + chunk_size;
+        if chunk_size % 2 != 0 { pos += 1; }
     }
 
-    // Organize interleaved samples into separate channels
-    let mut channels_data: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    for (i, sample) in samples.iter().enumerate() {
-        channels_data[i % channels].push(*sample);
+    None
+}
+
+/// Symphonia slow path: decode compressed audio (MP3, OGG, FLAC, etc.) to mono f32.
+fn symphonia_decode_mono(file_bytes: Vec<u8>, path: &Path) -> Result<(Vec<f32>, u32), String> {
+    let cursor = std::io::Cursor::new(file_bytes);
+    let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
     }
 
-    // Resample each channel
-    let resampled = resample_multichannel_f32(channels_data, sample_rate, target_rate)?;
+    let probed = symphonia::default::get_probe()
+        .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("Failed to probe audio format: {}", e))?;
 
-    // Interleave the channels back together
-    let output_len = resampled[0].len();
-    let mut result = Vec::with_capacity(output_len * channels);
-    for i in 0..output_len {
-        for channel in &resampled {
-            result.push(channel[i]);
+    let mut format = probed.format;
+    let track = format.tracks().iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or("No supported audio tracks found")?;
+
+    let track_id = track.id;
+    let sample_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
+    let channels = track.codec_params.channels.ok_or("Unknown channel count")?.count();
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("Failed to create decoder: {}", e))?;
+
+    let estimated_frames = track.codec_params.n_frames.unwrap_or(sample_rate as u64 * 120);
+    let mut mono_samples = Vec::with_capacity(estimated_frames as usize);
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymphoniaError::ResetRequired) => { decoder.reset(); continue; }
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(_) => break,
+        };
+
+        if packet.track_id() != track_id { continue; }
+
+        match decoder.decode(&packet) {
+            Ok(audio_buf) => {
+                if sample_buf.is_none() {
+                    sample_buf = Some(SampleBuffer::<f32>::new(
+                        audio_buf.capacity() as u64, *audio_buf.spec()));
+                }
+                if let Some(ref mut buf) = sample_buf {
+                    buf.copy_interleaved_ref(audio_buf);
+                    let samples = buf.samples();
+                    if channels > 1 {
+                        for chunk in samples.chunks_exact(channels) {
+                            let sum: f32 = chunk.iter().sum();
+                            mono_samples.push(sum / channels as f32);
+                        }
+                    } else {
+                        mono_samples.extend_from_slice(samples);
+                    }
+                }
+            }
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(_) => break,
         }
     }
 
-    Ok(result)
+    Ok((mono_samples, sample_rate))
 }
 
 /// Internal: Decode audio file with options

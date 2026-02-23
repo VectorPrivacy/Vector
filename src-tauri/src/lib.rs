@@ -25,7 +25,7 @@ mod util;
 #[path = "android/mod.rs"]
 mod android;
 
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 mod whisper;
 
 mod message;
@@ -316,6 +316,7 @@ pub fn run() {
             commands::media::download_whisper_model,
             commands::messaging::update_unread_counter,
             commands::system::get_platform_features,
+            commands::system::get_device_memory,
             // Invite and badge commands (commands/invites.rs)
             commands::invites::get_or_create_invite_code,
             commands::invites::accept_invite_code,
@@ -480,10 +481,12 @@ pub fn run() {
             commands::encryption::enable_encryption,
             commands::encryption::rekey_encryption,
             commands::encryption::verify_credential,
-            #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+            #[cfg(feature = "whisper")]
             whisper::delete_whisper_model,
-            #[cfg(all(not(target_os = "android"), feature = "whisper"))]
-            whisper::list_models
+            #[cfg(feature = "whisper")]
+            whisper::list_models,
+            #[cfg(feature = "whisper")]
+            whisper::cancel_whisper_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

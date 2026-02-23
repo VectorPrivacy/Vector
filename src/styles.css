@@ -40,6 +40,10 @@
   mask-image: url("./icons/battery-full.svg");
 }
 
+.icon-warning {
+  mask-image: url("./icons/vector_warning.svg");
+}
+
 .icon-chats {
   mask-image: url("./icons/chats.svg");
 }
@@ -150,6 +154,10 @@
 
 .icon-file-plus {
   mask-image: url("./icons/file-plus.svg");
+}
+
+.icon-file-minus {
+  mask-image: url("./icons/file-minus.svg");
 }
 
 .icon-cancel {
@@ -3266,6 +3274,7 @@ select {
   width: 0%;
   border-radius: 6px;
   position: relative;
+  background: linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%);
   transition: width 0.3s cubic-bezier(0.65, 0, 0.35, 1);
 }
 
@@ -3295,7 +3304,7 @@ select {
   transform: translateY(-50%);
   border-radius: 50%;
   filter: blur(1px);
-  animation: pulse 1.5s infinite ease-out;
+  animation: progress-pulse-anim 1.5s infinite ease-out;
 }
 
 /* Percentage Text */
@@ -3316,8 +3325,8 @@ select {
   100% { transform: translateX(calc(100vw + 20px)); }
 }
 
-@keyframes pulse {
-  0% { 
+@keyframes progress-pulse-anim {
+  0% {
     opacity: 0.6;
     transform: translateY(-50%) scale(0.95);
   }
@@ -3810,6 +3819,11 @@ select {
 .toggle-container span:first-child {
   margin-right: 10px;
   color: rgba(255, 255, 255, 0.8);
+}
+
+.toggle-container.disabled {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .neon-toggle {
@@ -4714,10 +4728,12 @@ select:disabled:hover {
 
 /* Transcription highlighting styles */
 .transcription-section {
-  transition: all 0.3s ease;
+  transition: background-color 0.3s ease, color 0.3s ease;
   border-radius: 4px;
   margin: 0 1px;
 }
+
+
 
 .transcription-section:hover {
   background-color: rgba(255, 255, 255, 0.1);
@@ -4738,6 +4754,7 @@ select:disabled:hover {
 }
 
 .transcription-result {
+  box-sizing: border-box;
   margin-top: 10px;
   padding: 10px;
   border-radius: 8px;
@@ -4913,7 +4930,8 @@ select:disabled:hover {
 }
 
 .waveform-bar {
-    width: 3px;
+    flex: 1;
+    min-width: 2px;
     background: #59fcb3;
     border-radius: 1.5px;
     height: 20%; /* Initial height */
@@ -5427,7 +5445,7 @@ select:disabled:hover {
     }
     
     .waveform-bar {
-        width: 2px; /* Slightly thinner bars on mobile */
+        min-width: 1px;
     }
     
     .audio-time-display {
