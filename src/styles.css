@@ -385,15 +385,13 @@ html, body {
 }
 
 .startup-subtext-gradient {
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
-
   /* Always uses Vector theme (brand colour) */
   background: linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%);
   background-size: 200% 200%;
   background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
 }
 
 @keyframes BreathingGradient {

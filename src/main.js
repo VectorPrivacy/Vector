@@ -6949,7 +6949,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             document.querySelector('.login-encrypt-header').style.display = '';
             document.querySelector('.login-lock-icon').style.display = 'none';
             domLoginEncryptTitle.textContent = 'Setting up your account...';
-            domLoginEncryptTitle.classList.add('startup-subtyping-indicator-text');
+            domLoginEncryptTitle.classList.add('startup-subtext-gradient');
             await invoke('skip_encryption');
             login();
         };
@@ -6993,10 +6993,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         function updateStatusMessage(message, isProcessing = false) {
             domLoginEncryptTitle.textContent = message;
             if (isProcessing) {
-                domLoginEncryptTitle.classList.add('startup-subtyping-indicator-text');
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 pinRow.style.display = 'none';
             } else {
-                domLoginEncryptTitle.classList.remove('startup-subtyping-indicator-text');
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 pinRow.style.display = '';
             }
             domLoginEncryptPassword.style.display = 'none';
@@ -7120,10 +7120,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         function updateStatusMessage(message, isProcessing = false) {
             domLoginEncryptTitle.textContent = message;
             if (isProcessing) {
-                domLoginEncryptTitle.classList.add('startup-subtyping-indicator-text');
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = 'none';
             } else {
-                domLoginEncryptTitle.classList.remove('startup-subtyping-indicator-text');
+                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = '';
             }
             domLoginEncryptPinRow.style.display = 'none';
