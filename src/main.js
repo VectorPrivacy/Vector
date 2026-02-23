@@ -6656,7 +6656,9 @@ function renderProfileTab(cProfile) {
     // npub display
     const profileNpub = document.getElementById('profile-npub');
     if (profileNpub) {
-        profileNpub.textContent = cProfile.id + '     ' + cProfile.id;
+        profileNpub.dataset.fullNpub = cProfile.id;
+        profileNpub.textContent = cProfile.id.slice(0, 25) + '...' + cProfile.id.slice(-8);
+        document.getElementById('profile-npub-label').textContent = cProfile.mine ? 'My nPub Key' : 'nPub Key';
     }
 
     // Description
@@ -6669,7 +6671,7 @@ function renderProfileTab(cProfile) {
 
     // Add npub copy functionality
     document.getElementById('profile-npub-copy').onclick = (e) => {
-        const npub = document.getElementById('profile-npub')?.textContent?.split('     ')[0];
+        const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
         if (npub) {
             // Copy the full profile URL for easy sharing
             navigator.clipboard.writeText(npub).then(() => {
@@ -6709,6 +6711,9 @@ function renderProfileTab(cProfile) {
         
         // Display the Navbar
         domNavbar.style.display = '';
+        document.getElementById('profile-header-avatar-container').style.display = 'none';
+        document.getElementById('profile-name').textContent = 'My Profile';
+        document.getElementById('profile-status').style.display = 'none';
 
         // Configure other clickables
         domProfileName.onclick = askForUsername;
@@ -6724,6 +6729,8 @@ function renderProfileTab(cProfile) {
     } else {
         // Show Contact Options
         domProfileOptions.style.display = '';
+        document.getElementById('profile-header-avatar-container').style.display = '';
+        document.getElementById('profile-status').style.display = '';
 
         // Setup Mute option
         domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));

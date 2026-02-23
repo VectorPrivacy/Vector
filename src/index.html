@@ -577,21 +577,18 @@
         <p class="navbar-text">Share</p>
       </div>
     </div>
-    <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-    <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
-    <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
-      <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
-    </div>
-    <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
-      <div class="npub-scroll-wrapper">
-        <span id="profile-npub" class="profile-npub"></span>
+      <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-wrap: break-word; font-style: normal; margin-top: 10px; text-align: center; display: block;"></span>
+      <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
+      <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
+        <h3 id="profile-npub-label" style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
       </div>
-      <button id="profile-npub-copy" class="btn profile-npub-copy">
-        <span class="icon icon-copy"></span>
-      </button>
-    </div>
-    <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
-    <span id="profile-id" style="display: none;"></span>
+      <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
+        <span id="profile-npub" class="profile-npub"></span>
+        <button id="profile-npub-copy" class="btn profile-npub-copy">
+          <span class="icon icon-copy"></span>
+        </button>
+      </div>
+      <span id="profile-id" style="display: none;"></span>
   </div>
   </div>
 </div>

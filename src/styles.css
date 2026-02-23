@@ -733,8 +733,8 @@ html, body {
   height: 175px;
   margin: -87px auto 10px;
   border-radius: 50%;
-  border: 8px solid #060606;
-  background-color: #060606;
+  border: 8px solid #030303;
+  background-color: #030303;
 }
 
 /* Avatar Image */
@@ -892,7 +892,7 @@ html, body {
   border-style: solid;
   border-width: 2px;
   color: #b2b2b2;
-  background-color: #060606;
+  background-color: #030303;
   cursor: pointer;
 }
 
@@ -907,44 +907,38 @@ html, body {
 .profile-npub-container {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin: 20px 0;
-  padding: 12px 16px;
-  border-radius: 30px;
-  width: calc(100% - 32px);
-  max-width: 600px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-.npub-scroll-wrapper {
-  flex: 1;
-  overflow: hidden;
-  padding: 0 12px;
+  width: 85%;
+  gap: 4px;
+  margin: 8px auto 20px auto;
+  padding: 4px 4px 4px 8px;
 }
 
 .profile-npub {
+  flex: 1;
   font-size: 14px;
-  opacity: 0.75;
+  opacity: 0.9;
   display: block;
   white-space: nowrap;
-  animation: npub-scroll 12s linear infinite;
-}
-
-@keyframes npub-scroll {
-  0%   { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
+  text-align: center;
 }
 
 .profile-npub-copy {
-  width: 36px;
-  height: 36px;
-  background: none;
+  align-self: center;
+  flex-shrink: 0;
+  padding: 4px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
+  background: transparent;
+  border: none;
+}
+
+.profile-npub-copy .icon-copy {
+  width: 20px;
+  height: 20px;
 }
 
 /* Icons */
@@ -1334,8 +1328,8 @@ html, body {
   margin-right: auto;
   margin-top: -1px;
   transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1), max-height 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
-  max-height: 30px;
-  overflow: hidden;
+  max-height: none;
+  overflow: visible;
 }
 
 .chat-contact-status.status-hidden {
