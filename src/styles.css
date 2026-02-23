@@ -1098,8 +1098,15 @@ html, body {
   display: flex;
   align-items: center;
   height: 40px;
-  background-color: transparent;
-  border-color: rgba(128, 128, 128, 0.2);
+  color: #fff;
+  background-color: #17171750;
+  border: 1px solid #80808033;
+}
+
+.new-chat-btn:hover {
+  color: #fff;
+  background-color: #171717;
+  border-color: #B2B2B2;
 }
 
 .new-chat-btn .icon {
@@ -1108,6 +1115,11 @@ html, body {
   width: 30px;
   height: 30px;
   margin: 0;
+  background: var(--primary-color);
+}
+
+.new-chat-btn .icon:hover {
+  background: var(--accent-color);
 }
 
 #chat-list {
@@ -4168,7 +4180,7 @@ select:disabled:hover {
 }
 
 #chat-new-btn .icon {
-  background-color: var(--icon-color-primary);
+  background-color: var(--primary-color);
 }
 
 .chat-new-help {

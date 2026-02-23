@@ -8,6 +8,8 @@
   --reply-highlight-border: #a128fd;
   --toast-border-color: #B359FC;
   --chat-bg-opacity: 0.04;
+  --primary-color: #B359FC;
+  --accent-color: #a128fd;
 }
 
 .sync-line {
@@ -141,7 +143,7 @@ button {
 }
 
 .new-chat-btn .icon {
-  background-color: #B359FC;
+  background-color: var(--primary-color);
 }
 
 .msg-preview-container {

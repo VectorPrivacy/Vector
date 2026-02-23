@@ -7,6 +7,8 @@
   --voice-progress-secondary: rgba(177, 136, 226, 0.4);
   --reply-highlight-border: #CD3DD3;
   --toast-border-color: #b188e2;
+  --primary-color: #b188e2;
+  --accent-color: #CD3DD3;
 }
 
 .sync-line {
@@ -118,7 +120,7 @@ button {
 }
 
 .new-chat-btn .icon {
-  background-color: #b188e2;
+  background-color: var(--primary-color);
 }
 
 .msg-preview-container {
