@@ -20,14 +20,8 @@
   border-color: #33DB98;
 }
 
-.text-gradient {
+.typing-indicator-text {
   background: linear-gradient(to right, #ffffff 13.87%, #808080 60%);
-  background-size: 200% 200%;
-  background-clip: text;
-}
-
-.text-gradient-green {
-  background: linear-gradient(to right, #59fcb3 13.87%, #2b976c 80%);
   background-size: 200% 200%;
   background-clip: text;
 }

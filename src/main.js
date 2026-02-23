@@ -4223,7 +4223,7 @@ function updateChatHeaderSubtext(chat) {
         domChatContactStatus.classList.remove('status-hidden');
         domChatContactStatus.style.display = ''; // Reset display in case it was hidden by else branch
         domChatContactStatus.textContent = newStatusText;
-        domChatContactStatus.classList.toggle('text-gradient', shouldAddGradient);
+        domChatContactStatus.classList.toggle('typing-indicator-text', shouldAddGradient);
         if (!shouldAddGradient) {
             twemojify(domChatContactStatus);
         }
@@ -4238,7 +4238,7 @@ function updateChatHeaderSubtext(chat) {
         // Clear content after animation completes (300ms matches CSS transition)
         statusHideTimeout = setTimeout(() => {
             domChatContactStatus.textContent = '';
-            domChatContactStatus.classList.remove('text-gradient');
+            domChatContactStatus.classList.remove('typing-indicator-text');
             statusHideTimeout = null;
         }, 300);
     }
@@ -4633,7 +4633,7 @@ function renderChat(chat, primaryColor) {
     pChatPreview.classList.add('cutoff');
 
     const preview = generateChatPreviewText(chat);
-    pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+    pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
     pChatPreview.textContent = preview.text;
     if (preview.needsTwemoji) twemojify(pChatPreview);
 
@@ -4685,7 +4685,7 @@ function updateChatlistPreview(chatId) {
 
     if (pChatPreview) {
         const preview = generateChatPreviewText(cChat);
-        pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+        pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
         pChatPreview.textContent = preview.text;
         if (preview.needsTwemoji) twemojify(pChatPreview);
     }
@@ -6315,7 +6315,7 @@ async function login(skipAnimations = false) {
             switch (type) {
                 case 'start':
                     domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.add('text-gradient');
+                    domLoginEncryptTitle.classList.add('typing-indicator-text');
                     domLoginEncryptTitle.style.color = '';
                     break;
                     
@@ -6330,12 +6330,12 @@ async function login(skipAnimations = false) {
                     
                 case 'complete':
                     domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.remove('text-gradient');
+                    domLoginEncryptTitle.classList.remove('typing-indicator-text');
                     break;
                     
                 case 'error':
                     domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.remove('text-gradient');
+                    domLoginEncryptTitle.classList.remove('typing-indicator-text');
                     domLoginEncryptTitle.style.color = 'red';
                     break;
             }
@@ -6949,7 +6949,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             document.querySelector('.login-encrypt-header').style.display = '';
             document.querySelector('.login-lock-icon').style.display = 'none';
             domLoginEncryptTitle.textContent = 'Setting up your account...';
-            domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+            domLoginEncryptTitle.classList.add('startup-subtyping-indicator-text');
             await invoke('skip_encryption');
             login();
         };
@@ -6993,10 +6993,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         function updateStatusMessage(message, isProcessing = false) {
             domLoginEncryptTitle.textContent = message;
             if (isProcessing) {
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                domLoginEncryptTitle.classList.add('startup-subtyping-indicator-text');
                 pinRow.style.display = 'none';
             } else {
-                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                domLoginEncryptTitle.classList.remove('startup-subtyping-indicator-text');
                 pinRow.style.display = '';
             }
             domLoginEncryptPassword.style.display = 'none';
@@ -7120,10 +7120,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         function updateStatusMessage(message, isProcessing = false) {
             domLoginEncryptTitle.textContent = message;
             if (isProcessing) {
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                domLoginEncryptTitle.classList.add('startup-subtyping-indicator-text');
                 domLoginEncryptPassword.style.display = 'none';
             } else {
-                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                domLoginEncryptTitle.classList.remove('startup-subtyping-indicator-text');
                 domLoginEncryptPassword.style.display = '';
             }
             domLoginEncryptPinRow.style.display = 'none';
@@ -7540,7 +7540,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.onclick = null;
             domChatContact.classList.remove('btn');
             domChatContactStatus.textContent = 'Encrypted Notes to Self';
-            domChatContactStatus.classList.remove('text-gradient');
+            domChatContactStatus.classList.remove('typing-indicator-text');
         } else if (isGroup) {
             domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
             domChatContact.onclick = () => {
@@ -7556,7 +7556,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.onclick = null;
             domChatContact.classList.remove('btn');
             domChatContactStatus.textContent = '';
-            domChatContactStatus.classList.remove('text-gradient');
+            domChatContactStatus.classList.remove('typing-indicator-text');
         }
 
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
@@ -9483,7 +9483,7 @@ async function closeChat() {
     domChatContact.textContent = '';
     domChatContactStatus.textContent = '';
     domChatContactStatus.classList.add('status-hidden');
-    domChatContactStatus.classList.remove('text-gradient');
+    domChatContactStatus.classList.remove('typing-indicator-text');
     domChatHeaderAvatarContainer.innerHTML = '';
     
     // Reset procedural scroll state

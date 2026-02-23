@@ -377,14 +377,7 @@ html, body {
   margin-top: auto;
 }
 
-.text-gradient {
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
-}
-
-.text-gradient-green {
+.typing-indicator-text {
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
