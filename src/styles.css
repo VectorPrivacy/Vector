@@ -1246,7 +1246,7 @@ html, body {
 .chat-header {
   position: fixed;
   height: 60px;
-  background-color: rgba(22, 22, 22, 0.85);
+  background-color: rgba(22, 22, 22, 0.9);
   backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
@@ -3110,7 +3110,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(rgba(7, 7, 7, 0.85), #00000000 80%);
+  background: linear-gradient(#030303d9, #03030300 80%);
   pointer-events: none;
 }
 
