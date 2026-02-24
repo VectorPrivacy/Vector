@@ -502,7 +502,6 @@ pub async fn load_profile(npub: String) -> bool {
                 }; // Drop STATE lock before async operations
 
                 if let Some((slim, avatar_url, banner_url)) = save_data {
-                    let handle = TAURI_APP.get().unwrap();
                     db::set_profile(slim).await.unwrap();
 
                     // Cache avatar/banner images in the background for offline access
@@ -651,7 +650,6 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
                 (slim, avatar_url, banner_url)
             }; // Drop STATE lock before async operations
 
-            let handle = TAURI_APP.get().unwrap();
             db::set_profile(slim).await.ok();
 
             // Cache avatar/banner images in the background for offline access

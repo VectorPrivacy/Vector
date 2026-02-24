@@ -647,6 +647,7 @@ fn get_write_connection_static() -> Result<rusqlite::Connection, String> {
 }
 
 /// Initialize the DB pool using static path (for headless/background service).
+#[allow(dead_code)]
 pub fn init_db_pool_static(db_path: &std::path::Path) -> Result<(), String> {
     // Skip if pool already has connections
     if DB_READ_POOL.lock().unwrap().len() > 0 {

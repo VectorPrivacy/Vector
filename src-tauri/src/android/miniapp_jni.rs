@@ -785,7 +785,7 @@ fn get_granted_permissions_for_package(package_path: &str) -> Result<String, Str
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
+    let file_hash = bytes_to_hex_string(&hasher.finalize());
 
     // Look up permissions from database using file_hash
     crate::db::get_miniapp_granted_permissions(&file_hash)

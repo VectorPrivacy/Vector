@@ -209,6 +209,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // Convert slim chats to full chats and merge last messages
                     #[cfg(debug_assertions)]
                     let start = std::time::Instant::now();
+                    #[cfg(debug_assertions)]
                     let mut total_messages = 0usize;
 
                     for slim_chat in slim_chats {
@@ -240,7 +241,8 @@ pub async fn fetch_messages<R: Runtime>(
                         if let Some(idx) = existing_idx {
                             // Merge DB-loaded messages into the existing chat
                             if let Some(messages) = messages_to_add {
-                                total_messages += messages.len();
+                                #[cfg(debug_assertions)]
+                                { total_messages += messages.len(); }
                                 // Deref MutexGuard for split field borrow
                                 let s = &mut *state;
                                 for message in messages {
@@ -250,7 +252,8 @@ pub async fn fetch_messages<R: Runtime>(
                         } else {
                             // New chat — add messages then push
                             if let Some(messages) = messages_to_add {
-                                total_messages += messages.len();
+                                #[cfg(debug_assertions)]
+                                { total_messages += messages.len(); }
                                 for message in messages {
                                     chat.internal_add_message(message, &mut state.interner);
                                 }

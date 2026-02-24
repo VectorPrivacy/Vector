@@ -203,6 +203,7 @@ async fn encrypt_and_upload_mls_media(
 /// Headless text-only reply: sends a DM or MLS message without requiring TAURI_APP.
 /// Used by Android notification inline-reply (JNI). Sends first, then adds to STATE,
 /// persists to DB, emits to frontend (if available), and marks the chat as read.
+#[allow(dead_code)]
 pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
     let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;

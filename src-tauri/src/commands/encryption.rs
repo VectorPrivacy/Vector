@@ -78,7 +78,7 @@ pub struct BootEncryptionInfo {
 }
 
 #[command]
-pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEncryptionInfo, String> {
+pub fn get_encryption_and_key<R: Runtime>(_handle: AppHandle<R>) -> Result<BootEncryptionInfo, String> {
     // auto_select_account already ran at Tauri startup — just check the result
     let has_account = crate::account_manager::get_current_account().is_ok();
 

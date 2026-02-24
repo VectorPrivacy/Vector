@@ -861,10 +861,9 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
             return;
         }
 
-        let handle = match TAURI_APP.get() {
-            Some(h) => h.clone(),
-            None => return,
-        };
+        if TAURI_APP.get().is_none() {
+            return;
+        }
 
         // Check if migration flagged a forced keypackage regeneration
         let force_regen = db::get_sql_setting("mls_force_keypackage_regen".into())

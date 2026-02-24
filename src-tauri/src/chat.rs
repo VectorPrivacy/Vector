@@ -404,6 +404,7 @@ impl ChatMetadata {
 /// Used by both the Tauri command and the Android notification action (JNI).
 /// If the Tauri app handle is available (backgrounded app mode), emits a
 /// `chat_mark_read` event so the frontend can update its unread state.
+#[allow(dead_code)]
 pub async fn mark_as_read_headless(chat_id: &str) -> bool {
     let (slim, last_read_hex) = {
         let mut state = crate::STATE.lock().await;

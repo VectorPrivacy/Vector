@@ -518,7 +518,7 @@ pub async fn miniapp_load_info_from_bytes(
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
+    let file_hash = bytes_to_hex_string(&hasher.finalize());
 
     let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback_name)?;
 
@@ -1340,7 +1340,7 @@ pub async fn miniapp_get_realtime_status(
 /// This tracks the app name, source URL, and the attachment reference for quick re-opening
 #[tauri::command]
 pub async fn miniapp_record_opened(
-    app: AppHandle,
+    _app: AppHandle,
     name: String,
     src_url: String,
     attachment_ref: String,
@@ -1353,7 +1353,7 @@ pub async fn miniapp_record_opened(
 /// Returns a list of Mini Apps sorted by last opened time (most recent first)
 #[tauri::command]
 pub async fn miniapp_get_history(
-    app: AppHandle,
+    _app: AppHandle,
     limit: Option<i64>,
 ) -> Result<Vec<crate::db::MiniAppHistoryEntry>, Error> {
     crate::db::get_miniapps_history(limit)
@@ -1363,7 +1363,7 @@ pub async fn miniapp_get_history(
 /// Removes a Mini App from history by name
 #[tauri::command]
 pub async fn miniapp_remove_from_history(
-    app: AppHandle,
+    _app: AppHandle,
     name: String,
 ) -> Result<(), Error> {
     crate::db::remove_miniapp_from_history(&name)
@@ -1372,7 +1372,7 @@ pub async fn miniapp_remove_from_history(
 
 #[tauri::command]
 pub async fn miniapp_toggle_favorite(
-    app: AppHandle,
+    _app: AppHandle,
     id: i64,
 ) -> Result<bool, Error> {
     crate::db::toggle_miniapp_favorite(id)
@@ -1381,7 +1381,7 @@ pub async fn miniapp_toggle_favorite(
 
 #[tauri::command]
 pub async fn miniapp_set_favorite(
-    app: AppHandle,
+    _app: AppHandle,
     id: i64,
     is_favorite: bool,
 ) -> Result<(), Error> {
@@ -1635,7 +1635,7 @@ pub async fn miniapp_get_available_permissions() -> Result<Vec<super::permission
 /// Get granted permissions for a specific Mini App by file hash
 #[tauri::command]
 pub async fn miniapp_get_granted_permissions(
-    app: AppHandle,
+    _app: AppHandle,
     file_hash: String,
 ) -> Result<String, Error> {
     crate::db::get_miniapp_granted_permissions(&file_hash)
@@ -1645,7 +1645,7 @@ pub async fn miniapp_get_granted_permissions(
 /// Set a permission for a Mini App by file hash (grant or revoke)
 #[tauri::command]
 pub async fn miniapp_set_permission(
-    app: AppHandle,
+    _app: AppHandle,
     file_hash: String,
     permission: String,
     granted: bool,
@@ -1657,7 +1657,7 @@ pub async fn miniapp_set_permission(
 /// Set multiple permissions at once for a Mini App by file hash
 #[tauri::command]
 pub async fn miniapp_set_permissions(
-    app: AppHandle,
+    _app: AppHandle,
     file_hash: String,
     permissions: Vec<(String, bool)>,
 ) -> Result<(), Error> {
@@ -1671,7 +1671,7 @@ pub async fn miniapp_set_permissions(
 /// Check if an app has been prompted for permissions yet (by file hash)
 #[tauri::command]
 pub async fn miniapp_has_permission_prompt(
-    app: AppHandle,
+    _app: AppHandle,
     file_hash: String,
 ) -> Result<bool, Error> {
     crate::db::has_miniapp_permission_prompt(&file_hash)
@@ -1681,7 +1681,7 @@ pub async fn miniapp_has_permission_prompt(
 /// Revoke all permissions for a Mini App by file hash
 #[tauri::command]
 pub async fn miniapp_revoke_all_permissions(
-    app: AppHandle,
+    _app: AppHandle,
     file_hash: String,
 ) -> Result<(), Error> {
     crate::db::revoke_all_miniapp_permissions(&file_hash)

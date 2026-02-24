@@ -576,7 +576,7 @@ pub async fn build_sweep_transaction(
 // ============================================================================
 
 /// Check if a promo code already exists in the database
-fn promo_code_exists<R: Runtime>(handle: &AppHandle<R>, code: &str) -> Result<bool, String> {
+fn promo_code_exists<R: Runtime>(_handle: &AppHandle<R>, code: &str) -> Result<bool, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pivx_promos WHERE gift_code = ?1",
@@ -588,7 +588,7 @@ fn promo_code_exists<R: Runtime>(handle: &AppHandle<R>, code: &str) -> Result<bo
 
 /// Save a promo to the database
 async fn save_promo<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     gift_code: &str,
     address: &str,
     privkey: &[u8; 32],
@@ -615,7 +615,7 @@ async fn save_promo<R: Runtime>(
 /// Decrypt an encrypted private key string and convert to bytes
 /// Used for retrieving stored promo privkeys without re-deriving (avoids PoW cost)
 async fn decrypt_privkey_bytes<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     privkey_encrypted: String,
 ) -> Result<[u8; 32], String> {
     let privkey_hex = crate::crypto::maybe_decrypt(privkey_encrypted)
@@ -672,7 +672,7 @@ async fn get_active_promos_with_keys<R: Runtime>(
 /// Update promo status in database
 /// For 'claimed' or 'sent' status, the promo is deleted (funds are gone)
 fn update_promo_status<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     gift_code: &str,
     status: &str,
 ) -> Result<(), String> {
@@ -696,7 +696,7 @@ fn update_promo_status<R: Runtime>(
 /// Find a reusable zero-balance promo for deposits
 /// Returns (gift_code, address, created_at) if found, None otherwise
 /// This helps avoid accumulating unused addresses
-fn find_reusable_promo<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<(String, String, u64)>, String> {
+fn find_reusable_promo<R: Runtime>(_handle: &AppHandle<R>) -> Result<Option<(String, String, u64)>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Find promos that:
@@ -795,7 +795,7 @@ pub async fn pivx_get_promo_balance(
 /// Get wallet total balance (sum of all active promos)
 #[tauri::command]
 pub async fn pivx_get_wallet_balance<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<f64, String> {
     // Fetch addresses in a separate scope to release DB connection before await
     let addresses: Vec<String> = {
@@ -826,7 +826,7 @@ pub async fn pivx_get_wallet_balance<R: Runtime>(
 /// List all promos for the wallet
 #[tauri::command]
 pub async fn pivx_list_promos<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<Vec<PivxPromo>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
 
@@ -914,7 +914,7 @@ pub async fn pivx_sweep_promo<R: Runtime>(
 /// Set user's personal PIVX receiving address (empty string clears it)
 #[tauri::command]
 pub fn pivx_set_wallet_address<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     address: String,
 ) -> Result<(), String> {
     // Validate address format only if not empty
@@ -928,7 +928,7 @@ pub fn pivx_set_wallet_address<R: Runtime>(
 /// Get user's personal PIVX receiving address
 #[tauri::command]
 pub fn pivx_get_wallet_address<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<Option<String>, String> {
     crate::db::get_sql_setting("pivx_wallet_address".to_string())
 }
@@ -1039,7 +1039,7 @@ pub async fn pivx_import_promo<R: Runtime>(
 /// Pass force_refresh=true to bypass cache (e.g., after a transaction)
 #[tauri::command]
 pub async fn pivx_refresh_balances<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     force_refresh: Option<bool>,
 ) -> Result<Vec<PivxPromo>, String> {
     // Clear cache if forced refresh
@@ -1456,7 +1456,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 /// Get all PIVX payments for a chat (for loading history)
 #[tauri::command]
 pub async fn pivx_get_chat_payments<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     conversation_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let events = crate::db::get_pivx_payments_for_chat(&conversation_id).await?;
@@ -1918,7 +1918,7 @@ pub async fn pivx_get_price(currency: String) -> Result<CurrencyInfo, String> {
 /// Set user's preferred display currency
 #[tauri::command]
 pub fn pivx_set_preferred_currency<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     currency: String,
 ) -> Result<(), String> {
     crate::db::set_sql_setting("pivx_preferred_currency".to_string(), currency.to_uppercase())
@@ -1927,7 +1927,7 @@ pub fn pivx_set_preferred_currency<R: Runtime>(
 /// Get user's preferred display currency
 #[tauri::command]
 pub fn pivx_get_preferred_currency<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<Option<String>, String> {
     crate::db::get_sql_setting("pivx_preferred_currency".to_string())
 }

@@ -19,7 +19,7 @@ use crate::{db, STATE, Message};
 /// Also adds the messages to the backend state for cache synchronization
 #[tauri::command]
 pub async fn get_chat_messages_paginated<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     chat_id: String,
     limit: usize,
     offset: usize,
@@ -57,7 +57,7 @@ pub async fn get_chat_messages_paginated<R: Runtime>(
 /// Get the total message count for a chat
 #[tauri::command]
 pub async fn get_chat_message_count<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     chat_id: String,
 ) -> Result<usize, String> {
     db::get_chat_message_count(&chat_id).await
@@ -67,7 +67,7 @@ pub async fn get_chat_message_count<R: Runtime>(
 /// This is the new event-based approach that computes reactions from flat events
 #[tauri::command]
 pub async fn get_message_views<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     chat_id: String,
     limit: usize,
     offset: usize,
@@ -108,7 +108,7 @@ pub async fn get_message_views<R: Runtime>(
 /// Loads messages from (target - context_before) to the most recent
 #[tauri::command]
 pub async fn get_messages_around_id<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     chat_id: String,
     target_message_id: String,
     context_before: usize,
@@ -149,7 +149,7 @@ pub async fn get_messages_around_id<R: Runtime>(
 /// Returns events in frontend-friendly format for rendering as timestamps
 #[tauri::command]
 pub async fn get_system_events<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     conversation_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let events = db::get_system_events_for_chat(&conversation_id).await?;

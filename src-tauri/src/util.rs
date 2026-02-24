@@ -331,7 +331,7 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn calculate_file_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    bytes_to_hex_string(hasher.finalize().as_slice())
+    bytes_to_hex_string(&hasher.finalize())
 }
 
 /// Ultra-fast nearest-neighbor downsampling for RGBA8 pixel data

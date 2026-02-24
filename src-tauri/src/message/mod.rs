@@ -282,7 +282,6 @@ pub async fn edit_message(
         let chat_type = chat.chat_type.clone();
 
         // Get db chat ID
-        let handle = TAURI_APP.get().ok_or("App handle not available")?;
         let db_chat_id = crate::db::get_chat_id_by_identifier(&chat_id)?;
 
         (chat_type, db_chat_id)
@@ -319,7 +318,7 @@ pub async fn edit_message(
     }
 
     // Save edit event to database
-    if let Some(handle) = TAURI_APP.get() {
+    if TAURI_APP.get().is_some() {
         crate::db::save_edit_event(
             &edit_id,
             &message_id,

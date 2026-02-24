@@ -587,7 +587,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let hash = bytes_to_hex_string(hasher.finalize().as_slice());
+    let hash = bytes_to_hex_string(&hasher.finalize());
 
     if hash != app.blossom_hash {
         let mut state = MARKETPLACE_STATE.write().await;
@@ -742,7 +742,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
                 use sha2::{Sha256, Digest};
                 let mut hasher = Sha256::new();
                 hasher.update(&old_data);
-                Some(bytes_to_hex_string(hasher.finalize().as_slice()))
+                Some(bytes_to_hex_string(&hasher.finalize()))
             }
             Err(e) => {
                 log_warn!("Failed to read old app file for hash: {}", e);
@@ -774,7 +774,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&bytes_vec);
-    let new_file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
+    let new_file_hash = bytes_to_hex_string(&hasher.finalize());
 
     if new_file_hash != app.blossom_hash {
         // Clean up temp file if it exists
@@ -890,7 +890,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&file_data);
-    let blossom_hash = bytes_to_hex_string(hasher.finalize().as_slice());
+    let blossom_hash = bytes_to_hex_string(&hasher.finalize());
 
     // Extract icon from the .xdc file
     let icon_bytes = extract_icon_from_xdc(&file_data);

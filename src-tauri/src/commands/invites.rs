@@ -11,7 +11,7 @@ use nostr_sdk::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 
-use crate::{TAURI_APP, NOSTR_CLIENT, active_trusted_relays, PENDING_INVITE, PendingInviteAcceptance};
+use crate::{NOSTR_CLIENT, active_trusted_relays, PENDING_INVITE, PendingInviteAcceptance};
 use crate::db;
 
 // ============================================================================
@@ -43,8 +43,6 @@ fn generate_invite_code() -> String {
 /// Generate or retrieve existing invite code for the current user
 #[tauri::command]
 pub async fn get_or_create_invite_code() -> Result<String, String> {
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
-
     // Check if we already have a stored invite code
     if let Ok(Some(existing_code)) = db::get_sql_setting("invite_code".to_string()) {
         return Ok(existing_code);

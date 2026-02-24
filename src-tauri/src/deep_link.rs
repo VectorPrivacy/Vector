@@ -136,6 +136,7 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
 }
 
 /// Store a pending notification tap action (called from Android JNI when user taps a notification)
+#[allow(dead_code)]
 pub fn set_pending_notification_action(chat_id: &str) {
     if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
         *pending = Some(DeepLinkAction {

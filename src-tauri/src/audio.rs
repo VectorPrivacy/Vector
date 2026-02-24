@@ -287,6 +287,7 @@ fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32), String> {
 /// Resample mono f32 audio samples to a target sample rate (SIMD-accelerated)
 ///
 /// Used by: notification sounds, general audio processing
+#[allow(dead_code)]
 pub fn resample_mono_f32(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Result<Vec<f32>, String> {
     if from_rate == to_rate {
         return Ok(samples);
@@ -979,7 +980,7 @@ pub fn play_notification_if_enabled<R: Runtime>(handle: &AppHandle<R>) -> Result
 
 #[cfg(desktop)]
 fn load_notification_settings_internal<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
 ) -> Result<NotificationSettings, String> {
     let global_mute = match db::get_sql_setting("notif_global_mute".to_string()) {
         Ok(Some(val)) => val == "true",
@@ -996,7 +997,7 @@ fn load_notification_settings_internal<R: Runtime>(
 
 #[cfg(desktop)]
 fn save_notification_settings_internal<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     settings: &NotificationSettings,
 ) -> Result<(), String> {
     db::set_sql_setting(
