@@ -27,7 +27,7 @@ use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
-use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
+use super::types::{AttachmentFile, FileBytes, ImageMetadata, Message, Attachment};
 
 /// Result of sending a message, returned to frontend for state update
 #[derive(serde::Serialize)]
@@ -145,7 +145,7 @@ async fn encrypt_and_upload_mls_media(
     let url = crate::blossom::upload_blob_with_progress_and_failover(
         signer,
         servers,
-        Arc::new(std::mem::take(&mut upload.encrypted_data)),
+        Arc::new(FileBytes::Owned(std::mem::take(&mut upload.encrypted_data))),
         Some(&mime_type),
         progress_callback,
         Some(3),
@@ -800,7 +800,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
 
             // Upload the file with progress, retries, and automatic server failover
-            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(FileBytes::Owned(enc_file)), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -1120,7 +1120,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: Arc::new(encoded_bytes),
+        bytes: Arc::new(FileBytes::Owned(encoded_bytes)),
         img_meta,
         extension: extension.to_string(),
     };
@@ -1133,7 +1133,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: Arc::new(bytes),
+        bytes: Arc::new(FileBytes::Owned(bytes)),
         img_meta: None,
         extension: String::from("wav")
     };

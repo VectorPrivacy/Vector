@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::types::{CachedCompressedImage, ImageMetadata};
+use super::types::{CachedCompressedImage, FileBytes, ImageMetadata};
 
 #[cfg(target_os = "android")]
 use super::types::ANDROID_FILE_CACHE;
@@ -23,7 +23,7 @@ pub const MIN_SAVINGS_PERCENT: u64 = 1;
 /// If `min_savings_percent` is Some and compression doesn't meet threshold,
 /// returns original bytes with metadata (no wasted clone).
 pub(super) fn compress_bytes_internal(
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<FileBytes>,
     extension: &str,
     min_savings_percent: Option<u64>,
 ) -> Result<CachedCompressedImage, String> {
@@ -113,7 +113,7 @@ pub(super) fn compress_bytes_internal(
     }
 
     Ok(CachedCompressedImage {
-        bytes: Arc::new(compressed_bytes),
+        bytes: Arc::new(FileBytes::Owned(compressed_bytes)),
         extension: new_extension.to_string(),
         img_meta: final_meta,
         original_size,
@@ -131,18 +131,20 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             .next()
             .unwrap_or("")
             .to_lowercase();
-        
-        // Read file bytes
-        let bytes = std::fs::read(file_path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-        
-        let original_size = bytes.len() as u64;
-        
+
+        // Memory-map the file for zero-copy access
+        let file = std::fs::File::open(file_path)
+            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| format!("Failed to mmap file: {}", e))?;
+
+        let original_size = mmap.len() as u64;
+
         // For GIFs, skip compression entirely to preserve animation
         // Just decode first frame for thumbhash, then return original bytes
         if extension == "gif" {
             // Decode just to get dimensions and generate thumbhash from first frame
-            let img = ::image::load_from_memory(&bytes)
+            let img = ::image::load_from_memory(&mmap)
                 .map_err(|e| format!("Failed to decode GIF: {}", e))?;
 
             let (width, height) = (img.width(), img.height());
@@ -154,18 +156,18 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
                     height,
                 });
 
-            // Return original bytes to preserve animation
+            // GIF bytes must be owned (mmap can't outlive this function in CachedCompressedImage)
             return Ok(CachedCompressedImage {
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(FileBytes::Owned(mmap.to_vec())),
                 extension: "gif".to_string(),
                 img_meta,
                 original_size,
-                compressed_size: original_size, // Same size, no compression
+                compressed_size: original_size,
             });
         }
-        
-        // Try to load and decode the image
-        let img = ::image::load_from_memory(&bytes)
+
+        // Try to load and decode the image from mmap'd bytes (zero-copy to decoder)
+        let img = ::image::load_from_memory(&mmap)
             .map_err(|e| format!("Failed to decode image: {}", e))?;
 
         // Determine target dimensions (max 1920px on longest side)
@@ -198,7 +200,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let compressed_size = compressed_bytes.len() as u64;
 
         Ok(CachedCompressedImage {
-            bytes: Arc::new(compressed_bytes),
+            bytes: Arc::new(FileBytes::Owned(compressed_bytes)),
             extension: extension.to_string(),
             img_meta,
             original_size,
@@ -216,7 +218,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
                 drop(cache);
                 // Fall back to reading directly (may fail if permission expired)
                 let (raw_bytes, ext) = filesystem::read_android_uri_bytes(file_path.to_string())?;
-                (Arc::new(raw_bytes), ext)
+                (Arc::new(FileBytes::Owned(raw_bytes)), ext)
             }
         };
         let original_size = bytes.len() as u64;
@@ -278,7 +280,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let compressed_size = compressed_bytes.len() as u64;
 
         Ok(CachedCompressedImage {
-            bytes: Arc::new(compressed_bytes),
+            bytes: Arc::new(FileBytes::Owned(compressed_bytes)),
             extension: extension.to_string(),
             img_meta,
             original_size,

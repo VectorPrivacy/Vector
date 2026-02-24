@@ -325,24 +325,27 @@ pub fn calculate_capped_preview_dimensions(width: u32, height: u32) -> (u32, u32
     )
 }
 
-/// Read a file, checking if it's empty via metadata first to avoid reading 0 bytes.
+/// Read a file via memory-mapping for zero-copy access.
 ///
-/// This is more efficient than reading then checking length, especially for
-/// large files that would waste I/O bandwidth on empty file detection.
+/// Returns `FileBytes::Mapped` which derefs to `&[u8]` — the OS pages in
+/// only what's accessed and can reclaim pages under memory pressure (file-backed).
 ///
 /// # Arguments
 /// * `path` - Path to the file
 ///
 /// # Returns
-/// File bytes or an error string
-pub fn read_file_checked(path: &str) -> Result<Vec<u8>, String> {
-    let metadata = std::fs::metadata(path)
+/// Memory-mapped file bytes or an error string
+pub fn read_file_checked(path: &str) -> Result<crate::message::FileBytes, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let metadata = file.metadata()
         .map_err(|e| format!("Failed to read file metadata: {}", e))?;
 
     if metadata.len() == 0 {
         return Err(format!("File is empty (0 bytes): {}", path));
     }
 
-    std::fs::read(path)
-        .map_err(|e| format!("Failed to read file: {}", e))
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| format!("Failed to mmap file: {}", e))?;
+    Ok(crate::message::FileBytes::Mapped(mmap))
 }

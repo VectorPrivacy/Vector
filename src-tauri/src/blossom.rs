@@ -11,6 +11,8 @@ use std::task::{Context, Poll};
 use base64::engine::general_purpose;
 use base64::Engine;
 
+use crate::message::FileBytes;
+
 /// Progress callback function type
 pub type ProgressCallback = std::sync::Arc<dyn Fn(Option<u8>, Option<u64>) -> Result<(), String> + Send + Sync>;
 
@@ -21,7 +23,7 @@ struct ProgressTrackingStream {
 }
 
 impl ProgressTrackingStream {
-    fn new(data: Arc<Vec<u8>>, bytes_sent: Arc<Mutex<u64>>) -> Self {
+    fn new(data: Arc<FileBytes>, bytes_sent: Arc<Mutex<u64>>) -> Self {
         let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
 
         // Spawn a background task to feed the stream
@@ -113,7 +115,7 @@ where
 pub async fn upload_blob_with_progress<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<Vec<u8>>,
+    file_data: Arc<FileBytes>,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
@@ -157,7 +159,7 @@ where
 async fn upload_attempt<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<Vec<u8>>,
+    file_data: Arc<FileBytes>,
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
 ) -> Result<String, String>
@@ -168,7 +170,7 @@ where
         .map_err(|e| format!("Invalid server URL: {}", e))?;
 
     let total_size = file_data.len() as u64;
-    let hash = Sha256Hash::hash(&file_data);
+    let hash = Sha256Hash::hash(&*file_data);
     
     // Report initial progress (0%)
     progress_callback(Some(0), Some(0)).map_err(|e| e)?;
@@ -262,7 +264,7 @@ where
 pub async fn upload_blob<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<Vec<u8>>,
+    file_data: Arc<FileBytes>,
     mime_type: Option<&str>,
 ) -> Result<String, String>
 where
@@ -271,7 +273,7 @@ where
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
 
-    let hash = Sha256Hash::hash(&file_data);
+    let hash = Sha256Hash::hash(&*file_data);
     
     // Build authorization header
     let auth_header = build_auth_header(&signer, hash).await?;
@@ -292,8 +294,12 @@ where
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
-    // Perform the upload - convert Arc to owned Vec for body
-    let body_data = Arc::try_unwrap(file_data).unwrap_or_else(|arc| (*arc).clone());
+    // Perform the upload - extract or copy bytes for body
+    let body_data: Vec<u8> = match Arc::try_unwrap(file_data) {
+        Ok(FileBytes::Owned(v)) => v,
+        Ok(FileBytes::Mapped(m)) => m.to_vec(),
+        Err(arc) => arc.to_vec(),
+    };
     let response = client
         .put(upload_url)
         .headers(headers)
@@ -321,7 +327,7 @@ where
 pub async fn upload_blob_with_failover<T>(
     signer: T,
     server_urls: Vec<String>,
-    file_data: Arc<Vec<u8>>,
+    file_data: Arc<FileBytes>,
     mime_type: Option<&str>,
 ) -> Result<String, String>
 where
@@ -364,7 +370,7 @@ where
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
     server_urls: Vec<String>,
-    file_data: Arc<Vec<u8>>,
+    file_data: Arc<FileBytes>,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,

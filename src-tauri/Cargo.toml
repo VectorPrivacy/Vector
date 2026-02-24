@@ -59,6 +59,7 @@ hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rayon = "1.11.0"
+memmap2 = "0.9"
 
 # Mini Apps (WebXDC) support
 zip = "2.4"

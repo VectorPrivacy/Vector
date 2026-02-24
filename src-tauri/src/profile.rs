@@ -722,7 +722,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
                 .to_lowercase();
 
             AttachmentFile {
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(crate::message::FileBytes::Owned(bytes)),
                 img_meta: None,
                 extension,
             }

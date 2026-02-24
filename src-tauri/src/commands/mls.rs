@@ -547,7 +547,7 @@ pub async fn upload_group_avatar(filepath: String) -> Result<serde_json::Value, 
         #[cfg(target_os = "android")]
         {
             let att = crate::android::filesystem::read_android_uri(filepath.clone())?;
-            Arc::try_unwrap(att.bytes).unwrap_or_else(|arc| (*arc).clone())
+            Arc::try_unwrap(att.bytes).unwrap_or_else(|arc| crate::message::FileBytes::Owned(arc.to_vec()))
         }
     };
 
@@ -578,7 +578,7 @@ pub async fn upload_group_avatar(filepath: String) -> Result<serde_json::Value, 
 
     // Upload encrypted blob to Blossom using the derived upload keypair
     let servers = crate::get_blossom_servers();
-    let encrypted_data = Arc::new(prepared.encrypted_data.as_ref().to_vec());
+    let encrypted_data = Arc::new(crate::message::FileBytes::Owned(prepared.encrypted_data.as_ref().to_vec()));
     let blob_url = crate::blossom::upload_blob_with_progress_and_failover(
         prepared.upload_keypair,
         servers,
