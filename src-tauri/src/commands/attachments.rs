@@ -1,7 +1,7 @@
 //! Attachment handling Tauri commands.
 //!
 //! This module handles attachment operations:
-//! - Blurhash preview generation and decoding
+//! - ThumbHash preview generation and decoding
 //! - Attachment download, decryption, and saving
 //! - MLS attachment decryption (MIP-04)
 
@@ -29,7 +29,7 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
     // Decrypt the attachment using the appropriate method
     let decrypted_data = if let Some(ref group_id) = attachment.group_id {
         // MLS attachment - use MDK's MIP-04 decryption
-        decrypt_mls_attachment(handle, encrypted_data, attachment, group_id).await?
+        decrypt_mls_attachment(encrypted_data, attachment, group_id).await?
     } else {
         // DM attachment - use explicit key/nonce with AES-GCM
         crypto::decrypt_data(encrypted_data, &attachment.key, &attachment.nonce)
@@ -66,8 +66,7 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
 /// This derives the encryption key from the MLS group secret using the original file hash
 /// and other metadata stored in the MediaReference. MDK internally handles epoch fallback,
 /// trying historical epoch secrets if the current epoch's key doesn't work.
-async fn decrypt_mls_attachment<R: Runtime>(
-    handle: &AppHandle<R>,
+async fn decrypt_mls_attachment(
     encrypted_data: &[u8],
     attachment: &Attachment,
     group_id: &str,
@@ -75,7 +74,7 @@ async fn decrypt_mls_attachment<R: Runtime>(
     use mdk_core::encrypted_media::MediaReference;
 
     // Create MLS service
-    let mls_service = mls::MlsService::new_persistent(handle)
+    let mls_service = mls::MlsService::new_persistent_static()
         .map_err(|e| format!("Failed to create MLS service: {}", e))?;
 
     // Look up the group metadata to get the engine_group_id
@@ -149,9 +148,9 @@ async fn decrypt_mls_attachment<R: Runtime>(
 // Tauri Commands
 // ============================================================================
 
-/// Generate a blurhash preview for an attachment
+/// Generate a thumbhash preview for an attachment
 #[tauri::command]
-pub async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<String, String> {
+pub async fn generate_thumbhash_preview(npub: String, msg_id: String) -> Result<String, String> {
     // Get the first attachment from the message by searching through chats
     let img_meta = {
         let state = STATE.lock().await;
@@ -181,22 +180,17 @@ pub async fn generate_blurhash_preview(npub: String, msg_id: String) -> Result<S
         found_attachment.ok_or_else(|| "No image attachment found".to_string())?
     };
 
-    // Generate the Base64 image using the decode_blurhash_to_base64 function
-    let base64_image = util::decode_blurhash_to_base64(
-        &img_meta.blurhash,
-        img_meta.width,
-        img_meta.height,
-        1.0 // Default punch value
-    );
+    // Generate the Base64 image using the decode_thumbhash_to_base64 function
+    let base64_image = util::decode_thumbhash_to_base64(&img_meta.thumbhash);
 
     Ok(base64_image)
 }
 
-/// Generic blurhash decoder - converts a blurhash string to a base64 data URL
+/// Generic thumbhash decoder - converts a thumbhash string to a base64 data URL
 /// Used by the GIF picker for placeholder backgrounds
 #[tauri::command]
-pub fn decode_blurhash(blurhash: String, width: u32, height: u32) -> String {
-    util::decode_blurhash_to_base64(&blurhash, width, height, 1.0)
+pub fn decode_thumbhash(thumbhash: String) -> String {
+    util::decode_thumbhash_to_base64(&thumbhash)
 }
 
 /// Download and decrypt an attachment
@@ -255,7 +249,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 drop(state); // Release lock before DB call
 
                                 let _ = db::update_attachment_downloaded_status(
-                                    handle,
                                     &chat_id_for_db,
                                     &msg_id_clone,
                                     &attachment_id_clone,
@@ -426,7 +419,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     // Drop the STATE lock before performing async I/O
                     drop(state);
 
-                    let _ = db::save_message(handle.clone(), &npub, &updated_message).await;
+                    let _ = db::save_message(&npub, &updated_message).await;
                 }
             }
 
@@ -436,6 +429,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 }
 
 // Handler list for this module (for reference):
-// - generate_blurhash_preview
-// - decode_blurhash
+// - generate_thumbhash_preview
+// - decode_thumbhash
 // - download_attachment

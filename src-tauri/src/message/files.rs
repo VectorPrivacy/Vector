@@ -9,12 +9,12 @@
 use std::sync::Arc;
 use nostr_sdk::prelude::*;
 use tokio::sync::Mutex as TokioMutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use crate::util;
 use crate::shared::image::read_file_checked;
 
-use super::types::{CachedCompressedImage, AttachmentFile, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
+use super::types::{CachedCompressedImage, AttachmentFile, FileBytes, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
 use super::compression::{compress_bytes_internal, compress_image_internal};
 use super::sending::{message, MessageSendResult};
 
@@ -22,12 +22,12 @@ use super::sending::{message, MessageSendResult};
 use crate::android::filesystem;
 
 /// Cache for bytes received from JavaScript (for Android file handling)
-static JS_FILE_CACHE: Lazy<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
-    Lazy::new(|| std::sync::Mutex::new(None));
+static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<FileBytes>, String, String)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Cache for compressed bytes from JavaScript file
-static JS_COMPRESSION_CACHE: Lazy<TokioMutex<Option<CachedCompressedImage>>> =
-    Lazy::new(|| TokioMutex::new(None));
+static JS_COMPRESSION_CACHE: LazyLock<TokioMutex<Option<CachedCompressedImage>>> =
+    LazyLock::new(|| TokioMutex::new(None));
 
 /// Response from caching file bytes, includes preview for images
 #[derive(serde::Serialize)]
@@ -53,7 +53,7 @@ pub fn cache_file_bytes(bytes: Vec<u8>, file_name: String, extension: String) ->
         None
     };
 
-    let bytes = Arc::new(bytes);
+    let bytes = Arc::new(FileBytes::Owned(bytes));
 
     let mut cache = JS_FILE_CACHE.lock().unwrap();
     *cache = Some((bytes, file_name.clone(), extension.clone()));
@@ -198,9 +198,9 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
     // Process images: generate metadata and optionally compress
     let (bytes, extension, img_meta) = if is_image {
         if let Ok(img) = ::image::load_from_memory(&original_bytes) {
-            let blurhash_meta = crate::util::generate_blurhash_from_image(&img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            let thumbhash_meta = crate::util::generate_thumbhash_from_image(&img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width: img.width(),
                     height: img.height(),
                 });
@@ -209,14 +209,14 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
             // Other images: compress if requested
             if original_extension == "gif" || !use_compression {
                 // No compression - just use original bytes with metadata
-                (original_bytes, original_extension, blurhash_meta)
+                (original_bytes, original_extension, thumbhash_meta)
             } else {
                 // Compress on-the-fly since pre-compression wasn't ready
                 use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
                 let rgba_img = img.to_rgba8();
                 match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
-                    Ok(encoded) => (Arc::new(encoded.bytes), encoded.extension.to_string(), blurhash_meta),
-                    Err(_) => (original_bytes, original_extension, blurhash_meta),
+                    Ok(encoded) => (Arc::new(FileBytes::Owned(encoded.bytes)), encoded.extension.to_string(), thumbhash_meta),
+                    Err(_) => (original_bytes, original_extension, thumbhash_meta),
                 }
             }
         } else {
@@ -291,7 +291,7 @@ pub async fn send_file_bytes(
             None // GIFs or no compression - just get metadata
         };
 
-        match compress_bytes_internal(Arc::new(file_bytes), &extension, min_savings) {
+        match compress_bytes_internal(Arc::new(FileBytes::Owned(file_bytes)), &extension, min_savings) {
             Ok(result) => AttachmentFile {
                 bytes: result.bytes,
                 extension: result.extension,
@@ -305,7 +305,7 @@ pub async fn send_file_bytes(
     } else {
         // Non-image file - send as-is
         AttachmentFile {
-            bytes: Arc::new(file_bytes),
+            bytes: Arc::new(FileBytes::Owned(file_bytes)),
             extension,
             img_meta: None,
         }
@@ -320,7 +320,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
-            let bytes = read_file_checked(&file_path)?;
+            let file_bytes = read_file_checked(&file_path)?;
 
             let extension = file_path
                 .rsplit('.')
@@ -329,7 +329,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 .to_lowercase();
 
             AttachmentFile {
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(file_bytes),
                 img_meta: None,
                 extension,
             }
@@ -354,7 +354,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                     filesystem::read_android_uri(file_path)?
                 } else {
                     // Regular file path (e.g., marketplace apps) - use standard file I/O
-                    let bytes = read_file_checked(&file_path)?;
+                    let file_bytes = read_file_checked(&file_path)?;
 
                     let extension = file_path
                         .rsplit('.')
@@ -363,7 +363,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                         .to_lowercase();
 
                     AttachmentFile {
-                        bytes: Arc::new(bytes),
+                        bytes: Arc::new(file_bytes),
                         img_meta: None,
                         extension,
                     }
@@ -375,9 +375,9 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     // Generate image metadata if the file is an image
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
         if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
-            attachment_file.img_meta = util::generate_blurhash_from_image(&img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            attachment_file.img_meta = util::generate_thumbhash_from_image(&img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width: img.width(),
                     height: img.height(),
                 });
@@ -574,10 +574,12 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
 
     #[cfg(not(target_os = "android"))]
     {
-        let bytes = std::fs::read(&file_path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
+        let file = std::fs::File::open(&file_path)
+            .map_err(|e| format!("Failed to open file: {}", e))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| format!("Failed to mmap file: {}", e))?;
 
-        let img = ::image::load_from_memory(&bytes)
+        let img = ::image::load_from_memory(&mmap)
             .map_err(|e| format!("Failed to decode image: {}", e))?;
 
         let (width, height) = (img.width(), img.height());
@@ -600,7 +602,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             } else {
                 drop(cache);
                 // Fall back to reading directly (may fail if permission expired)
-                Arc::new(filesystem::read_android_uri_bytes(file_path)?.0)
+                Arc::new(FileBytes::Owned(filesystem::read_android_uri_bytes(file_path)?.0))
             }
         };
 
@@ -625,7 +627,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
-            let bytes = read_file_checked(&file_path)?;
+            let file_bytes = read_file_checked(&file_path)?;
 
             let extension = file_path
                 .rsplit('.')
@@ -634,7 +636,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 .to_lowercase();
 
             AttachmentFile {
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(file_bytes),
                 img_meta: None,
                 extension,
             }
@@ -659,7 +661,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                     filesystem::read_android_uri(file_path)?
                 } else {
                     // Regular file path (e.g., marketplace apps) - use standard file I/O
-                    let bytes = read_file_checked(&file_path)?;
+                    let file_bytes = read_file_checked(&file_path)?;
 
                     let extension = file_path
                         .rsplit('.')
@@ -668,7 +670,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                         .to_lowercase();
 
                     AttachmentFile {
-                        bytes: Arc::new(bytes),
+                        bytes: Arc::new(file_bytes),
                         img_meta: None,
                         extension,
                     }
@@ -692,9 +694,9 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 img
             };
 
-            attachment_file.img_meta = crate::util::generate_blurhash_from_image(&resized_img)
-                .map(|blurhash| ImageMetadata {
-                    blurhash,
+            attachment_file.img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
+                .map(|thumbhash| ImageMetadata {
+                    thumbhash,
                     width: resized_img.width(),
                     height: resized_img.height(),
                 });
@@ -720,7 +722,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 attachment_file.extension = encoded.extension.to_string();
             }
 
-            attachment_file.bytes = Arc::new(compressed_bytes);
+            attachment_file.bytes = Arc::new(FileBytes::Owned(compressed_bytes));
         }
     }
 

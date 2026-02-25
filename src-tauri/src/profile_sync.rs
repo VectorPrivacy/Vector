@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, LazyLock};
 use std::time::{Duration, Instant};
-use lazy_static::lazy_static;
 use crate::{profile, STATE};
 
 /// Priority levels for profile syncing
@@ -177,10 +176,8 @@ impl ProfileSyncQueue {
 }
 
 // Global profile sync queue
-lazy_static! {
-    static ref PROFILE_SYNC_QUEUE: Arc<Mutex<ProfileSyncQueue>> = 
-        Arc::new(Mutex::new(ProfileSyncQueue::new()));
-}
+static PROFILE_SYNC_QUEUE: LazyLock<Arc<Mutex<ProfileSyncQueue>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(ProfileSyncQueue::new())));
 
 /// Background processor that continuously processes the profile sync queue
 pub async fn start_profile_sync_processor() {

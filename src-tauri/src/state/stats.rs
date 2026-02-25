@@ -155,7 +155,7 @@ impl<T: DeepSize> DeepSize for Option<T> {
 
 impl DeepSize for ImageMetadata {
     fn deep_size(&self) -> usize {
-        std::mem::size_of::<ImageMetadata>() + self.blurhash.capacity()
+        std::mem::size_of::<ImageMetadata>() + self.thumbhash.capacity()
     }
 }
 
@@ -168,7 +168,7 @@ impl DeepSize for Attachment {
             + self.extension.capacity()
             + self.url.capacity()
             + self.path.capacity()
-            + self.img_meta.as_ref().map(|m| m.blurhash.capacity()).unwrap_or(0)
+            + self.img_meta.as_ref().map(|m| m.thumbhash.capacity()).unwrap_or(0)
             + self.webxdc_topic.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.group_id.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.original_hash.as_ref().map(|s| s.capacity()).unwrap_or(0)

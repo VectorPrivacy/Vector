@@ -12,7 +12,7 @@ use ripemd::Ripemd160;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use tauri::{AppHandle, Runtime, Emitter};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -44,14 +44,14 @@ const PROMO_KEY_ITERATIONS: u32 = 12_500_000;
 const BALANCE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// HTTP client for Blockbook API calls
-static PIVX_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+static PIVX_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .build()
         .expect("Failed to create HTTP client")
 });
 
 /// Balance cache: address -> (balance_piv, last_fetch_time)
-static BALANCE_CACHE: Lazy<RwLock<HashMap<String, (f64, Instant)>>> = Lazy::new(|| {
+static BALANCE_CACHE: LazyLock<RwLock<HashMap<String, (f64, Instant)>>> = LazyLock::new(|| {
     RwLock::new(HashMap::new())
 });
 
@@ -160,72 +160,16 @@ fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
     hasher.finalize().into()
 }
 
-/// Base58 encoding
+/// Base58 encoding (delegates to the `bs58` crate)
 fn base58_encode(data: &[u8]) -> String {
-    // Handle leading zeros
-    let mut leading_zeros = 0;
-    for byte in data {
-        if *byte == 0 {
-            leading_zeros += 1;
-        } else {
-            break;
-        }
-    }
-
-    // Convert to big integer (simple implementation)
-    let mut num = data.iter().fold(
-        num_bigint::BigUint::from(0u32),
-        |acc, &byte| acc * 256u32 + byte as u32,
-    );
-
-    let mut result = Vec::new();
-    let base = num_bigint::BigUint::from(58u32);
-
-    while num > num_bigint::BigUint::from(0u32) {
-        let remainder = (&num % &base).to_u32_digits();
-        let idx = if remainder.is_empty() { 0 } else { remainder[0] as usize };
-        result.push(BASE58_ALPHABET[idx]);
-        num /= &base;
-    }
-
-    // Add leading '1's for zero bytes
-    for _ in 0..leading_zeros {
-        result.push(b'1');
-    }
-
-    result.reverse();
-    String::from_utf8(result).unwrap_or_default()
+    bs58::encode(data).into_string()
 }
 
-/// Base58 decoding
+/// Base58 decoding (delegates to the `bs58` crate)
 fn base58_decode(encoded: &str) -> Result<Vec<u8>, String> {
-    let mut num = num_bigint::BigUint::from(0u32);
-    let base = num_bigint::BigUint::from(58u32);
-
-    let mut leading_ones = 0;
-    for c in encoded.chars() {
-        if c == '1' {
-            leading_ones += 1;
-        } else {
-            break;
-        }
-    }
-
-    for c in encoded.chars() {
-        let idx = BASE58_ALPHABET
-            .iter()
-            .position(|&b| b as char == c)
-            .ok_or_else(|| format!("Invalid Base58 character: {}", c))?;
-        num = num * &base + idx as u32;
-    }
-
-    let mut bytes = num.to_bytes_be();
-
-    // Add leading zeros
-    let mut result = vec![0u8; leading_ones];
-    result.append(&mut bytes);
-
-    Ok(result)
+    bs58::decode(encoded)
+        .into_vec()
+        .map_err(|e| format!("Base58 decode error: {}", e))
 }
 
 /// Derive PIVX address from private key
@@ -632,8 +576,8 @@ pub async fn build_sweep_transaction(
 // ============================================================================
 
 /// Check if a promo code already exists in the database
-fn promo_code_exists<R: Runtime>(handle: &AppHandle<R>, code: &str) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+fn promo_code_exists<R: Runtime>(_handle: &AppHandle<R>, code: &str) -> Result<bool, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pivx_promos WHERE gift_code = ?1",
         rusqlite::params![code],
@@ -644,21 +588,21 @@ fn promo_code_exists<R: Runtime>(handle: &AppHandle<R>, code: &str) -> Result<bo
 
 /// Save a promo to the database
 async fn save_promo<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     gift_code: &str,
     address: &str,
     privkey: &[u8; 32],
 ) -> Result<(), String> {
     // Conditionally encrypt private key based on user setting
     let privkey_hex = bytes_to_hex_string(privkey);
-    let privkey_encrypted = crate::crypto::maybe_encrypt(handle, privkey_hex).await;
+    let privkey_encrypted = crate::crypto::maybe_encrypt(privkey_hex).await;
 
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
 
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
     conn.execute(
         "INSERT INTO pivx_promos (gift_code, address, privkey_encrypted, created_at, status)
          VALUES (?1, ?2, ?3, ?4, 'active')",
@@ -671,10 +615,10 @@ async fn save_promo<R: Runtime>(
 /// Decrypt an encrypted private key string and convert to bytes
 /// Used for retrieving stored promo privkeys without re-deriving (avoids PoW cost)
 async fn decrypt_privkey_bytes<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     privkey_encrypted: String,
 ) -> Result<[u8; 32], String> {
-    let privkey_hex = crate::crypto::maybe_decrypt(handle, privkey_encrypted)
+    let privkey_hex = crate::crypto::maybe_decrypt(privkey_encrypted)
         .await
         .map_err(|_| "Failed to decrypt private key".to_string())?;
 
@@ -698,7 +642,7 @@ async fn get_active_promos_with_keys<R: Runtime>(
 ) -> Result<Vec<DecryptedPromo>, String> {
     // Query all active promos with balances
     let encrypted_promos: Vec<(String, String, String, f64)> = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let result = {
             let mut stmt = conn.prepare(
                 "SELECT gift_code, address, privkey_encrypted, COALESCE(amount_piv, 0)
@@ -728,11 +672,11 @@ async fn get_active_promos_with_keys<R: Runtime>(
 /// Update promo status in database
 /// For 'claimed' or 'sent' status, the promo is deleted (funds are gone)
 fn update_promo_status<R: Runtime>(
-    handle: &AppHandle<R>,
+    _handle: &AppHandle<R>,
     gift_code: &str,
     status: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // For claimed/sent promos, delete them entirely (no need to track spent promos)
     if status == "claimed" || status == "sent" {
@@ -752,8 +696,8 @@ fn update_promo_status<R: Runtime>(
 /// Find a reusable zero-balance promo for deposits
 /// Returns (gift_code, address, created_at) if found, None otherwise
 /// This helps avoid accumulating unused addresses
-fn find_reusable_promo<R: Runtime>(handle: &AppHandle<R>) -> Result<Option<(String, String, u64)>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+fn find_reusable_promo<R: Runtime>(_handle: &AppHandle<R>) -> Result<Option<(String, String, u64)>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Find promos that:
     // 1. Are active status (not 'sent' or 'claimed')
@@ -788,7 +732,7 @@ async fn get_or_create_deposit_promo<R: Runtime>(handle: &AppHandle<R>) -> Resul
             });
         }
         // If it has balance, update the DB and continue to create new promo
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![balance, gift_code],
@@ -851,11 +795,11 @@ pub async fn pivx_get_promo_balance(
 /// Get wallet total balance (sum of all active promos)
 #[tauri::command]
 pub async fn pivx_get_wallet_balance<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<f64, String> {
     // Fetch addresses in a separate scope to release DB connection before await
     let addresses: Vec<String> = {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let mut stmt = conn.prepare(
             "SELECT address FROM pivx_promos WHERE status = 'active'"
         ).map_err(|e| format!("Query failed: {}", e))?;
@@ -882,9 +826,9 @@ pub async fn pivx_get_wallet_balance<R: Runtime>(
 /// List all promos for the wallet
 #[tauri::command]
 pub async fn pivx_list_promos<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<Vec<PivxPromo>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT gift_code, address, amount_piv, status, created_at
@@ -970,7 +914,7 @@ pub async fn pivx_sweep_promo<R: Runtime>(
 /// Set user's personal PIVX receiving address (empty string clears it)
 #[tauri::command]
 pub fn pivx_set_wallet_address<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     address: String,
 ) -> Result<(), String> {
     // Validate address format only if not empty
@@ -978,15 +922,15 @@ pub fn pivx_set_wallet_address<R: Runtime>(
         decode_pivx_address(&address)?;
     }
 
-    crate::db::set_sql_setting(handle, "pivx_wallet_address".to_string(), address)
+    crate::db::set_sql_setting("pivx_wallet_address".to_string(), address)
 }
 
 /// Get user's personal PIVX receiving address
 #[tauri::command]
 pub fn pivx_get_wallet_address<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    crate::db::get_sql_setting(handle, "pivx_wallet_address".to_string())
+    crate::db::get_sql_setting("pivx_wallet_address".to_string())
 }
 
 /// Claim a promo code from a message
@@ -1004,7 +948,7 @@ pub async fn pivx_claim_from_message<R: Runtime>(
     }
 
     // Check if auto-withdraw address is set (filter out empty strings)
-    let auto_withdraw_address = crate::db::get_sql_setting(handle.clone(), "pivx_wallet_address".to_string())
+    let auto_withdraw_address = crate::db::get_sql_setting("pivx_wallet_address".to_string())
         .ok()
         .flatten()
         .filter(|s| !s.is_empty());
@@ -1039,7 +983,7 @@ pub async fn pivx_claim_from_message<R: Runtime>(
 
         // Update the new promo's amount in the database
         {
-            let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+            let conn = crate::account_manager::get_db_connection_guard_static()?;
             let _ = conn.execute(
                 "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
                 rusqlite::params![balance, new_code],
@@ -1095,7 +1039,7 @@ pub async fn pivx_import_promo<R: Runtime>(
 /// Pass force_refresh=true to bypass cache (e.g., after a transaction)
 #[tauri::command]
 pub async fn pivx_refresh_balances<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     force_refresh: Option<bool>,
 ) -> Result<Vec<PivxPromo>, String> {
     // Clear cache if forced refresh
@@ -1105,7 +1049,7 @@ pub async fn pivx_refresh_balances<R: Runtime>(
 
     // Fetch promos in a separate scope to release DB connection before await
     let promos: Vec<(String, String, String, u64)> = {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let mut stmt = conn.prepare(
             "SELECT gift_code, address, status, created_at FROM pivx_promos WHERE status = 'active'"
         ).map_err(|e| format!("Query failed: {}", e))?;
@@ -1139,7 +1083,7 @@ pub async fn pivx_refresh_balances<R: Runtime>(
 
     // Batch update all balances in database
     {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         for (gift_code, address, status, created_at) in &promos {
             let balance = balances.get(address).copied().unwrap_or(0.0);
 
@@ -1159,9 +1103,6 @@ pub async fn pivx_refresh_balances<R: Runtime>(
 
     Ok(results)
 }
-
-// We need num-bigint for Base58 encoding
-use num_bigint;
 
 // ============================================================================
 // Send PIVX Payment via Chat
@@ -1277,7 +1218,7 @@ pub async fn pivx_send_payment<R: Runtime>(
     // Save the send promo (it now has the exact amount)
     save_promo(&handle, &send_promo.0, &send_promo.1, &send_promo.2).await?;
     {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![amount_piv, send_promo.0],
@@ -1287,7 +1228,7 @@ pub async fn pivx_send_payment<R: Runtime>(
     let change_piv = change_sats as f64 / 100_000_000.0;
     if change_sats > 0 {
         save_promo(&handle, &change_promo.0, &change_promo.1, &change_promo.2).await?;
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![change_piv, change_promo.0],
@@ -1342,7 +1283,7 @@ pub async fn pivx_send_payment<R: Runtime>(
 
     // Delete sent promo from our DB (funds are transferred to recipient)
     {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let _ = conn.execute(
             "DELETE FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![send_promo.0],
@@ -1367,7 +1308,7 @@ pub async fn pivx_send_payment<R: Runtime>(
         .npub(Some(my_public_key.to_bech32().unwrap_or_default()))
         .build();
     let event_timestamp = stored_event.created_at;
-    let _ = crate::db::save_pivx_payment_event(&handle, &receiver, stored_event).await;
+    let _ = crate::db::save_pivx_payment_event(&receiver, stored_event).await;
 
     // Emit event to frontend
     handle.emit("pivx_payment_received", serde_json::json!({
@@ -1396,7 +1337,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
     // Verify the promo exists and get its balance
     let promo_data: (String, f64) = {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let result = conn.query_row(
             "SELECT address, COALESCE(amount_piv, 0) FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![gift_code],
@@ -1470,7 +1411,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 
     // Delete sent promo from DB (funds are gone, no need to track it)
     {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let _ = conn.execute(
             "DELETE FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![gift_code],
@@ -1495,7 +1436,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         .npub(Some(my_public_key.to_bech32().unwrap_or_default()))
         .build();
     let event_timestamp = stored_event.created_at;
-    let _ = crate::db::save_pivx_payment_event(&handle, &receiver, stored_event).await;
+    let _ = crate::db::save_pivx_payment_event(&receiver, stored_event).await;
 
     // Emit event to frontend so our own send shows up in chat immediately
     handle.emit("pivx_payment_received", serde_json::json!({
@@ -1515,10 +1456,10 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
 /// Get all PIVX payments for a chat (for loading history)
 #[tauri::command]
 pub async fn pivx_get_chat_payments<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     conversation_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let events = crate::db::get_pivx_payments_for_chat(&handle, &conversation_id).await?;
+    let events = crate::db::get_pivx_payments_for_chat(&conversation_id).await?;
 
     // Convert StoredEvents to frontend-friendly format
     let payments: Vec<serde_json::Value> = events.iter().map(|event| {
@@ -1895,7 +1836,7 @@ pub async fn pivx_withdraw<R: Runtime>(
     if change_sats > 0 {
         save_promo(&handle, &change_promo.0, &change_promo.1, &change_promo.2).await?;
         // Update the change promo's amount
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
         let _ = conn.execute(
             "UPDATE pivx_promos SET amount_piv = ?1 WHERE gift_code = ?2",
             rusqlite::params![change_piv, change_promo.0],
@@ -1977,16 +1918,16 @@ pub async fn pivx_get_price(currency: String) -> Result<CurrencyInfo, String> {
 /// Set user's preferred display currency
 #[tauri::command]
 pub fn pivx_set_preferred_currency<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
     currency: String,
 ) -> Result<(), String> {
-    crate::db::set_sql_setting(handle, "pivx_preferred_currency".to_string(), currency.to_uppercase())
+    crate::db::set_sql_setting("pivx_preferred_currency".to_string(), currency.to_uppercase())
 }
 
 /// Get user's preferred display currency
 #[tauri::command]
 pub fn pivx_get_preferred_currency<R: Runtime>(
-    handle: AppHandle<R>,
+    _handle: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    crate::db::get_sql_setting(handle, "pivx_preferred_currency".to_string())
+    crate::db::get_sql_setting("pivx_preferred_currency".to_string())
 }

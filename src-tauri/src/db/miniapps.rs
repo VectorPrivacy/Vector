@@ -7,7 +7,6 @@
 //! - Marketplace app version tracking
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
 
 // ============================================================================
 // Mini Apps History Functions
@@ -33,18 +32,16 @@ pub struct MiniAppHistoryEntry {
 
 /// Record a Mini App being opened (upsert - insert or update)
 /// If the same name+src_url combo exists, update the attachment_ref, increment count, and update timestamp
-pub fn record_miniapp_opened<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn record_miniapp_opened(
     name: String,
     src_url: String,
     attachment_ref: String,
 ) -> Result<(), String> {
-    record_miniapp_opened_with_metadata(handle, name, src_url, attachment_ref, String::new(), None, None)
+    record_miniapp_opened_with_metadata(name, src_url, attachment_ref, String::new(), None, None)
 }
 
 /// Record a Mini App being opened with additional metadata (categories, marketplace_id, and version)
-pub fn record_miniapp_opened_with_metadata<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn record_miniapp_opened_with_metadata(
     name: String,
     src_url: String,
     attachment_ref: String,
@@ -52,7 +49,7 @@ pub fn record_miniapp_opened_with_metadata<R: Runtime>(
     marketplace_id: Option<String>,
     installed_version: Option<String>,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -82,11 +79,10 @@ pub fn record_miniapp_opened_with_metadata<R: Runtime>(
 }
 
 /// Get Mini Apps history sorted by last opened (most recent first)
-pub fn get_miniapps_history<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn get_miniapps_history(
     limit: Option<i64>,
 ) -> Result<Vec<MiniAppHistoryEntry>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let limit_val = limit.unwrap_or(50);
 
@@ -122,11 +118,10 @@ pub fn get_miniapps_history<R: Runtime>(
 }
 
 /// Toggle the favorite status of a Mini App by its ID
-pub fn toggle_miniapp_favorite<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn toggle_miniapp_favorite(
     id: i64,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     // Toggle the is_favorite value and return the new state
     conn.execute(
@@ -146,12 +141,11 @@ pub fn toggle_miniapp_favorite<R: Runtime>(
 }
 
 /// Set the favorite status of a Mini App by its ID
-pub fn set_miniapp_favorite<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn set_miniapp_favorite(
     id: i64,
     is_favorite: bool,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "UPDATE miniapps_history SET is_favorite = ?1 WHERE id = ?2",
@@ -163,11 +157,10 @@ pub fn set_miniapp_favorite<R: Runtime>(
 }
 
 /// Remove a Mini App from history by name
-pub fn remove_miniapp_from_history<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn remove_miniapp_from_history(
     name: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "DELETE FROM miniapps_history WHERE name = ?1",
@@ -179,12 +172,11 @@ pub fn remove_miniapp_from_history<R: Runtime>(
 }
 
 /// Update the installed version for a marketplace app
-pub fn update_miniapp_version<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn update_miniapp_version(
     marketplace_id: &str,
     version: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "UPDATE miniapps_history SET installed_version = ?1 WHERE marketplace_id = ?2",
@@ -196,11 +188,10 @@ pub fn update_miniapp_version<R: Runtime>(
 }
 
 /// Get the installed version for a marketplace app by its marketplace_id
-pub fn get_miniapp_installed_version<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn get_miniapp_installed_version(
     marketplace_id: &str,
 ) -> Result<Option<String>, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let result = conn.query_row(
         "SELECT installed_version FROM miniapps_history WHERE marketplace_id = ?1",
@@ -223,11 +214,10 @@ pub fn get_miniapp_installed_version<R: Runtime>(
 
 /// Get all granted permissions for a Mini App by its file hash
 /// Returns a comma-separated string of granted permission names
-pub fn get_miniapp_granted_permissions<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn get_miniapp_granted_permissions(
     file_hash: &str,
 ) -> Result<String, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT permission FROM miniapp_permissions WHERE file_hash = ?1 AND granted = 1"
@@ -244,13 +234,12 @@ pub fn get_miniapp_granted_permissions<R: Runtime>(
 }
 
 /// Set the granted status of a permission for a Mini App by its file hash
-pub fn set_miniapp_permission<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn set_miniapp_permission(
     file_hash: &str,
     permission: &str,
     granted: bool,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -274,12 +263,11 @@ pub fn set_miniapp_permission<R: Runtime>(
 
 /// Set multiple permissions at once for a Mini App by its file hash
 /// Uses a transaction to ensure all permissions are set atomically
-pub fn set_miniapp_permissions<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn set_miniapp_permissions(
     file_hash: &str,
     permissions: &[(&str, bool)],
 ) -> Result<(), String> {
-    let mut conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let mut conn = crate::account_manager::get_write_connection_guard_static()?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -310,11 +298,10 @@ pub fn set_miniapp_permissions<R: Runtime>(
 
 /// Check if an app has been prompted for permissions yet (by file hash)
 /// Returns true if any permission record exists for this hash
-pub fn has_miniapp_permission_prompt<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn has_miniapp_permission_prompt(
     file_hash: &str,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM miniapp_permissions WHERE file_hash = ?1)",
@@ -327,11 +314,10 @@ pub fn has_miniapp_permission_prompt<R: Runtime>(
 }
 
 /// Revoke all permissions for a Mini App by its file hash
-pub fn revoke_all_miniapp_permissions<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn revoke_all_miniapp_permissions(
     file_hash: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "DELETE FROM miniapp_permissions WHERE file_hash = ?1",
@@ -343,12 +329,11 @@ pub fn revoke_all_miniapp_permissions<R: Runtime>(
 }
 
 /// Copy all permissions from one file hash to another (for app updates)
-pub fn copy_miniapp_permissions<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn copy_miniapp_permissions(
     old_hash: &str,
     new_hash: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     // Copy all permission records from old hash to new hash
     conn.execute(

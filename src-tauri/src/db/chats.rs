@@ -6,7 +6,6 @@
 //! - ID cache management for chats and users
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
 
 use crate::{Chat, ChatType};
 use crate::message::compact::{encode_message_id, decode_message_id, NpubInterner};
@@ -26,8 +25,7 @@ pub struct SlimChatDB {
 
 /// Helper function to get or create integer chat ID from identifier
 /// Uses in-memory cache for maximum speed, only hits DB on cache miss
-pub(crate) fn get_or_create_chat_id<R: Runtime>(
-    handle: &AppHandle<R>,
+pub(crate) fn get_or_create_chat_id(
     chat_identifier: &str,
 ) -> Result<i64, String> {
     // Check cache first (fast path - no DB access)
@@ -40,7 +38,7 @@ pub(crate) fn get_or_create_chat_id<R: Runtime>(
 
     // Cache miss - uses write connection since we may INSERT
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     // Try to get existing ID from database
     let existing_id: Option<i64> = conn.query_row(
@@ -91,8 +89,7 @@ pub(crate) fn get_or_create_chat_id<R: Runtime>(
 
 /// Helper function to get integer chat ID from identifier (lookup only, no creation)
 /// Returns an error if the chat doesn't exist
-pub fn get_chat_id_by_identifier<R: Runtime>(
-    handle: &AppHandle<R>,
+pub fn get_chat_id_by_identifier(
     chat_identifier: &str,
 ) -> Result<i64, String> {
     // Check cache first (fast path - no DB access)
@@ -105,7 +102,7 @@ pub fn get_chat_id_by_identifier<R: Runtime>(
 
     // Cache miss - check database
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let id: i64 = conn.query_row(
         "SELECT id FROM chats WHERE chat_identifier = ?1",
@@ -126,8 +123,7 @@ pub fn get_chat_id_by_identifier<R: Runtime>(
 
 /// Helper function to get or create integer user ID from npub
 /// Uses in-memory cache for maximum speed, only hits DB on cache miss
-pub(crate) fn get_or_create_user_id<R: Runtime>(
-    handle: &AppHandle<R>,
+pub(crate) fn get_or_create_user_id(
     npub: &str,
 ) -> Result<Option<i64>, String> {
     // If npub is empty, return None (for messages without author)
@@ -145,7 +141,7 @@ pub(crate) fn get_or_create_user_id<R: Runtime>(
 
     // Cache miss - check database
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Try to get existing ID from database
     let existing_id: Option<i64> = conn.query_row(
@@ -180,14 +176,14 @@ pub(crate) fn get_or_create_user_id<R: Runtime>(
 
 /// Preload all ID mappings into memory cache on app startup
 /// This ensures all subsequent lookups are instant (no DB access)
-pub async fn preload_id_caches<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
+pub async fn preload_id_caches() -> Result<(), String> {
     let _npub = match crate::account_manager::get_current_account() {
         Ok(n) => n,
         Err(_) => return Ok(()), // No account selected, skip
     };
 
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     // Load all chat ID mappings
     {
@@ -272,9 +268,9 @@ impl SlimChatDB {
 }
 
 /// Get all chats from the database
-pub async fn get_all_chats<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<SlimChatDB>, String> {
+pub async fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_db_connection_guard(handle)?;
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare("SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted FROM chats ORDER BY created_at DESC")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
@@ -312,9 +308,9 @@ pub async fn get_all_chats<R: Runtime>(handle: &AppHandle<R>) -> Result<Vec<Slim
 ///
 /// Takes a pre-built `SlimChatDB` so callers can build it while holding STATE
 /// (cheap — just metadata, no messages), drop the lock, then call this.
-pub async fn save_slim_chat<R: Runtime>(handle: AppHandle<R>, slim_chat: SlimChatDB) -> Result<(), String> {
+pub async fn save_slim_chat(slim_chat: SlimChatDB) -> Result<(), String> {
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     let chat_identifier = &slim_chat.id;
 
@@ -350,9 +346,9 @@ pub async fn save_slim_chat<R: Runtime>(handle: AppHandle<R>, slim_chat: SlimCha
 }
 
 /// Delete a chat and all its messages from the database
-pub async fn delete_chat<R: Runtime>(handle: AppHandle<R>, chat_id: &str) -> Result<(), String> {
+pub async fn delete_chat(chat_id: &str) -> Result<(), String> {
     // RAII guard ensures connection is returned even on error
-    let conn = crate::account_manager::get_write_connection_guard(&handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
         "DELETE FROM chats WHERE id = ?1",

@@ -9,13 +9,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex as TokioMutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 /// Tracks consecutive processing failures per group for desync detection.
 /// If a group has too many consecutive failures, it likely means the member
 /// missed commits and is permanently desynced (can't decrypt new messages).
-static GROUP_FAILURE_COUNTS: Lazy<TokioMutex<HashMap<String, u32>>> =
-    Lazy::new(|| TokioMutex::new(HashMap::new()));
+static GROUP_FAILURE_COUNTS: LazyLock<TokioMutex<HashMap<String, u32>>> =
+    LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
 /// Threshold for consecutive failures before considering a group desynced.
 /// After this many consecutive unprocessable/error events, we alert the user.
@@ -98,7 +98,11 @@ pub struct MlsGroupMetadata {
     pub engine_group_id: String,
     pub creator_pubkey: String,
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub avatar_ref: Option<String>,
+    #[serde(default)]
+    pub avatar_cached: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     // Flag indicating if we were evicted/kicked from this group

@@ -1,6 +1,9 @@
 use nostr_sdk::prelude::*;
 use tauri::Manager;
 
+#[macro_use]
+mod macros;
+
 mod crypto;
 
 mod db;
@@ -22,7 +25,7 @@ mod util;
 #[path = "android/mod.rs"]
 mod android;
 
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 mod whisper;
 
 mod message;
@@ -70,9 +73,8 @@ mod simd;
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility
 pub(crate) use state::{
-    SyncMode,
     TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
-    TRUSTED_RELAYS, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
+    TRUSTED_RELAYS, active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
     get_blossom_servers, PendingInviteAcceptance,
 };
@@ -185,6 +187,13 @@ pub fn run() {
                 }
             });
 
+            // Set the static app data directory FIRST (before any DB access)
+            // This must happen before auto_select_account so that static DB
+            // connection functions can resolve paths correctly.
+            if let Ok(data_dir) = handle.path().app_data_dir() {
+                account_manager::set_app_data_dir(data_dir);
+            }
+
             // Auto-select account on startup if one exists but isn't selected
             {
                 let handle_clone = handle.clone();
@@ -193,9 +202,8 @@ pub fn run() {
 
             // Startup log: persistent MLS device_id if present
             {
-                let handle_clone = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Ok(Some(id)) = db::load_mls_device_id(&handle_clone).await {
+                    if let Ok(Some(id)) = db::load_mls_device_id().await {
                         println!("[MLS] Found persistent mls_device_id at startup: {}", id);
                     }
                 });
@@ -253,7 +261,7 @@ pub fn run() {
             profile::update_status,
             profile::upload_avatar,
             chat::mark_as_read,
-            profile::toggle_muted,
+            chat::toggle_chat_mute,
             profile::set_nickname,
             message::message,
             message::paste_message,
@@ -283,7 +291,6 @@ pub fn run() {
             message::fetch_msg_metadata,
             // Sync commands (commands/sync.rs)
             commands::sync::fetch_messages,
-            commands::sync::deep_rescan,
             commands::sync::is_scanning,
             // Messaging commands (commands/messaging.rs)
             commands::messaging::get_chat_messages_paginated,
@@ -307,6 +314,7 @@ pub fn run() {
             commands::media::download_whisper_model,
             commands::messaging::update_unread_counter,
             commands::system::get_platform_features,
+            commands::system::get_device_memory,
             // Invite and badge commands (commands/invites.rs)
             commands::invites::get_or_create_invite_code,
             commands::invites::accept_invite_code,
@@ -314,6 +322,12 @@ pub fn run() {
             commands::invites::check_fawkes_badge,
             commands::system::get_storage_info,
             commands::system::clear_storage,
+            commands::system::check_battery_optimized,
+            commands::system::request_battery_optimization,
+            commands::system::get_background_service_enabled,
+            commands::system::set_background_service_enabled,
+            commands::system::get_background_service_prompted,
+            commands::system::set_background_service_prompted,
             // MLS commands (commands/mls.rs)
             commands::mls::load_mls_device_id,
             commands::mls::load_mls_keypackages,
@@ -322,6 +336,9 @@ pub fn run() {
             commands::mls::list_group_cursors,
             commands::mls::create_mls_group,
             commands::mls::create_group_chat,
+            commands::mls::upload_group_avatar,
+            commands::mls::cache_group_avatar,
+            commands::mls::cache_invite_avatar,
             commands::mls::invite_member_to_group,
             commands::mls::remove_mls_member_device,
             commands::mls::sync_mls_groups_now,
@@ -445,8 +462,8 @@ pub fn run() {
             commands::relays::get_relay_logs,
             commands::relays::monitor_relay_connections,
             // Attachment commands (commands/attachments.rs)
-            commands::attachments::generate_blurhash_preview,
-            commands::attachments::decode_blurhash,
+            commands::attachments::generate_thumbhash_preview,
+            commands::attachments::decode_thumbhash,
             commands::attachments::download_attachment,
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,
@@ -462,10 +479,12 @@ pub fn run() {
             commands::encryption::enable_encryption,
             commands::encryption::rekey_encryption,
             commands::encryption::verify_credential,
-            #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+            #[cfg(feature = "whisper")]
             whisper::delete_whisper_model,
-            #[cfg(all(not(target_os = "android"), feature = "whisper"))]
-            whisper::list_models
+            #[cfg(feature = "whisper")]
+            whisper::list_models,
+            #[cfg(feature = "whisper")]
+            whisper::cancel_whisper_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

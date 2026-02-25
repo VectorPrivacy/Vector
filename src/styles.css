@@ -36,6 +36,14 @@
   mask-image: url("./icons/add-user.svg");
 }
 
+.icon-battery-full {
+  mask-image: url("./icons/battery-full.svg");
+}
+
+.icon-warning {
+  mask-image: url("./icons/vector_warning.svg");
+}
+
 .icon-chats {
   mask-image: url("./icons/chats.svg");
 }
@@ -146,6 +154,10 @@
 
 .icon-file-plus {
   mask-image: url("./icons/file-plus.svg");
+}
+
+.icon-file-minus {
+  mask-image: url("./icons/file-minus.svg");
 }
 
 .icon-cancel {
@@ -2802,6 +2814,11 @@ body.chat-bg-disabled .chat-messages::before {
   aspect-ratio: 1;
 }
 
+/* Disabled/grayed-out state for hidden apps (e.g., removed PIVX shown in search) */
+.miniapps-grid .attachment-panel-item.miniapp-disabled {
+  opacity: 0.45;
+}
+
 /* Hidden state for search filtering */
 .miniapps-grid .attachment-panel-item.hidden-by-search {
   display: none;
@@ -3275,6 +3292,7 @@ select {
   width: 0%;
   border-radius: 6px;
   position: relative;
+  background: linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%);
   transition: width 0.3s cubic-bezier(0.65, 0, 0.35, 1);
 }
 
@@ -3304,7 +3322,7 @@ select {
   transform: translateY(-50%);
   border-radius: 50%;
   filter: blur(1px);
-  animation: pulse 1.5s infinite ease-out;
+  animation: progress-pulse-anim 1.5s infinite ease-out;
 }
 
 /* Percentage Text */
@@ -3325,8 +3343,8 @@ select {
   100% { transform: translateX(calc(100vw + 20px)); }
 }
 
-@keyframes pulse {
-  0% { 
+@keyframes progress-pulse-anim {
+  0% {
     opacity: 0.6;
     transform: translateY(-50%) scale(0.95);
   }
@@ -3819,6 +3837,11 @@ select {
 .toggle-container span:first-child {
   margin-right: 10px;
   color: rgba(255, 255, 255, 0.8);
+}
+
+.toggle-container.disabled {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .neon-toggle {
@@ -4691,6 +4714,7 @@ select:disabled:hover {
   border-radius: 100%;
   height: 45px;
   width: 45px;
+  z-index: 1;
 }
 
 .sync-line {
@@ -4707,6 +4731,13 @@ select:disabled:hover {
 .sync-line.active {
   transform: scaleX(1);
   animation: pulse-sync 1.5s ease-in-out infinite 0.4s;
+}
+
+.sync-line.progress {
+  transform-origin: left;
+  transform: scaleX(var(--sync-progress, 0));
+  animation: none;
+  transition: transform 0.3s ease-out;
 }
 
 .sync-line.fade-out {
@@ -4739,10 +4770,12 @@ select:disabled:hover {
 
 /* Transcription highlighting styles */
 .transcription-section {
-  transition: all 0.3s ease;
+  transition: background-color 0.3s ease, color 0.3s ease;
   border-radius: 4px;
   margin: 0 1px;
 }
+
+
 
 .transcription-section:hover {
   background-color: rgba(255, 255, 255, 0.1);
@@ -4763,6 +4796,7 @@ select:disabled:hover {
 }
 
 .transcription-result {
+  box-sizing: border-box;
   margin-top: 10px;
   padding: 10px;
   border-radius: 8px;
@@ -4938,7 +4972,8 @@ select:disabled:hover {
 }
 
 .waveform-bar {
-    width: 3px;
+    flex: 1;
+    min-width: 2px;
     background: #59fcb3;
     border-radius: 1.5px;
     height: 20%; /* Initial height */
@@ -5452,7 +5487,7 @@ select:disabled:hover {
     }
     
     .waveform-bar {
-        width: 2px; /* Slightly thinner bars on mobile */
+        min-width: 1px;
     }
     
     .audio-time-display {
@@ -5703,11 +5738,71 @@ select:disabled:hover {
   margin-right: auto;
 }
 
+/* Member picker row (shared by Create Group & Invite modals) */
+.member-pick-row {
+    display: flex;
+    align-items: center;
+    padding: 5px 10px;
+    border-radius: 6px;
+    transition: background 0.2s ease;
+    isolation: isolate;
+    cursor: pointer;
+    position: relative;
+}
+
+.member-pick-row .member-pick-hover {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.member-pick-row:hover .member-pick-hover {
+    opacity: 1;
+}
+
+.member-pick-row .member-pick-avatar {
+    margin-right: 10px;
+    position: relative;
+    z-index: 1;
+}
+
+.compact-member-name {
+    color: #f7f4f4;
+    font-size: 14px;
+    flex: 1;
+    text-align: left;
+    position: relative;
+    z-index: 1;
+}
+
 /* Compact member list emoji styling */
 .compact-member-name img.emoji {
     width: 15px !important;
     height: 15px !important;
     vertical-align: middle !important;
+}
+
+.member-pick-indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 2px solid var(--icon-color-primary);
+    position: relative;
+    z-index: 1;
+    flex-shrink: 0;
+    margin-left: auto;
+    transition: background-color 0.2s ease;
+}
+
+.member-pick-indicator.selected {
+    background-color: var(--icon-color-primary);
 }
 
 /* MLS Group Invite Styles */
@@ -5842,6 +5937,75 @@ select:disabled:hover {
   justify-content: center;
   flex-wrap: wrap;
   flex-shrink: 0;
+}
+
+.create-group-footer .chat-contact-status {
+  width: 100%;
+  text-align: center;
+}
+
+/* Create Group Avatar Picker */
+.create-group-avatar-picker {
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: visible;
+  transition: opacity 0.2s;
+  position: relative;
+  opacity: 0.7;
+}
+.create-group-avatar-picker:hover {
+  opacity: 1;
+}
+.create-group-avatar-picker.has-image {
+  opacity: 1;
+}
+.create-group-avatar-placeholder {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.create-group-avatar-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.create-group-avatar-edit {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.create-group-avatar-edit .icon {
+  font-size: 13px;
+  color: #fff;
+}
+.create-group-description {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  background-color: transparent;
+  border: 1px solid rgba(57, 57, 57, 0.5);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 38px;
+  max-height: 100px;
 }
 
 /* Override: show real checkboxes inside Create Group panel only */

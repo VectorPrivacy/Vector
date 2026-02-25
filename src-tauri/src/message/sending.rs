@@ -27,7 +27,7 @@ use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
-use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
+use super::types::{AttachmentFile, FileBytes, ImageMetadata, Message, Attachment};
 
 /// Result of sending a message, returned to frontend for state update
 #[derive(serde::Serialize)]
@@ -54,8 +54,8 @@ async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
             "old_id": pending_id.as_ref(),
             "message": &msg,
             "chat_id": &chat_id
-        })).unwrap();
-        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
+        })).ok();
+        let _ = crate::db::save_message(&chat_id, &msg).await;
     }
 }
 
@@ -80,8 +80,7 @@ pub struct MlsMediaUploadResult {
 ///
 /// This uses the MDK's EncryptedMediaManager to encrypt files with keys derived
 /// from the MLS group secret, creating a White Noise-compatible imeta tag.
-async fn encrypt_and_upload_mls_media<R: Runtime>(
-    handle: &AppHandle<R>,
+async fn encrypt_and_upload_mls_media(
     group_id: &str,
     file: &AttachmentFile,
     filename: &str,
@@ -90,7 +89,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     use mdk_core::encrypted_media::MediaProcessingOptions;
 
     // Get the MDK engine and create media manager for this group
-    let mls_service = MlsService::new_persistent(handle)
+    let mls_service = MlsService::new_persistent_static()
         .map_err(|e| format!("Failed to create MLS service: {}", e))?;
 
     // Look up the group metadata to get the engine_group_id
@@ -125,10 +124,10 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     };
 
     // Configure media processing options
-    // Disable blurhash generation since we already have it in img_meta
+    // Disable blurhash generation — we generate thumbhash ourselves
     let options = MediaProcessingOptions {
         sanitize_exif: true,
-        generate_blurhash: file.img_meta.is_none(), // Only generate if we don't have it
+        generate_blurhash: false,
         max_dimension: None,
         max_file_size: None,
         max_filename_length: None,
@@ -146,7 +145,7 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     let url = crate::blossom::upload_blob_with_progress_and_failover(
         signer,
         servers,
-        Arc::new(std::mem::take(&mut upload.encrypted_data)),
+        Arc::new(FileBytes::Owned(std::mem::take(&mut upload.encrypted_data))),
         Some(&mime_type),
         progress_callback,
         Some(3),
@@ -164,12 +163,11 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
     // because MDK also validates MIME types when parsing on the receive side.
     // The receiver can identify file type from the extension in the filename.
 
-    // Append our pre-generated blurhash and dimensions if available
-    // MDK doesn't include these when generate_blurhash is false
+    // Append our pre-generated thumbhash and dimensions if available
     if let Some(ref img_meta) = file.img_meta {
-        // Add blurhash if not already present
-        if !tag_values.iter().any(|s| s.starts_with("blurhash ")) && !img_meta.blurhash.is_empty() {
-            tag_values.push(format!("blurhash {}", img_meta.blurhash));
+        // Add thumbhash if not already present
+        if !tag_values.iter().any(|s| s.starts_with("thumbhash ")) && !img_meta.thumbhash.is_empty() {
+            tag_values.push(format!("thumbhash {}", img_meta.thumbhash));
         }
         // Add dimensions if not already present
         if !tag_values.iter().any(|s| s.starts_with("dim ")) {
@@ -200,6 +198,112 @@ async fn encrypt_and_upload_mls_media<R: Runtime>(
         nonce: bytes_to_hex_string(&upload.nonce),
         scheme_version,
     })
+}
+
+/// Headless text-only reply: sends a DM or MLS message without requiring TAURI_APP.
+/// Used by Android notification inline-reply (JNI). Sends first, then adds to STATE,
+/// persists to DB, emits to frontend (if available), and marks the chat as read.
+#[allow(dead_code)]
+pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
+    let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?;
+
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let milliseconds = current_time.as_millis() % 1000;
+
+    // Detect chat type
+    let is_group = {
+        let state = STATE.lock().await;
+        state.get_chat(chat_id).map_or(!chat_id.starts_with("npub1"), |c| c.is_mls_group())
+    };
+
+    // Parse receiver pubkey once for DMs (used for both rumor build and send)
+    let receiver_pubkey = if !is_group {
+        Some(PublicKey::from_bech32(chat_id)
+            .map_err(|e| format!("Invalid npub: {}", e))?)
+    } else {
+        None
+    };
+
+    // Build rumor
+    let rumor = if is_group {
+        EventBuilder::new(
+            Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
+            content,
+        )
+    } else {
+        EventBuilder::private_msg_rumor(receiver_pubkey.unwrap(), content)
+    }
+    .tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]))
+    .build(my_public_key);
+
+    let rumor_id = rumor.id.ok_or("Rumor has no id")?.to_hex();
+
+    // Send first — only add to STATE after successful delivery
+    if is_group {
+        crate::mls::send_mls_message(chat_id, rumor, None).await?;
+    } else {
+        crate::inbox_relays::send_gift_wrap(client, &receiver_pubkey.unwrap(), rumor, [])
+            .await
+            .map_err(|e| format!("Gift wrap failed: {}", e))?;
+    }
+
+    // Build message and add to STATE only after successful send
+    let msg = Message {
+        id: rumor_id.clone(),
+        content: content.to_string(),
+        replied_to: String::new(),
+        replied_to_content: None,
+        replied_to_npub: None,
+        replied_to_has_attachment: None,
+        preview_metadata: None,
+        at: current_time.as_millis() as u64,
+        attachments: Vec::new(),
+        reactions: Vec::new(),
+        pending: false,
+        failed: false,
+        mine: true,
+        npub: my_public_key.to_bech32().ok(),
+        wrapper_event_id: None,
+        edited: false,
+        edit_history: None,
+    };
+
+    {
+        let mut state = STATE.lock().await;
+        if is_group {
+            state.create_or_get_mls_group_chat(chat_id, vec![]);
+            state.add_message_to_chat(chat_id, msg.clone());
+        } else {
+            state.add_message_to_participant(chat_id, msg.clone());
+        }
+    }
+
+    // Emit to frontend if TAURI_APP is available (backgrounded app mode)
+    if let Some(handle) = TAURI_APP.get() {
+        use tauri::Emitter;
+        if is_group {
+            let _ = handle.emit("mls_message_new", serde_json::json!({
+                "group_id": chat_id,
+                "message": &msg
+            }));
+        } else {
+            let _ = handle.emit("message_new", serde_json::json!({
+                "message": &msg,
+                "chat_id": chat_id
+            }));
+        }
+    }
+
+    // Persist message to DB
+    let _ = crate::db::save_message(chat_id, &msg).await;
+
+    // Mark chat as read (we just replied, so we've seen everything)
+    crate::chat::mark_as_read_headless(chat_id).await;
+
+    Ok(rumor_id)
 }
 
 #[tauri::command]
@@ -323,14 +427,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     handle_for_callback.emit("attachment_upload_progress", serde_json::json!({
                         "id": pending_id_for_callback.as_ref(),
                         "progress": pct
-                    })).unwrap();
+                    })).ok();
                 }
                 Ok(())
             });
 
             // Encrypt and upload using MIP-04 (always fresh - no deduplication for MLS)
             let mls_upload_result = match encrypt_and_upload_mls_media(
-                handle,
                 &receiver,
                 &attached_file,
                 &filename,
@@ -373,7 +476,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     handle.emit("mls_message_new", serde_json::json!({
                         "group_id": &receiver,
                         "message": msg
-                    })).unwrap();
+                    })).ok();
                 }
             }
 
@@ -428,8 +531,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     "old_id": old_id,
                     "message": &msg,
                     "chat_id": &receiver
-                })).unwrap();
-                let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
+                })).ok();
+                let _ = crate::db::save_message(&receiver, &msg).await;
             }
 
             return Ok(MessageSendResult {
@@ -466,7 +569,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
             // Fallback: check database if not found in memory (covers all stored attachments)
             if found_attachment.is_none() {
-                if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(handle, &file_hash).await {
+                if let Ok(Some(attachment_ref)) = db::lookup_attachment_cached(&file_hash).await {
                     found_attachment = Some(Attachment {
                         id: attachment_ref.hash,
                         url: attachment_ref.url,
@@ -586,12 +689,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     handle.emit("mls_message_new", serde_json::json!({
                         "group_id": &receiver,
                         "message": msg
-                    })).unwrap();
+                    })).ok();
                 } else {
                     handle.emit("message_new", serde_json::json!({
                         "message": msg,
                         "chat_id": &receiver
-                    })).unwrap();
+                    })).ok();
                 }
             }
         }
@@ -656,7 +759,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 // Append image metadata if available
                 if let Some(ref img_meta) = attached_file.img_meta {
                     attachment_rumor = attachment_rumor
-                        .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
+                        .tag(Tag::custom(TagKind::custom("thumbhash"), [&img_meta.thumbhash]))
                         .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
                 }
 
@@ -691,13 +794,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         handle.emit("attachment_upload_progress", serde_json::json!({
                             "id": pending_id_for_callback.as_ref(),
                             "progress": pct
-                        })).unwrap();
+                        })).ok();
                     }
                 Ok(())
             });
 
             // Upload the file with progress, retries, and automatic server failover
-            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(FileBytes::Owned(enc_file)), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -738,7 +841,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     // Append image metadata if available
                     if let Some(ref img_meta) = attached_file.img_meta {
                         attachment_rumor = attachment_rumor
-                            .tag(Tag::custom(TagKind::custom("blurhash"), [&img_meta.blurhash]))
+                            .tag(Tag::custom(TagKind::custom("thumbhash"), [&img_meta.thumbhash]))
                             .tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", img_meta.width, img_meta.height)]));
                     }
 
@@ -772,12 +875,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             handle.emit("mls_message_new", serde_json::json!({
                 "group_id": &receiver,
                 "message": &msg
-            })).unwrap();
+            })).ok();
         } else {
             handle.emit("message_new", serde_json::json!({
                 "message": &msg,
                 "chat_id": &receiver
-            })).unwrap();
+            })).ok();
         }
 
         if !is_group_chat {
@@ -889,8 +992,8 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                                 "message": &msg,
                                 "chat_id": &receiver
                             }));
-                            let _ = crate::db::chats::save_slim_chat(handle.clone(), slim).await;
-                            let _ = crate::db::save_message(handle.clone(), &receiver, &msg).await;
+                            let _ = crate::db::chats::save_slim_chat(slim).await;
+                            let _ = crate::db::save_message(&receiver, &msg).await;
                         }
                         
                         break;
@@ -1004,20 +1107,20 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     let encoded = crate::shared::image::encode_rgba_auto(&pixels, img.width(), img.height(), 85)?;
     let (encoded_bytes, extension) = (encoded.bytes, encoded.extension);
 
-    // Generate image metadata with Blurhash and dimensions
-    let img_meta: Option<ImageMetadata> = util::generate_blurhash_from_rgba(
+    // Generate image metadata with ThumbHash and dimensions
+    let img_meta: Option<ImageMetadata> = util::generate_thumbhash_from_rgba(
         img.as_raw(),
         img.width(),
         img.height()
-    ).map(|blurhash| ImageMetadata {
-        blurhash,
+    ).map(|thumbhash| ImageMetadata {
+        thumbhash,
         width: img.width(),
         height: img.height(),
     });
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: Arc::new(encoded_bytes),
+        bytes: Arc::new(FileBytes::Owned(encoded_bytes)),
         img_meta,
         extension: extension.to_string(),
     };
@@ -1030,7 +1133,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: Arc::new(bytes),
+        bytes: Arc::new(FileBytes::Owned(bytes)),
         img_meta: None,
         extension: String::from("wav")
     };

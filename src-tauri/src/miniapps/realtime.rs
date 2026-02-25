@@ -8,19 +8,58 @@
 #![allow(dead_code)] // API functions that will be used as the feature matures
 
 use anyhow::{anyhow, bail, Context as _, Result};
-use data_encoding::BASE32_NOPAD;
 use futures_util::StreamExt;
 use iroh::{Endpoint, NodeAddr, NodeId, PublicKey, RelayMode, SecretKey};
 use iroh_gossip::net::{Event, Gossip, GossipEvent, JoinOptions, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
-use log::{info, trace, warn};
-use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
+
+/// BASE32 no-pad encoding (RFC 4648), replacing the `data-encoding` crate.
+fn base32_nopad_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity((bytes.len() * 8 + 4) / 5);
+    let mut buf: u64 = 0;
+    let mut bits: u32 = 0;
+    for &b in bytes {
+        buf = (buf << 8) | b as u64;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buf >> bits) & 0x1F) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buf << (5 - bits)) & 0x1F) as usize] as char);
+    }
+    out
+}
+
+/// BASE32 no-pad decoding (RFC 4648), replacing the `data-encoding` crate.
+fn base32_nopad_decode(encoded: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(encoded.len() * 5 / 8);
+    let mut buf: u64 = 0;
+    let mut bits: u32 = 0;
+    for &c in encoded {
+        let val = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a',
+            b'2'..=b'7' => c - b'2' + 26,
+            _ => return Err(format!("Invalid base32 character: {}", c as char)),
+        };
+        buf = (buf << 5) | val as u64;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
 
 /// Maximum message size for realtime data (128 KB as per WebXDC spec)
 const MAX_MESSAGE_SIZE: usize = 128 * 1024;
@@ -50,7 +89,7 @@ pub struct IrohState {
 impl IrohState {
     /// Initialize a new Iroh state with endpoint and gossip
     pub async fn new(_relay_url: Option<String>) -> Result<Self> {
-        info!("Initializing Iroh peer channels");
+        log_info!("Initializing Iroh peer channels");
         
         let secret_key = SecretKey::generate(rand::rngs::OsRng);
         let public_key = secret_key.public();
@@ -207,7 +246,7 @@ impl IrohState {
         // If channel already exists, we're re-joining (e.g., user closed and reopened the game)
         // Update the shared event target so the subscribe loop uses the new frontend channel
         if let Some(channel_state) = channels.get(&topic) {
-            info!("IROH_REALTIME: Re-joining existing gossip topic {:?}, updating event target", topic);
+            log_info!("IROH_REALTIME: Re-joining existing gossip topic {:?}, updating event target", topic);
             let mut shared_target = channel_state.event_target.write().await;
             *shared_target = Some(event_target);
             println!("[WEBXDC] Updated shared event target for existing topic");
@@ -216,7 +255,7 @@ impl IrohState {
 
         let node_ids: Vec<NodeId> = peers.iter().map(|p| p.node_id).collect();
 
-        info!(
+        log_info!(
             "IROH_REALTIME: Joining gossip topic {:?} with {} peers",
             topic,
             node_ids.len()
@@ -248,7 +287,7 @@ impl IrohState {
         let topic_encoded = encode_topic_id(&topic);
         let subscribe_loop = tokio::spawn(async move {
             if let Err(e) = run_subscribe_loop(gossip_receiver, topic, shared_target_clone, join_tx, public_key, peer_count_clone, app_handle, topic_encoded).await {
-                warn!("Subscribe loop failed: {e}");
+                log_warn!("Subscribe loop failed: {e}");
             }
         });
 
@@ -271,14 +310,14 @@ impl IrohState {
             if attempt > 0 {
                 // Exponential backoff: 1s, 2s, 4s...
                 let delay = std::time::Duration::from_secs(1 << (attempt - 1));
-                info!("[WEBXDC] add_peer: Retry {} for peer {} after {:?}", attempt, peer.node_id, delay);
+                log_info!("[WEBXDC] add_peer: Retry {} for peer {} after {:?}", attempt, peer.node_id, delay);
                 tokio::time::sleep(delay).await;
             }
             
             match self.try_add_peer(&topic, &peer).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    warn!("[WEBXDC] add_peer: Attempt {} failed for peer {}: {}", attempt + 1, peer.node_id, e);
+                    log_warn!("[WEBXDC] add_peer: Attempt {} failed for peer {}: {}", attempt + 1, peer.node_id, e);
                     last_error = Some(e);
                 }
             }
@@ -290,7 +329,7 @@ impl IrohState {
     /// Single attempt to add a peer (internal helper)
     async fn try_add_peer(&self, topic: &TopicId, peer: &NodeAddr) -> Result<()> {
         // First, add the node address to the endpoint so we can connect to it
-        trace!("[WEBXDC] add_peer: Adding node addr for peer {}, relay_url={:?}, direct_addrs={}",
+        log_trace!("[WEBXDC] add_peer: Adding node addr for peer {}, relay_url={:?}, direct_addrs={}",
             peer.node_id,
             peer.relay_url(),
             peer.direct_addresses.len());
@@ -298,20 +337,20 @@ impl IrohState {
         
         // Verify the node address was added by checking if we can get connection info
         if let Some(info) = self.endpoint.remote_info(peer.node_id) {
-            trace!("[WEBXDC] add_peer: Remote info for peer {}: relay_url={:?}, addrs={:?}",
+            log_trace!("[WEBXDC] add_peer: Remote info for peer {}: relay_url={:?}, addrs={:?}",
                 peer.node_id,
                 info.relay_url,
                 info.addrs);
         } else {
-            trace!("[WEBXDC] add_peer: WARNING - Could not get remote info for peer {}", peer.node_id);
+            log_trace!("[WEBXDC] add_peer: WARNING - Could not get remote info for peer {}", peer.node_id);
         }
         
         // Then, use the existing channel's sender to join the peer
         let channels = self.channels.read().await;
         if let Some(channel_state) = channels.get(topic) {
-            trace!("[WEBXDC] add_peer: Joining peer {} via existing channel sender", peer.node_id);
+            log_trace!("[WEBXDC] add_peer: Joining peer {} via existing channel sender", peer.node_id);
             channel_state.sender.join_peers(vec![peer.node_id]).await?;
-            info!("[WEBXDC] add_peer: Successfully joined peer {} to topic", peer.node_id);
+            log_info!("[WEBXDC] add_peer: Successfully joined peer {} to topic", peer.node_id);
         } else {
             return Err(anyhow!("Channel not found for topic"));
         }
@@ -332,7 +371,7 @@ impl IrohState {
 
         state.sender.broadcast(data.into()).await?;
 
-        trace!("Sent realtime data to topic {:?}", topic);
+        log_trace!("Sent realtime data to topic {:?}", topic);
 
         Ok(())
     }
@@ -343,7 +382,7 @@ impl IrohState {
             // Abort the subscribe loop (this drops the receiver)
             channel.subscribe_loop.abort();
             let _ = channel.subscribe_loop.await;
-            info!("Left realtime channel {:?}", topic);
+            log_info!("Left realtime channel {:?}", topic);
         }
         Ok(())
     }
@@ -379,7 +418,7 @@ impl IrohState {
 
     /// Get and increment sequence number for a topic
     fn get_and_incr_seq(&self, topic: &TopicId) -> i32 {
-        let mut seq_nums = self.sequence_numbers.lock();
+        let mut seq_nums = self.sequence_numbers.lock().unwrap();
         let entry = seq_nums.entry(*topic).or_default();
         *entry = entry.wrapping_add(1);
         *entry
@@ -545,13 +584,13 @@ async fn run_subscribe_loop(
                         }
                     }
                     for peer in peers {
-                        let peer_id = BASE32_NOPAD.encode(peer.as_bytes());
+                        let peer_id = base32_nopad_encode(peer.as_bytes());
                         println!("[WEBXDC] Peer joined topic: {}", peer_id);
                         send_event(&shared_event_target, RealtimeEvent::PeerJoined(peer_id)).await;
                     }
                 }
                 GossipEvent::NeighborUp(peer) => {
-                    let peer_id = BASE32_NOPAD.encode(peer.as_bytes());
+                    let peer_id = base32_nopad_encode(peer.as_bytes());
                     println!("[WEBXDC] Neighbor UP for topic: {}", peer_id);
                     
                     // Increment peer count
@@ -568,7 +607,7 @@ async fn run_subscribe_loop(
                     }
                 }
                 GossipEvent::NeighborDown(peer) => {
-                    let peer_id = BASE32_NOPAD.encode(peer.as_bytes());
+                    let peer_id = base32_nopad_encode(peer.as_bytes());
                     println!("[WEBXDC] Neighbor DOWN for topic: {}", peer_id);
 
                     // Atomically decrement peer count (saturating to avoid underflow)
@@ -691,13 +730,13 @@ pub fn derive_topic_id(file_hash: &str, chat_id: &str, message_id: &str) -> Topi
 
 /// Encode a topic ID to a string for storage/transmission
 pub fn encode_topic_id(topic: &TopicId) -> String {
-    BASE32_NOPAD.encode(topic.as_bytes())
+    base32_nopad_encode(topic.as_bytes())
 }
 
 /// Decode a topic ID from a string
 pub fn decode_topic_id(s: &str) -> Result<TopicId> {
-    let bytes = BASE32_NOPAD
-        .decode(s.as_bytes())
+    let bytes = base32_nopad_decode(s.as_bytes())
+        .map_err(|e| anyhow!(e))
         .context("Invalid topic ID encoding")?;
     if bytes.len() != 32 {
         bail!("Invalid topic ID length");
@@ -710,13 +749,13 @@ pub fn decode_topic_id(s: &str) -> Result<TopicId> {
 /// Encode a node address to a string for transmission via Nostr
 pub fn encode_node_addr(addr: &NodeAddr) -> Result<String> {
     let json = serde_json::to_string(addr)?;
-    Ok(BASE32_NOPAD.encode(json.as_bytes()))
+    Ok(base32_nopad_encode(json.as_bytes()))
 }
 
 /// Decode a node address from a string
 pub fn decode_node_addr(s: &str) -> Result<NodeAddr> {
-    let bytes = BASE32_NOPAD
-        .decode(s.as_bytes())
+    let bytes = base32_nopad_decode(s.as_bytes())
+        .map_err(|e| anyhow!(e))
         .context("Invalid node address encoding")?;
     let json = String::from_utf8(bytes)?;
     println!("[WEBXDC] decode_node_addr: json={}", json);

@@ -1,6 +1,9 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.vector" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:statusBarColor">@color/vector_bg</item>
+        <item name="android:navigationBarColor">@color/vector_bg</item>
+        <item name="android:windowBackground">@color/vector_bg</item>
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/vector_bg</item>
     </style>
 </resources>

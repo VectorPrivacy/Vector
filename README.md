@@ -1,22 +1,27 @@
 <img width="1293" height="646" alt="GitHub-Repo-Graphics-Header" src="./assets/github_header_readme.png"/>
- 
+
+<p align="center">
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.0/Vector_aarch64.app.tar.gz"><img src="https://img.shields.io/badge/Linux-5E5E5E?style=flat&logo=linux&logoColor=33DB98" alt="Linux"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.0/Vector_0.3.0_x64.dmg"><img src="https://img.shields.io/badge/macOS-5E5E5E?style=flat&logo=apple&logoColor=33DB98" alt="macOS"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.0/Vector_0.3.0_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-5E5E5E?style=flat&logo=windows&logoColor=33DB98" alt="Windows"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.0/Vector.apk"><img src="https://img.shields.io/badge/Android-5E5E5E?style=flat&logo=android&logoColor=33DB98" alt="Android"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/blob/master/LICENSE"><img src="https://img.shields.io/github/license/henriquesebastiao/badges?style=flat&color=33DB98" alt="License"/></a>
+</p>
+
 ---
+
 <h3 align="center">
   Private & Encrypted Messenger App
 </h3>
 
 <h4 align="center">
-  Designed for everyone, providing a safe and secure “hardline” between you and your contacts.
+  Designed for everyone, providing a secure and private “hardline” between you and your contacts.
 </h4>
-
-<p align="center">
-  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.1.8/Vector_0.1.8_x64-setup.exe">Windows</a> | <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.1.8/Vector_0.1.8_x64.dmg">MacOS</a> | <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.1.8/Vector_aarch64.app.tar.gz">Linux</a>
 
 ---
 
-<p align="center">
-  Vector is a decentralized communication platform built on the Nostr Protocol, offering no-compromise encryption with zero metadata leakage and plausible deniability for all content, including texts, media, voice notes, and files,     adhering to the NIP-17 standard.
-</p>
+<p align="justify">
+  Vector Messenger is a free, open-source, decentralized, and censorship-resistant chat communication platform that doesn't require any form of KYC, prevents metadata tracking, and will never allow for any form of advertisements to depreciate the user experience. The application is optimally designed to be lightweight, energy efficient, and requires minimum computing resources allowing for Vector Messenger to be run on virtually any device (<200mb RAM).
 
 ---
 <img align="left" src="./assets/vector_check.png" width="150">

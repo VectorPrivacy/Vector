@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use nostr_sdk::prelude::*;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 use crate::NOSTR_CLIENT;
 
@@ -31,8 +31,8 @@ struct CachedRelays {
     fetch_ok: bool,
 }
 
-static INBOX_RELAY_CACHE: Lazy<Mutex<HashMap<PublicKey, CachedRelays>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static INBOX_RELAY_CACHE: LazyLock<Mutex<HashMap<PublicKey, CachedRelays>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Per-key locks to prevent cache stampede (thundering herd).
 /// When multiple messages target the same recipient with a cold cache, only the
@@ -40,8 +40,8 @@ static INBOX_RELAY_CACHE: Lazy<Mutex<HashMap<PublicKey, CachedRelays>>> =
 /// Uses Weak references: the Mutex allocation is freed when Arc refcount drops.
 /// HashMap entries are removed eagerly by a per-call drop guard (normal return,
 /// cancellation, or panic unwind). Periodic retain() remains a fallback safety net.
-static FETCH_LOCKS: Lazy<Mutex<HashMap<PublicKey, Weak<tokio::sync::Mutex<()>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static FETCH_LOCKS: LazyLock<Mutex<HashMap<PublicKey, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Counter for periodic fallback pruning of dead Weak entries in FETCH_LOCKS.
 /// Prune every PRUNE_INTERVAL cache misses to avoid O(n) scans on every access.
@@ -250,7 +250,7 @@ async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<S
 // ============================================================================
 
 /// Parsed `TRUSTED_RELAYS` URLs — computed once on first access.
-static TRUSTED_RELAY_URLS: Lazy<Vec<RelayUrl>> = Lazy::new(|| {
+static TRUSTED_RELAY_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
     crate::TRUSTED_RELAYS
         .iter()
         .filter_map(|s| RelayUrl::parse(s).ok())
@@ -515,8 +515,8 @@ mod tests {
     }
 
     // Serialize tests that mutate global cache/lock statics.
-    static TEST_GLOBALS_LOCK: Lazy<tokio::sync::Mutex<()>> =
-        Lazy::new(|| tokio::sync::Mutex::new(()));
+    static TEST_GLOBALS_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     #[test]
     fn cache_stores_and_retrieves() {

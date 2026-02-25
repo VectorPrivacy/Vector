@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#030303">
     <link rel="stylesheet" href="styles.css" />
     <link id="theme" rel="stylesheet" href="/themes/vector/dark.css" />
     <link rel="stylesheet" href="/highlight-github-dark.min.css" />
@@ -619,11 +620,11 @@
         <div style="display: flex; justify-content: center; margin-bottom: 10px;">
           <button id="group-invite-member-btn" class="btn accept-btn btn-bounce" style="background-color: transparent; display: flex; align-items: center; gap: 6px;">
             <span class="icon icon-add-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
-            <span style="color: white;">Invite Member</span>
+            <span style="color: white;">Invite</span>
           </button>
           <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="display: none; align-items: center; gap: 6px;">
             <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: #ff2ea9;"></span>
-            <span style="color: white;">Leave Group</span>
+            <span style="color: white;">Leave</span>
           </button>
         </div>
         <div class="emoji-search-container" style="padding: 10px 0px;">
@@ -760,7 +761,17 @@
             <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
             <hr class="divider chat-new-divider">
             <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+              <div id="create-group-avatar-picker" class="create-group-avatar-picker" title="Choose group avatar">
+                <img id="create-group-avatar-preview" class="create-group-avatar-preview" style="display: none;" />
+                <img id="create-group-avatar-placeholder" class="create-group-avatar-placeholder" src="icons/group-placeholder.svg" />
+                <div class="create-group-avatar-edit">
+                  <span id="create-group-avatar-edit-icon" class="icon icon-plus-circle"></span>
+                </div>
+              </div>
               <input id="create-group-name" placeholder="Group name..." class="chat-input-container chat-new-input" />
+            </div>
+            <div style="padding: 0 15px; margin-top: 8px;">
+              <textarea id="create-group-description" placeholder="Group description (optional)" class="create-group-description" rows="2"></textarea>
             </div>
           </center>
 
@@ -768,9 +779,9 @@
             <h2 class="chat-new-subtitle">Select Members</h2>
             <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
             <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <div class="emoji-search-container" style="padding: 0; background: transparent; width: 75%;">
+              <div class="emoji-search-container" style="padding: 0; background: transparent;">
                 <span class="emoji-search-icon icon icon-search"></span>
-                <input id="create-group-filter" placeholder="Search contacts..." style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
+                <input id="create-group-filter" placeholder="Search or paste npub..." style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
               </div>
               <div id="create-group-list" class="create-group-list"></div>
             </div>
@@ -805,7 +816,13 @@
             <span class="neon-toggle"></span>
           </label>
         </div>
-        
+        <div id="translate-model-warning" class="form-group" style="display: none; margin-bottom: 0; padding-bottom: 0;">
+          <p style="color: #FCE459; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+            <span class="icon icon-warning" style="position: relative; width: 16px; height: 16px; min-width: 16px; margin: 0; background-color: #FCE459;"></span>
+            Selected model does not support translation
+          </p>
+        </div>
+
          <div class="form-group">
           <label class="toggle-container">
             <span>
@@ -820,7 +837,7 @@
           <span id="whisper-model-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; margin-left: 5px;"></span></label>
           <div class="model-select-container">
           <select id="whisper-model" class="form-control" style="margin-top: 10px;"></select>
-          <button id="delete-model" class="btn-delete-model" title="Delete selected model">
+          <button id="delete-model" class="btn-delete-model" title="Delete selected model" style="display: none;">
           <span class="icon-trash"></span>
           </button>
           </div>
@@ -836,6 +853,7 @@
           </div>
           <div class="progress-pulse"></div>
           </div>
+          <button id="cancel-download" class="btn btn-secondary" style="display: none;">Cancel Download</button>
         </div>
       </div>
 
@@ -889,10 +907,6 @@
               <span class="neon-toggle"></span>
             </label>
           </div>
-
-          <div class="form-group" id="restore-pivx-group" style="display: none;">
-            <button id="restore-pivx-btn" class="btn cancel-btn">Restore PIVX Wallet</button>
-          </div>
         </div>
 
         <!-- Notification Settings Section -->
@@ -930,6 +944,24 @@
                 <button class="notif-sound-chip-clear" id="notif-custom-clear" title="Remove custom sound">×</button>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- Battery & Background Service Section (mobile only) -->
+        <div id="settings-battery" class="settings-section" style="display: none;">
+          <hr class="divider settings-divider">
+          <h2>Battery</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="battery-bg-service-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Run in Background</span>
+              <input type="checkbox" id="battery-bg-service-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div id="battery-warning" class="form-group" style="display: none; margin-bottom: 0; padding-bottom: 0;">
+            <p style="color: #FCE459; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px;"><span class="icon icon-battery-full" style="position: relative; width: 16px; height: 16px; min-width: 16px; margin: 0; background-color: #FCE459;"></span>Battery Optimization is active</p>
           </div>
         </div>
 
@@ -1045,11 +1077,11 @@
 
             <div class="danger-option">
               <div class="left-group">
-                <span id="deep-rescan-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
-                <span>Deep Rescan</span>
+                <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Export Account</span>
               </div>
-              <button id="deep-rescan-btn" class="cancel-btn">
-                Rescan
+              <button id="export-account-btn" class="cancel-btn">
+                Export
               </button>
             </div>
 

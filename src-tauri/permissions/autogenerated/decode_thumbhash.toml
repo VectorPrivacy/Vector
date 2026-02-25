@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-decode-thumbhash"
+description = "Enables the decode_thumbhash command without any pre-configured scope."
+commands.allow = ["decode_thumbhash"]
+
+[[permission]]
+identifier = "deny-decode-thumbhash"
+description = "Denies the decode_thumbhash command without any pre-configured scope."
+commands.deny = ["decode_thumbhash"]

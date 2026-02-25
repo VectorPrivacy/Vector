@@ -4,11 +4,9 @@
 //! - Database vacuuming to reclaim space and optimize performance
 //! - Automatic scheduled maintenance checks
 
-use tauri::{AppHandle, Runtime};
-
 /// Vacuum the database to reclaim space and optimize performance
-pub fn vacuum_database<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+pub fn vacuum_database() -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute_batch("VACUUM;")
         .map_err(|e| format!("Failed to vacuum database: {}", e))?;
@@ -19,9 +17,9 @@ pub fn vacuum_database<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> 
 
 /// Check if vacuum is needed and perform it if so
 /// Vacuums if it hasn't been done in the last 7 days
-pub async fn check_and_vacuum_if_needed<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
+pub async fn check_and_vacuum_if_needed() -> Result<(), String> {
     let should_vacuum = {
-        let conn = crate::account_manager::get_db_connection_guard(handle)?;
+        let conn = crate::account_manager::get_db_connection_guard_static()?;
 
         let last_vacuum: Option<i64> = conn.query_row(
             "SELECT value FROM settings WHERE key = 'last_vacuum'",
@@ -43,7 +41,7 @@ pub async fn check_and_vacuum_if_needed<R: Runtime>(handle: &AppHandle<R>) -> Re
     }; // read conn drops here — must drop before vacuum_database takes the write conn
 
     if should_vacuum {
-        vacuum_database(handle)?;
+        vacuum_database()?;
 
         // Update last vacuum timestamp
         let now = std::time::SystemTime::now()
@@ -51,7 +49,7 @@ pub async fn check_and_vacuum_if_needed<R: Runtime>(handle: &AppHandle<R>) -> Re
             .unwrap()
             .as_secs() as i64;
 
-        let conn = crate::account_manager::get_write_connection_guard(handle)?;
+        let conn = crate::account_manager::get_write_connection_guard_static()?;
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_vacuum', ?1)",
             rusqlite::params![now.to_string()],

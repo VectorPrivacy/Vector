@@ -1,17 +1,97 @@
 package io.vectorapp
 
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.os.Bundle
 import android.view.View
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.vectorapp.miniapp.MiniAppManager
 
 class MainActivity : TauriActivity() {
+
+    companion object {
+        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
+
+        init {
+            System.loadLibrary("vector_lib")
+        }
+
+        @JvmStatic
+        external fun nativeOnResume()
+        @JvmStatic
+        external fun nativeOnPause()
+        @JvmStatic
+        external fun nativeOnNotificationTap(chatId: String)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Ensure hardware acceleration is enabled
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
+
+        // Request notification permission (Android 13+)
+        requestNotificationPermission()
+
+        // Start the foreground notification service (only if user hasn't disabled it)
+        if (VectorBatteryHelper.getBackgroundServiceEnabled(this)) {
+            val serviceIntent = Intent(this, VectorNotificationService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        }
+
+        // Handle notification tap that launched the app
+        handleNotificationIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Handle notification tap when app is already running
+        handleNotificationIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try { nativeOnResume() } catch (_: Exception) {}
+        // Clear notification message history — user is in the app, stale history is irrelevant
+        VectorNotificationService.clearAllMessageHistory()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { nativeOnPause() } catch (_: Exception) {}
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        val chatId = intent?.getStringExtra("chat_id")
+        if (!chatId.isNullOrEmpty()) {
+            intent.removeExtra("chat_id") // Consume to prevent re-processing
+            android.util.Log.d("MainActivity", "Notification tap → chat: ${chatId.take(20)}")
+            try { nativeOnNotificationTap(chatId) } catch (_: Exception) {}
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    NOTIFICATION_PERMISSION_REQUEST_CODE
+                )
+            }
+        }
     }
 
     @Deprecated("Deprecated in Java")

@@ -11,7 +11,7 @@ use nostr_sdk::prelude::*;
 use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
 
-use crate::{TAURI_APP, NOSTR_CLIENT, TRUSTED_RELAYS, PENDING_INVITE, PendingInviteAcceptance};
+use crate::{NOSTR_CLIENT, active_trusted_relays, PENDING_INVITE, PendingInviteAcceptance};
 use crate::db;
 
 // ============================================================================
@@ -43,10 +43,8 @@ fn generate_invite_code() -> String {
 /// Generate or retrieve existing invite code for the current user
 #[tauri::command]
 pub async fn get_or_create_invite_code() -> Result<String, String> {
-    let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
-
     // Check if we already have a stored invite code
-    if let Ok(Some(existing_code)) = db::get_sql_setting(handle.clone(), "invite_code".to_string()) {
+    if let Ok(Some(existing_code)) = db::get_sql_setting("invite_code".to_string()) {
         return Ok(existing_code);
     }
 
@@ -75,7 +73,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
             if let Some(r_tag) = event.tags.find(TagKind::Custom(Cow::Borrowed("r"))) {
                 if let Some(code) = r_tag.content() {
                     // Store it locally
-                    db::set_sql_setting(handle.clone(), "invite_code".to_string(), code.to_string())
+                    db::set_sql_setting("invite_code".to_string(), code.to_string())
                         .map_err(|e| e.to_string())?;
                     return Ok(code.to_string());
                 }
@@ -95,10 +93,10 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let event = client.sign_event_builder(event_builder).await.map_err(|e| e.to_string())?;
 
     // Send only to trusted relays
-    client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await.map_err(|e| e.to_string())?;
+    client.send_event_to(active_trusted_relays().await.into_iter(), &event).await.map_err(|e| e.to_string())?;
 
     // Store locally
-    db::set_sql_setting(handle.clone(), "invite_code".to_string(), new_code.clone())
+    db::set_sql_setting("invite_code".to_string(), new_code.clone())
         .map_err(|e| e.to_string())?;
 
     Ok(new_code)
@@ -124,7 +122,7 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
 
     // Find the invite event
     let mut events = client
-        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -180,7 +178,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
         .limit(100);
 
     let mut events = client
-        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -205,7 +203,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
         .limit(1000); // Allow fetching many acceptances
 
     let mut acceptance_events = client
-        .stream_events_from(TRUSTED_RELAYS.to_vec(), acceptance_filter, std::time::Duration::from_secs(10))
+        .stream_events_from(active_trusted_relays().await, acceptance_filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -251,7 +249,7 @@ pub async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
         .limit(10);
 
     let mut events = client
-        .stream_events_from(TRUSTED_RELAYS.to_vec(), filter, std::time::Duration::from_secs(10))
+        .stream_events_from(active_trusted_relays().await, filter, std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
 

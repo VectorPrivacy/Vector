@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // Submodules
 mod maintenance;
@@ -22,7 +22,7 @@ pub use settings::{get_sql_setting, set_sql_setting, get_seed, set_seed, get_pke
 pub use profiles::{SlimProfile, get_all_profiles, set_profile};
 // MLS database functions
 pub use mls::{
-    save_mls_groups, save_mls_group, load_mls_groups,
+    save_mls_groups, save_mls_group, load_mls_groups, update_mls_group_avatar, clear_all_mls_group_avatar_cache,
     save_mls_keypackages, load_mls_keypackages,
     save_mls_event_cursors, load_mls_event_cursors,
     save_mls_device_id, load_mls_device_id,
@@ -51,8 +51,8 @@ pub use attachments::{
     lookup_attachment_cached, warm_file_hash_cache,
     get_chat_messages_paginated, get_chat_message_count,
     get_messages_around_id, message_exists_in_db, wrapper_event_exists,
-    update_wrapper_event_id, load_recent_wrapper_ids, update_attachment_downloaded_status,
-    check_downloaded_attachments_integrity,
+    update_wrapper_event_id, load_recent_wrapper_ids, save_processed_wrapper, load_processed_wrappers, load_negentropy_items, update_wrapper_timestamp,
+    update_attachment_downloaded_status, check_downloaded_attachments_integrity,
 };
 // Event database functions
 pub use events::{
@@ -64,13 +64,13 @@ pub use events::{
 
 /// In-memory cache for chat_identifier → integer ID mappings
 /// This avoids database lookups on every message operation
-static CHAT_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+static CHAT_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// In-memory cache for npub → integer ID mappings
 /// This avoids database lookups on every message operation
-static USER_ID_CACHE: Lazy<Arc<RwLock<HashMap<String, i64>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+static USER_ID_CACHE: LazyLock<Arc<RwLock<HashMap<String, i64>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// System event types for MLS groups (stored as integers for efficiency)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

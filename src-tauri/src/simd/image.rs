@@ -855,6 +855,7 @@ fn rgba_to_rgb_scalar(rgba_data: &[u8], rgb_data: &mut Vec<u8>) {
 /// - **x86_64**: SSSE3 pshufb (with scalar fallback)
 ///
 /// ~4x speedup on large images compared to naive scalar.
+#[allow(dead_code)]
 #[inline]
 pub fn rgb_to_rgba(rgb_data: &[u8]) -> Vec<u8> {
     let pixel_count = rgb_data.len() / 3;
@@ -888,6 +889,7 @@ pub fn rgb_to_rgba(rgb_data: &[u8]) -> Vec<u8> {
 /// Uses vld3q to load RGB data deinterleaved, then vst4q to store as RGBA.
 /// Unlike SSE/SSSE3, NEON's vld3q loads exactly 48 bytes, so no OOB risk.
 #[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
 #[inline]
 unsafe fn rgb_to_rgba_neon(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     let pixel_count = rgb_data.len() / 3;
@@ -1058,6 +1060,7 @@ unsafe fn rgb_to_rgba_scalar_x86(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
 
 /// Scalar RGB to RGBA conversion (fallback for non-SIMD platforms)
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[allow(dead_code)]
 #[inline]
 fn rgb_to_rgba_scalar(rgb_data: &[u8], rgba_data: &mut Vec<u8>) {
     let pixel_count = rgb_data.len() / 3;

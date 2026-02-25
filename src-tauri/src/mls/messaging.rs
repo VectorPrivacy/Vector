@@ -24,18 +24,14 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
     
     // Run non-Send MLS engine work on blocking thread
     tokio::task::spawn_blocking(move || {
-        let handle = TAURI_APP.get()
-            .ok_or_else(|| "App handle not initialized".to_string())?
-            .clone();
-        
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async move {
             // Get the Nostr client
             let client = NOSTR_CLIENT.get()
                 .ok_or_else(|| "Nostr client not initialized".to_string())?;
-            
+
             // Create MLS service instance
-            let service = MlsService::new_persistent(&handle)
+            let service = MlsService::new_persistent_static()
                 .map_err(|e| format!("Failed to create MLS service: {}", e))?;
             
             // Look up the group to get the engine_group_id (do this before getting engine)
@@ -165,7 +161,7 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                                     "message": &msg,
                                     "chat_id": &group_id
                                 })).ok();
-                                let _ = crate::db::save_message(handle.clone(), &group_id, &msg).await;
+                                let _ = crate::db::save_message(&group_id, &msg).await;
                             }
                         }
                     }
@@ -223,7 +219,9 @@ pub fn metadata_to_frontend(meta: &MlsGroupMetadata) -> serde_json::Value {
         "engine_group_id": meta.engine_group_id,
         "creator_pubkey": meta.creator_pubkey,
         "name": meta.name,
+        "description": meta.description,
         "avatar_ref": meta.avatar_ref,
+        "avatar_cached": meta.avatar_cached,
         "created_at": seconds_to_millis(meta.created_at),
         "updated_at": seconds_to_millis(meta.updated_at),
         "evicted": meta.evicted,

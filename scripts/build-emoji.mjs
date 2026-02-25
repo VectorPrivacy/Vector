@@ -11,7 +11,7 @@
  * Zero runtime dependencies. Uses Node 18+ built-in fetch.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -21,6 +21,7 @@ const CACHE_DIR = join(__dirname, '.emoji-cache');
 const SVG_DIR = join(ROOT, 'src', 'twemoji', 'svg');
 const EMOJI_JS = join(ROOT, 'src', 'js', 'emoji.js');
 const CUSTOM_KEYWORDS_FILE = join(__dirname, 'emoji-custom-keywords.json');
+const SVG_OVERRIDES_DIR = join(__dirname, 'emoji-svg-overrides');
 
 // Unicode data URLs
 const EMOJI_TEST_URL = 'https://unicode.org/Public/emoji/latest/emoji-test.txt';
@@ -201,6 +202,21 @@ function pruneExcludedSvgs() {
     }
 
     console.log(`  Deleted ${deleted} excluded SVGs`);
+}
+
+/**
+ * Copy custom SVG overrides into the twemoji directory.
+ * Place replacement SVGs in scripts/emoji-svg-overrides/ (e.g. 1f52b.svg for pistol).
+ */
+function applySvgOverrides() {
+    if (!existsSync(SVG_OVERRIDES_DIR)) return;
+    const files = readdirSync(SVG_OVERRIDES_DIR).filter(f => f.endsWith('.svg'));
+    if (files.length === 0) return;
+    console.log('Phase 3c: Applying custom SVG overrides...');
+    for (const file of files) {
+        copyFileSync(join(SVG_OVERRIDES_DIR, file), join(SVG_DIR, file));
+        console.log(`  Overrode ${file}`);
+    }
 }
 
 // ── Phase 4: Merge keywords ─────────────────────────────────────────────
@@ -433,9 +449,10 @@ async function main() {
     // Phase 2: Parse
     const emojis = parseEmojiTest(emojiTestRaw);
 
-    // Phase 3: Filter by SVG + prune excluded SVGs from disk
+    // Phase 3: Filter by SVG + prune excluded SVGs from disk + apply overrides
     const available = filterBySvg(emojis);
     pruneExcludedSvgs();
+    applySvgOverrides();
 
     // Phase 4: Keywords
     const cldrMap = parseCLDR(cldrRaw, cldrDerivedRaw);

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-battery-optimized"
+description = "Enables the check_battery_optimized command without any pre-configured scope."
+commands.allow = ["check_battery_optimized"]
+
+[[permission]]
+identifier = "deny-check-battery-optimized"
+description = "Denies the check_battery_optimized command without any pre-configured scope."
+commands.deny = ["check_battery_optimized"]

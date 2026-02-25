@@ -54,3 +54,24 @@
 -keepclassmembers class io.vectorapp.miniapp.MiniAppWebViewClient {
     native <methods>;
 }
+
+# ============================================
+# Background Sync - JNI and Foreground Service
+# ============================================
+
+# Keep VectorNotificationService native JNI methods and static helpers
+-keep class io.vectorapp.VectorNotificationService { *; }
+
+# Keep BootReceiver (referenced in AndroidManifest)
+-keep class io.vectorapp.BootReceiver { *; }
+
+# Keep MainActivity native JNI methods (foreground state tracking)
+-keepclassmembers class io.vectorapp.MainActivity {
+    native <methods>;
+}
+
+# Keep NotificationActionReceiver JNI methods and constants (inline reply + mark as read)
+-keep class io.vectorapp.NotificationActionReceiver { *; }
+
+# Keep VectorBatteryHelper static methods (called from Rust via JNI)
+-keep class io.vectorapp.VectorBatteryHelper { *; }

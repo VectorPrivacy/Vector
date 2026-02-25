@@ -8,9 +8,9 @@
 //! - PIN encrypt/decrypt for account security
 
 use nostr_sdk::prelude::*;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE, TRUSTED_RELAYS};
+use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, active_trusted_relays};
 use crate::{Profile, account_manager, db, crypto, commands};
 
 // ============================================================================
@@ -74,8 +74,7 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
         "npub": my_npub,
         "profiles": slim_profiles,
         "chats": serializable_chats,
-        "is_syncing": state.is_syncing,
-        "sync_mode": format!("{:?}", state.sync_mode)
+        "is_syncing": state.is_syncing
     }))
 }
 
@@ -142,8 +141,10 @@ pub async fn login(import_key: String) -> Result<LoginResult, String> {
     if let Some(handle) = TAURI_APP.get() {
         if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
             eprintln!("[Login] Failed to initialize profile database: {}", e);
+            let _ = handle.emit("loading_error", &e);
         } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
             eprintln!("[Login] Failed to set current account: {}", e);
+            let _ = handle.emit("loading_error", &e);
         } else {
             println!("[Login] Database initialized and account set: {}", npub);
         }
@@ -246,32 +247,24 @@ pub async fn create_account() -> Result<LoginResult, String> {
 /// Export account keys (nsec and seed phrase if available)
 #[tauri::command]
 pub async fn export_keys() -> Result<serde_json::Value, String> {
-    // Try to get nsec from database first
-    let handle = TAURI_APP.get().unwrap();
-    let nsec = if let Some(enc_pkey) = db::get_pkey(handle.clone())? {
-        // Decrypt the nsec
-        match crypto::internal_decrypt(enc_pkey, None).await {
-            Ok(decrypted_nsec) => decrypted_nsec,
-            Err(_) => return Err("Failed to decrypt nsec".to_string()),
-        }
+    let stored = db::get_pkey()?
+        .ok_or("No nsec found in database")?;
+
+    // If encryption is disabled the stored value is already plaintext
+    let nsec = if crypto::is_encryption_enabled() {
+        crypto::internal_decrypt(stored, None).await
+            .map_err(|_| "Failed to decrypt nsec".to_string())?
     } else {
-        return Err("No nsec found in database".to_string());
+        stored
     };
 
-    // Try to get seed phrase from memory first
+    // Try to get seed phrase from memory first, then from database
     let seed_phrase = if let Some(seed) = MNEMONIC_SEED.get() {
         Some(seed.clone())
     } else {
-        // If not in memory, try to get from database
-        let has_key = ENCRYPTION_KEY.read().unwrap().is_some();
-        if has_key {
-            match db::get_seed(handle.clone()).await {
-                Ok(Some(seed)) => Some(seed),
-                Ok(None) => None,
-                Err(_) => None,
-            }
-        } else {
-            None
+        match db::get_seed().await {
+            Ok(Some(seed)) => Some(seed),
+            _ => None,
         }
     };
 
@@ -298,8 +291,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
     match MNEMONIC_SEED.get() {
         Some(seed) => {
             // Save the seed phrase to the database
-            let handle = TAURI_APP.get().unwrap();
-            let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+            let _ = db::set_seed(seed.to_string()).await;
         }
         _ => ()
     }
@@ -324,7 +316,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
                 match client.sign_event_builder(event_builder).await {
                     Ok(event) => {
                         // Send only to trusted relays
-                        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await {
+                        match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
@@ -348,11 +340,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
         }
 
         // Skip if a forced regen is pending (connect() post-connect handler owns this)
-        let handle = match TAURI_APP.get() {
-            Some(h) => h.clone(),
-            None => return,
-        };
-        let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+        let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
             .ok().flatten().map(|v| v == "1").unwrap_or(false);
         if force_pending {
             println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
@@ -393,11 +381,7 @@ pub async fn decrypt(ciphertext: String, password: Option<String>) -> Result<Str
             }
 
             // Skip if a forced regen is pending (connect() post-connect handler owns this)
-            let handle = match TAURI_APP.get() {
-                Some(h) => h.clone(),
-                None => return,
-            };
-            let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+            let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
                 .ok().flatten().map(|v| v == "1").unwrap_or(false);
             if force_pending {
                 println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending (connect handler)");
@@ -437,7 +421,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     }
 
     let handle = TAURI_APP.get().ok_or("App not initialized")?;
-    let stored_pkey = db::get_pkey(handle.clone())?
+    let stored_pkey = db::get_pkey()?
         .ok_or("No private key found")?;
 
     // Decrypt if password provided
@@ -469,8 +453,10 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // Initialize profile database
     if let Err(e) = account_manager::init_profile_database(handle, &npub).await {
         eprintln!("[Login] Failed to initialize profile database: {}", e);
+        let _ = handle.emit("loading_error", &e);
     } else if let Err(e) = account_manager::set_current_account(npub.clone()) {
         eprintln!("[Login] Failed to set current account: {}", e);
+        let _ = handle.emit("loading_error", &e);
     }
 
     // MLS keypackage bootstrap (non-blocking, same as decrypt command)
@@ -499,12 +485,12 @@ pub async fn setup_encryption<R: Runtime>(
     db::set_pkey(handle.clone(), encrypted).await?;
 
     // Set security type and ensure encryption flag is cached
-    db::set_sql_setting(handle.clone(), "security_type".to_string(), security_type)?;
+    db::set_sql_setting("security_type".to_string(), security_type)?;
     crate::state::set_encryption_enabled(true);
 
     // Save seed phrase if available
     if let Some(seed) = MNEMONIC_SEED.get() {
-        let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+        let _ = db::set_seed(seed.to_string()).await;
     }
 
     // Broadcast pending invite acceptance
@@ -518,7 +504,7 @@ pub async fn setup_encryption<R: Runtime>(
                     .tag(Tag::public_key(inviter_pubkey));
                 match client.sign_event_builder(event_builder).await {
                     Ok(event) => {
-                        match client.send_event_to(TRUSTED_RELAYS.iter().copied(), &event).await {
+                        match client.send_event_to(active_trusted_relays().await.into_iter(), &event).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
@@ -547,12 +533,12 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     db::set_pkey(handle.clone(), nsec).await?;
 
     // Mark encryption as disabled
-    db::set_sql_setting(handle.clone(), "encryption_enabled".to_string(), "false".to_string())?;
+    db::set_sql_setting("encryption_enabled".to_string(), "false".to_string())?;
     crate::state::set_encryption_enabled(false);
 
     // Save seed phrase if available (stored plaintext since encryption is disabled)
     if let Some(seed) = MNEMONIC_SEED.get() {
-        let _ = db::set_seed(handle.clone(), seed.to_string()).await;
+        let _ = db::set_seed(seed.to_string()).await;
     }
 
     Ok(())
@@ -568,11 +554,7 @@ fn spawn_mls_bootstrap() {
             return;
         }
 
-        let handle = match TAURI_APP.get() {
-            Some(h) => h.clone(),
-            None => return,
-        };
-        let force_pending = db::get_sql_setting(handle, "mls_force_keypackage_regen".into())
+        let force_pending = db::get_sql_setting("mls_force_keypackage_regen".into())
             .ok().flatten().map(|v| v == "1").unwrap_or(false);
         if force_pending {
             println!("[MLS] Skipping cached KeyPackage bootstrap — forced regen pending");

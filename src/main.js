@@ -55,8 +55,8 @@ const domProfileBadgeFawkes = document.getElementById('profile-badge-fawkes');
 const domProfileDescription = document.getElementById('profile-description');
 const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
 const domProfileOptions = document.getElementById('profile-option-list');
-const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
+const domProfileOptionMute = document.getElementById('profile-option-mute');
 const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileOptionShare = document.getElementById('profile-option-share');
 const domProfileId = document.getElementById('profile-id');
@@ -149,6 +149,11 @@ const domCreateGroupList = document.getElementById('create-group-list');
 const domCreateGroupCreateBtn = document.getElementById('create-group-create-btn');
 const domCreateGroupCancelBtn = document.getElementById('create-group-cancel-btn');
 const domCreateGroupStatus = document.getElementById('create-group-status');
+const domCreateGroupDescription = document.getElementById('create-group-description');
+const domCreateGroupAvatarPicker = document.getElementById('create-group-avatar-picker');
+const domCreateGroupAvatarPreview = document.getElementById('create-group-avatar-preview');
+const domCreateGroupAvatarPlaceholder = document.getElementById('create-group-avatar-placeholder');
+const domCreateGroupAvatarEditIcon = document.getElementById('create-group-avatar-edit-icon');
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
 const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
@@ -160,7 +165,6 @@ const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-t
 const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
-const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
 const domSettingsChangePinLabel = document.getElementById('change-pin-label');
@@ -170,8 +174,6 @@ const domDonorPivx = document.getElementById('donor-pivx');
 const domDonorGitcoin = document.getElementById('donor-gitcoin');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
-const domRestorePivxGroup = document.getElementById('restore-pivx-group');
-const domRestorePivxBtn = document.getElementById('restore-pivx-btn');
 
 const domApp = document.getElementById('popup-container');
 const domPopup = document.getElementById('popup');
@@ -202,6 +204,9 @@ let strCurrentReactionReference = "";
  */
 function openEmojiPanel(e) {
     const isDefaultPanel = e.target === domChatMessageInputEmoji || domChatMessageInputEmoji.contains(e.target);
+
+    // Don't close if clicking inside the picker itself
+    if (picker.contains(e.target)) return;
 
     // Open or Close the panel depending on it's state
     const strReaction = e.target.classList.contains('add-reaction') ? e.target.parentElement.parentElement.id : '';
@@ -477,12 +482,13 @@ function showToast(message) {
     toast.style.opacity = '1';
     backdrop.style.opacity = '1';
 
-    // Hide after 1 second
+    // Scale duration by message length: 1.5s base + 40ms per char, capped at 6s
+    const duration = Math.min(1500 + message.length * 40, 6000);
     clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => {
         backdrop.style.opacity = '0';
         toast.style.opacity = '0';
-    }, 1000);
+    }, duration);
 }
 
 /**
@@ -1727,10 +1733,10 @@ async function loadMiniAppsHistory() {
         const pivxLastUsedMs = parseInt(localStorage.getItem('pivx_last_used') || '0', 10);
         const pivxLastOpenedAt = Math.floor(pivxLastUsedMs / 1000);
 
-        // Create combined list of apps with PIVX as a virtual entry (if not hidden)
+        // Create combined list of apps with PIVX always included (hidden flag controls visibility)
         const allApps = [
-            // Add PIVX as a virtual app entry (only if not hidden)
-            ...(!pivxHidden ? [{ name: 'PIVX', isPivx: true, last_opened_at: pivxLastOpenedAt }] : []),
+            // Add PIVX as a virtual app entry (always present, hidden flag for grayed-out state)
+            { name: 'PIVX', isPivx: true, isHidden: pivxHidden, last_opened_at: pivxLastOpenedAt },
             // Add history apps with their timestamps (backend uses last_opened_at in seconds)
             ...history.map(app => ({ ...app, isPivx: false, last_opened_at: app.last_opened_at || 0 }))
         ];
@@ -1743,7 +1749,7 @@ async function loadMiniAppsHistory() {
             if (app.isPivx) {
                 // Create PIVX button
                 const pivxBtn = document.createElement('button');
-                pivxBtn.className = 'attachment-panel-item';
+                pivxBtn.className = 'attachment-panel-item' + (app.isHidden ? ' miniapp-disabled' : '');
                 pivxBtn.id = 'attachment-panel-pivx';
                 pivxBtn.draggable = false;
                 pivxBtn.innerHTML = `
@@ -1754,20 +1760,32 @@ async function loadMiniAppsHistory() {
                 `;
                 // Store app name for search filtering
                 pivxBtn.dataset.appName = 'pivx';
+                // Mark hidden state for search filter logic
+                if (app.isHidden) pivxBtn.dataset.appHidden = 'true';
+
+                // Hidden PIVX starts invisible (only revealed via search)
+                if (app.isHidden) pivxBtn.style.display = 'none';
 
                 // Add tooltip on hover
                 pivxBtn.addEventListener('mouseenter', () => {
-                    showGlobalTooltip('PIVX Wallet', pivxBtn);
+                    showGlobalTooltip(app.isHidden ? 'Restore PIVX Wallet' : 'PIVX Wallet', pivxBtn);
                 });
                 pivxBtn.addEventListener('mouseleave', () => {
                     hideGlobalTooltip();
                 });
 
-                pivxBtn.onclick = () => {
+                pivxBtn.onclick = async () => {
                     // Don't launch if in edit mode
                     if (miniAppsEditMode) return;
                     hideGlobalTooltip();
-                    showPivxWalletPanel();
+                    if (app.isHidden) {
+                        // Restore hidden PIVX
+                        localStorage.removeItem('pivx_hidden');
+                        await loadMiniAppsHistory();
+                        popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
+                    } else {
+                        showPivxWalletPanel();
+                    }
                 };
                 domMiniAppsGrid.appendChild(pivxBtn);
             } else {
@@ -1810,7 +1828,7 @@ async function loadMiniAppsHistory() {
         }
 
         // If no apps at all (only PIVX which is always there), show empty message
-        if (history.length === 0 && pivxLastOpenedAt === 0) {
+        if (history.length === 0 && (pivxHidden || pivxLastOpenedAt === 0)) {
             const emptyMsg = document.createElement('div');
             emptyMsg.className = 'attachment-panel-empty';
             emptyMsg.textContent = 'No recent Mini Apps';
@@ -1846,9 +1864,19 @@ function filterMiniApps(query) {
 
         // Filter all apps (including PIVX) by name
         if (appName) {
+            const isHiddenApp = item.dataset.appHidden === 'true';
             const matches = !isSearching || appName.includes(normalizedQuery);
-            item.classList.toggle('hidden-by-search', !matches);
-            if (matches) visibleCount++;
+
+            if (isHiddenApp) {
+                // Hidden apps: only show when searching and name matches
+                const show = isSearching && matches;
+                item.style.display = show ? '' : 'none';
+                item.classList.toggle('hidden-by-search', !show);
+                if (show) visibleCount++;
+            } else {
+                item.classList.toggle('hidden-by-search', !matches);
+                if (matches) visibleCount++;
+            }
         }
     });
 
@@ -3047,51 +3075,49 @@ function prefetchTrendingGifs() {
         .catch(() => {}); // Silently fail - this is just an optimization
 }
 
-// ===== Blurhash Decoder (Rust Backend) =====
+// ===== ThumbHash Decoder (Rust Backend) =====
 // Uses efficient Rust-based decoder with LRU caching
-/** @type {Map<string, string>} Cache of decoded blurhash -> data URL */
-const blurhashCache = new Map();
-/** Maximum cached blurhash entries */
-const BLURHASH_CACHE_MAX_SIZE = 200;
+/** @type {Map<string, string>} Cache of decoded thumbhash -> data URL */
+const thumbhashCache = new Map();
+/** Maximum cached thumbhash entries */
+const THUMBHASH_CACHE_MAX_SIZE = 200;
 
 /**
- * Get a decoded blurhash data URL from cache, or decode via Rust backend
+ * Get a decoded thumbhash data URL from cache, or decode via Rust backend
  * Returns cached value synchronously if available, otherwise triggers async decode
- * @param {string} blurhash - The blurhash string
+ * @param {string} thumbhash - The base91-encoded thumbhash string
  * @returns {string|null} - Cached data URL or null (will be decoded async)
  */
-function getCachedBlurhash(blurhash) {
-    if (!blurhash || blurhash.length < 6) return null;
-    return blurhashCache.get(blurhash) || null;
+function getCachedThumbhash(thumbhash) {
+    if (!thumbhash) return null;
+    return thumbhashCache.get(thumbhash) || null;
 }
 
 /**
- * Pre-decode blurhashes for a batch of GIFs using the Rust backend
+ * Pre-decode thumbhashes for a batch of GIFs using the Rust backend
  * Results are cached for synchronous access during rendering
- * @param {Array<{b?: string}>} gifs - Array of GIF objects with optional blurhash field 'b'
+ * @param {Array<{th?: string}>} gifs - Array of GIF objects with optional thumbhash field 'th'
  */
-async function predecodeBlurhashes(gifs) {
-    const uncached = gifs.filter(g => g.b && !blurhashCache.has(g.b));
+async function predecodeThumbhashes(gifs) {
+    const uncached = gifs.filter(g => g.th && !thumbhashCache.has(g.th));
     if (uncached.length === 0) return;
 
     // Decode in parallel (Rust backend is efficient)
     const decodePromises = uncached.map(async (gif) => {
         try {
-            const dataUrl = await invoke('decode_blurhash', {
-                blurhash: gif.b,
-                width: 32,
-                height: 32
+            const dataUrl = await invoke('decode_thumbhash', {
+                thumbhash: gif.th
             });
             if (dataUrl && dataUrl.startsWith('data:')) {
                 // LRU eviction if cache is full
-                if (blurhashCache.size >= BLURHASH_CACHE_MAX_SIZE) {
-                    const firstKey = blurhashCache.keys().next().value;
-                    blurhashCache.delete(firstKey);
+                if (thumbhashCache.size >= THUMBHASH_CACHE_MAX_SIZE) {
+                    const firstKey = thumbhashCache.keys().next().value;
+                    thumbhashCache.delete(firstKey);
                 }
-                blurhashCache.set(gif.b, dataUrl);
+                thumbhashCache.set(gif.th, dataUrl);
             }
         } catch {
-            // Silently fail - blurhash is just for placeholder
+            // Silently fail - thumbhash is just for placeholder
         }
     });
 
@@ -3170,8 +3196,8 @@ async function loadTrendingGifs() {
     // Use cached data if fresh (only for first page)
     if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
         gifGrid.innerHTML = '';
-        // Blurhashes should already be cached, but ensure they are
-        await predecodeBlurhashes(cachedTrendingGifs);
+        // Thumbhashes should already be cached, but ensure they are
+        await predecodeThumbhashes(cachedTrendingGifs);
         renderGifs(cachedTrendingGifs, false);
         gifCurrentOffset = cachedTrendingGifs.length;
         gifHasMore = cachedTrendingGifs.length >= gifPageSize;
@@ -3191,8 +3217,8 @@ async function loadTrendingGifs() {
             // Cache the results
             cachedTrendingGifs = data.results;
             cachedTrendingTimestamp = Date.now();
-            // Pre-decode blurhashes before rendering
-            await predecodeBlurhashes(data.results);
+            // Pre-decode thumbhashes before rendering
+            await predecodeThumbhashes(data.results);
             renderGifs(data.results, false);
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -3237,8 +3263,8 @@ async function searchGifs(query) {
         gifSearchCache.delete(cacheKey);
         gifSearchCache.set(cacheKey, cached);
         gifGrid.innerHTML = '';
-        // Blurhashes should already be cached, but ensure they are
-        await predecodeBlurhashes(cached);
+        // Thumbhashes should already be cached, but ensure they are
+        await predecodeThumbhashes(cached);
         renderGifs(cached, false);
         gifCurrentOffset = cached.length;
         gifHasMore = cached.length >= gifPageSize;
@@ -3262,8 +3288,8 @@ async function searchGifs(query) {
             }
             gifSearchCache.set(cacheKey, data.results);
 
-            // Pre-decode blurhashes before rendering
-            await predecodeBlurhashes(data.results);
+            // Pre-decode thumbhashes before rendering
+            await predecodeThumbhashes(data.results);
             renderGifs(data.results, false);
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -3313,8 +3339,8 @@ async function loadMoreGifs() {
         gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
 
         if (data.results && data.results.length > 0) {
-            // Pre-decode blurhashes before rendering
-            await predecodeBlurhashes(data.results);
+            // Pre-decode thumbhashes before rendering
+            await predecodeThumbhashes(data.results);
             renderGifs(data.results, true); // Append mode
             gifCurrentOffset += data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
@@ -3385,15 +3411,15 @@ function renderGifs(gifs, append = false) {
         gifItem.dataset.gifId = gif.i;
         gifItem.dataset.gifTitle = gif.ti || '';
 
-        // Create placeholder with blurhash background
+        // Create placeholder with thumbhash background
         const placeholder = document.createElement('div');
         placeholder.className = 'gif-placeholder';
 
-        // Apply cached blurhash as background (pre-decoded via Rust backend)
-        if (gif.b) {
-            const cachedBlurhash = getCachedBlurhash(gif.b);
-            if (cachedBlurhash) {
-                placeholder.style.backgroundImage = `url(${cachedBlurhash})`;
+        // Apply cached thumbhash as background (pre-decoded via Rust backend)
+        if (gif.th) {
+            const cachedThumbhash = getCachedThumbhash(gif.th);
+            if (cachedThumbhash) {
+                placeholder.style.backgroundImage = `url(${cachedThumbhash})`;
                 placeholder.style.backgroundSize = 'cover';
             }
         }
@@ -3898,10 +3924,17 @@ function applyMlsGroupMetadata(metadata) {
     assignIfChanged(chat.metadata, 'engine_group_id', metadata.engine_group_id);
     assignIfChanged(chat.metadata, 'creator_pubkey', metadata.creator_pubkey);
     assignIfChanged(chat.metadata, 'avatar_ref', metadata.avatar_ref ?? null);
+    assignIfChanged(chat.metadata, 'avatar_cached', metadata.avatar_cached ?? null);
     assignIfChanged(chat.metadata, 'created_at', metadata.created_at);
     assignIfChanged(chat.metadata, 'updated_at', metadata.updated_at);
     assignIfChanged(chat.metadata, 'evicted', metadata.evicted);
+
+    // Auto-trigger avatar caching if we have a ref but no cache
+    if (chat.metadata.avatar_ref && !chat.metadata.avatar_cached) {
+        invoke('cache_group_avatar', { groupId: metadata.group_id }).catch(() => {});
+    }
     assignIfChanged(chat.metadata.custom_fields, 'name', metadata.name);
+    assignIfChanged(chat.metadata.custom_fields, 'description', metadata.description);
     if (metadata.member_count !== undefined) {
         assignIfChanged(chat.metadata.custom_fields, 'member_count', metadata.member_count);
     }
@@ -3929,6 +3962,21 @@ async function hydrateMLSGroupMetadata() {
         console.error('Failed to hydrate MLS group metadata:', e);
     }
 }
+
+/** Extract a valid npub from a bare npub string or a vectorapp.io profile URL */
+function extractNpub(input) {
+    const trimmed = (input || '').trim();
+    if (/^npub1[a-z0-9]{58}$/i.test(trimmed)) return trimmed.toLowerCase();
+    const m = trimmed.match(/https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i);
+    if (m) return m[1].toLowerCase();
+    return null;
+}
+
+/** Track npubs we've already fired load_profile for (to avoid duplicate relay lookups) */
+const strangerProfileRequested = new Set();
+
+/** Active invite-modal re-render callback (set while the invite modal is open) */
+let activeInviteModalRerender = null;
 
 /**
  * Get a profile by npub
@@ -4255,9 +4303,9 @@ function generateChatlistStateHash() {
     // Build a simple array of state values (faster than creating objects)
     const states = [];
 
-    // Add invite IDs first
+    // Add invite IDs and avatar state
     for (const inv of arrMLSInvites) {
-        states.push(inv.id || inv.welcome_event_id || inv.group_id);
+        states.push(inv.id || inv.welcome_event_id || inv.group_id, inv.avatar_cached);
     }
 
     // Add chat states (including chat ID to capture order changes)
@@ -4265,7 +4313,7 @@ function generateChatlistStateHash() {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
         const cLastMsg = chat.messages[chat.messages.length - 1];
-        const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
+        const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
         const activeTypers = chat.active_typers || [];
 
         // Push values directly (faster than creating object)
@@ -4279,7 +4327,9 @@ function generateChatlistStateHash() {
             profile?.nickname || profile?.name,
             profile?.avatar,
             profile?.avatar_cached,
-            chat.muted
+            chat.muted,
+            isGroup ? chat.metadata?.avatar_cached : undefined,
+            isGroup ? chat.metadata?.custom_fields?.name : undefined
         );
     }
 
@@ -4355,10 +4405,43 @@ function renderInviteItem(invite, primaryColor) {
     divInvite.id = `invite-${invite.id || invite.welcome_event_id || groupId}`;
     divInvite.style.borderColor = primaryColor;
 
-    // Avatar container with group placeholder
+    // Avatar container — show cached avatar if available, otherwise placeholder
     const divAvatarContainer = document.createElement('div');
     divAvatarContainer.style.position = 'relative';
-    divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+    if (invite.avatar_cached) {
+        const imgAvatar = document.createElement('img');
+        imgAvatar.src = convertFileSrc(invite.avatar_cached);
+        imgAvatar.style.width = '50px';
+        imgAvatar.style.height = '50px';
+        imgAvatar.style.objectFit = 'cover';
+        imgAvatar.style.borderRadius = '50%';
+        imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
+        divAvatarContainer.appendChild(imgAvatar);
+    } else {
+        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        // Fire-and-forget: cache the invite avatar if encryption data is available
+        if (invite.image_hash && invite.image_key && invite.image_nonce) {
+            invoke('cache_invite_avatar', {
+                imageHash: invite.image_hash,
+                imageKey: invite.image_key,
+                imageNonce: invite.image_nonce,
+            }).then(cachedPath => {
+                if (cachedPath) {
+                    invite.avatar_cached = cachedPath;
+                    // Direct DOM update + state hash change triggers re-render
+                    const img = document.createElement('img');
+                    img.src = convertFileSrc(cachedPath);
+                    img.style.width = '50px';
+                    img.style.height = '50px';
+                    img.style.objectFit = 'cover';
+                    img.style.borderRadius = '50%';
+                    img.onerror = () => img.replaceWith(createPlaceholderAvatar(true, 50));
+                    divAvatarContainer.innerHTML = '';
+                    divAvatarContainer.appendChild(img);
+                }
+            }).catch(() => {});
+        }
+    }
     divInvite.appendChild(divAvatarContainer);
 
     // Preview container with group name and member count
@@ -4535,8 +4618,8 @@ function renderChat(chat, primaryColor) {
     const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
 
     // Collect the Unread Message count for 'Unread' emphasis and badging
-    // Ensure muted chats OR muted profiles do not show unread glow
-    const nUnread = (chat.muted || (profile && profile.muted)) ? 0 : countUnreadMessages(chat);
+    // Ensure muted chats do not show unread glow
+    const nUnread = chat.muted ? 0 : countUnreadMessages(chat);
 
     // The Chat container (The ID is the Contact's npub)
     const divContact = document.createElement('div');
@@ -4553,8 +4636,19 @@ function renderChat(chat, primaryColor) {
     divAvatarContainer.style.position = `relative`;
     
     if (isGroup) {
-        // For groups, show the group placeholder SVG
-        divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        const groupAvatarCached = chat.metadata?.avatar_cached;
+        if (groupAvatarCached) {
+            const imgAvatar = document.createElement('img');
+            imgAvatar.src = convertFileSrc(groupAvatarCached);
+            imgAvatar.style.width = '50px';
+            imgAvatar.style.height = '50px';
+            imgAvatar.style.objectFit = 'cover';
+            imgAvatar.style.borderRadius = '50%';
+            imgAvatar.onerror = () => imgAvatar.replaceWith(createPlaceholderAvatar(true, 50));
+            divAvatarContainer.appendChild(imgAvatar);
+        } else {
+            divAvatarContainer.appendChild(createPlaceholderAvatar(true, 50));
+        }
     } else {
         const avatarSrc = getProfileAvatarSrc(profile);
         if (avatarSrc) {
@@ -4827,8 +4921,8 @@ function updateChatBackNotification() {
         const isGroup = chat.chat_type === 'MlsGroup';
         const profile = !isGroup && chat.participants.length === 1 ? getProfile(chat.id) : null;
         
-        // Skip muted chats or muted profiles (same logic as chatlist rendering)
-        if (chat.muted || (profile && profile.muted)) return false;
+        // Skip muted chats
+        if (chat.muted) return false;
         
         // Check if this chat has unread messages
         return countUnreadMessages(chat) > 0;
@@ -5014,6 +5108,14 @@ async function setupRustListeners() {
                 const groupName = chat.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
                 domChatContact.textContent = groupName;
                 updateChatHeaderSubtext(chat);
+                // Update header avatar if cached avatar changed
+                if (chat.metadata?.avatar_cached) {
+                    domChatHeaderAvatarContainer.innerHTML = '';
+                    const avatarImg = createAvatarImg(convertFileSrc(chat.metadata.avatar_cached), 22, true);
+                    avatarImg.classList.add('btn');
+                    avatarImg.onclick = () => { closeChat(); openGroupOverview(chat); };
+                    domChatHeaderAvatarContainer.appendChild(avatarImg);
+                }
             }
 
             const overviewGroupId = domGroupOverview.getAttribute('data-group-id');
@@ -5095,7 +5197,14 @@ async function setupRustListeners() {
             console.error('Error handling mls_group_left event:', e);
         }
     });
-    
+
+    // Listen for async MLS operation failures (background publish/merge errors)
+    _on('mls_error', (evt) => {
+        const { group_id, error } = evt.payload || {};
+        console.error('[MLS] Background operation failed:', group_id, error);
+        showToast(error || 'Group operation failed');
+    });
+
     // Listen for MLS initial sync completion after joining a group
     _on('mls_group_initial_sync', async (evt) => {
         try {
@@ -5183,9 +5292,10 @@ async function setupRustListeners() {
         fSyncComplete = true;
         
         // Fade out the sync line
-        domSyncLine.classList.remove('active');
+        domSyncLine.classList.remove('active', 'progress');
+        domSyncLine.style.removeProperty('--sync-progress');
         domSyncLine.classList.add('fade-out');
-        
+
         // Wait for fade animation to complete, then reset
         setTimeout(() => {
             domSyncLine.classList.remove('fade-out');
@@ -5193,19 +5303,21 @@ async function setupRustListeners() {
         }, 300);
     });
 
-    // Listen for Synchronisation Slice updates
-    _on('sync_slice_finished', (_) => {
-        // Continue synchronising until event `sync_finished` is emitted
-        invoke("fetch_messages", { init: false });
-    });
-
     // Listen for Synchronisation Progress updates
     _on('sync_progress', (evt) => {
-        // Show and activate the sync line when syncing is in progress
-        // Only add 'active' if it's not already active to avoid restarting the animation
-        if (!fInit && !domSyncLine.classList.contains('active')) {
-            domSyncLine.classList.remove('fade-out');
-            domSyncLine.classList.add('active');
+        if (fInit) return;
+        const { mode, current, total } = evt.payload || {};
+        if (mode === 'Syncing' && current && total) {
+            // Determinate progress bar: fill left-to-right
+            domSyncLine.classList.remove('active', 'fade-out');
+            domSyncLine.classList.add('progress');
+            domSyncLine.style.setProperty('--sync-progress', Math.min(current / total, 1));
+        } else {
+            // Indeterminate pulse (reconciliation phase — total unknown)
+            if (!domSyncLine.classList.contains('active')) {
+                domSyncLine.classList.remove('fade-out', 'progress');
+                domSyncLine.classList.add('active');
+            }
         }
         if (!strOpenChat) adjustSize();
     });
@@ -5365,28 +5477,30 @@ async function setupRustListeners() {
         if (domProfileId.textContent === evt.payload.id) {
             renderProfileTab(evt.payload);
         }
-        
+
+        // Re-render create group or invite modal if a stranger npub's profile resolved
+        if (arrSelectedGroupMembers.includes(evt.payload.id) && domCreateGroup?.style.display !== 'none') {
+            renderCreateGroupList(domCreateGroupFilter?.value || '');
+        }
+        if (activeInviteModalRerender) {
+            activeInviteModalRerender();
+        }
+
         // Render the Chat List
         renderChatlist();
     });
 
-    _on('profile_muted', (evt) => {
-        // Update the chat's muted status
-        const cChat = getDMChat(evt.payload.profile_id);
+    _on('chat_muted', (evt) => {
+        const cChat = arrChats.find(c => c.id === evt.payload.chat_id);
         if (cChat) {
             cChat.muted = evt.payload.value;
         }
-        
-        // Also update profile if it exists
-        const cProfile = getProfile(evt.payload.profile_id);
-        if (cProfile) {
-            cProfile.muted = evt.payload.value;
-        }
 
-        // If this profile is Expanded, update the Mute UI
-        if (domProfileId.textContent === evt.payload.profile_id && cProfile) {
-            domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
-            domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
+        // If this chat's profile is expanded, update the Mute UI
+        const domMuteBtn = document.getElementById('profile-option-mute');
+        if (domMuteBtn && domProfileId.textContent === evt.payload.chat_id) {
+            domMuteBtn.querySelector('span').classList.replace('icon-volume-' + (evt.payload.value ? 'max' : 'mute'), 'icon-volume-' + (evt.payload.value ? 'mute' : 'max'));
+            domMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
         }
 
         // Re-render the chat list to immediately reflect glow/badge changes
@@ -5651,6 +5765,22 @@ async function setupRustListeners() {
         }
     });
 
+    // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
+    _on('chat_mark_read', (evt) => {
+        const { chat_id, last_read } = evt.payload;
+        const cChat = getChat(chat_id);
+        if (cChat && last_read) {
+            cChat.last_read = last_read;
+            // Re-render the chat preview element in-place (border, font color, etc. all depend on unread state)
+            const oldEl = document.getElementById(`chatlist-${chat_id}`);
+            if (oldEl) {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                const newEl = renderChat(cChat, primaryColor);
+                oldEl.replaceWith(newEl);
+            }
+        }
+    });
+
     // Listen for attachment URL updates (for file uploads and reuse)
     _on('attachment_update', (evt) => {
         const { chat_id, message_id, attachment_id, url } = evt.payload;
@@ -5678,9 +5808,17 @@ async function setupRustListeners() {
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
     _on('whisper_download_progress', async (evt) => {
-        // Update the progression UI
+        const { progress, downloaded_bytes, total_bytes, speed_bps } = evt.payload;
         const spanProgression = document.getElementById('voice-model-download-progression');
-        if (spanProgression) spanProgression.textContent = `(${evt.payload.progress}%)`;
+        if (spanProgression) {
+            if (downloaded_bytes && total_bytes) {
+                const dlMB = (downloaded_bytes / (1024 * 1024)).toFixed(1);
+                const totalMB = (total_bytes / (1024 * 1024)).toFixed(1);
+                spanProgression.textContent = `(${dlMB}/${totalMB} MB)`;
+            } else {
+                spanProgression.textContent = `(${progress}%)`;
+            }
+        }
     });
 
     // Listen for Windows-specific Overlay Icon update requests
@@ -5755,18 +5893,21 @@ async function executeDeepLinkAction(payload) {
         // Open the profile for the given npub
         // First, try to find an existing profile in our cache
         let profile = arrProfiles.find(p => p.id === target);
-        
+
         if (!profile) {
             // Profile not in cache - create a minimal profile object
             // The openProfile function will trigger a refresh from the network
             profile = { id: target };
         }
-        
+
         // Store the current chat so we can return to it
         previousChatBeforeProfile = strOpenChat;
-        
+
         // Open the profile view
         await openProfile(profile);
+    } else if (action_type === 'chat') {
+        // Open a specific chat (triggered by tapping a notification)
+        await openChat(target);
     }
 }
 
@@ -6401,6 +6542,23 @@ async function login(skipAnimations = false) {
 
                 // Adjust the Chat List sizes (deferred — layout reflows don't block first paint)
                 requestAnimationFrame(() => adjustSize());
+
+                // Prompt for background service / battery optimization (mobile only, once)
+                // Deferred so login animations finish first
+                if (platformFeatures.is_mobile) {
+                    setTimeout(async () => {
+                        try {
+                            const prompted = await invoke('get_background_service_prompted');
+                            console.log('[Battery] prompted =', prompted);
+                            if (!prompted) {
+                                await invoke('set_background_service_prompted');
+                                await showBackgroundServicePrompt();
+                            }
+                        } catch (e) {
+                            console.error('[Battery] prompt error:', e);
+                        }
+                    }, 1500);
+                }
             };
 
             if (skipAnimations) {
@@ -6484,17 +6642,15 @@ async function login(skipAnimations = false) {
             initializeUpdater();
 
             // Execute any pending deep link action that was received before login
-            setTimeout(async () => {
-                try {
-                    const pendingAction = await invoke('get_pending_deep_link');
-                    if (pendingAction) {
-                        console.log('Executing pending deep link action:', pendingAction);
-                        await executeDeepLinkAction(pendingAction);
-                    }
-                } catch (e) {
-                    console.error('Failed to check for pending deep link:', e);
+            try {
+                const pendingAction = await invoke('get_pending_deep_link');
+                if (pendingAction) {
+                    console.log('Executing pending deep link action:', pendingAction);
+                    await executeDeepLinkAction(pendingAction);
                 }
-            }, 1000);
+            } catch (e) {
+                console.error('Failed to check for pending deep link:', e);
+            }
         });
 
         // Wait for connect + all listener registrations to complete
@@ -6733,9 +6889,11 @@ function renderProfileTab(cProfile) {
         document.getElementById('profile-status').style.display = '';
 
         // Setup Mute option
-        domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (cProfile.muted ? 'max' : 'mute'), 'icon-volume-' + (cProfile.muted ? 'mute' : 'max'));
-        domProfileOptionMute.querySelector('p').innerText = cProfile.muted ? 'Unmute' : 'Mute';
-        domProfileOptionMute.onclick = () => invoke('toggle_muted', { npub: cProfile.id });
+        const cMuteChat = arrChats.find(c => c.id === cProfile.id);
+        const isMuted = cMuteChat ? cMuteChat.muted : false;
+        domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (isMuted ? 'max' : 'mute'), 'icon-volume-' + (isMuted ? 'mute' : 'max'));
+        domProfileOptionMute.querySelector('p').innerText = isMuted ? 'Unmute' : 'Mute';
+        domProfileOptionMute.onclick = () => invoke('toggle_chat_mute', { chatId: cProfile.id });
 
         // Setup Message option
         domProfileOptionMessage.onclick = () => openChat(cProfile.id);
@@ -7261,9 +7419,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             // Notes: no avatar, just show the title "Notes"
             domChatAvatar = null;
         } else if (isGroup) {
-            // Group: use group placeholder
-            domChatAvatar = document.createElement('img');
-            domChatAvatar.src = './icons/group-placeholder.svg';
+            const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+            domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 closeChat();
@@ -7520,9 +7677,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             // Notes: no avatar icon
             domChatAvatar = null;
         } else if (isGroup) {
-            // Group: use group placeholder
-            domChatAvatar = document.createElement('img');
-            domChatAvatar.src = './icons/group-placeholder.svg';
+            const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+            domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
             domChatAvatar.classList.add('btn');
             domChatAvatar.onclick = () => {
                 closeChat();
@@ -8375,20 +8531,24 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 pMessage.appendChild(divBar);
             }
         } else if (cAttachment.downloading) {
-            // For images, show blurhash preview while downloading (only for formats that support blurhash)
+            // For images, show thumbhash preview while downloading (only for formats that support thumbhash)
             if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                // Generate blurhash preview for downloading image
+                // Generate thumbhash preview for downloading image
                 // For group chats, use chat ID; for DMs, use sender.id
-                const blurhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                invoke('generate_blurhash_preview', { npub: blurhashNpub2, msgId: msg.id })
+                const thumbhashNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                invoke('generate_thumbhash_preview', { npub: thumbhashNpub2, msgId: msg.id })
                     .then(base64Image => {
                         const imgPreview = document.createElement('img');
-                        imgPreview.style.width = `100%`;
+                        if (cAttachment.img_meta) {
+                            imgPreview.width = cAttachment.img_meta.width;
+                            imgPreview.height = cAttachment.img_meta.height;
+                        }
+                        imgPreview.style.maxWidth = `100%`;
                         imgPreview.style.height = `auto`;
                         imgPreview.style.borderRadius = `8px`;
                         imgPreview.style.opacity = `0.7`;
                         imgPreview.src = base64Image;
-                        // Add scroll correction on blurhash load
+                        // Add scroll correction on thumbhash load
                         imgPreview.addEventListener('load', () => {
                             if (proceduralScrollState.isLoadingOlderMessages) {
                                 correctScrollForMediaLoad();
@@ -8419,7 +8579,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         pMessage.appendChild(container);
                     })
                     .catch(() => {
-                        // Fallback to simple downloading indicator if blurhash fails
+                        // Fallback to simple downloading indicator if thumbhash fails
                         const iDownloading = document.createElement('i');
                         iDownloading.id = cAttachment.id;
                         iDownloading.textContent = `Downloading`;
@@ -8436,20 +8596,24 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 // Check if this attachment will auto-download
                 const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES;
 
-                // For images, show blurhash preview with download button (unless auto-downloading)
+                // For images, show thumbhash preview with download button (unless auto-downloading)
                 if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                    // Generate blurhash preview for undownloaded image
+                    // Generate thumbhash preview for undownloaded image
                     // For group chats, use chat ID; for DMs, use sender.id
-                    const blurhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    invoke('generate_blurhash_preview', { npub: blurhashNpub, msgId: msg.id })
+                    const thumbhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('generate_thumbhash_preview', { npub: thumbhashNpub, msgId: msg.id })
                         .then(base64Image => {
                             const imgPreview = document.createElement('img');
-                            imgPreview.style.width = `100%`;
+                            if (cAttachment.img_meta) {
+                                imgPreview.width = cAttachment.img_meta.width;
+                                imgPreview.height = cAttachment.img_meta.height;
+                            }
+                            imgPreview.style.maxWidth = `100%`;
                             imgPreview.style.height = `auto`;
                             imgPreview.style.borderRadius = `8px`;
                             imgPreview.style.opacity = willAutoDownload ? `0.8` : `0.6`;
                             imgPreview.src = base64Image;
-                            // Add scroll correction on blurhash load
+                            // Add scroll correction on thumbhash load
                             imgPreview.addEventListener('load', () => {
                                 if (proceduralScrollState.isLoadingOlderMessages) {
                                     correctScrollForMediaLoad();
@@ -8506,7 +8670,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                             pMessage.appendChild(container);
                         })
                         .catch(() => {
-                            // Fallback when blurhash fails
+                            // Fallback when thumbhash fails
                             if (!willAutoDownload) {
                                 // Manual download: show download button
                                 let strSize = 'Unknown Size';
@@ -8553,7 +8717,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                 // If the size is known and within auto-download range; immediately begin downloading
                 if (willAutoDownload) {
-                    // For non-images (which don't have blurhash previews), create a placeholder for progress bar targeting
+                    // For non-images (which don't have thumbhash previews), create a placeholder for progress bar targeting
                     if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                         const iDownloading = document.createElement('i');
                         iDownloading.id = cAttachment.id;
@@ -8693,6 +8857,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 } else {
                     softChatScroll();
                 }
+            }, { once: true });
+            imgFavicon.addEventListener('error', () => {
+                imgFavicon.style.display = 'none';
             }, { once: true });
 
             // Add the title (prefixed with the Favicon)
@@ -9617,7 +9784,41 @@ async function renderGroupOverview(chat) {
     // Display Name (top header)
     domGroupOverviewName.innerHTML = groupName;
     domGroupOverviewStatus.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
-    
+
+    // Header avatar (small, next to name)
+    const headerAvatarContainer = document.getElementById('group-overview-header-avatar-container');
+    if (headerAvatarContainer) {
+        headerAvatarContainer.innerHTML = '';
+        const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+        headerAvatarContainer.appendChild(createAvatarImg(groupAvatarSrc, 22, true));
+    }
+
+    // Large center avatar
+    const avatarParent = domGroupOverviewAvatar.parentElement;
+    const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
+    if (groupAvatarSrc) {
+        const img = document.createElement('img');
+        img.src = groupAvatarSrc;
+        img.style.width = '100px';
+        img.style.height = '100px';
+        img.style.objectFit = 'cover';
+        img.style.borderRadius = '50%';
+        img.onerror = () => {
+            img.replaceWith(domGroupOverviewAvatar);
+            domGroupOverviewAvatar.style.display = 'inline-block';
+        };
+        domGroupOverviewAvatar.style.display = 'none';
+        // Remove any previous cached avatar img from parent
+        const prevImg = avatarParent.querySelector('img');
+        if (prevImg) prevImg.remove();
+        avatarParent.appendChild(img);
+    } else {
+        // Remove any stale cached img
+        const prevImg = avatarParent.querySelector('img');
+        if (prevImg) prevImg.remove();
+        domGroupOverviewAvatar.style.display = 'inline-block';
+    }
+
     // Secondary name
     domGroupOverviewNameSecondary.innerHTML = groupName;
     
@@ -9929,7 +10130,7 @@ async function renderGroupOverview(chat) {
 }
 
 /**
- * Open the invite member UI for a specific group
+ * Open the invite members UI for a specific group (multi-select)
  * @param {Chat} chat - The group chat object
  */
 async function openInviteMemberToGroup(chat) {
@@ -9977,7 +10178,7 @@ async function openInviteMemberToGroup(chat) {
     header.style.marginBottom = '20px';
     
     const title = document.createElement('h3');
-    title.textContent = 'Invite Member';
+    title.textContent = 'Invite Members';
     title.style.margin = '0';
     title.style.color = '#f7f4f4';
     header.appendChild(title);
@@ -9987,7 +10188,7 @@ async function openInviteMemberToGroup(chat) {
     closeBtn.className = 'btn';
     closeBtn.style.padding = '8px 12px';
     closeBtn.style.fontSize = '18px';
-    closeBtn.onclick = () => modal.remove();
+    closeBtn.onclick = () => { activeInviteModalRerender = null; modal.remove(); };
     header.appendChild(closeBtn);
     
     container.appendChild(header);
@@ -10006,7 +10207,7 @@ async function openInviteMemberToGroup(chat) {
     searchContainer.appendChild(searchIcon);
     
     const searchInput = document.createElement('input');
-    searchInput.placeholder = 'Search contacts...';
+    searchInput.placeholder = 'Search or paste npub...';
     searchInput.style.padding = '10px 40px';
     searchInput.style.backgroundColor = 'transparent';
     searchInput.style.border = '1px solid rgba(57, 57, 57, 0.5)';
@@ -10044,20 +10245,97 @@ async function openInviteMemberToGroup(chat) {
     inviteBtn.disabled = true;
     inviteBtn.style.opacity = '0.5';
     
-    let selectedMember = null;
-    
+    const selectedMembers = new Set();
+
+    const updateInviteButton = () => {
+        const count = selectedMembers.size;
+        inviteBtn.disabled = count === 0;
+        inviteBtn.style.opacity = count === 0 ? '0.5' : '1';
+        inviteBtn.textContent = count > 1 ? `Invite (${count})` : 'Invite';
+    };
+
     const renderMemberList = (filterText = '') => {
         memberList.innerHTML = '';
-        const filter = filterText.toLowerCase();
-        
+        const filter = (filterText || '').trim().toLowerCase();
+
         // Get mine profile to exclude self
         const mine = arrProfiles.find(p => p.mine)?.id;
-        
+
+        // Collect stranger npubs: selected npubs not in arrProfiles and not current members
+        const knownIds = new Set(arrProfiles.map(p => p.id));
+        const strangerNpubs = [...selectedMembers].filter(id => !knownIds.has(id) && !currentMembers.includes(id));
+
+        // Check if filter text is a valid stranger npub
+        const filterNpub = extractNpub(filterText);
+        if (filterNpub && filterNpub !== mine && !knownIds.has(filterNpub) && !currentMembers.includes(filterNpub) && !strangerNpubs.includes(filterNpub)) {
+            strangerNpubs.push(filterNpub);
+        }
+
+        // Helper to build a row
+        const buildInviteRow = (npub, profile) => {
+            const name = profile ? (profile.nickname || profile.name || '') : '';
+            const isSelected = selectedMembers.has(npub);
+
+            const row = document.createElement('div');
+            row.className = 'member-pick-row';
+
+            const bgDiv = document.createElement('div');
+            bgDiv.className = 'member-pick-hover';
+            row.appendChild(bgDiv);
+
+            row.addEventListener('mouseenter', () => {
+                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+            });
+
+            const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
+            const avatar = createAvatarImg(avatarSrc, 25, false);
+            avatar.className = 'member-pick-avatar';
+            row.appendChild(avatar);
+
+            const nameSpan = document.createElement('div');
+            nameSpan.className = 'compact-member-name';
+            nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+            if (name) twemojify(nameSpan);
+            row.appendChild(nameSpan);
+
+            const indicator = document.createElement('div');
+            indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
+            row.appendChild(indicator);
+
+            row.onclick = () => {
+                if (selectedMembers.has(npub)) {
+                    selectedMembers.delete(npub);
+                } else {
+                    selectedMembers.add(npub);
+                }
+                renderMemberList(searchInput.value || '');
+                updateInviteButton();
+            };
+
+            return row;
+        };
+
+        let hasRows = false;
+
+        // Render stranger npubs (selected first, then filter-matched)
+        for (const npub of strangerNpubs) {
+            const isSelected = selectedMembers.has(npub);
+            if (!isSelected && filterNpub !== npub) continue;
+            memberList.appendChild(buildInviteRow(npub, null));
+            hasRows = true;
+            // Fire-and-forget relay lookup
+            if (!strangerProfileRequested.has(npub)) {
+                strangerProfileRequested.add(npub);
+                invoke('load_profile', { npub }).catch(() => {});
+            }
+        }
+
         // Filter available contacts (exclude self and current members)
         const availableContacts = arrProfiles.filter(p => {
             if (!p || !p.id || p.id === mine) return false;
             if (currentMembers.includes(p.id)) return false;
-            
+
             if (filter) {
                 const name = (p.nickname || p.name || '').toLowerCase();
                 const npub = p.id.toLowerCase();
@@ -10065,152 +10343,78 @@ async function openInviteMemberToGroup(chat) {
             }
             return true;
         });
-        
-        if (availableContacts.length === 0) {
+
+        // Hoist selected members to top
+        availableContacts.sort((a, b) => {
+            const aSelected = selectedMembers.has(a.id) ? 0 : 1;
+            const bSelected = selectedMembers.has(b.id) ? 0 : 1;
+            return aSelected - bSelected;
+        });
+
+        for (const contact of availableContacts) {
+            memberList.appendChild(buildInviteRow(contact.id, getProfile(contact.id)));
+            hasRows = true;
+        }
+
+        if (!hasRows) {
             const empty = document.createElement('p');
             empty.textContent = filter ? 'No matches' : 'No contacts available to invite';
             empty.style.textAlign = 'center';
             empty.style.color = '#999';
             empty.style.padding = '20px';
             memberList.appendChild(empty);
-            return;
-        }
-        
-        for (const contact of availableContacts) {
-            const contactProfile = getProfile(contact.id);
-            const name = contactProfile?.nickname || contactProfile?.name || '';
-            
-            const row = document.createElement('div');
-            row.style.display = 'flex';
-            row.style.alignItems = 'center';
-            row.style.padding = '5px 10px';
-            row.style.borderRadius = '6px';
-            row.style.transition = 'background 0.2s ease';
-            row.style.isolation = 'isolate';
-            row.style.cursor = 'pointer';
-            row.style.position = 'relative';
-            
-            // Add hover effect with theme-based gradient
-            const bgDiv = document.createElement('div');
-            bgDiv.style.position = 'absolute';
-            bgDiv.style.top = '0';
-            bgDiv.style.left = '0';
-            bgDiv.style.right = '0';
-            bgDiv.style.bottom = '0';
-            bgDiv.style.borderRadius = '6px';
-            bgDiv.style.opacity = '0';
-            bgDiv.style.transition = 'opacity 0.2s ease';
-            bgDiv.style.pointerEvents = 'none';
-            bgDiv.style.zIndex = '0';
-            row.appendChild(bgDiv);
-            
-            row.addEventListener('mouseenter', () => {
-                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-                bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-                bgDiv.style.opacity = '1';
-            });
-            row.addEventListener('mouseleave', () => {
-                bgDiv.style.opacity = '0';
-            });
-            
-            // Avatar (compact size like member list)
-            let avatar;
-            const contactAvatarSrc = getProfileAvatarSrc(contactProfile);
-            avatar = createAvatarImg(contactAvatarSrc, 25, false);
-            avatar.style.marginRight = '10px';
-            avatar.style.position = 'relative';
-            avatar.style.zIndex = '1';
-            row.appendChild(avatar);
-            
-            // Name
-            const nameSpan = document.createElement('div');
-            nameSpan.className = 'compact-member-name';
-            nameSpan.textContent = name || contact.id.substring(0, 10) + '...';
-            nameSpan.style.color = '#f7f4f4';
-            nameSpan.style.fontSize = '14px';
-            nameSpan.style.flex = '1';
-            nameSpan.style.textAlign = 'left';
-            nameSpan.style.position = 'relative';
-            nameSpan.style.zIndex = '1';
-            if (name) twemojify(nameSpan);
-            row.appendChild(nameSpan);
-            
-            // Selection indicator (right-aligned)
-            const indicator = document.createElement('div');
-            indicator.style.width = '18px';
-            indicator.style.height = '18px';
-            indicator.style.borderRadius = '50%';
-            indicator.style.border = '2px solid var(--icon-color-primary)';
-            indicator.style.position = 'relative';
-            indicator.style.zIndex = '1';
-            indicator.style.flexShrink = '0';
-            row.appendChild(indicator);
-            
-            row.onclick = () => {
-                // Deselect previous
-                memberList.querySelectorAll('div[data-contact-row]').forEach(r => {
-                    const ind = r.querySelector('div:last-child');
-                    if (ind) ind.style.backgroundColor = '';
-                });
-                
-                // Select this one
-                indicator.style.backgroundColor = 'var(--icon-color-primary)';
-                selectedMember = contact.id;
-                inviteBtn.disabled = false;
-                inviteBtn.style.opacity = '1';
-            };
-            
-            row.setAttribute('data-contact-row', 'true');
-            memberList.appendChild(row);
         }
     };
     
     renderMemberList();
     searchInput.oninput = (e) => renderMemberList(e.target.value);
-    
+    activeInviteModalRerender = () => renderMemberList(searchInput.value || '');
+
     inviteBtn.onclick = async () => {
-        if (!selectedMember) return;
-        
+        if (selectedMembers.size === 0) return;
+
         inviteBtn.disabled = true;
         inviteBtn.textContent = 'Inviting...';
         statusMsg.style.display = '';
         statusMsg.style.color = '#999';
         statusMsg.textContent = 'Preparing invitation...';
-        
+
         try {
             await invoke('invite_member_to_group', {
                 groupId: chat.id,
-                memberNpub: selectedMember
+                memberNpubs: Array.from(selectedMembers)
             });
-            
+
+            const count = selectedMembers.size;
             statusMsg.style.color = '#4caf50';
-            statusMsg.textContent = 'Member invited successfully!';
-            
+            statusMsg.textContent = count > 1
+                ? `${count} members invited successfully!`
+                : 'Member invited successfully!';
+
             // Refresh the group overview
             setTimeout(async () => {
+                activeInviteModalRerender = null;
                 modal.remove();
                 await renderGroupOverview(chat);
             }, 1000);
         } catch (e) {
-            const errorMsg = (e || '').toString();
+            const errorMsg = typeof e === 'string' ? e : (e?.message || e || '').toString();
             let friendlyMsg = errorMsg;
-            
+
             // Map backend errors to friendly messages
-            if (errorMsg.includes('no device keypackag')) {
-                const match = errorMsg.match(/for (\S+)/);
-                if (match) {
-                    const npub = match[1];
-                    const prof = arrProfiles.find(p => p.id === npub);
-                    const display = prof?.nickname || prof?.name || 'This user';
-                    friendlyMsg = `${display} is using an older Vector version! Please ask them to upgrade.`;
-                }
+            const keyPkgMatch = errorMsg.match(/(?:no device keypackag(?:e|es) found|failed to refresh device keypackage) for (\S+)/i);
+            if (keyPkgMatch && keyPkgMatch[1]) {
+                const npub = keyPkgMatch[1].replace(/:$/, '');
+                const prof = getProfile(npub);
+                const display = prof?.nickname || prof?.name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+                friendlyMsg = `${display} can't join group chats yet. They may need to update Vector or set up their device.`;
             }
-            
+
             statusMsg.style.color = '#f44336';
             statusMsg.textContent = friendlyMsg;
             inviteBtn.disabled = false;
-            inviteBtn.textContent = 'Invite';
-            
+            updateInviteButton();
+
             // Error is already displayed in the modal, no need for popup
         }
     };
@@ -10223,7 +10427,7 @@ async function openInviteMemberToGroup(chat) {
     
     // Close on background click
     modal.onclick = (e) => {
-        if (e.target === modal) modal.remove();
+        if (e.target === modal) { activeInviteModalRerender = null; modal.remove(); }
     };
 }
 
@@ -10266,12 +10470,6 @@ function openSettings() {
 
     // Update the Storage Breakdown
     initStorageSection();
-
-    // Show/hide Restore PIVX Wallet button based on hidden state
-    const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
-    if (domRestorePivxGroup) {
-        domRestorePivxGroup.style.display = pivxHidden ? '' : 'none';
-    }
 
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
@@ -10492,6 +10690,13 @@ window.addEventListener("DOMContentLoaded", async () => {
         
         // User is logged in, execute the action immediately
         await executeDeepLinkAction(evt.payload);
+    });
+
+    // Listen for critical loading errors from the backend (database, migrations, etc.)
+    // Registered early so it catches errors from login_from_stored_key and login
+    await listen('loading_error', (evt) => {
+        console.error('[Boot] Loading error:', evt.payload);
+        popupConfirm('Loading Error', evt.payload, true, '', 'vector_warning.svg');
     });
 
     // Immediately load and apply theme settings (visual only, don't save)
@@ -11324,16 +11529,18 @@ domChatMessageInput.oninput = async () => {
         e.stopPropagation();
         popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
     };
+    const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
+    if (domSettingsBatteryBgServiceInfo) {
+        domSettingsBatteryBgServiceInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.', true);
+        };
+    }
     domSettingsNotifMuteInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.', true);
-    };
-
-    domSettingsDeepRescanInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Deep Rescan', 'This will forcefully sync your message history backwards in two‑day sections until 30 days of no events are found. This may take some time.', true);
     };
 
     domSettingsExportAccountInfo.onclick = (e) => {
@@ -11410,19 +11617,6 @@ domChatMessageInput.oninput = async () => {
         openUrl('https://vectorapp.io/privacy-policy');
     };
 
-    // Restore PIVX Wallet button - restores hidden PIVX app
-    if (domRestorePivxBtn) {
-        domRestorePivxBtn.onclick = async () => {
-            localStorage.removeItem('pivx_hidden');
-            // Hide the restore button
-            if (domRestorePivxGroup) {
-                domRestorePivxGroup.style.display = 'none';
-            }
-            // Refresh Mini Apps list if it's loaded
-            await loadMiniAppsHistory();
-            popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
-        };
-    }
 });
 
 // Listen for app-wide click interations
@@ -11624,6 +11818,8 @@ window.onresize = adjustSize;
  * Keep this decoupled from arrChats.
  */
 let arrSelectedGroupMembers = [];
+/** Path to the selected group avatar image file (null if none selected) */
+let strCreateGroupAvatarPath = null;
 /**
  * Tracks whether the user attempted to create the group.
  * Used to only show inline validation after an explicit attempt.
@@ -11647,26 +11843,36 @@ function renderCreateGroupList(filterText = '') {
     // Build a fragment for performance
     const frag = document.createDocumentFragment();
 
+    // Collect stranger npubs: selected npubs that are NOT in arrProfiles
+    const knownIds = new Set(arrProfiles.map(p => p.id));
+    const strangerNpubs = arrSelectedGroupMembers.filter(id => !knownIds.has(id));
+
+    // Check if the filter text itself is a valid stranger npub
+    const filterNpub = extractNpub(filterText);
+    if (filterNpub && filterNpub !== mine && !knownIds.has(filterNpub) && !strangerNpubs.includes(filterNpub)) {
+        strangerNpubs.push(filterNpub);
+    }
+
     // Sort profiles: selected members first (by selection order), then unselected by last message time
     const sortedProfiles = [...arrProfiles].sort((a, b) => {
         const aSelectedIndex = arrSelectedGroupMembers.indexOf(a?.id);
         const bSelectedIndex = arrSelectedGroupMembers.indexOf(b?.id);
         const aSelected = aSelectedIndex !== -1;
         const bSelected = bSelectedIndex !== -1;
-        
+
         // Selected members come first
         if (aSelected && !bSelected) return -1;
         if (!aSelected && bSelected) return 1;
-        
+
         // For selected members: sort by selection order (first selected = first in list)
         if (aSelected && bSelected) {
             return aSelectedIndex - bSelectedIndex;
         }
-        
+
         // For unselected members: sort by last message time (most recent first)
         const aChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === a?.id) || {});
         const bChatTimestamp = getChatSortTimestamp(arrChats.find(c => c.id === b?.id) || {});
-        
+
         // If both have timestamps, sort by most recent
         if (aChatTimestamp && bChatTimestamp) {
             return bChatTimestamp - aChatTimestamp;
@@ -11674,12 +11880,74 @@ function renderCreateGroupList(filterText = '') {
         // Contacts with messages come before those without
         if (aChatTimestamp && !bChatTimestamp) return -1;
         if (!aChatTimestamp && bChatTimestamp) return 1;
-        
+
         // Fallback: sort alphabetically
         const aName = (a?.nickname || a?.name || '').toLowerCase();
         const bName = (b?.nickname || b?.name || '').toLowerCase();
         return aName.localeCompare(bName);
     });
+
+    // Helper to build a member-pick row
+    const buildRow = (npub, profile) => {
+        const name = profile ? (profile.nickname || profile.name || '') : '';
+        const isSelected = arrSelectedGroupMembers.includes(npub);
+
+        const row = document.createElement('div');
+        row.id = `cg-${npub}`;
+        row.className = 'member-pick-row';
+
+        const bgDiv = document.createElement('div');
+        bgDiv.className = 'member-pick-hover';
+        row.appendChild(bgDiv);
+
+        row.addEventListener('mouseenter', () => {
+            const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
+            bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
+        });
+
+        const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
+        const avatar = createAvatarImg(avatarSrc, 25, false);
+        avatar.className = 'member-pick-avatar';
+        row.appendChild(avatar);
+
+        const nameSpan = document.createElement('div');
+        nameSpan.className = 'compact-member-name';
+        nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+        if (name) twemojify(nameSpan);
+        row.appendChild(nameSpan);
+
+        const indicator = document.createElement('div');
+        indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
+        row.appendChild(indicator);
+
+        row.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (arrSelectedGroupMembers.includes(npub)) {
+                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== npub);
+            } else {
+                arrSelectedGroupMembers.push(npub);
+            }
+            updateCreateGroupValidation(true);
+            const currentFilter = domCreateGroupFilter?.value || '';
+            renderCreateGroupList(currentFilter);
+        });
+
+        return row;
+    };
+
+    // Render stranger npubs (selected ones first, then filter-matched)
+    for (const npub of strangerNpubs) {
+        const isSelected = arrSelectedGroupMembers.includes(npub);
+        // Show if selected (always) or if it matches the current filter npub
+        if (!isSelected && filterNpub !== npub) continue;
+        frag.appendChild(buildRow(npub, null));
+        // Fire-and-forget relay lookup
+        if (!strangerProfileRequested.has(npub)) {
+            strangerProfileRequested.add(npub);
+            invoke('load_profile', { npub }).catch(() => {});
+        }
+    }
 
     for (const p of sortedProfiles) {
         if (!p || !p.id) continue;
@@ -11690,101 +11958,7 @@ function renderCreateGroupList(filterText = '') {
         const hay = (name + ' ' + p.id).toLowerCase();
         if (f && !hay.includes(f)) continue;
 
-        // Row container - compact style matching Invite Member list
-        const row = document.createElement('div');
-        row.id = `cg-${p.id}`;
-        row.style.display = 'flex';
-        row.style.alignItems = 'center';
-        row.style.padding = '5px 10px';
-        row.style.borderRadius = '6px';
-        row.style.transition = 'background 0.2s ease';
-        row.style.isolation = 'isolate';
-        row.style.cursor = 'pointer';
-        row.style.position = 'relative';
-
-        // Add hover effect with theme-based gradient
-        const bgDiv = document.createElement('div');
-        bgDiv.style.position = 'absolute';
-        bgDiv.style.top = '0';
-        bgDiv.style.left = '0';
-        bgDiv.style.right = '0';
-        bgDiv.style.bottom = '0';
-        bgDiv.style.borderRadius = '6px';
-        bgDiv.style.opacity = '0';
-        bgDiv.style.transition = 'opacity 0.2s ease';
-        bgDiv.style.pointerEvents = 'none';
-        bgDiv.style.zIndex = '0';
-        row.appendChild(bgDiv);
-
-        row.addEventListener('mouseenter', () => {
-            const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-            bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-            bgDiv.style.opacity = '1';
-        });
-        row.addEventListener('mouseleave', () => {
-            bgDiv.style.opacity = '0';
-        });
-
-        // Avatar - compact 25px size
-        const listAvatarSrc = getProfileAvatarSrc(p);
-        const avatar = createAvatarImg(listAvatarSrc, 25, false);
-        avatar.style.marginRight = '10px';
-        avatar.style.position = 'relative';
-        avatar.style.zIndex = '1';
-        row.appendChild(avatar);
-
-        // Name - compact style
-        const nameSpan = document.createElement('div');
-        nameSpan.className = 'compact-member-name';
-        nameSpan.textContent = name || p.id.substring(0, 10) + '...';
-        nameSpan.style.color = '#f7f4f4';
-        nameSpan.style.fontSize = '14px';
-        nameSpan.style.flex = '1';
-        nameSpan.style.textAlign = 'left';
-        nameSpan.style.position = 'relative';
-        nameSpan.style.zIndex = '1';
-        if (name) twemojify(nameSpan);
-        row.appendChild(nameSpan);
-
-        // Custom checkbox indicator (circular, matching Invite Member style)
-        const indicator = document.createElement('div');
-        indicator.style.width = '18px';
-        indicator.style.height = '18px';
-        indicator.style.borderRadius = '50%';
-        indicator.style.border = '2px solid var(--icon-color-primary)';
-        indicator.style.position = 'relative';
-        indicator.style.zIndex = '1';
-        indicator.style.flexShrink = '0';
-        indicator.style.marginLeft = 'auto';
-        indicator.style.transition = 'background-color 0.2s ease';
-        
-        // Set initial state
-        if (arrSelectedGroupMembers.includes(p.id)) {
-            indicator.style.backgroundColor = 'var(--icon-color-primary)';
-        }
-        row.appendChild(indicator);
-
-        // Row click toggles selection
-        row.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const isSelected = arrSelectedGroupMembers.includes(p.id);
-            if (isSelected) {
-                // Deselect
-                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== p.id);
-            } else {
-                // Select
-                arrSelectedGroupMembers.push(p.id);
-            }
-            updateCreateGroupValidation(true);
-            
-            // Re-render to hoist selected members to top
-            const currentFilter = domCreateGroupFilter?.value || '';
-            renderCreateGroupList(currentFilter);
-        });
-
-        frag.appendChild(row);
+        frag.appendChild(buildRow(p.id, p));
     }
 
     // If no matches
@@ -11846,13 +12020,22 @@ function openCreateGroup() {
 
     // Reset state
     arrSelectedGroupMembers = [];
+    strCreateGroupAvatarPath = null;
     fCreateGroupAttempt = false;
     if (domCreateGroupName) domCreateGroupName.value = '';
+    if (domCreateGroupDescription) domCreateGroupDescription.value = '';
     if (domCreateGroupFilter) domCreateGroupFilter.value = '';
     if (domCreateGroupStatus) {
         domCreateGroupStatus.style.display = 'none';
         domCreateGroupStatus.textContent = '';
     }
+    // Reset avatar picker
+    if (domCreateGroupAvatarPreview) {
+        domCreateGroupAvatarPreview.style.display = 'none';
+        domCreateGroupAvatarPreview.src = '';
+    }
+    if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = '';
+    if (domCreateGroupAvatarPicker) domCreateGroupAvatarPicker.classList.remove('has-image');
 
     // Render list
     renderCreateGroupList('');
@@ -11910,6 +12093,31 @@ Create Group UI wiring
     domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
     domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
 
+    // Avatar picker: open file dialog on click
+    if (domCreateGroupAvatarPicker) {
+        domCreateGroupAvatarPicker.onclick = async () => {
+            const { open } = window.__TAURI__.dialog;
+            const file = await open({
+                title: 'Choose Group Avatar',
+                multiple: false,
+                directory: false,
+                filters: [{
+                    name: 'Image',
+                    extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp']
+                }]
+            });
+            if (!file) return;
+            strCreateGroupAvatarPath = file;
+            // Show local preview, hide placeholder
+            if (domCreateGroupAvatarPreview) {
+                domCreateGroupAvatarPreview.src = convertFileSrc(file);
+                domCreateGroupAvatarPreview.style.display = '';
+            }
+            if (domCreateGroupAvatarPlaceholder) domCreateGroupAvatarPlaceholder.style.display = 'none';
+            domCreateGroupAvatarPicker.classList.add('has-image');
+        };
+    }
+
     domCreateGroupCreateBtn.onclick = async () => {
         const groupName = (domCreateGroupName?.value || '').trim();
         const memberIds = [...arrSelectedGroupMembers];
@@ -11933,11 +12141,50 @@ Create Group UI wiring
         }
 
         try {
+            // Upload group avatar if one was selected
+            let avatarResult = null;
+            if (strCreateGroupAvatarPath) {
+                if (domCreateGroupStatus) {
+                    domCreateGroupStatus.style.display = '';
+                    domCreateGroupStatus.textContent = 'Uploading avatar...';
+                }
+                // Show progress spinner on edit badge (matches profile avatar pattern)
+                let unlisten = null;
+                if (domCreateGroupAvatarEditIcon) {
+                    domCreateGroupAvatarEditIcon.className = 'profile-upload-spinner';
+                    domCreateGroupAvatarEditIcon.style.setProperty('--progress', '5%');
+                    unlisten = await window.__TAURI__.event.listen('profile_upload_progress', (event) => {
+                        if (event.payload.type === 'group_avatar') {
+                            const progress = Math.max(5, event.payload.progress);
+                            domCreateGroupAvatarEditIcon.style.setProperty('--progress', `${progress}%`);
+                        }
+                    });
+                }
+                try {
+                    avatarResult = await invoke('upload_group_avatar', { filepath: strCreateGroupAvatarPath });
+                } finally {
+                    if (unlisten) unlisten();
+                    if (domCreateGroupAvatarEditIcon) domCreateGroupAvatarEditIcon.className = 'icon icon-plus-circle';
+                }
+            }
+
+            const groupDescription = (domCreateGroupDescription?.value || '').trim() || null;
+
+            if (domCreateGroupStatus) {
+                domCreateGroupStatus.textContent = 'Preparing devices...';
+            }
+
             // Backend orchestration: refresh keypackages per member, create group, persist
             // Note: Tauri expects camelCase arg keys for Rust snake_case params.
             const newGroupId = await invoke('create_group_chat', {
                 groupName: groupName,
-                memberIds: memberIds
+                memberIds: memberIds,
+                groupDescription: groupDescription,
+                imageHash: avatarResult?.image_hash || null,
+                imageKey: avatarResult?.image_key || null,
+                imageNonce: avatarResult?.image_nonce || null,
+                avatarBlobUrl: avatarResult?.blob_url || null,
+                avatarCached: avatarResult?.cached_path || null,
             });
 
             // On success: refresh groups, open the new group chat, and close panel
@@ -11951,17 +12198,17 @@ Create Group UI wiring
             // Hide panel
             domCreateGroup.style.display = 'none';
         } catch (e) {
-            const raw = (e || '').toString();
+            const raw = typeof e === 'string' ? e : (e?.message || e || '').toString();
             // Map backend "no device keypackages" errors to a friendlier UX message
             let friendly = raw;
             let isHtml = false;
             try {
-                const m = raw.match(/no device keypackag(?:e|es) found for (\S+)/i);
+                const m = raw.match(/(?:no device keypackag(?:e|es) found|failed to refresh device keypackage) for (\S+)/i);
                 if (m && m[1]) {
-                    const npub = m[1];
-                    const prof = arrProfiles.find(p => p.id === npub);
-                    const display = prof?.nickname || prof?.name || 'This user';
-                    friendly = `${display} is using an older Vector version!<br>Please ask them to upgrade before inviting them to a Group Chat.`;
+                    const npub = m[1].replace(/:$/, '');
+                    const prof = getProfile(npub);
+                    const display = prof?.nickname || prof?.name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+                    friendly = `<b>${display}</b> can't join group chats yet.<br>They may need to update Vector or set up their device.`;
                     isHtml = true;
                 }
             } catch (_) {}

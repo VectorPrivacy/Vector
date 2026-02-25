@@ -1,3 +1,4 @@
+pub mod background_sync;
 pub mod clipboard;
 pub mod filesystem;
 pub mod miniapp;

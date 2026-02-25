@@ -21,8 +21,9 @@ const SRC = join(ROOT, 'src');
 const DIST = join(ROOT, 'dist');
 
 const isDev = process.argv.includes('--dev');
+const isCopy = process.argv.includes('--copy');
 
-console.log(`[build-frontend] ${isDev ? 'DEV' : 'RELEASE'} build`);
+console.log(`[build-frontend] ${isDev ? 'DEV' : isCopy ? 'COPY' : 'RELEASE'} build`);
 
 // Remove dist safely — if it's a symlink, just unlink it (never follow into src/)
 function cleanDist() {
@@ -41,6 +42,14 @@ if (isDev) {
     cleanDist();
     symlinkSync(SRC, DIST, 'dir');
     console.log('  Symlinked dist/ → src/ (hot-reload enabled)');
+    process.exit(0);
+}
+
+if (isCopy) {
+    // Plain copy without minification (for Android dev builds where symlinks don't work)
+    cleanDist();
+    cpSync(SRC, DIST, { recursive: true });
+    console.log('  Copied src/ → dist/ (no minification)');
     process.exit(0);
 }
 

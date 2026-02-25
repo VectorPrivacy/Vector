@@ -27,9 +27,12 @@ echo "Using Android NDK: $ANDROID_NDK_HOME"
 OPENSSL_ANDROID_DIR="$TAURI_DIR/android-deps/openssl"
 
 if [ ! -d "$OPENSSL_ANDROID_DIR/include/openssl" ]; then
-    echo "Error: OpenSSL for Android not found at $OPENSSL_ANDROID_DIR"
-    echo "Please run a release build first to generate OpenSSL artifacts,"
-    echo "or manually place pre-built OpenSSL for Android in that directory."
+    echo "Error: OpenSSL headers not found at $OPENSSL_ANDROID_DIR/include/"
+    exit 1
+fi
+
+if [ ! -f "$OPENSSL_ANDROID_DIR/aarch64/lib/libcrypto.a" ]; then
+    echo "Error: OpenSSL aarch64 libs not found at $OPENSSL_ANDROID_DIR/aarch64/lib/"
     exit 1
 fi
 
@@ -37,10 +40,12 @@ echo "Using OpenSSL: $OPENSSL_ANDROID_DIR"
 
 # Export environment variables for the build
 export ANDROID_NDK_HOME
-export OPENSSL_DIR="$OPENSSL_ANDROID_DIR"
-export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
-export OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/lib"
 export OPENSSL_STATIC=1
+export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
+
+# Per-target OpenSSL lib directories
+export AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/aarch64/lib"
+export ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/armv7/lib"
 
 # Run tauri android dev
 cd "$PROJECT_ROOT"

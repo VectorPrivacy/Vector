@@ -11,7 +11,7 @@ use crate::voice::AudioRecorder;
 #[cfg(target_os = "android")]
 use crate::android;
 
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 use crate::{audio, whisper};
 
 // ============================================================================
@@ -48,7 +48,7 @@ pub async fn stop_recording() -> Result<Vec<u8>, String> {
 // ============================================================================
 
 /// Transcribe audio file using Whisper model
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 #[tauri::command]
 pub async fn transcribe<R: Runtime>(
     handle: AppHandle<R>,
@@ -56,24 +56,24 @@ pub async fn transcribe<R: Runtime>(
     model_name: String,
     translate: bool,
 ) -> Result<whisper::TranscriptionResult, String> {
-    // Convert the file path to a Path
     let path = std::path::Path::new(&file_path);
-
-    // Decode and resample to 16kHz for Whisper
-    match audio::decode_and_resample(path, 16000) {
-        Ok(audio_data) => {
-            // Pass the resampled audio to the whisper transcribe function
-            match whisper::transcribe(&handle, &model_name, translate, audio_data).await {
-                Ok(result) => Ok(result),
-                Err(e) => Err(format!("Transcription error: {}", e.to_string())),
-            }
-        }
-        Err(e) => Err(format!("Audio processing error: {}", e.to_string())),
+    if !path.exists() {
+        return Err("File not found".to_string());
     }
+
+    // Decode to mono 16kHz for Whisper (fast resample — whisper doesn't need audiophile quality)
+    let t0 = std::time::Instant::now();
+    let audio_data = audio::decode_for_whisper(path)
+        .map_err(|e| format!("Audio processing error: {}", e))?;
+    println!("[Whisper]   audio decode:  {:>10?}  ({} samples, {:.1}s)",
+        t0.elapsed(), audio_data.len(), audio_data.len() as f64 / 16000.0);
+
+    whisper::transcribe(&handle, &model_name, translate, audio_data).await
+        .map_err(|e| format!("Transcription error: {}", e))
 }
 
 /// Transcribe audio file (stub for unsupported platforms)
-#[cfg(any(target_os = "android", not(feature = "whisper")))]
+#[cfg(not(feature = "whisper"))]
 #[tauri::command]
 pub async fn transcribe<R: Runtime>(
     _handle: AppHandle<R>,
@@ -85,7 +85,7 @@ pub async fn transcribe<R: Runtime>(
 }
 
 /// Download a Whisper model for transcription
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 #[tauri::command]
 pub async fn download_whisper_model<R: Runtime>(
     handle: AppHandle<R>,
@@ -99,7 +99,7 @@ pub async fn download_whisper_model<R: Runtime>(
 }
 
 /// Download a Whisper model (stub for unsupported platforms)
-#[cfg(any(target_os = "android", not(feature = "whisper")))]
+#[cfg(not(feature = "whisper"))]
 #[tauri::command]
 pub async fn download_whisper_model<R: Runtime>(
     _handle: AppHandle<R>,

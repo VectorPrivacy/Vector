@@ -26,10 +26,10 @@ fn main() {
             "update_profile",
             "update_status",
             "upload_avatar",
-            "toggle_muted",
             "set_nickname",
             // Chat commands
             "mark_as_read",
+            "toggle_chat_mute",
             // Message commands
             "message",
             "paste_message",
@@ -62,7 +62,6 @@ fn main() {
             "fetch_msg_metadata",
             // Core commands
             "fetch_messages",
-            "deep_rescan",
             "is_scanning",
             "get_chat_messages_paginated",
             "get_message_views",
@@ -70,8 +69,8 @@ fn main() {
             "get_system_events",
             "get_chat_message_count",
             "evict_chat_messages",
-            "generate_blurhash_preview",
-            "decode_blurhash",
+            "generate_thumbhash_preview",
+            "decode_thumbhash",
             "download_attachment",
             "login",
             "login_from_stored_key",
@@ -92,6 +91,7 @@ fn main() {
             "logout",
             "create_account",
             "get_platform_features",
+            "get_device_memory",
             "transcribe",
             "download_whisper_model",
             "get_or_create_invite_code",
@@ -105,6 +105,9 @@ fn main() {
             "export_keys",
             "regenerate_device_keypackage",
             // MLS core commands
+            "upload_group_avatar",
+            "cache_group_avatar",
+            "cache_invite_avatar",
             "create_group_chat",
             "create_mls_group",
             "sync_mls_groups_now",
@@ -179,6 +182,7 @@ fn main() {
             "miniapp_revoke_all_permissions",
             // Whisper commands (conditional)
             "delete_whisper_model",
+            "cancel_whisper_download",
             "list_models",
             // Notification sound commands
             "get_notification_settings",

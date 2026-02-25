@@ -23,7 +23,7 @@ pub use sending::*;
 pub use files::*;
 pub use types::{
     Message, ImageMetadata, Attachment,
-    AttachmentFile, Reaction, EditEntry,
+    AttachmentFile, FileBytes, Reaction, EditEntry,
 };
 #[allow(unused_imports)]
 pub use compact::{
@@ -97,7 +97,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
 
             if let Some((chat_id, msg)) = msg_for_save {
                 if let Some(handle) = TAURI_APP.get() {
-                    let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
+                    let _ = crate::db::save_message(&chat_id, &msg).await;
                     let _ = handle.emit("message_update", serde_json::json!({
                         "old_id": &reference_id,
                         "message": &msg,
@@ -143,7 +143,7 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
 
             if let Some((chat_id_clone, msg)) = msg_for_save {
                 if let Some(handle) = TAURI_APP.get() {
-                    let _ = crate::db::save_message(handle.clone(), &chat_id_clone, &msg).await;
+                    let _ = crate::db::save_message(&chat_id_clone, &msg).await;
                     let _ = handle.emit("message_update", serde_json::json!({
                         "old_id": &reference_id,
                         "message": &msg,
@@ -210,7 +210,7 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
                             "message": &msg,
                             "chat_id": &chat_id
                         })).unwrap();
-                        let _ = crate::db::save_message(handle.clone(), &chat_id, &msg).await;
+                        let _ = crate::db::save_message(&chat_id, &msg).await;
                         return true;
                     }
                 }
@@ -282,8 +282,7 @@ pub async fn edit_message(
         let chat_type = chat.chat_type.clone();
 
         // Get db chat ID
-        let handle = TAURI_APP.get().ok_or("App handle not available")?;
-        let db_chat_id = crate::db::get_chat_id_by_identifier(handle, &chat_id)?;
+        let db_chat_id = crate::db::get_chat_id_by_identifier(&chat_id)?;
 
         (chat_type, db_chat_id)
     };
@@ -319,9 +318,8 @@ pub async fn edit_message(
     }
 
     // Save edit event to database
-    if let Some(handle) = TAURI_APP.get() {
+    if TAURI_APP.get().is_some() {
         crate::db::save_edit_event(
-            handle,
             &edit_id,
             &message_id,
             &new_content,

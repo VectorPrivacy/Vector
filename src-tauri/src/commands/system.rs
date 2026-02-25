@@ -13,7 +13,7 @@ use crate::{db, image_cache, util::format_bytes};
 #[cfg(desktop)]
 use crate::audio;
 
-#[cfg(all(not(target_os = "android"), feature = "whisper"))]
+#[cfg(feature = "whisper")]
 use crate::whisper;
 
 // ============================================================================
@@ -54,7 +54,7 @@ pub async fn get_platform_features() -> PlatformFeatures {
     let is_mobile = cfg!(target_os = "android") || cfg!(target_os = "ios");
 
     PlatformFeatures {
-        transcription: cfg!(all(not(target_os = "android"), feature = "whisper")),
+        transcription: cfg!(feature = "whisper"),
         notification_sounds: cfg!(desktop),
         os: os.to_string(),
         is_mobile,
@@ -136,7 +136,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     }
 
     // Calculate Whisper models size if whisper feature is enabled
-    #[cfg(all(not(target_os = "android"), feature = "whisper"))]
+    #[cfg(feature = "whisper")]
     {
         // Calculate total size of downloaded Whisper models
         let mut ai_models_size = 0;
@@ -228,7 +228,7 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
                 .collect();
 
             // Save updated messages to database
-            db::save_chat_messages(handle.clone(), &chat_id, &messages_to_update).await
+            db::save_chat_messages(&chat_id, &messages_to_update).await
                 .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
 
             // Emit message_update events for each updated message
@@ -267,7 +267,17 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     }
     for id in cleared_ids {
         if let Some(slim) = state.serialize_profile(id) {
-            db::set_profile(handle.clone(), slim).await.ok();
+            db::set_profile(slim).await.ok();
+        }
+    }
+
+    // Clear cached avatar paths from all MLS groups in DB and notify frontend
+    if db::clear_all_mls_group_avatar_cache().is_ok() {
+        // Reload (now all avatar_cached = NULL) and emit events so frontend switches to placeholders
+        if let Ok(groups) = db::load_mls_groups().await {
+            for meta in groups.iter().filter(|g| !g.evicted) {
+                crate::mls::emit_group_metadata_event(meta);
+            }
         }
     }
 
@@ -288,8 +298,271 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     }))
 }
 
+// ============================================================================
+// Battery Optimization & Background Service Commands
+// ============================================================================
+
+/// Check whether the app is exempt from battery optimizations (Android only).
+/// Returns `true` on non-Android platforms (no optimization needed).
+#[tauri::command]
+pub async fn check_battery_optimized() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_bool("isIgnoringBatteryOptimizations")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Open the system battery optimization dialog (Android only). No-op on other platforms.
+#[tauri::command]
+pub async fn request_battery_optimization() {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_void("requestBatteryOptimization");
+    }
+}
+
+/// Get the background service enabled preference.
+/// Returns `true` on non-Android platforms.
+#[tauri::command]
+pub async fn get_background_service_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_bool("getBackgroundServiceEnabled")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Set the background service enabled preference and start/stop the service accordingly.
+#[tauri::command]
+pub async fn set_background_service_enabled(enabled: bool) {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_set_enabled(enabled);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Check whether the user has been prompted for background service setup.
+/// Returns `true` on non-Android platforms (no prompt needed).
+#[tauri::command]
+pub async fn get_background_service_prompted() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_bool("getBackgroundServicePrompted")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        true
+    }
+}
+
+/// Mark the user as having been prompted for background service setup.
+#[tauri::command]
+pub async fn set_background_service_prompted() {
+    #[cfg(target_os = "android")]
+    {
+        call_battery_helper_void("setBackgroundServicePrompted");
+    }
+}
+
+// ============================================================================
+// Android JNI helpers for VectorBatteryHelper
+// Uses ndk_context (Tauri's Activity context) — always available when Tauri
+// commands execute, unlike BG_JAVA_VM which depends on service startup timing.
+// ============================================================================
+
+#[cfg(target_os = "android")]
+fn call_battery_helper_bool(method: &str) -> bool {
+    let default = method == "getBackgroundServiceEnabled";
+    crate::android::utils::with_android_context(|env, activity| {
+        let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let class_name = env.new_string("io.vectorapp.VectorBatteryHelper")
+            .map_err(|e| format!("{:?}", e))?;
+        let helper_class = env.call_method(&class_loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let helper_jclass = jni::objects::JClass::from(helper_class);
+        let val = env.call_static_method(&helper_jclass, method, "(Landroid/content/Context;)Z",
+            &[activity.into()])
+            .map_err(|e| format!("{:?}", e))?.z().map_err(|e| format!("{:?}", e))?;
+        Ok(val)
+    }).unwrap_or(default)
+}
+
+#[cfg(target_os = "android")]
+fn call_battery_helper_void(method: &str) {
+    let _ = crate::android::utils::with_android_context(|env, activity| {
+        let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let class_name = env.new_string("io.vectorapp.VectorBatteryHelper")
+            .map_err(|e| format!("{:?}", e))?;
+        let helper_class = env.call_method(&class_loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let helper_jclass = jni::objects::JClass::from(helper_class);
+        env.call_static_method(&helper_jclass, method, "(Landroid/content/Context;)V",
+            &[activity.into()])
+            .map_err(|e| format!("{:?}", e))?;
+        Ok(())
+    });
+}
+
+#[cfg(target_os = "android")]
+fn call_battery_helper_set_enabled(enabled: bool) {
+    let _ = crate::android::utils::with_android_context(|env, activity| {
+        let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let class_name = env.new_string("io.vectorapp.VectorBatteryHelper")
+            .map_err(|e| format!("{:?}", e))?;
+        let helper_class = env.call_method(&class_loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
+
+        let helper_jclass = jni::objects::JClass::from(helper_class);
+
+        // Set the preference
+        env.call_static_method(&helper_jclass, "setBackgroundServiceEnabled",
+            "(Landroid/content/Context;Z)V",
+            &[activity.into(), jni::objects::JValue::Bool(enabled as u8)])
+            .map_err(|e| format!("{:?}", e))?;
+
+        // Start or stop the service
+        let service_method = if enabled { "startBackgroundService" } else { "stopBackgroundService" };
+        env.call_static_method(&helper_jclass, service_method, "(Landroid/content/Context;)V",
+            &[activity.into()])
+            .map_err(|e| format!("{:?}", e))?;
+
+        Ok(())
+    });
+}
+
+// ============================================================================
+// Device Info
+// ============================================================================
+
+/// Returns total system RAM in bytes (0 = unknown, frontend treats as unlimited)
+#[tauri::command]
+pub async fn get_device_memory() -> u64 {
+    get_total_memory()
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn get_total_memory() -> u64 {
+    // Parse /proc/meminfo for MemTotal (always available on Linux/Android)
+    if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+        for line in contents.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                // Format: "       XXXX kB"
+                if let Some(kb_str) = rest.trim().strip_suffix("kB").or_else(|| rest.trim().strip_suffix("KB")) {
+                    if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                        return kb * 1024;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn get_total_memory() -> u64 {
+    // Use sysctl hw.memsize (returns total bytes directly)
+    extern "C" {
+        fn sysctl(
+            name: *const i32, namelen: u32,
+            oldp: *mut std::ffi::c_void, oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void, newlen: usize,
+        ) -> i32;
+    }
+    // CTL_HW = 6, HW_MEMSIZE = 24
+    let mib: [i32; 2] = [6, 24];
+    let mut memsize: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    unsafe {
+        if sysctl(
+            mib.as_ptr(), 2,
+            &mut memsize as *mut u64 as *mut _,
+            &mut size,
+            std::ptr::null_mut(), 0,
+        ) == 0
+        {
+            return memsize;
+        }
+    }
+    0
+}
+
+#[cfg(windows)]
+fn get_total_memory() -> u64 {
+    use std::mem;
+
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
+    }
+
+    extern "system" {
+        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+    }
+
+    let mut status = MemoryStatusEx {
+        dw_length: mem::size_of::<MemoryStatusEx>() as u32,
+        dw_memory_load: 0,
+        ull_total_phys: 0,
+        ull_avail_phys: 0,
+        ull_total_page_file: 0,
+        ull_avail_page_file: 0,
+        ull_total_virtual: 0,
+        ull_avail_virtual: 0,
+        ull_avail_extended_virtual: 0,
+    };
+
+    unsafe {
+        if GlobalMemoryStatusEx(&mut status) != 0 {
+            return status.ull_total_phys;
+        }
+    }
+    0
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos", windows)))]
+fn get_total_memory() -> u64 {
+    0
+}
+
 // Handler list for this module (for reference):
 // - get_platform_features
 // - run_maintenance
 // - get_storage_info
 // - clear_storage
+// - get_device_memory
+// - check_battery_optimized
+// - request_battery_optimization
+// - get_background_service_enabled
+// - set_background_service_enabled
+// - get_background_service_prompted
+// - set_background_service_prompted

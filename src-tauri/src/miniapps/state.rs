@@ -47,18 +47,20 @@ pub struct MiniAppPackage {
 impl MiniAppPackage {
     /// Load a Mini App package from a .xdc file
     pub fn load(id: String, path: PathBuf) -> Result<Self, Error> {
-        // Read the entire file to compute hash
-        let file_data = std::fs::read(&path)?;
+        // Memory-map the file for zero-copy hash + zip read
+        let file = std::fs::File::open(&path)?;
+        let file_data = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         // Compute SHA-256 hash of the file
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
-        hasher.update(&file_data);
-        let file_hash = bytes_to_hex_string(hasher.finalize().as_slice());
+        hasher.update(&*file_data);
+        let file_hash = bytes_to_hex_string(&hasher.finalize());
 
-        // Open archive from the data we already read
+        // Open archive from the mmap'd data
         use std::io::Cursor;
-        let cursor = Cursor::new(&file_data);
+        let cursor = Cursor::new(&*file_data);
         let mut archive = zip::ZipArchive::new(cursor)?;
 
         // Try to read manifest.toml
@@ -329,7 +331,7 @@ impl MiniAppsState {
             
             if before_count != after_count {
                 let topic_encoded = crate::miniapps::realtime::encode_topic_id(topic);
-                log::debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
+                log_debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
                     before_count - after_count, topic_encoded);
             }
             

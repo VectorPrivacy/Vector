@@ -56,11 +56,22 @@ class VoiceSettings {
         document.getElementById('auto-transcribe-toggle').checked = this.autoTranscribe;
         
         // Update selectedModel to match the loaded model ID
-        this.selectedModel = strModelID;
-        document.getElementById('whisper-model').value = strModelID;
+        // If the saved model no longer exists (e.g. removed in an update), keep the
+        // selection that loadWhisperModels() already chose and persist it
+        const modelSelect = document.getElementById('whisper-model');
+        const modelExists = this.models.some(m => m.model.name === strModelID);
+        if (modelExists) {
+            this.selectedModel = strModelID;
+            modelSelect.value = strModelID;
+        } else {
+            this.selectedModel = modelSelect.value || 'small';
+            await saveChosenWhisperModel(this.selectedModel);
+        }
 
         this.updateModelStatus();
+        this.updateDeleteButton();
         this.setupEventListeners();
+        this.updateTranslateAvailability();
     }
 
     setupEventListeners() {
@@ -69,6 +80,7 @@ class VoiceSettings {
             this.selectedModel = e.target.value;
             this.updateModelStatus();
             this.updateDeleteButton();
+            this.updateTranslateAvailability();
             await this.setSelectedModel(e.target.value);
         });
         
@@ -80,6 +92,11 @@ class VoiceSettings {
 
         // Toggle event listeners
         document.getElementById('auto-translate-toggle').addEventListener('change', async (e) => {
+            const modelState = this.models.find(m => m.model.name === this.selectedModel);
+            if (modelState && !modelState.model.supports_translate) {
+                e.target.checked = false;
+                return;
+            }
             this.autoTranslate = e.target.checked;
             await this.setAutoTranslate(e.target.checked);
         });
@@ -96,62 +113,107 @@ class VoiceSettings {
         }
     }
 
+    async updateTranslateAvailability() {
+        const toggle = document.getElementById('auto-translate-toggle');
+        const warning = document.getElementById('translate-model-warning');
+        const modelState = this.models.find(m => m.model.name === this.selectedModel);
+        const supported = modelState ? modelState.model.supports_translate : true;
+
+        if (!supported) {
+            toggle.checked = false;
+            toggle.disabled = true;
+            toggle.closest('.toggle-container')?.classList.add('disabled');
+            warning.style.display = '';
+            this.autoTranslate = false;
+        } else {
+            toggle.disabled = false;
+            toggle.closest('.toggle-container')?.classList.remove('disabled');
+            warning.style.display = 'none';
+            // Restore saved preference when switching to a capable model
+            const saved = await loadWhisperAutoTranslate();
+            toggle.checked = saved;
+            this.autoTranslate = saved;
+        }
+    }
+
     async loadWhisperModels() {
         const modelSelect = document.getElementById('whisper-model');
         const modelStatus = document.getElementById('model-status');
-        
+
         try {
             // Store the currently selected model before rebuilding the dropdown
             const currentSelection = modelSelect.value;
-            
+
             // Show loading state while fetching models from backend
             modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
-            
-            // Fetch available models from Tauri backend
-            this.models = await invoke('list_models');
+
+            // Fetch device RAM and available models in parallel
+            const [deviceMemory, models] = await Promise.all([
+                invoke('get_device_memory'),
+                invoke('list_models'),
+            ]);
+            this.models = models;
+            const deviceMemoryMB = deviceMemory > 0 ? deviceMemory / (1024 * 1024) : Infinity;
             modelSelect.innerHTML = ''; // Clear loading message
-            
+
             // Create model hierarchy dynamically from model sizes (lowest to highest quality)
             const modelHierarchy = this.models
                 .slice() // Create a copy to avoid mutating original
                 .sort((a, b) => a.model.size - b.model.size) // Sort by size (smaller = lower quality)
                 .map(m => m.model.name);
-            
+
+            // Determine the best model for this device's RAM
+            const recommendedModel = this.findBestModelForDevice(deviceMemoryMB);
+
             // Track if we need to select a fallback model
             let foundCurrentSelection = false;
             let selectedModel = null;
-            
+
             // Populate dropdown with all available models
             this.models.forEach(modelState => {
                 const option = document.createElement('option');
                 option.value = modelState.model.name;
-                option.textContent = modelState.model.display_name;
-                
+
+                // Build display text with size and RAM-based annotations
+                const ramRequired = modelState.model.ram_required || 0;
+                const canRun = deviceMemoryMB >= ramRequired;
+                let displayText = modelState.model.display_name;
+
+                if (!canRun) {
+                    displayText += ' (Insufficient RAM)';
+                    option.disabled = true;
+                } else if (modelState.model.name === recommendedModel) {
+                    displayText += ' [Recommended]';
+                }
+
+                option.textContent = displayText;
+
                 // If this was the previously selected model and it's still downloaded, keep it selected
-                if (currentSelection === modelState.model.name && modelState.downloaded) {
+                if (currentSelection === modelState.model.name && modelState.downloaded && canRun) {
                     foundCurrentSelection = true;
                     option.selected = true;
                     selectedModel = modelState.model.name;
                 }
-                
+
                 modelSelect.appendChild(option);
             });
-            
+
             // If the previously selected model is no longer available, find the best fallback
             if (!foundCurrentSelection) {
                 selectedModel = this.findBestFallbackModel(currentSelection, modelHierarchy);
-                
+
                 const fallbackOption = Array.from(modelSelect.options).find(opt => opt.value === selectedModel);
                 if (fallbackOption) {
                     fallbackOption.selected = true;
                 }
             }
-            
+
             // Update this.selectedModel to match the UI selection
             this.selectedModel = selectedModel || this.selectedModel;
-            
+
             // Update UI elements based on the selected model
             this.updateDeleteButton();
+            this.updateTranslateAvailability();
             modelStatus.textContent = '';
         } catch (error) {
             // Handle errors by showing error state in UI
@@ -159,6 +221,24 @@ class VoiceSettings {
             modelStatus.textContent = `Error: ${error.message}`;
             console.error('Failed to load models:', error);
         }
+    }
+
+    /**
+     * Find the best model for the device's available RAM
+     * Prefers small > base > tiny in descending quality order
+     * @param {number} deviceMemoryMB - Device RAM in MB (Infinity = unknown/unlimited)
+     * @returns {string} The recommended model name
+     */
+    findBestModelForDevice(deviceMemoryMB) {
+        const preferred = ['small', 'base', 'tiny'];
+        for (const name of preferred) {
+            const model = this.models.find(m => m.model.name === name);
+            if (model && deviceMemoryMB >= (model.model.ram_required || 0)) {
+                return name;
+            }
+        }
+        // Fallback to the smallest available model
+        return this.models.length > 0 ? this.models[0].model.name : 'small';
     }
 
     updateDeleteButton() {
@@ -175,8 +255,8 @@ class VoiceSettings {
         // Find the model data for the selected model
         const model = this.models.find(m => m.model.name === selectedModel);
         
-        // Only show delete button for downloaded models (can't delete what isn't there)
-        if (model?.downloaded) {
+        // Only show delete button for downloaded models that aren't currently downloading
+        if (model?.downloaded && !model.downloading) {
             deleteBtn.style.display = 'block';
             deleteBtn.classList.add('downloaded');
             deleteBtn.title = `Delete ${model.model.display_name}`;
@@ -209,6 +289,14 @@ class VoiceSettings {
             await invoke('delete_whisper_model', { modelName });
             await this.loadWhisperModels();
             this.updateModelStatus();
+
+            // Show toast with fallback info
+            const fallback = this.models.find(m => m.model.name === this.selectedModel && m.downloaded);
+            if (fallback && fallback.model.name !== modelName) {
+                showToast(`Deleted — Now using ${fallback.model.display_name}`);
+            } else {
+                showToast(`Deleted ${modelName} model`);
+            }
         } catch (error) {
             console.error('Failed to delete model:', error);
             await popupConfirm('Deletion Failed', `Could not delete model: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
@@ -250,18 +338,26 @@ class VoiceSettings {
         // Get UI elements for progress display
         const modelStatus = document.getElementById('model-status');
         const progressContainer = document.querySelector('.download-progress-container');
-        const progressFill = document.querySelector('.progress-bar-fill');
-        const progressText = document.querySelector('.progress-text');
+        const progressFill = progressContainer.querySelector('.progress-bar-fill');
+        const progressText = progressContainer.querySelector('.progress-text');
 
         // Initialize download UI state
         modelStatus.textContent = `Downloading AI model...`;
         progressContainer.style.display = 'block';
         progressFill.style.width = '0%';
-        progressText.textContent = '0%';
-        
+        progressText.textContent = `0 / ${model.model.size} MB`;
+
         // Disable UI during download to prevent user interference
         document.getElementById('download-model').style.display = 'none';
+        document.getElementById('delete-model').style.display = 'none';
         document.getElementById('whisper-model').disabled = true;
+
+        // Show cancel button
+        const cancelBtn = document.getElementById('cancel-download');
+        if (cancelBtn) {
+            cancelBtn.style.display = 'inline-block';
+            cancelBtn.onclick = () => invoke('cancel_whisper_download');
+        }
 
         try {
             // Mark model as downloading and update status display
@@ -270,11 +366,18 @@ class VoiceSettings {
 
             // Set up Tauri event listener for download progress updates
             const unlisten = await window.__TAURI__.event.listen(
-                'whisper_download_progress', 
+                'whisper_download_progress',
                 (event) => {
-                    const progress = event.payload.progress;
+                    const { progress, downloaded_bytes, total_bytes, speed_bps } = event.payload;
                     progressFill.style.width = `${progress}%`;
-                    progressText.textContent = `${progress}%`;
+
+                    const dlMB = (downloaded_bytes / (1024 * 1024)).toFixed(1);
+                    const totalMB = (total_bytes / (1024 * 1024)).toFixed(1);
+                    const speedMBs = (speed_bps / (1024 * 1024)).toFixed(1);
+                    progressText.textContent = `${dlMB} / ${totalMB} MB \u2014 ${speedMBs} MB/s`;
+
+                    const progressionSpan = document.getElementById('voice-model-download-progression');
+                    if (progressionSpan) progressionSpan.textContent = `(${Math.round(progress)}%)`;
                 }
             );
 
@@ -287,33 +390,37 @@ class VoiceSettings {
             // Update model state to reflect successful download
             model.downloaded = true;
             model.downloading = false;
-            
+
             modelStatus.textContent = `Successfully downloaded AI model!`;
-            
+
             // Show success animation with green gradient
             progressFill.style.width = `100%`;
-            progressText.textContent = `100%`;
+            progressText.textContent = `Complete`;
             progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #2b976c 100%)';
             progressContainer.style.animation = 'none';
             void progressContainer.offsetWidth; // Force reflow to reset animation
             progressContainer.style.animation = 'fadeIn 0.3s ease-out';
-            
+
             // Refresh the models dropdown and update UI state
             await this.loadWhisperModels();
             this.updateModelStatus();
         } catch (error) {
             // Handle download failures
             model.downloading = false;
-            modelStatus.textContent = `Error downloading model: ${error}`;
-            console.error('Download failed:', error);
-            
-            // Show error state with red gradient
-            progressFill.style.background = 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
-            progressText.textContent = 'Failed';
+            const isCancelled = String(error).includes('cancelled');
+            modelStatus.textContent = isCancelled ? 'Download cancelled' : `Error downloading model: ${error}`;
+            if (!isCancelled) console.error('Download failed:', error);
+
+            // Show error/cancelled state
+            progressFill.style.background = isCancelled
+                ? 'linear-gradient(90deg, #888 0%, #555 100%)'
+                : 'linear-gradient(90deg, #ff5e5e 0%, #d40000 100%)';
+            progressText.textContent = isCancelled ? 'Cancelled' : 'Failed';
         } finally {
-            // Re-enable model selector after download completes
+            // Hide cancel button and re-enable model selector
+            if (cancelBtn) cancelBtn.style.display = 'none';
             document.getElementById('whisper-model').disabled = false;
-            
+
             // Clean up progress bar after a delay, regardless of success/failure
             setTimeout(() => {
                 progressContainer.style.display = 'none';
@@ -321,6 +428,7 @@ class VoiceSettings {
                 progressFill.style.width = '0%';
                 progressFill.style.background = 'linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%)';
                 progressText.textContent = '0%';
+                this.updateModelStatus();
             }, 3000);
         }
     }
@@ -859,30 +967,6 @@ if (domRefreshKeypkg) {
         }
     };
 }
-
-// Listen for Deep Rescan clicks
-const domSettingsDeepRescan = document.getElementById('deep-rescan-btn');
-domSettingsDeepRescan.onclick = async (evt) => {
-    try {
-        // Prompt for confirmation first
-        const fConfirm = await popupConfirm('Deep Rescan', 'This will forcefully sync your message history backwards in two-day sections until 30 days of no events are found. This may take some time. Continue?', false, '', 'vector_warning.svg');
-        if (!fConfirm) return;
-
-        // Check if already scanning (only after user confirms)
-        const isScanning = await invoke('is_scanning');
-        if (isScanning) {
-            await popupConfirm('Already Scanning!', 'Please wait for the current scan to finish before starting a deep rescan.', true, '', 'vector_warning.svg');
-            return;
-        }
-
-        // Start the deep rescan
-        await invoke('deep_rescan');
-        await popupConfirm('Deep Rescan Started', 'The deep rescan has been initiated. You can continue using the app while it runs in the background.', true, '', 'vector-check.svg');
-    } catch (error) {
-        console.error('Deep rescan failed:', error);
-        await popupConfirm('Deep Rescan Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
-    }
-};
 
 // Listen for Export Account clicks
 domSettingsExport.onclick = async (evt) => {
@@ -1534,6 +1618,15 @@ async function initSettings() {
     const primaryDeviceStatus = document.getElementById('primary-device-status');
     primaryDeviceStatus.onclick = showPrimaryDeviceInfo;
 
+    // Initialize battery / background service settings (mobile only)
+    if (platformFeatures.is_mobile) {
+        try {
+            await initBatterySettings();
+        } catch (e) {
+            console.error('[Battery] initBatterySettings failed:', e);
+        }
+    }
+
     // Initialize encryption settings
     await initEncryptionSettings();
 }
@@ -2080,6 +2173,131 @@ function hideMigrationModal() {
  * @param {number} completed - Items completed
  * @param {string} phase - Current phase description
  */
+// ============================================================================
+// Battery & Background Service Settings (mobile only)
+// ============================================================================
+
+/**
+ * Initialize the battery settings section (toggle, warning).
+ */
+async function initBatterySettings() {
+    const section = document.getElementById('settings-battery');
+    if (!section) return;
+
+    section.style.display = 'block';
+
+    const toggle = document.getElementById('battery-bg-service-toggle');
+    const warning = document.getElementById('battery-warning');
+
+    // Load current state
+    const enabled = await invoke('get_background_service_enabled');
+    toggle.checked = enabled;
+
+    // Show warning if enabled but battery optimization is active
+    if (enabled) {
+        const exempt = await invoke('check_battery_optimized');
+        warning.style.display = exempt ? 'none' : '';
+    } else {
+        warning.style.display = 'none';
+    }
+
+    // Tap warning to open battery optimization dialog
+    warning.style.cursor = 'pointer';
+    warning.addEventListener('click', async () => {
+        await invoke('request_battery_optimization');
+        await waitForVisibility();
+        const nowExempt = await invoke('check_battery_optimized');
+        warning.style.display = nowExempt ? 'none' : '';
+    });
+
+    toggle.addEventListener('change', async () => {
+        if (toggle.checked) {
+            // Turning ON — check battery optimization first
+            const exempt = await invoke('check_battery_optimized');
+            if (!exempt) {
+                // Request exemption
+                await invoke('request_battery_optimization');
+                // Wait for user to return from system dialog
+                await waitForVisibility();
+                const nowExempt = await invoke('check_battery_optimized');
+                if (!nowExempt) {
+                    // User denied — revert toggle
+                    toggle.checked = false;
+                    warning.style.display = 'none';
+                    popupConfirm('Battery Optimization', 'Battery optimization must be disabled for reliable background notifications.', true, '', 'vector_warning.svg');
+                    return;
+                }
+            }
+            await invoke('set_background_service_enabled', { enabled: true });
+            warning.style.display = 'none';
+        } else {
+            // Turning OFF — stop service immediately
+            await invoke('set_background_service_enabled', { enabled: false });
+            warning.style.display = 'none';
+        }
+    });
+}
+
+/**
+ * Show a one-time prompt asking the user to enable the background service
+ * and battery optimization. Called once after first login.
+ */
+async function showBackgroundServicePrompt() {
+    const confirmed = await popupConfirm(
+        'Background Notifications',
+        'Vector can run in the background to deliver <b>instant notifications</b>.<br><br>This requires disabling battery optimization for Vector so Android doesn\'t kill the service.<br><br>You can change this later in Settings.',
+        false, '', 'vector_warning.svg'
+    );
+
+    if (confirmed) {
+        // User chose "Enable" — explicitly persist enabled=true and request battery exemption
+        await invoke('set_background_service_enabled', { enabled: true });
+        await invoke('request_battery_optimization');
+        // Best-effort wait for user to return from system dialog (non-blocking)
+        await waitForVisibility();
+    } else {
+        // User chose "Not Now" — disable the background service
+        await invoke('set_background_service_enabled', { enabled: false });
+    }
+
+    // Refresh the settings UI to reflect current state
+    const warning = document.getElementById('battery-warning');
+    const toggle = document.getElementById('battery-bg-service-toggle');
+    if (warning && toggle) {
+        const enabled = await invoke('get_background_service_enabled');
+        const exempt = await invoke('check_battery_optimized');
+        toggle.checked = enabled;
+        warning.style.display = (enabled && !exempt) ? '' : 'none';
+    }
+}
+
+/**
+ * Returns a promise that resolves when the page becomes visible again
+ * after being hidden (e.g. user returns from system settings dialog).
+ * If the page never becomes hidden within 1s, resolves immediately
+ * (dialog may have been suppressed or instant-dismissed).
+ */
+function waitForVisibility() {
+    return new Promise(resolve => {
+        let hidden = document.hidden;
+        const handler = () => {
+            if (document.hidden) {
+                hidden = true;
+            } else if (hidden) {
+                // Page was hidden and is now visible again
+                document.removeEventListener('visibilitychange', handler);
+                setTimeout(resolve, 300);
+            }
+        };
+        document.addEventListener('visibilitychange', handler);
+        // Timeout: if the dialog never hid us, resolve after 1s
+        setTimeout(() => {
+            document.removeEventListener('visibilitychange', handler);
+            resolve();
+        }, 1000);
+    });
+}
+
 function updateMigrationProgress(total, completed, phase) {
     const phaseEl = document.getElementById('encryption-migration-phase');
     const progressFill = document.getElementById('encryption-migration-progress-fill');

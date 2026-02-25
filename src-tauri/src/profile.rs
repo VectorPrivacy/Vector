@@ -17,7 +17,7 @@ use crate::message::AttachmentFile;
 use crate::android::filesystem;
 
 // ============================================================================
-// ProfileFlags — 3 bools packed into 1 byte
+// ProfileFlags — 2 bools packed into 1 byte
 // ============================================================================
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -25,15 +25,12 @@ pub struct ProfileFlags(u8);
 
 impl ProfileFlags {
     const MINE:  u8 = 0b001;
-    const MUTED: u8 = 0b010;
     const BOT:   u8 = 0b100;
 
     #[inline] pub fn is_mine(self) -> bool  { self.0 & Self::MINE != 0 }
-    #[inline] pub fn is_muted(self) -> bool { self.0 & Self::MUTED != 0 }
     #[inline] pub fn is_bot(self) -> bool   { self.0 & Self::BOT != 0 }
 
     #[inline] pub fn set_mine(&mut self, v: bool)  { if v { self.0 |= Self::MINE } else { self.0 &= !Self::MINE } }
-    #[inline] pub fn set_muted(&mut self, v: bool) { if v { self.0 |= Self::MUTED } else { self.0 &= !Self::MUTED } }
     #[inline] pub fn set_bot(&mut self, v: bool)   { if v { self.0 |= Self::BOT } else { self.0 &= !Self::BOT } }
 }
 
@@ -67,7 +64,7 @@ pub struct Profile {
     pub status_url: Box<str>,
     /// Compact timestamp: seconds since 2020 epoch (valid until 2156)
     pub last_updated: u32,
-    /// Packed boolean flags: mine | muted | bot
+    /// Packed boolean flags: mine | bot
     pub flags: ProfileFlags,
     /// Local cached path for avatar image (for offline support)
     pub avatar_cached: Box<str>,
@@ -245,7 +242,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
                 avatar_cached = path;
             }
             CacheResult::Failed(e) => {
-                log::warn!("[Profile] Failed to cache avatar for {}: {}", npub, e);
+                log_warn!("[Profile] Failed to cache avatar for {}: {}", npub, e);
             }
         }
     }
@@ -257,7 +254,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
                 banner_cached = path;
             }
             CacheResult::Failed(e) => {
-                log::warn!("[Profile] Failed to cache banner for {}: {}", npub, e);
+                log_warn!("[Profile] Failed to cache banner for {}: {}", npub, e);
             }
         }
     }
@@ -286,7 +283,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
             let slim = state.serialize_profile(id).unwrap();
             handle.emit("profile_update", &slim).ok();
             drop(state);
-            db::set_profile(handle.clone(), slim).await.ok();
+            db::set_profile(slim).await.ok();
         }
     }
 }
@@ -319,7 +316,7 @@ pub async fn cache_all_profile_images() {
         return;
     }
 
-    log::info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
+    log_info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
 
     // Spawn caching tasks for each profile (they run concurrently with semaphore limiting)
     for (npub, avatar_url, banner_url) in profiles_to_cache {
@@ -344,7 +341,7 @@ pub async fn cache_all_profile_images() {
                             let slim = state.serialize_profile(id).unwrap();
                             handle.emit("profile_update", &slim).ok();
                             drop(state);
-                            db::set_profile(handle.clone(), slim).await.ok();
+                            db::set_profile(slim).await.ok();
                         }
                     }
                 }
@@ -369,7 +366,7 @@ pub async fn cache_all_profile_images() {
                             let slim = state.serialize_profile(id).unwrap();
                             handle.emit("profile_update", &slim).ok();
                             drop(state);
-                            db::set_profile(handle.clone(), slim).await.ok();
+                            db::set_profile(slim).await.ok();
                         }
                     }
                 }
@@ -505,8 +502,7 @@ pub async fn load_profile(npub: String) -> bool {
                 }; // Drop STATE lock before async operations
 
                 if let Some((slim, avatar_url, banner_url)) = save_data {
-                    let handle = TAURI_APP.get().unwrap();
-                    db::set_profile(handle.clone(), slim).await.unwrap();
+                    db::set_profile(slim).await.unwrap();
 
                     // Cache avatar/banner images in the background for offline access
                     let npub_clone = npub.clone();
@@ -654,8 +650,7 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
                 (slim, avatar_url, banner_url)
             }; // Drop STATE lock before async operations
 
-            let handle = TAURI_APP.get().unwrap();
-            db::set_profile(handle.clone(), slim).await.ok();
+            db::set_profile(slim).await.ok();
 
             // Cache avatar/banner images in the background for offline access
             let npub_clone = npub.clone();
@@ -727,7 +722,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
                 .to_lowercase();
 
             AttachmentFile {
-                bytes: Arc::new(bytes),
+                bytes: Arc::new(crate::message::FileBytes::Owned(bytes)),
                 img_meta: None,
                 extension,
             }
@@ -786,41 +781,6 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 }
 
 
-/// Toggles the muted status of a profile
-#[tauri::command]
-pub async fn toggle_muted(npub: String) -> bool {
-    let handle = TAURI_APP.get().unwrap();
-
-    let (muted, slim) = {
-        let mut state = STATE.lock().await;
-        if let Some(id) = state.interner.lookup(&npub) {
-            let muted_val = {
-                let profile = match state.get_profile_mut_by_id(id) {
-                    Some(p) => p,
-                    None => return false,
-                };
-                profile.flags.set_muted(!profile.flags.is_muted());
-                handle.emit("profile_muted", serde_json::json!({
-                    "profile_id": &npub,
-                    "value": profile.flags.is_muted()
-                })).unwrap();
-                profile.flags.is_muted()
-            };
-            (muted_val, state.serialize_profile(id))
-        } else {
-            (false, None)
-        }
-    }; // Drop STATE lock before async DB operation
-
-    if let Some(slim) = slim {
-        db::set_profile(handle.clone(), slim).await.unwrap();
-    }
-
-    // Refresh unread badge count to reflect mute changes immediately
-    let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
-    muted
-}
-
 /// Sets a nickname for a profile
 #[tauri::command]
 pub async fn set_nickname(npub: String, nickname: String) -> bool {
@@ -841,7 +801,7 @@ pub async fn set_nickname(npub: String, nickname: String) -> bool {
         }
         let slim = state.serialize_profile(id).unwrap();
         drop(state);
-        db::set_profile(handle.clone(), slim).await.unwrap();
+        db::set_profile(slim).await.unwrap();
         true
     } else {
         false

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-invite-avatar"
+description = "Enables the cache_invite_avatar command without any pre-configured scope."
+commands.allow = ["cache_invite_avatar"]
+
+[[permission]]
+identifier = "deny-cache-invite-avatar"
+description = "Denies the cache_invite_avatar command without any pre-configured scope."
+commands.deny = ["cache_invite_avatar"]

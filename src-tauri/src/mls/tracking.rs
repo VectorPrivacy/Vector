@@ -12,8 +12,8 @@
 
 /// Check if an MLS event has already been processed.
 /// Returns true if the event_id exists in mls_processed_events table.
-pub fn is_mls_event_processed<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, event_id: &str) -> bool {
-    let conn = match crate::account_manager::get_db_connection_guard(handle) {
+pub fn is_mls_event_processed(event_id: &str) -> bool {
+    let conn = match crate::account_manager::get_db_connection_guard_static() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -30,13 +30,12 @@ pub fn is_mls_event_processed<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, e
 
 /// Mark an MLS event as processed.
 /// Uses INSERT OR IGNORE to handle race conditions safely.
-pub fn track_mls_event_processed<R: tauri::Runtime>(
-    handle: &tauri::AppHandle<R>,
+pub fn track_mls_event_processed(
     event_id: &str,
     group_id: &str,
     event_created_at: u64,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -55,11 +54,10 @@ pub fn track_mls_event_processed<R: tauri::Runtime>(
 /// Cleanup old processed events to prevent unbounded table growth.
 /// Removes events older than the specified age (in seconds).
 /// Call this periodically (e.g., once per sync cycle).
-pub fn cleanup_old_processed_events<R: tauri::Runtime>(
-    handle: &tauri::AppHandle<R>,
+pub fn cleanup_old_processed_events(
     max_age_secs: u64,
 ) -> Result<usize, String> {
-    let conn = crate::account_manager::get_write_connection_guard(handle)?;
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     let cutoff = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -6,7 +6,7 @@
 
 use nostr_sdk::prelude::*;
 
-use crate::{mls, NOSTR_CLIENT, TRUSTED_RELAYS};
+use crate::{mls, NOSTR_CLIENT, active_trusted_relays};
 
 // ============================================================================
 // Typing Indicators
@@ -47,7 +47,7 @@ pub async fn start_typing(receiver: String) -> bool {
             );
             match client
                 .gift_wrap_to(
-                    TRUSTED_RELAYS.iter().copied(),
+                    active_trusted_relays().await.into_iter(),
                     &pubkey,
                     rumor,
                     [Tag::expiration(expiry_time)],
@@ -100,8 +100,8 @@ pub async fn send_webxdc_peer_advertisement(
     let my_npub = my_public_key.to_bech32().unwrap_or_else(|_| "unknown".to_string());
 
     println!("[WEBXDC] Sending peer advertisement: my_npub={}, receiver={}, topic={}", my_npub, receiver, topic_id);
-    log::info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
-    log::debug!("Node address: {}", node_addr);
+    log_info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
+    log_debug!("Node address: {}", node_addr);
 
     // Check if this is a group chat (group IDs are hex, not bech32)
     match PublicKey::from_bech32(receiver.as_str()) {
@@ -133,7 +133,7 @@ pub async fn send_webxdc_peer_advertisement(
             );
             match client
                 .gift_wrap_to(
-                    TRUSTED_RELAYS.iter().copied(),
+                    active_trusted_relays().await.into_iter(),
                     &pubkey,
                     rumor,
                     [Tag::expiration(expiry_time)],
