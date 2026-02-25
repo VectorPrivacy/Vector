@@ -1274,6 +1274,7 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // migration system so they're always present regardless of migration history.
     ensure_column_exists(conn, "mls_groups", "description", "TEXT")?;
     ensure_column_exists(conn, "mls_groups", "avatar_cached", "TEXT")?;
+    ensure_column_exists(conn, "events", "preview_metadata", "TEXT")?;
 
     // =========================================================================
     // Migration 16: Create processed_wrappers table for NIP-59 gift wrap dedup
