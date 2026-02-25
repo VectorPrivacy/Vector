@@ -474,23 +474,19 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
 /// Preview is capped to UI display size (300x400 mobile, 512x512 desktop)
 /// For files smaller than 5MB or GIFs, returns the original image as base64
 fn generate_image_preview_from_bytes(bytes: &[u8]) -> Result<String, String> {
-    use base64::Engine;
     use crate::shared::image::{calculate_capped_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
 
     const SKIP_RESIZE_THRESHOLD: usize = 5 * 1024 * 1024; // 5MB
 
-    // Detect if this is a GIF (we never resize GIFs to preserve animation)
-    let is_gif = bytes.starts_with(b"GIF");
+    let detected = crate::util::mime_from_magic_bytes(bytes);
+    let is_gif = detected == "image/gif";
 
     // For small files or GIFs, just return the original as base64 (skip resizing)
     if bytes.len() < SKIP_RESIZE_THRESHOLD || is_gif {
-        let base64_str = base64::engine::general_purpose::STANDARD.encode(bytes);
-
-        let detected = crate::util::mime_from_magic_bytes(bytes);
         // Fall back to image/jpeg if unrecognized (we know it's an image at this point)
         let mime_type = if detected == "application/octet-stream" { "image/jpeg" } else { detected };
 
-        return Ok(format!("data:{};base64,{}", mime_type, base64_str));
+        return Ok(crate::util::data_uri(mime_type, bytes));
     }
 
     let img = ::image::load_from_memory(bytes)

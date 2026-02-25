@@ -40,9 +40,7 @@ impl MiniAppInfo {
     pub fn from_package(pkg: &super::state::MiniAppPackage) -> Self {
         let icon_data = pkg.get_icon().map(|bytes| {
             let mime = crate::util::mime_from_magic_bytes(&bytes);
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            format!("data:{};base64,{}", mime, b64)
+            crate::util::data_uri(mime, &bytes)
         });
         
         Self {
@@ -513,9 +511,7 @@ pub async fn miniapp_load_info_from_bytes(
     // Convert icon bytes to base64 data URL
     let icon_data = icon_bytes.map(|bytes| {
         let mime = crate::util::mime_from_magic_bytes(&bytes);
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        format!("data:{};base64,{}", mime, b64)
+        crate::util::data_uri(mime, &bytes)
     });
 
     Ok(MiniAppInfo {

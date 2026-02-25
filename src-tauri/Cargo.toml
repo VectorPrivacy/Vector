@@ -54,7 +54,7 @@ tauri-plugin-process = "2.3.1"
 tauri-plugin-deep-link = "2.4.7"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico"] }
 fast-thumbhash = "0.2"
-base64 = "0.22.1"
+base64-simd = "0.8"
 cpal = "0.16.0"
 hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }

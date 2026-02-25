@@ -38,22 +38,8 @@ impl EncodedImage {
     /// avoiding an intermediate base64 string allocation.
     #[inline]
     pub fn to_data_uri(&self) -> String {
-        use base64::Engine;
-
-        let prefix = if self.extension == "png" {
-            "data:image/png;base64,"
-        } else {
-            "data:image/jpeg;base64,"
-        };
-
-        // Base64 output is 4/3 input size, rounded up to nearest 4 (padding)
-        let base64_len = (self.bytes.len() + 2) / 3 * 4;
-        let mut result = String::with_capacity(prefix.len() + base64_len);
-
-        result.push_str(prefix);
-        base64::engine::general_purpose::STANDARD.encode_string(&self.bytes, &mut result);
-
-        result
+        let mime = if self.extension == "png" { "image/png" } else { "image/jpeg" };
+        crate::util::data_uri(mime, &self.bytes)
     }
 }
 

@@ -8,8 +8,6 @@ use tokio::sync::mpsc;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use base64::engine::general_purpose;
-use base64::Engine;
 
 use crate::message::FileBytes;
 
@@ -97,7 +95,7 @@ where
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
     
     // Encode as base64
-    let encoded_auth = general_purpose::STANDARD.encode(auth_event.as_json());
+    let encoded_auth = base64_simd::STANDARD.encode_to_string(auth_event.as_json());
     let value = format!("Nostr {}", encoded_auth);
     
     HeaderValue::try_from(value)

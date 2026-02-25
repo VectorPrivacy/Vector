@@ -2,7 +2,21 @@ use std::sync::LazyLock;
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use fast_thumbhash::{rgba_to_thumb_hash, thumb_hash_to_rgba, base91_encode, base91_decode};
-use base64::{Engine as _, engine::general_purpose};
+
+/// Build a `data:{mime};base64,{...}` URI with a single pre-allocated buffer.
+/// Uses SIMD-accelerated base64 encoding (NEON/AVX2).
+#[inline]
+pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
+    // "data:" + mime + ";base64," = 5 + mime.len() + 8
+    let prefix_len = 13 + mime.len();
+    let base64_len = (bytes.len() + 2) / 3 * 4;
+    let mut result = String::with_capacity(prefix_len + base64_len);
+    result.push_str("data:");
+    result.push_str(mime);
+    result.push_str(";base64,");
+    base64_simd::STANDARD.encode_append(bytes, &mut result);
+    result
+}
 
 // Re-export SIMD-accelerated functions for backwards compatibility
 pub use crate::simd::{
@@ -450,14 +464,7 @@ fn encode_rgba_to_png_base64(rgba_data: &[u8], width: u32, height: u32) -> Strin
         }
     };
 
-    // Encode as base64 with pre-allocated string
-    // Base64 is 4/3 the size of input + padding
-    let base64_capacity = ((png_data.len() * 4 / 3) + 4) + 22; // +22 for "data:image/png;base64,"
-    let mut result = String::with_capacity(base64_capacity);
-    result.push_str("data:image/png;base64,");
-    general_purpose::STANDARD.encode_string(&png_data, &mut result);
-
-    result
+    data_uri("image/png", &png_data)
 }
 
 // ===== MIME & Extension Conversion Utilities =====
