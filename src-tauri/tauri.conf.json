@@ -6,7 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "node scripts/build-frontend.mjs --dev",
-    "beforeBuildCommand": "node scripts/build-frontend.mjs"
+    "beforeBuildCommand": "node scripts/build-frontend.mjs",
+    "removeUnusedCommands": true
   },
   "app": {
     "macOSPrivateApi": true,
