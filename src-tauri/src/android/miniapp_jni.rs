@@ -8,7 +8,6 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
 use std::io::Read;
-use std::path::Path;
 use tauri::{Emitter, Manager};
 use crate::util::bytes_to_hex_string;
 use crate::TAURI_APP;
@@ -46,7 +45,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
     chat_id: JString,
     message_id: JString,
 ) {
-    let miniapp_id: String = match env.get_string(&miniapp_id) {
+    let _miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
             log_error!("Failed to get miniapp_id: {:?}", e);
@@ -54,7 +53,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
         }
     };
 
-    let chat_id: String = match env.get_string(&chat_id) {
+    let _chat_id: String = match env.get_string(&chat_id) {
         Ok(s) => s.into(),
         Err(e) => {
             log_error!("Failed to get chat_id: {:?}", e);
@@ -62,7 +61,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
         }
     };
 
-    let message_id: String = match env.get_string(&message_id) {
+    let _message_id: String = match env.get_string(&message_id) {
         Ok(s) => s.into(),
         Err(e) => {
             log_error!("Failed to get message_id: {:?}", e);
@@ -72,7 +71,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppOpened(
 
     log_info!(
         "Mini App opened (JNI callback): {} (chat: {}, message: {})",
-        miniapp_id, chat_id, message_id
+        _miniapp_id, _chat_id, _message_id
     );
 
     // TODO: Update state tracking if needed
@@ -181,12 +180,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
         Err(e) => return create_error_string(&mut env, &format!("Failed to get command: {:?}", e)),
     };
 
-    let args: String = match env.get_string(&args) {
+    let _args: String = match env.get_string(&args) {
         Ok(s) => s.into(),
         Err(e) => return create_error_string(&mut env, &format!("Failed to get args: {:?}", e)),
     };
 
-    log_debug!("[{}] invokeNative: {} (args: {})", miniapp_id, command, args);
+    log_debug!("[{}] invokeNative: {} (args: {})", miniapp_id, command, _args);
 
     // Route to appropriate handler
     let result = match command.as_str() {
@@ -221,7 +220,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
     update: JString,
     description: JString,
 ) {
-    let miniapp_id: String = match env.get_string(&miniapp_id) {
+    let _miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => {
             log_error!("Failed to get miniapp_id: {:?}", e);
@@ -229,7 +228,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
         }
     };
 
-    let update: String = match env.get_string(&update) {
+    let _update: String = match env.get_string(&update) {
         Ok(s) => s.into(),
         Err(e) => {
             log_error!("Failed to get update: {:?}", e);
@@ -237,7 +236,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
         }
     };
 
-    let description: String = match env.get_string(&description) {
+    let _description: String = match env.get_string(&description) {
         Ok(s) => s.into(),
         Err(e) => {
             log_error!("Failed to get description: {:?}", e);
@@ -247,7 +246,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendUpdateNative(
 
     log_info!(
         "[{}] sendUpdate: {} ({})",
-        miniapp_id, description, update
+        _miniapp_id, _description, _update
     );
 
     // TODO: Store update and broadcast to other participants
@@ -259,16 +258,16 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getUpdatesNative(
     mut env: JNIEnv,
     _class: JClass,
     miniapp_id: JString,
-    last_known_serial: jint,
+    _last_known_serial: jint,
 ) -> jstring {
-    let miniapp_id: String = match env.get_string(&miniapp_id) {
+    let _miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
         Err(e) => return create_error_string(&mut env, &format!("Failed to get miniapp_id: {:?}", e)),
     };
 
     log_debug!(
         "[{}] getUpdates since serial: {}",
-        miniapp_id, last_known_serial
+        _miniapp_id, _last_known_serial
     );
 
     // TODO: Implement actual update retrieval

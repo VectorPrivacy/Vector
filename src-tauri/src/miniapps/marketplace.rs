@@ -527,9 +527,9 @@ async fn recache_miniapp_icon<R: Runtime>(
     icon_url: &str,
 ) {
     // Remove old cached icon first to force re-download
-    if let Err(e) = image_cache::remove_cached_image(handle, icon_url, ImageType::MiniAppIcon) {
+    if let Err(_e) = image_cache::remove_cached_image(handle, icon_url, ImageType::MiniAppIcon) {
         // Log but don't fail - the old cache might not exist
-        log_info!("[Marketplace] Could not remove old icon cache for {}: {}", app_id, e);
+        log_info!("[Marketplace] Could not remove old icon cache for {}: {}", app_id, _e);
     }
 
     // Now cache the (potentially new) icon
@@ -916,9 +916,9 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
                 log_info!("Uploaded icon to Blossom: {} ({})", url, mime_type);
                 Some((url, mime_type))
             }
-            Err(e) => {
+            Err(_e) => {
                 // Log warning but continue without icon
-                log_info!("Warning: Failed to upload icon: {}. Continuing without icon.", e);
+                log_info!("Warning: Failed to upload icon: {}. Continuing without icon.", _e);
                 None
             }
         }

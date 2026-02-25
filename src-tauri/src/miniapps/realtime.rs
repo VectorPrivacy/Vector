@@ -336,11 +336,11 @@ impl IrohState {
         self.endpoint.add_node_addr(peer.clone())?;
         
         // Verify the node address was added by checking if we can get connection info
-        if let Some(info) = self.endpoint.remote_info(peer.node_id) {
+        if let Some(_info) = self.endpoint.remote_info(peer.node_id) {
             log_trace!("[WEBXDC] add_peer: Remote info for peer {}: relay_url={:?}, addrs={:?}",
                 peer.node_id,
-                info.relay_url,
-                info.addrs);
+                _info.relay_url,
+                _info.addrs);
         } else {
             log_trace!("[WEBXDC] add_peer: WARNING - Could not get remote info for peer {}", peer.node_id);
         }

@@ -324,15 +324,14 @@ impl MiniAppsState {
         let mut pending = self.pending_peers.write().await;
         
         // Remove expired peers from each topic
-        pending.retain(|topic, peers| {
+        pending.retain(|_topic, peers| {
             let before_count = peers.len();
             peers.retain(|p| now.duration_since(p.received_at).as_secs() < 300);
             let after_count = peers.len();
-            
+
             if before_count != after_count {
-                let topic_encoded = crate::miniapps::realtime::encode_topic_id(topic);
                 log_debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
-                    before_count - after_count, topic_encoded);
+                    before_count - after_count, crate::miniapps::realtime::encode_topic_id(_topic));
             }
             
             // Keep the topic entry only if it still has peers
