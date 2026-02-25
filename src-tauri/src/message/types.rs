@@ -201,7 +201,8 @@ impl Message {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
 pub struct ImageMetadata {
     /// The ThumbHash preview (base91-encoded)
     pub thumbhash: String,
