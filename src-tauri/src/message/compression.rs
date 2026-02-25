@@ -156,9 +156,8 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
                     height,
                 });
 
-            // GIF bytes must be owned (mmap can't outlive this function in CachedCompressedImage)
             return Ok(CachedCompressedImage {
-                bytes: Arc::new(FileBytes::Owned(mmap.to_vec())),
+                bytes: Arc::new(FileBytes::Mapped(mmap)),
                 extension: "gif".to_string(),
                 img_meta,
                 original_size,

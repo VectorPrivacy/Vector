@@ -665,48 +665,10 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
 
     // Compress the image if it's a supported format
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        if let Ok(img) = ::image::load_from_memory(&attachment_file.bytes) {
-            // Determine target dimensions (max 1920px on longest side)
-            use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, encode_rgba_auto, JPEG_QUALITY_STANDARD};
-            let (width, height) = (img.width(), img.height());
-            let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
-
-            // Resize if needed
-            let resized_img = if new_width != width || new_height != height {
-                img.resize(new_width, new_height, ::image::imageops::FilterType::Lanczos3)
-            } else {
-                img
-            };
-
-            attachment_file.img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
-                .map(|thumbhash| ImageMetadata {
-                    thumbhash,
-                    width: resized_img.width(),
-                    height: resized_img.height(),
-                });
-
-            let rgba_img = resized_img.to_rgba8();
-
-            let mut compressed_bytes = Vec::new();
-
-            // Encode based on format (GIF stays GIF, others use smart PNG/JPEG selection)
-            if attachment_file.extension == "gif" {
-                // For GIFs, just resize but keep format
-                let mut cursor = std::io::Cursor::new(&mut compressed_bytes);
-                let mut encoder = ::image::codecs::gif::GifEncoder::new(&mut cursor);
-                encoder.encode(
-                    rgba_img.as_raw(),
-                    rgba_img.width(),
-                    rgba_img.height(),
-                    ::image::ExtendedColorType::Rgba8.into()
-                ).map_err(|e| format!("Failed to encode GIF: {}", e))?;
-            } else {
-                let encoded = encode_rgba_auto(rgba_img.as_raw(), rgba_img.width(), rgba_img.height(), JPEG_QUALITY_STANDARD)?;
-                compressed_bytes = encoded.bytes;
-                attachment_file.extension = encoded.extension.to_string();
-            }
-
-            attachment_file.bytes = Arc::new(FileBytes::Owned(compressed_bytes));
+        if let Ok(compressed) = compress_bytes_internal(attachment_file.bytes.clone(), &attachment_file.extension, None) {
+            attachment_file.bytes = compressed.bytes;
+            attachment_file.extension = compressed.extension;
+            attachment_file.img_meta = compressed.img_meta;
         }
     }
 
@@ -726,24 +688,36 @@ pub struct CompressionEstimate {
 /// This is called when the file preview opens
 #[tauri::command]
 pub async fn start_image_precompression(file_path: String) -> Result<(), String> {
-    // Mark as "in progress" by inserting None
+    // Mark as "in progress" by inserting None, and create a notify for waiters
     {
         let mut cache = COMPRESSION_CACHE.lock().await;
         cache.insert(file_path.clone(), None);
     }
-    
+    {
+        let mut notifiers = super::types::COMPRESSION_NOTIFY.lock().await;
+        notifiers.insert(file_path.clone(), Arc::new(tokio::sync::Notify::new()));
+    }
+
     // Spawn the compression task
     let path_clone = file_path.clone();
     tokio::spawn(async move {
         let result = compress_image_internal(&path_clone);
         let mut cache = COMPRESSION_CACHE.lock().await;
-        
+
         // Only store if still in cache (not cancelled)
         if cache.contains_key(&path_clone) {
-            cache.insert(path_clone, result.ok());
+            cache.insert(path_clone.clone(), result.ok());
         }
+        drop(cache);
+
+        // Wake any waiters
+        let notify = {
+            let mut notifiers = super::types::COMPRESSION_NOTIFY.lock().await;
+            notifiers.remove(&path_clone)
+        };
+        if let Some(n) = notify { n.notify_waiters(); }
     });
-    
+
     Ok(())
 }
 
@@ -833,49 +807,44 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
             }
         }
         Some(None) => {
-            // Still compressing - wait for it
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                let cache = COMPRESSION_CACHE.lock().await;
-                match cache.get(&file_path) {
-                    Some(Some(_)) => break,
-                    Some(None) => continue,
-                    None => {
-                        // Cache was cleared - fall back to compressing now
-                        drop(cache);
-                        return file_message_compressed(receiver, replied_to, file_path).await;
-                    }
-                }
+            // Still compressing — await the notify instead of polling
+            let notify = {
+                let notifiers = super::types::COMPRESSION_NOTIFY.lock().await;
+                notifiers.get(&file_path).cloned()
+            };
+            if let Some(n) = notify {
+                n.notified().await;
             }
-            
-            // Now get the result
+
+            // Get the result
             let cached = {
                 let mut cache = COMPRESSION_CACHE.lock().await;
                 cache.remove(&file_path)
             };
-            
-            if let Some(Some(compressed)) = cached {
-                // Check if compression provides significant savings
-                let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
-                    ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
-                } else {
-                    0 // No savings or compression made it bigger
-                };
-                
-                if savings_percent >= MIN_SAVINGS_PERCENT {
-                    // Compression provides significant savings - send compressed
-                    let attachment_file = AttachmentFile {
-                        bytes: compressed.bytes,
-                        extension: compressed.extension,
-                        img_meta: compressed.img_meta,
+
+            match cached {
+                Some(Some(compressed)) => {
+                    let savings_percent = if compressed.original_size > 0 && compressed.compressed_size < compressed.original_size {
+                        ((compressed.original_size - compressed.compressed_size) * 100) / compressed.original_size
+                    } else {
+                        0
                     };
-                    message(receiver, String::new(), replied_to, Some(attachment_file)).await
-                } else {
-                    // No significant savings - send original file
-                    file_message(receiver, replied_to, file_path).await
+
+                    if savings_percent >= MIN_SAVINGS_PERCENT {
+                        let attachment_file = AttachmentFile {
+                            bytes: compressed.bytes,
+                            extension: compressed.extension,
+                            img_meta: compressed.img_meta,
+                        };
+                        message(receiver, String::new(), replied_to, Some(attachment_file)).await
+                    } else {
+                        file_message(receiver, replied_to, file_path).await
+                    }
                 }
-            } else {
-                Err("Failed to get compressed image".to_string())
+                _ => {
+                    // Cache was cleared or missing — fall back to compressing now
+                    file_message_compressed(receiver, replied_to, file_path).await
+                }
             }
         }
         None => {

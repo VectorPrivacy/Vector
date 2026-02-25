@@ -67,6 +67,10 @@ pub struct CachedCompressedImage {
 pub static COMPRESSION_CACHE: LazyLock<TokioMutex<HashMap<String, Option<CachedCompressedImage>>>> =
     LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
+/// Notifiers for compression completion — waiters subscribe, compressor signals
+pub static COMPRESSION_NOTIFY: LazyLock<TokioMutex<HashMap<String, Arc<tokio::sync::Notify>>>> =
+    LazyLock::new(|| TokioMutex::new(HashMap::new()));
+
 /// Cache for Android file bytes: uri -> (bytes, extension, name, size)
 /// This is used to cache file bytes immediately after file selection on Android,
 /// before the temporary content URI permission expires.
