@@ -63,7 +63,7 @@ rayon = "1.11.0"
 memmap2 = "0.9"
 
 # Mini Apps (WebXDC) support
-zip = "2.4"
+zip = { version = "2.4", default-features = false, features = ["deflate-zlib"] }
 toml = "0.8.23"
 anyhow = "1.0.99"
 http = "1.3"

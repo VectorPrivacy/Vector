@@ -84,6 +84,11 @@ jobs:
           Write-Host "Verifying glslc..."
           & "$vcpkgBin\glslc.exe" --version
 
+      - name: Shorten cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: echo "CARGO_TARGET_DIR=C:\cargo-target" >> $env:GITHUB_ENV
+
       - name: install frontend dependencies
         run: npm install
 

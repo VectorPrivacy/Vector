@@ -70,9 +70,12 @@ async function minifyJs(filePath) {
         compress: {
             dead_code: true,
             drop_console: false, // keep console.log for debugging in production
-            passes: 2,
+            passes: 3,
+            pure_getters: true,
         },
-        mangle: true,
+        mangle: {
+            toplevel: true,
+        },
         format: {
             comments: false,
         },
