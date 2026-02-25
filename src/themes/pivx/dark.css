@@ -8,6 +8,8 @@
   --reply-highlight-border: #a128fd;
   --toast-border-color: #B359FC;
   --chat-bg-opacity: 0.04;
+  --primary-color: #B359FC;
+  --accent-color: #a128fd;
 }
 
 .sync-line {
@@ -15,19 +17,13 @@
 }
 
 .popup {
-  background-color: rgba(0, 0, 0, 1);
+  background-color: #030303;
   box-shadow: 0 0 15px #6202D420;
   border-color: #6202D4;
 }
 
-.text-gradient {
+.typing-indicator-text {
   background: linear-gradient(to right, #f8f8f8 13.87%, #6202D4 60%);
-  background-size: 200% 200%;
-  background-clip: text;
-}
-
-.text-gradient-green {
-  background: linear-gradient(to right, #6202D4 13.87%, #1D003F 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
@@ -141,7 +137,7 @@ button {
 }
 
 .new-chat-btn .icon {
-  background-color: #B359FC;
+  background-color: var(--primary-color);
 }
 
 .msg-preview-container {

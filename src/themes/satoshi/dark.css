@@ -7,6 +7,8 @@
   --voice-progress-secondary: #F7931A40;
   --reply-highlight-border: #F9AA4B;
   --toast-border-color: #F7931A;
+  --primary-color: #F7931A;
+  --accent-color: #F9AA4B;
 }
 
 .sync-line {
@@ -14,19 +16,13 @@
 }
 
 .popup {
-  background-color: rgba(0, 0, 0, 1);
+  background-color: #030303;
   box-shadow: 0 0 15px #F7931A20;
   border-color: #F7931A;
 }
 
-.text-gradient {
+.typing-indicator-text {
   background: linear-gradient(to right, #f8f8f8 13.87%, #F7931A 60%);
-  background-size: 200% 200%;
-  background-clip: text;
-}
-
-.text-gradient-green {
-  background: linear-gradient(to right, #F7931A 13.87%, #B56C12 60%);
   background-size: 200% 200%;
   background-clip: text;
 }
@@ -118,7 +114,7 @@ button {
 }
 
 .new-chat-btn .icon {
-  background-color: #F9AA4B;
+  background-color: var(--primary-color);
 }
 
 .msg-preview-container {
@@ -332,7 +328,7 @@ select:disabled {
 
 #popupConfirm {
   background-color: #F7931A;
-  color: #ffffff;
+  color: #000;
 }
 
 /* File Preview Overlay Theme */

@@ -166,9 +166,12 @@ const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
+const domSettingsChangePinInfo = document.getElementById('change-pin-info');
+const domSettingsChangePinLabel = document.getElementById('change-pin-label');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
 const domSettingsDonorsInfo = document.getElementById('donors-info');
 const domDonorPivx = document.getElementById('donor-pivx');
+const domDonorGitcoin = document.getElementById('donor-gitcoin');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 
@@ -4268,7 +4271,7 @@ function updateChatHeaderSubtext(chat) {
         domChatContactStatus.classList.remove('status-hidden');
         domChatContactStatus.style.display = ''; // Reset display in case it was hidden by else branch
         domChatContactStatus.textContent = newStatusText;
-        domChatContactStatus.classList.toggle('text-gradient', shouldAddGradient);
+        domChatContactStatus.classList.toggle('typing-indicator-text', shouldAddGradient);
         if (!shouldAddGradient) {
             twemojify(domChatContactStatus);
         }
@@ -4283,7 +4286,7 @@ function updateChatHeaderSubtext(chat) {
         // Clear content after animation completes (300ms matches CSS transition)
         statusHideTimeout = setTimeout(() => {
             domChatContactStatus.textContent = '';
-            domChatContactStatus.classList.remove('text-gradient');
+            domChatContactStatus.classList.remove('typing-indicator-text');
             statusHideTimeout = null;
         }, 300);
     }
@@ -4724,7 +4727,7 @@ function renderChat(chat, primaryColor) {
     pChatPreview.classList.add('cutoff');
 
     const preview = generateChatPreviewText(chat);
-    pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+    pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
     pChatPreview.textContent = preview.text;
     if (preview.needsTwemoji) twemojify(pChatPreview);
 
@@ -4776,7 +4779,7 @@ function updateChatlistPreview(chatId) {
 
     if (pChatPreview) {
         const preview = generateChatPreviewText(cChat);
-        pChatPreview.classList.toggle('text-gradient', preview.isTyping);
+        pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
         pChatPreview.textContent = preview.text;
         if (preview.needsTwemoji) twemojify(pChatPreview);
     }
@@ -6453,7 +6456,7 @@ async function login(skipAnimations = false) {
             switch (type) {
                 case 'start':
                     domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.add('text-gradient');
+                    domLoginEncryptTitle.classList.add('typing-indicator-text');
                     domLoginEncryptTitle.style.color = '';
                     break;
                     
@@ -6468,12 +6471,12 @@ async function login(skipAnimations = false) {
                     
                 case 'complete':
                     domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.remove('text-gradient');
+                    domLoginEncryptTitle.classList.remove('typing-indicator-text');
                     break;
                     
                 case 'error':
                     domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.remove('text-gradient');
+                    domLoginEncryptTitle.classList.remove('typing-indicator-text');
                     domLoginEncryptTitle.style.color = 'red';
                     break;
             }
@@ -6809,7 +6812,9 @@ function renderProfileTab(cProfile) {
     // npub display
     const profileNpub = document.getElementById('profile-npub');
     if (profileNpub) {
-        profileNpub.textContent = cProfile.id;
+        profileNpub.dataset.fullNpub = cProfile.id;
+        profileNpub.textContent = cProfile.id.slice(0, 16) + '...' + cProfile.id.slice(-16);
+        document.getElementById('profile-npub-label').textContent = cProfile.mine ? 'My nPub Key' : 'nPub Key';
     }
 
     // Description
@@ -6822,7 +6827,7 @@ function renderProfileTab(cProfile) {
 
     // Add npub copy functionality
     document.getElementById('profile-npub-copy').onclick = (e) => {
-        const npub = document.getElementById('profile-npub')?.textContent;
+        const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
         if (npub) {
             // Copy the full profile URL for easy sharing
             navigator.clipboard.writeText(npub).then(() => {
@@ -6862,6 +6867,9 @@ function renderProfileTab(cProfile) {
         
         // Display the Navbar
         domNavbar.style.display = '';
+        document.getElementById('profile-header-avatar-container').style.display = 'none';
+        document.getElementById('profile-name').textContent = 'My Profile';
+        document.getElementById('profile-status').style.display = 'none';
 
         // Configure other clickables
         domProfileName.onclick = askForUsername;
@@ -6877,6 +6885,8 @@ function renderProfileTab(cProfile) {
     } else {
         // Show Contact Options
         domProfileOptions.style.display = '';
+        document.getElementById('profile-header-avatar-container').style.display = '';
+        document.getElementById('profile-status').style.display = '';
 
         // Setup Mute option
         const cMuteChat = arrChats.find(c => c.id === cProfile.id);
@@ -7686,7 +7696,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.onclick = null;
             domChatContact.classList.remove('btn');
             domChatContactStatus.textContent = 'Encrypted Notes to Self';
-            domChatContactStatus.classList.remove('text-gradient');
+            domChatContactStatus.classList.remove('typing-indicator-text');
         } else if (isGroup) {
             domChatContact.textContent = chat?.metadata?.custom_fields?.name || `Group ${strOpenChat.substring(0, 10)}...`;
             domChatContact.onclick = () => {
@@ -7702,7 +7712,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             domChatContact.onclick = null;
             domChatContact.classList.remove('btn');
             domChatContactStatus.textContent = '';
-            domChatContactStatus.classList.remove('text-gradient');
+            domChatContactStatus.classList.remove('typing-indicator-text');
         }
 
         domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
@@ -9640,7 +9650,7 @@ async function closeChat() {
     domChatContact.textContent = '';
     domChatContactStatus.textContent = '';
     domChatContactStatus.classList.add('status-hidden');
-    domChatContactStatus.classList.remove('text-gradient');
+    domChatContactStatus.classList.remove('typing-indicator-text');
     domChatHeaderAvatarContainer.innerHTML = '';
     
     // Reset procedural scroll state
@@ -11539,6 +11549,20 @@ domChatMessageInput.oninput = async () => {
         popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
     };
 
+    if (domSettingsChangePinInfo) {
+        domSettingsChangePinInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm(
+                fSecurityType === 'password' ? 'Change Password' : 'Change PIN',
+                fSecurityType === 'password'
+                    ? 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.'
+                    : 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.',
+                true
+            );
+        };
+    }
+
     // Info button for Refresh KeyPackages
     const domRefreshKeypkgInfo = document.getElementById('refresh-keypkg-info');
     if (domRefreshKeypkgInfo) {
@@ -11571,6 +11595,27 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         openUrl('https://pivx.org');
+    };
+
+    // Gitcoin donor logo click - opens gitcoin.co
+    domDonorGitcoin.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openUrl('https://www.gitcoin.co');
+    };
+
+    // Footer Hyperlinks
+    document.getElementById('footer-donate').onclick = (e) => {
+        e.preventDefault();
+        openUrl('https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations');
+    };
+    document.getElementById('footer-gitbook').onclick = (e) => {
+        e.preventDefault();
+        openUrl('https://docs.vectorapp.io');
+    };
+    document.getElementById('footer-privacy').onclick = (e) => {
+        e.preventDefault();
+        openUrl('https://vectorapp.io/privacy-policy');
     };
 
 });

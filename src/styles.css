@@ -322,6 +322,17 @@ html, body {
   opacity: 0.5;
 }
 
+.settings-footer span {
+    color: #5B6060;
+    font-size: 13px;
+    cursor: pointer;
+    transition: color 0.2s ease;
+}
+
+.settings-footer span:hover {
+    color: #fff;
+}
+
 .popup-container {
   z-index: 10002;
   width: 100%;
@@ -378,14 +389,7 @@ html, body {
   margin-top: auto;
 }
 
-.text-gradient {
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
-}
-
-.text-gradient-green {
+.typing-indicator-text {
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -393,15 +397,13 @@ html, body {
 }
 
 .startup-subtext-gradient {
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
-
   /* Always uses Vector theme (brand colour) */
   background: linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%);
   background-size: 200% 200%;
   background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: BreathingGradient 6s cubic-bezier(.46,.03,.52,.96) infinite;
 }
 
 @keyframes BreathingGradient {
@@ -734,8 +736,8 @@ html, body {
   height: 175px;
   margin: -87px auto 10px;
   border-radius: 50%;
-  border: 8px solid #060606;
-  background-color: #060606;
+  border: 8px solid #030303;
+  background-color: #030303;
 }
 
 /* Avatar Image */
@@ -893,12 +895,12 @@ html, body {
   border-style: solid;
   border-width: 2px;
   color: #b2b2b2;
-  background-color: #060606;
+  background-color: #030303;
   cursor: pointer;
 }
 
 .profile-option:hover {
-  background-color: #161616;
+  background-color: #171717;
   border-color: #959899;
   color: white;
   opacity: 1;
@@ -908,34 +910,38 @@ html, body {
 .profile-npub-container {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin: 20px 0;
-  padding: 12px 16px;
-  border-radius: 30px;
-  width: calc(100% - 32px);
-  max-width: 600px;
-  margin-left: auto;
-  margin-right: auto;
+  width: 85%;
+  gap: 4px;
+  margin: 8px auto 20px auto;
+  padding: 4px 4px 4px 8px;
 }
 
 .profile-npub {
-  font-size: 14px;
-  opacity: 0.75;
-  word-break: break-all;
-  text-align: center;
   flex: 1;
-  padding: 0 12px;
+  font-size: 14px;
+  opacity: 0.9;
+  display: block;
+  white-space: nowrap;
+  text-align: center;
 }
 
 .profile-npub-copy {
-  width: 36px;
-  height: 36px;
-  background: none;
+  align-self: center;
+  flex-shrink: 0;
+  padding: 4px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
+  background: transparent;
+  border: none;
+}
+
+.profile-npub-copy .icon-copy {
+  width: 20px;
+  height: 20px;
 }
 
 /* Icons */
@@ -1095,8 +1101,15 @@ html, body {
   display: flex;
   align-items: center;
   height: 40px;
-  background-color: transparent;
-  border-color: rgba(128, 128, 128, 0.2);
+  color: #fff;
+  background-color: #17171750;
+  border: 1px solid #80808033;
+}
+
+.new-chat-btn:hover {
+  color: #fff;
+  background-color: #171717;
+  border-color: #B2B2B2;
 }
 
 .new-chat-btn .icon {
@@ -1105,6 +1118,11 @@ html, body {
   width: 30px;
   height: 30px;
   margin: 0;
+  background: var(--primary-color);
+}
+
+.new-chat-btn .icon:hover {
+  background: var(--accent-color);
 }
 
 #chat-list {
@@ -1247,7 +1265,7 @@ html, body {
 .chat-header {
   position: fixed;
   height: 60px;
-  background-color: rgba(22, 22, 22, 0.85);
+  background-color: rgba(22, 22, 22, 0.9);
   backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
@@ -1325,8 +1343,8 @@ html, body {
   margin-right: auto;
   margin-top: -1px;
   transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1), max-height 0.3s cubic-bezier(0.34, 1, 0.64, 1), margin-bottom 0.3s cubic-bezier(0.34, 1, 0.64, 1);
-  max-height: 30px;
-  overflow: hidden;
+  max-height: none;
+  overflow: visible;
 }
 
 .chat-contact-status.status-hidden {
@@ -3116,7 +3134,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(rgba(7, 7, 7, 0.85), #00000000 80%);
+  background: linear-gradient(#030303d9, #03030300 80%);
   pointer-events: none;
 }
 
@@ -3181,7 +3199,7 @@ audio {
 #settings {
   overflow-y: auto;
   height: 100%;
-  padding-bottom: 100px;
+  padding-bottom: 80px;
   overscroll-behavior: none;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
@@ -3217,7 +3235,7 @@ select {
 }
 
 #whisper-model option {
-  background: #161616;
+  background: #171717;
   padding: 10px;
 }
 
@@ -3875,6 +3893,12 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 #theme-select {
   text-align: center;
   text-align-last: center;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 10px;
+  padding-right: 36px;
 }
 
 /* Remove default focus outline and apply custom styling */
@@ -3884,7 +3908,7 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 
 /* Style options to match whisper model */
 #theme-select option {
-  background: #161616;
+  background: #171717;
   text-align: center;
   padding: 10px;
 }
@@ -3907,9 +3931,20 @@ select:focus::-ms-value {
 
 /* Sound Notification Selection container styles */
 #notif-sound-select option {
-  background: #161616;
+  background: #171717;
   padding: 10px;
   text-align: center;
+}
+
+/* Down Arrow added to Dropdown Button */
+#notif-sound-select {
+    text-align: center;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 10px;
+    padding-right: 36px;
 }
 
 /* Delete model button with trash bin icon */
@@ -3995,7 +4030,7 @@ select:disabled:hover {
   margin-left: 10px;
   backdrop-filter: none;
   border-color: #ff2ea9;
-  background-color: #161616;
+  background-color: #171717;
 }
 
 .cancel-btn:disabled,
@@ -4159,7 +4194,7 @@ select:disabled:hover {
 }
 
 #chat-new-btn .icon {
-  background-color: var(--icon-color-primary);
+  background-color: var(--primary-color);
 }
 
 .chat-new-help {
@@ -4268,7 +4303,7 @@ select:disabled:hover {
   bottom: 0px;
   height: 65px;
   width: 100%;
-  background-color: #161616;
+  background-color: #171717;
   justify-content: space-evenly;
 }
 
@@ -4510,7 +4545,7 @@ select:disabled:hover {
   cursor: pointer;
   font-size: 15px;
   font-family: inherit;
-  font-weight: 500;
+  font-weight: 600;
   transition: all 0.2s;
 }
 
@@ -6042,7 +6077,7 @@ select:disabled:hover {
   right: 20px;
   width: 40px;
   height: 40px;
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: #17171770;
   border: none;
   border-radius: 50%;
   cursor: pointer;
@@ -6054,7 +6089,7 @@ select:disabled:hover {
 }
 
 .image-viewer-close:hover {
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: #171717;
 }
 
 .image-viewer-close::before,
@@ -8135,7 +8170,7 @@ hr {
   align-items: center;
   gap: 14px;
   padding: 14px;
-  background-color: #161616;
+  background-color: #171717;
   border-radius: 12px;
   cursor: pointer;
   transition: transform 0.2s, box-shadow 0.2s;
@@ -8537,7 +8572,7 @@ hr {
 }
 
 .publish-app-container {
-  background-color: #161616;
+  background-color: #171717;
   border-radius: 16px;
   width: 90%;
   max-width: 500px;

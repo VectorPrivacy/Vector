@@ -578,19 +578,18 @@
         <p class="navbar-text">Share</p>
       </div>
     </div>
-    <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
-    <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
-    <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
-      <h3 style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
-    </div>
-    <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
-      <span id="profile-npub" class="profile-npub"></span>
-      <button id="profile-npub-copy" class="btn profile-npub-copy">
-        <span class="icon icon-copy"></span>
-      </button>
-    </div>
-    <!-- Profile ID is currently JS-only, no visible UI - it will be added in the future -->
-    <span id="profile-id" style="display: none;"></span>
+      <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-wrap: break-word; font-style: normal; margin-top: 10px; text-align: center; display: block;"></span>
+      <textarea id="profile-description-editor" class="chat-contact-status profile-description-editor" style="display: none; margin-top: 10px;"></textarea>
+      <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
+        <h3 id="profile-npub-label" style="color: #f7f4f4; margin: 0; text-align: center;">nPub Key</h3>
+      </div>
+      <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;">
+        <span id="profile-npub" class="profile-npub"></span>
+        <button id="profile-npub-copy" class="btn profile-npub-copy">
+          <span class="icon icon-copy"></span>
+        </button>
+      </div>
+      <span id="profile-id" style="display: none;"></span>
   </div>
   </div>
 </div>
@@ -888,21 +887,6 @@
           </div>
         </div>
 
-        <!-- Security Settings Section -->
-        <div id="settings-security" class="settings-section">
-          <hr class="divider settings-divider">
-          <h2>Security</h2>
-
-          <div class="form-group">
-            <label class="toggle-container">
-              <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
-              <input type="checkbox" id="security-encryption-toggle" checked>
-              <span class="neon-toggle"></span>
-            </label>
-          </div>
-          <button id="security-change-credential" class="btn cancel-btn" style="display: none;">Change PIN</button>
-        </div>
-
         <!-- Display Settings Section -->
         <div id="settings-display" class="settings-section">
           <hr class="divider settings-divider">
@@ -938,16 +922,18 @@
             </label>
           </div>
 
-          <div class="form-group">
-            <label for="notif-sound-select">Notification Sound</label>
-            <div class="select-container" style="margin-top: 10px;">
-              <select id="notif-sound-select">
+          <div class="form-group" style="display: flex; align-items: center; gap: 5px;">
+            <div class="select-container" style="margin: 0; flex: 1">
+              <select id="notif-sound-select" style="margin-bottom: 0 !important;">
                 <option value="default">Prélude</option>
                 <option value="techno">Techno</option>
                 <option value="none">None</option>
                 <option value="custom">Custom...</option>
               </select>
             </div>
+            <button id="notif-preview-btn" class="btn cancel-btn" style="margin: 0; padding: 0 10px; min-width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;" title="Preview Sound">
+              <img src="./icons/speaker_volume.svg" alt="Preview" style="width: 18px; height: 18px;">
+            </button>
           </div>
 
           <div class="form-group" id="notif-custom-group" style="display: none;">
@@ -958,10 +944,6 @@
                 <button class="notif-sound-chip-clear" id="notif-custom-clear" title="Remove custom sound">×</button>
               </div>
             </div>
-          </div>
-
-          <div class="form-group">
-            <button id="notif-preview-btn" class="btn cancel-btn">Preview Sound</button>
           </div>
         </div>
 
@@ -1034,7 +1016,39 @@
               </div>
             </div>
             
-            <!-- Action buttons -->
+        <!-- Security Settings Section -->
+        <div id="settings-security" class="settings-section">
+          <hr class="divider settings-divider">
+          <h2>Security</h2>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="security-encryption-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Local Encryption</span>
+              <input type="checkbox" id="security-encryption-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div id="change-pin-container" class="danger-option" style="display: none;">
+              <div class="left-group">
+                <span id="change-pin-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span id="change-pin-label">Change PIN</span>
+              </div>
+              <button id="security-change-credential" class="btn cancel-btn">Change</button>
+          </div>
+          
+          <div class="danger-option">
+              <div class="left-group">
+                <span id="export-account-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span>Export Account</span>
+              </div>
+              <button id="export-account-btn" class="cancel-btn">
+                Export
+              </button>
+          </div>
+        </div>
+
+            <!-- Dangerzone (Irreversible Actions) buttons -->
             <button id="restart-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart Now</button>
           </div>
         </div>
@@ -1086,16 +1100,30 @@
 
         <!-- Donors & Contributors Section -->
         <div id="settings-donors" class="settings-section" style="text-align: center;">
-          <hr class="divider settings-divider" style="background-color: #161616;">
+          <hr class="divider settings-divider" style="background-color: #171717;">
           <h3 style="opacity: 0.6; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 5px;">Donors & Contributors
             <span id="donors-info" class="icon icon-info btn" style="width: 16px; height: 16px; position: relative; display: inline-block; margin-left: 8px;"></span>
           </h3>
-          <div class="donors-list" style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; padding: 15px 0;">
+          <div class="donors-list" style="display: flex; flex-wrap: wrap; gap: 25px; justify-content: center; padding: 15px 0;">
             <div id="donor-pivx" class="btn" style="cursor: pointer;">
               <img src="./icons/PIVX-White.svg" alt="PIVX" style="height: 40px; width: auto;">
             </div>
+            <div id="donor-gitcoin" class="btn" style="cursor: pointer;">
+              <img src="./icons/gitcoin-white.svg" alt="Gitcoin" style="height: 40px; width: auto;">
+            </div>
           </div>
         </div>
+
+      <!-- Footer Section (Hyperlinks)-->
+        <div class="settings-section">
+          <hr class="divider settings-divider" style="background-color: #171717;">
+          <div class="settings-footer" style="text-align: center; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">
+            <span id="footer-donate" >Donate</span>
+            <span id="footer-gitbook">GitBook</span>
+            <span id="footer-privacy">Privacy Policy</span>
+          </div>
+        </div>
+
       </div>
 
       <div id="invites" style="display: none;">

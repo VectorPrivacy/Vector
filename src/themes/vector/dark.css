@@ -3,9 +3,11 @@
   --voice-highlight-bg: rgba(89, 252, 179, 0.3);
   --voice-highlight-text: #59fcb3;
   --voice-frequency-glow: rgba(89, 252, 179, 0.8);
-  --icon-color-primary: #59fcb3;
+  --icon-color-primary: #33DB98;
   --reply-highlight-border: #33DB98;
   --toast-border-color: #33DB98;
+  --primary-color: #33DB98;
+  --accent-color: #59fcb3;
 }
 
 .sync-line {
@@ -13,19 +15,13 @@
 }
 
 .popup {
-  background-color: rgba(0, 0, 0, 1);
-  box-shadow: 0 0 15px rgba(90, 252, 180, 0.25);
-  border-color: rgba(90, 252, 180, 0.35);
+  background-color: #030303;
+  box-shadow: 0 0 15px #33DB9825;
+  border-color: #33DB98;
 }
 
-.text-gradient {
+.typing-indicator-text {
   background: linear-gradient(to right, #ffffff 13.87%, #808080 60%);
-  background-size: 200% 200%;
-  background-clip: text;
-}
-
-.text-gradient-green {
-  background: linear-gradient(to right, #59fcb3 13.87%, #2b976c 80%);
   background-size: 200% 200%;
   background-clip: text;
 }
@@ -123,7 +119,7 @@ button {
 }
 
 .new-chat-btn .icon {
-  background-color: rgba(128, 255, 212, 0.75);
+  background-color: var(--primary-color);
 }
 
 .msg-preview-container {
