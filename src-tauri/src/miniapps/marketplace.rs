@@ -902,7 +902,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         log_info!("Uploading app icon to Blossom...");
         
         // Detect MIME type from icon bytes
-        let mime_type = detect_image_mime_type(&icon_data);
+        let mime_type = crate::util::mime_from_magic_bytes(&icon_data);
         
         match blossom::upload_blob_with_failover(
             signer.clone(),
@@ -1028,34 +1028,3 @@ fn extract_icon_from_xdc(xdc_bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Detect MIME type from image bytes
-fn detect_image_mime_type(bytes: &[u8]) -> &'static str {
-    if bytes.len() < 4 {
-        return "application/octet-stream";
-    }
-    
-    // Check magic bytes
-    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png"
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if bytes.starts_with(b"<?xml") || bytes.starts_with(b"<svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_marketplace_event() {
-        // Test parsing would go here
-    }
-}

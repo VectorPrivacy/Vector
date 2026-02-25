@@ -760,3 +760,24 @@ pub fn mime_from_extension_safe(extension: &str, image_only: bool) -> Result<Str
 pub fn is_image_mime(mime: &str) -> bool {
     mime.trim().starts_with("image/")
 }
+
+/// Detect MIME type from file magic bytes.
+/// Supports PNG, JPEG, GIF, WebP, TIFF, ICO, and SVG.
+/// Returns "application/octet-stream" for unrecognized formats.
+pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
+    if bytes.len() < 4 {
+        return "application/octet-stream";
+    }
+    // Dispatch on first byte to minimize comparisons
+    match bytes[0] {
+        0x89 if bytes[1..4] == [0x50, 0x4E, 0x47] => "image/png",
+        0xFF if bytes[1..3] == [0xD8, 0xFF] => "image/jpeg",
+        b'G' if bytes.len() >= 6 && (bytes[..6] == *b"GIF87a" || bytes[..6] == *b"GIF89a") => "image/gif",
+        b'R' if bytes.len() > 12 && bytes[..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" => "image/webp",
+        0x49 if bytes[1..4] == [0x49, 0x2A, 0x00] => "image/tiff",
+        0x4D if bytes[1..4] == [0x4D, 0x00, 0x2A] => "image/tiff",
+        0x00 if bytes[1..4] == [0x00, 0x01, 0x00] => "image/x-icon",
+        b'<' if bytes.starts_with(b"<?xml") || bytes.starts_with(b"<svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}

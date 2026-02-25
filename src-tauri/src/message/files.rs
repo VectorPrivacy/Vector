@@ -486,25 +486,9 @@ fn generate_image_preview_from_bytes(bytes: &[u8]) -> Result<String, String> {
     if bytes.len() < SKIP_RESIZE_THRESHOLD || is_gif {
         let base64_str = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-        // Detect image type from magic bytes for correct MIME type
-        let mime_type = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            "image/jpeg"
-        } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-            "image/png"
-        } else if is_gif {
-            "image/gif"
-        } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
-            "image/webp"
-        } else if bytes.len() >= 4 && ((bytes[0..2] == [0x49, 0x49] && bytes[2..4] == [0x2A, 0x00]) ||
-                                        (bytes[0..2] == [0x4D, 0x4D] && bytes[2..4] == [0x00, 0x2A])) {
-            // TIFF: II (little-endian) or MM (big-endian) followed by 42
-            "image/tiff"
-        } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
-            // ICO format
-            "image/x-icon"
-        } else {
-            "image/jpeg" // Default fallback
-        };
+        let detected = crate::util::mime_from_magic_bytes(bytes);
+        // Fall back to image/jpeg if unrecognized (we know it's an image at this point)
+        let mime_type = if detected == "application/octet-stream" { "image/jpeg" } else { detected };
 
         return Ok(format!("data:{};base64,{}", mime_type, base64_str));
     }

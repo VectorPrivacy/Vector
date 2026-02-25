@@ -39,19 +39,7 @@ pub struct MiniAppInfo {
 impl MiniAppInfo {
     pub fn from_package(pkg: &super::state::MiniAppPackage) -> Self {
         let icon_data = pkg.get_icon().map(|bytes| {
-            // Detect MIME type from bytes
-            let mime = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-                "image/png"
-            } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-                "image/jpeg"
-            } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
-                "image/svg+xml"
-            } else if bytes.starts_with(b"GIF") {
-                "image/gif"
-            } else {
-                "application/octet-stream"
-            };
-            
+            let mime = crate::util::mime_from_magic_bytes(&bytes);
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             format!("data:{};base64,{}", mime, b64)
@@ -524,19 +512,7 @@ pub async fn miniapp_load_info_from_bytes(
 
     // Convert icon bytes to base64 data URL
     let icon_data = icon_bytes.map(|bytes| {
-        // Detect MIME type from bytes
-        let mime = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-            "image/png"
-        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            "image/jpeg"
-        } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
-            "image/svg+xml"
-        } else if bytes.starts_with(b"GIF") {
-            "image/gif"
-        } else {
-            "application/octet-stream"
-        };
-
+        let mime = crate::util::mime_from_magic_bytes(&bytes);
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         format!("data:{};base64,{}", mime, b64)
