@@ -975,6 +975,10 @@ domSettingsExport.onclick = async (evt) => {
         const keys = await invoke('export_keys');
         
         // Create the export content with security warnings
+        // Escape values to prevent XSS from malicious DB content
+        const safeSeed = keys.seed_phrase ? escapeHtml(keys.seed_phrase) : '';
+        const safeNsec = escapeHtml(keys.nsec);
+
         let exportContent = `
         <div style="text-align: center; padding: 0 8px;">
             <p style="color: #ff2ea9; font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">Security Warning. Do Not Lose.</p>
@@ -986,8 +990,8 @@ domSettingsExport.onclick = async (evt) => {
             <div style="text-align: left; padding: 0 8px; margin-bottom: 12px;">
             <p style="font-weight: bold; margin: 0 0 4px 0;">Seed Phrase</p>
             <div style="display: flex; align-items: center; gap: 6px;">
-                <p style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${keys.seed_phrase}</p>
-                <button onclick="navigator.clipboard.writeText('${keys.seed_phrase}')" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
+                <p id="export-seed-value" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${safeSeed}</p>
+                <button id="export-seed-copy" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
             </div>
             </div>
         `;
@@ -997,7 +1001,7 @@ domSettingsExport.onclick = async (evt) => {
         <div style="text-align: center; padding: 0 8px;">
             <p style="font-weight: bold; margin: 0 0 4px 0;">Private Key (nsec)</p>
             <div style="display: flex; align-items: center; gap: 6px;">
-            <p style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${keys.nsec}</p>
+            <p id="export-nsec-value" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; margin: 0;">${safeNsec}</p>
             </div>
             <p style="color: #4de0a0; font-size: 12px; margin: 8px 0 -10px 0; text-align: center;">Do Not Store on Device. Backup Offline.</p>
         </div>
@@ -1005,6 +1009,12 @@ domSettingsExport.onclick = async (evt) => {
 
         // Show the export information in a popup
         await popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg');
+
+        // Bind copy buttons via DOM (safe — no inline onclick with interpolated values)
+        const seedCopyBtn = document.getElementById('export-seed-copy');
+        if (seedCopyBtn) seedCopyBtn.onclick = () => navigator.clipboard.writeText(keys.seed_phrase);
+        const nsecCopyBtn = document.getElementById('export-nsec-value');
+        if (nsecCopyBtn) nsecCopyBtn.style.cursor = 'pointer', nsecCopyBtn.onclick = () => navigator.clipboard.writeText(keys.nsec);
     } catch (error) {
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
@@ -1686,14 +1696,13 @@ async function initEncryptionSettings() {
  * Update change credential button visibility and text
  */
 function updateChangeCredentialButton() {
-    const btn = document.getElementById('security-change-credential');
-    if (!btn) return;
+    const container = document.getElementById('change-pin-container');
+    if (!container) return;
     if (fEncryptionEnabled) {
-        btn.style.display = '';
-        btn.textContent = 'Change';
+        container.style.display = '';
         domSettingsChangePinLabel.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
     } else {
-        btn.style.display = 'none';
+        container.style.display = 'none';
     }
 }
 

@@ -6813,7 +6813,7 @@ function renderProfileTab(cProfile) {
     const profileNpub = document.getElementById('profile-npub');
     if (profileNpub) {
         profileNpub.dataset.fullNpub = cProfile.id;
-        profileNpub.textContent = cProfile.id.slice(0, 25) + '...' + cProfile.id.slice(-8);
+        profileNpub.textContent = cProfile.id.slice(0, 16) + '...' + cProfile.id.slice(-16);
         document.getElementById('profile-npub-label').textContent = cProfile.mine ? 'My nPub Key' : 'nPub Key';
     }
 
@@ -11549,18 +11549,19 @@ domChatMessageInput.oninput = async () => {
         popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
     };
 
-    domSettingsChangePinInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm(
-            fSecurityType === 'password' ? 'Change Password' : 'Change PIN',
-            fSecurityType === 'password'
-                ? 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.'
-                : 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.',
-            true
-        );
-    };
-    
+    if (domSettingsChangePinInfo) {
+        domSettingsChangePinInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm(
+                fSecurityType === 'password' ? 'Change Password' : 'Change PIN',
+                fSecurityType === 'password'
+                    ? 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.'
+                    : 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.',
+                true
+            );
+        };
+    }
 
     // Info button for Refresh KeyPackages
     const domRefreshKeypkgInfo = document.getElementById('refresh-keypkg-info');
