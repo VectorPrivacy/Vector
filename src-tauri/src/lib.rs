@@ -73,7 +73,6 @@ mod simd;
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility
 pub(crate) use state::{
-    SyncMode,
     TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
     TRUSTED_RELAYS, active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
@@ -292,7 +291,6 @@ pub fn run() {
             message::fetch_msg_metadata,
             // Sync commands (commands/sync.rs)
             commands::sync::fetch_messages,
-            commands::sync::deep_rescan,
             commands::sync::is_scanning,
             // Messaging commands (commands/messaging.rs)
             commands::messaging::get_chat_messages_paginated,

@@ -495,8 +495,7 @@ pub fn is_file_hash_cache_built() -> bool {
 ///
 /// # When to call
 ///
-/// - After initial sync completes
-/// - After deep rescan completes
+/// - After sync completes
 ///
 /// # Behavior
 ///
@@ -771,6 +770,94 @@ pub async fn load_recent_wrapper_ids(
             Ok(Vec::new()) // Return empty vec on error, will fall back to DB queries
         }
     }
+}
+
+/// Persist a wrapper_event_id in the processed_wrappers table for cross-session dedup.
+/// Uses INSERT OR IGNORE — safe to call multiple times for the same wrapper.
+/// `wrapper_created_at` is the gift wrap's created_at (NIP-59 randomized timestamp),
+/// needed for negentropy (NIP-77) reconciliation fingerprinting.
+pub fn save_processed_wrapper(wrapper_id_bytes: &[u8; 32], wrapper_created_at: u64) -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_wrappers (wrapper_id, wrapper_created_at) VALUES (?1, ?2)",
+        rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64],
+    ).map_err(|e| format!("Failed to save processed wrapper: {}", e))?;
+    Ok(())
+}
+
+/// Upsert a wrapper timestamp in processed_wrappers.
+/// - INSERT if the wrapper isn't in processed_wrappers yet (e.g. only existed in events table)
+/// - UPDATE if it exists but has wrapper_created_at = 0 (pre-migration-17 default)
+/// - No-op if it already has a correct timestamp
+/// This is a one-time backfill: once all timestamps are correct, negentropy finds zero missing.
+pub fn update_wrapper_timestamp(wrapper_id_bytes: &[u8; 32], wrapper_created_at: u64) -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT INTO processed_wrappers (wrapper_id, wrapper_created_at) VALUES (?1, ?2) \
+         ON CONFLICT(wrapper_id) DO UPDATE SET wrapper_created_at = ?2 WHERE wrapper_created_at = 0",
+        rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64],
+    ).map_err(|e| format!("Failed to upsert wrapper timestamp: {}", e))?;
+    Ok(())
+}
+
+/// Load all processed wrapper_event_ids as raw bytes for the dedup cache at boot.
+pub fn load_processed_wrappers() -> Result<Vec<[u8; 32]>, String> {
+    let conn = match crate::account_manager::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut stmt = conn.prepare("SELECT wrapper_id FROM processed_wrappers")
+        .map_err(|e| format!("Failed to prepare processed_wrappers query: {}", e))?;
+    let rows = stmt.query_map([], |row| {
+        let blob: Vec<u8> = row.get(0)?;
+        if blob.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&blob);
+            Ok(arr)
+        } else {
+            Err(rusqlite::Error::InvalidParameterCount(blob.len(), 32))
+        }
+    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        if let Ok(arr) = row {
+            result.push(arr);
+        }
+    }
+    Ok(result)
+}
+
+/// Load all processed wrappers as (EventId, Timestamp) pairs for negentropy (NIP-77) reconciliation.
+pub fn load_negentropy_items() -> Result<Vec<(nostr_sdk::EventId, nostr_sdk::Timestamp)>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()
+        .map_err(|_| "No DB connection".to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT wrapper_id, wrapper_created_at FROM processed_wrappers"
+    ).map_err(|e| format!("Failed to prepare negentropy query: {}", e))?;
+
+    let items: Vec<_> = stmt.query_map([], |row| {
+        let blob: Vec<u8> = row.get(0)?;
+        let created_at: i64 = row.get(1)?;
+        Ok((blob, created_at))
+    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?
+    .filter_map(|r| r.ok())
+    .filter_map(|(blob, ts)| {
+        if blob.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&blob);
+            Some((
+                nostr_sdk::EventId::from_byte_array(arr),
+                nostr_sdk::Timestamp::from_secs(ts as u64),
+            ))
+        } else {
+            None
+        }
+    })
+    .collect();
+
+    Ok(items)
 }
 
 /// Update the downloaded status of an attachment in the database

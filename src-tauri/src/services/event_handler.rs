@@ -16,7 +16,7 @@ use crate::{
     Message, Reaction, StoredEvent,
     RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor,
     MlsService, NotificationData, show_notification_generic,
-    STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES, SyncMode,
+    STATE, TAURI_APP, NOSTR_CLIENT, WRAPPER_ID_CACHE, NOTIFIED_WELCOMES,
     util::get_file_type_description,
     state::{is_processing_allowed, PENDING_EVENTS},
 };
@@ -54,6 +54,7 @@ pub(crate) async fn handle_event_with_context(
     // Get the wrapper (giftwrap) event ID for duplicate detection
     // Use bytes for cache (memory efficient), hex string for DB operations
     let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
+    let wrapper_created_at = event.created_at.as_secs();
     let wrapper_event_id = event.id.to_hex();
 
     // For historical sync events (is_new = false), use the wrapper_id cache for fast duplicate detection
@@ -96,6 +97,9 @@ pub(crate) async fn handle_event_with_context(
             } else {
                 sender.to_bech32().unwrap_or_default()
             };
+
+            // Persist wrapper for negentropy reconciliation (so next boot knows we've seen this event)
+            let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
 
             // Special handling for MLS Welcomes (not processed by rumor processor)
             if rumor.kind == Kind::MlsWelcome {
@@ -155,7 +159,7 @@ pub(crate) async fn handle_event_with_context(
                         // During initial sync, invites are processed but not emitted to avoid UI updates before chats are loaded
                         let should_emit = {
                             let state = STATE.lock().await;
-                            state.sync_mode == SyncMode::Finished || !state.is_syncing
+                            !state.is_syncing
                         };
 
                         if should_emit {
@@ -252,7 +256,12 @@ pub(crate) async fn handle_event_with_context(
                             handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::Reaction(reaction) => {
-                            handle_reaction(reaction, &contact).await
+                            let result = handle_reaction(reaction.clone(), &contact).await;
+                            // Always save reaction event with wrapper_event_id for cross-session dedup
+                            if let Ok(chat_id) = db::get_chat_id_by_identifier(&contact) {
+                                let _ = db::save_reaction_event(&reaction, chat_id, None, is_mine, Some(wrapper_event_id.clone())).await;
+                            }
+                            result
                         }
                         RumorProcessingResult::TypingIndicator { profile_id, until } => {
                             // Update the chat's typing participants
@@ -260,7 +269,7 @@ pub(crate) async fn handle_event_with_context(
                                 let mut state = STATE.lock().await;
                                 state.update_typing_and_get_active(&contact, &profile_id, until)
                             };
-                            
+
                             // Emit typing update event to frontend
                             if let Some(handle) = TAURI_APP.get() {
                                 let _ = handle.emit("typing-update", serde_json::json!({
@@ -268,12 +277,12 @@ pub(crate) async fn handle_event_with_context(
                                     "typers": active_typers,
                                 }));
                             }
-                            
-                            true
+
+                            false // Ephemeral — not a new message
                         }
                         RumorProcessingResult::LeaveRequest { .. } => {
                             // Leave requests only apply to MLS groups, not DMs
-                            true
+                            false // Administrative — not a new message
                         }
                         RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
                             // Handle WebXDC peer advertisement - add peer to realtime channel
@@ -285,7 +294,12 @@ pub(crate) async fn handle_event_with_context(
                             handle_unknown_event(event, &contact).await
                         }
                         RumorProcessingResult::Ignored => false,
-                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, event } => {
+                        RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, mut event } => {
+                            // Dedup: skip if this payment event was already saved
+                            if db::event_exists(&event.id).unwrap_or(false) {
+                                return false;
+                            }
+                            event.wrapper_event_id = Some(wrapper_event_id.clone());
                             // Save PIVX payment event to database
                             let event_timestamp = event.created_at;
                             let _ = db::save_pivx_payment_event(&contact, event).await;
@@ -308,7 +322,7 @@ pub(crate) async fn handle_event_with_context(
                         RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
                             // Skip if this edit event was already processed (deduplication)
                             if db::event_exists(&event.id).unwrap_or(false) {
-                                return true; // Already processed, skip
+                                return false; // Already processed, skip
                             }
 
                             // Save edit event to database with proper chat_id
@@ -580,6 +594,10 @@ async fn handle_reaction(reaction: Reaction, _contact: &str) -> bool {
 
 /// Handle an unknown event type - store for future compatibility
 async fn handle_unknown_event(mut event: StoredEvent, contact: &str) -> bool {
+    // Dedup: skip if this event was already saved
+    if db::event_exists(&event.id).unwrap_or(false) {
+        return false;
+    }
     // Get the chat_id for this contact
     match db::get_chat_id_by_identifier(contact) {
         Ok(chat_id) => {
@@ -601,6 +619,384 @@ async fn handle_unknown_event(mut event: StoredEvent, contact: &str) -> bool {
         Err(_) => {
             // Chat doesn't exist yet, skip this event
             eprintln!("Cannot save unknown event: chat not found for {}", contact);
+            false
+        }
+    }
+}
+
+// ============================================================================
+// Parallel Sync Pipeline — prepare/commit split
+// ============================================================================
+
+/// Result of the parallel preparation phase (Phase 1).
+/// Contains everything needed to commit a processed event sequentially.
+pub(crate) enum PreparedEvent {
+    /// Fully processed rumor — ready for sequential state commit
+    Processed {
+        result: RumorProcessingResult,
+        contact: String,
+        sender: PublicKey,
+        is_mine: bool,
+        wrapper_event_id: String,
+        wrapper_event_id_bytes: [u8; 32],
+        /// Gift wrap's created_at (NIP-59 randomized) — stored for negentropy reconciliation
+        wrapper_created_at: u64,
+        /// Time spent on ECDH + ChaCha20Poly1305 decryption (nanoseconds)
+        unwrap_ns: u64,
+        /// Time spent on rumor parsing (nanoseconds)
+        parse_ns: u64,
+    },
+    /// MLS Welcome — needs spawn_blocking in sequential phase
+    MlsWelcome {
+        event: Event,
+        rumor: UnsignedEvent,
+        contact: String,
+        is_mine: bool,
+        wrapper_event_id: String,
+        wrapper_event_id_bytes: [u8; 32],
+        /// Gift wrap's created_at (NIP-59 randomized) — stored for negentropy reconciliation
+        wrapper_created_at: u64,
+        unwrap_ns: u64,
+    },
+    /// Duplicate event (dedup cache or DB hit) — carries wrapper timestamp for backfill
+    DedupSkip {
+        wrapper_id_bytes: [u8; 32],
+        wrapper_created_at: u64,
+    },
+    /// Failed to unwrap or process — still carries wrapper data for negentropy persistence
+    ErrorSkip {
+        wrapper_id_bytes: [u8; 32],
+        wrapper_created_at: u64,
+    },
+}
+
+/// Phase 1: Prepare an event for commit (parallel-safe, no state mutation).
+///
+/// Performs dedup check, gift wrap decryption (CPU-bound ECDH + ChaCha20Poly1305),
+/// and rumor parsing. Safe to call from multiple tokio tasks concurrently.
+pub(crate) async fn prepare_event(
+    event: Event,
+    client: &Client,
+    my_public_key: PublicKey,
+) -> PreparedEvent {
+    // Capture the gift wrap's created_at (NIP-59 randomized timestamp) for negentropy
+    let wrapper_created_at = event.created_at.as_secs();
+
+    // Dedup check — fast in-memory cache + DB fallback
+    let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
+    let wrapper_event_id = event.id.to_hex();
+
+    {
+        let cache = WRAPPER_ID_CACHE.lock().await;
+        if cache.contains(&wrapper_event_id_bytes) {
+            return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+        }
+    }
+
+    if let Ok(true) = db::wrapper_event_exists(&wrapper_event_id).await {
+        return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+    }
+
+    // Unwrap the gift wrap (CPU-bound crypto — the expensive step)
+    let unwrap_start = std::time::Instant::now();
+    let (rumor, sender) = match client.unwrap_gift_wrap(&event).await {
+        Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
+        Err(_) => return PreparedEvent::ErrorSkip {
+            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+        },
+    };
+    let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64;
+
+    let is_mine = sender == my_public_key;
+    let contact: String = if is_mine {
+        match rumor.tags.public_keys().next() {
+            Some(pub_key) => pub_key.to_bech32()
+                .or_else(|_| sender.to_bech32())
+                .unwrap_or_default(),
+            None => sender.to_bech32().unwrap_or_default(),
+        }
+    } else {
+        sender.to_bech32().unwrap_or_default()
+    };
+
+    // MLS Welcome — defer full processing to sequential phase
+    if rumor.kind == Kind::MlsWelcome {
+        return PreparedEvent::MlsWelcome {
+            event, rumor, contact, is_mine,
+            wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, unwrap_ns,
+        };
+    }
+
+    // Build RumorEvent for protocol-agnostic processing
+    let Some(rumor_id) = rumor.id else {
+        return PreparedEvent::ErrorSkip {
+            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+        };
+    };
+    let parse_start = std::time::Instant::now();
+    let rumor_event = RumorEvent {
+        id: rumor_id,
+        kind: rumor.kind,
+        content: rumor.content,
+        tags: rumor.tags,
+        created_at: rumor.created_at,
+        pubkey: rumor.pubkey,
+    };
+    let rumor_context = RumorContext {
+        sender,
+        is_mine,
+        conversation_id: contact.clone(),
+        conversation_type: ConversationType::DirectMessage,
+    };
+
+    // Process the rumor (pure parsing, no state mutation)
+    match process_rumor(rumor_event, rumor_context).await {
+        Ok(result) => {
+            let parse_ns = parse_start.elapsed().as_nanos() as u64;
+            PreparedEvent::Processed {
+                result, contact, sender, is_mine,
+                wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at,
+                unwrap_ns, parse_ns,
+            }
+        }
+        Err(e) => {
+            log_warn!("[EventHandler] Failed to process rumor: {}", e);
+            PreparedEvent::ErrorSkip {
+                wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+            }
+        }
+    }
+}
+
+/// Phase 2: Commit a prepared event sequentially (state mutation, DB save, frontend emit).
+///
+/// Must be called from a single task — not parallel-safe.
+pub(crate) async fn commit_prepared_event(prepared: PreparedEvent, is_new: bool) -> bool {
+    match prepared {
+        PreparedEvent::Processed { result, contact, sender, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, .. } => {
+            // Always cache the wrapper_event_id after successful unwrap — prevents
+            // re-unwrapping the same event in later sync windows within this session
+            {
+                let mut cache = WRAPPER_ID_CACHE.lock().await;
+                cache.insert(wrapper_event_id_bytes);
+            }
+            // Persist for cross-session dedup + negentropy reconciliation
+            let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+            match result {
+                RumorProcessingResult::TextMessage(mut msg) => {
+                    msg.wrapper_event_id = Some(wrapper_event_id.clone());
+                    handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
+                }
+                RumorProcessingResult::FileAttachment(mut msg) => {
+                    msg.wrapper_event_id = Some(wrapper_event_id.clone());
+                    handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
+                }
+                RumorProcessingResult::Reaction(reaction) => {
+                    let result = handle_reaction(reaction.clone(), &contact).await;
+                    // Always save reaction event with wrapper_event_id for cross-session dedup.
+                    match db::get_chat_id_by_identifier(&contact) {
+                        Ok(chat_id) => {
+                            if let Err(e) = db::save_reaction_event(&reaction, chat_id, None, is_mine, Some(wrapper_event_id.clone())).await {
+                                eprintln!("[Dedup] save_reaction_event failed: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[Dedup] get_chat_id failed for reaction: {}", e);
+                        }
+                    }
+                    result
+                }
+                RumorProcessingResult::TypingIndicator { profile_id, until } => {
+                    let active_typers = {
+                        let mut state = STATE.lock().await;
+                        state.update_typing_and_get_active(&contact, &profile_id, until)
+                    };
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = handle.emit("typing-update", serde_json::json!({
+                            "conversation_id": contact,
+                            "typers": active_typers,
+                        }));
+                    }
+                    false // Ephemeral — not a new message
+                }
+                RumorProcessingResult::LeaveRequest { .. } => false, // Administrative — not a new message
+                RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
+                    handle_webxdc_peer_advertisement(&topic_id, &node_addr).await
+                }
+                RumorProcessingResult::UnknownEvent(mut event) => {
+                    event.wrapper_event_id = Some(wrapper_event_id.clone());
+                    handle_unknown_event(event, &contact).await
+                }
+                RumorProcessingResult::Ignored => false,
+                RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, mut event } => {
+                    // Dedup: skip if this payment event was already saved
+                    if db::event_exists(&event.id).unwrap_or(false) {
+                        return false;
+                    }
+                    event.wrapper_event_id = Some(wrapper_event_id.clone());
+                    let event_timestamp = event.created_at;
+                    let _ = db::save_pivx_payment_event(&contact, event).await;
+                    if let Some(handle) = TAURI_APP.get() {
+                        let _ = handle.emit("pivx_payment_received", serde_json::json!({
+                            "conversation_id": contact,
+                            "gift_code": gift_code,
+                            "amount_piv": amount_piv,
+                            "address": address,
+                            "message_id": message_id,
+                            "sender": sender,
+                            "is_mine": is_mine,
+                            "at": event_timestamp * 1000,
+                        }));
+                    }
+                    true
+                }
+                RumorProcessingResult::Edit { message_id, new_content, edited_at, mut event } => {
+                    if db::event_exists(&event.id).unwrap_or(false) {
+                        return false; // Already processed this edit
+                    }
+                    if let Ok(chat_id) = db::get_chat_id_by_identifier(&contact) {
+                        event.chat_id = chat_id;
+                    }
+                    event.wrapper_event_id = Some(wrapper_event_id.clone());
+                    let _ = db::save_event(&event).await;
+                    let msg_for_emit = {
+                        let mut state = STATE.lock().await;
+                        state.update_message_in_chat(&contact, &message_id, |msg| {
+                            msg.apply_edit(new_content, edited_at);
+                        })
+                    };
+                    if let Some(msg) = msg_for_emit {
+                        if let Some(handle) = TAURI_APP.get() {
+                            let _ = handle.emit("message_update", serde_json::json!({
+                                "old_id": &message_id,
+                                "message": msg,
+                                "chat_id": &contact
+                            }));
+                        }
+                    }
+                    true
+                }
+            }
+        }
+        PreparedEvent::MlsWelcome { event, rumor, contact, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, .. } => {
+            // Dedup: the same welcome can arrive from multiple relays simultaneously
+            {
+                let cache = WRAPPER_ID_CACHE.lock().await;
+                if cache.contains(&wrapper_event_id_bytes) {
+                    return false;
+                }
+            }
+
+            let unsigned_opt = serde_json::to_string(&rumor)
+                .ok()
+                .and_then(|s| nostr_sdk::UnsignedEvent::from_json(s.as_bytes()).ok());
+
+            if let Some(unsigned) = unsigned_opt {
+                let wrapper_id = event.id;
+
+                let welcome_result: Option<String> = tokio::task::spawn_blocking(move || {
+                    let svc = MlsService::new_persistent_static();
+                    if let Ok(mls) = svc {
+                        if let Ok(engine) = mls.engine() {
+                            match engine.process_welcome(&wrapper_id, &unsigned) {
+                                Ok(_) => {
+                                    if let Ok(welcomes) = engine.get_pending_welcomes(None) {
+                                        let group_name = welcomes.iter()
+                                            .find(|w| w.wrapper_event_id == wrapper_id)
+                                            .map(|w| w.group_name.clone())
+                                            .unwrap_or_default();
+                                        return Some(group_name);
+                                    }
+                                    return Some(String::new());
+                                }
+                                Err(e) => {
+                                    eprintln!("[MLS] Failed to process welcome: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    None
+                })
+                .await
+                .unwrap_or(None);
+
+                if let Some(group_name) = welcome_result {
+                    {
+                        let mut cache = WRAPPER_ID_CACHE.lock().await;
+                        cache.insert(wrapper_event_id_bytes);
+                    }
+                    // Persist for cross-session dedup + negentropy reconciliation
+                    let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+                    let should_emit = {
+                        let state = STATE.lock().await;
+                        !state.is_syncing
+                    };
+
+                    if should_emit {
+                        if let Some(app) = TAURI_APP.get() {
+                            let _ = app.emit("mls_invite_received", serde_json::json!({
+                                "wrapper_event_id": wrapper_id.to_hex()
+                            }));
+                        }
+
+                        if !is_mine && is_new {
+                            let display_info = {
+                                let state = STATE.lock().await;
+                                match state.get_profile(&contact) {
+                                    Some(profile) => {
+                                        let name = if !profile.nickname.is_empty() {
+                                            profile.nickname.to_string()
+                                        } else if !profile.name.is_empty() {
+                                            profile.name.to_string()
+                                        } else {
+                                            String::from("Someone")
+                                        };
+                                        let avatar = if !profile.avatar_cached.is_empty() {
+                                            Some(profile.avatar_cached.to_string())
+                                        } else {
+                                            None
+                                        };
+                                        (name, avatar)
+                                    }
+                                    None => (String::from("Someone"), None),
+                                }
+                            };
+                            let notif_group_name = if group_name.is_empty() {
+                                String::from("Group Chat")
+                            } else {
+                                group_name.clone()
+                            };
+                            let notification = NotificationData::group_invite(
+                                notif_group_name,
+                                display_info.0,
+                                display_info.1,
+                            );
+                            show_notification_generic(notification);
+
+                            let mut notified = NOTIFIED_WELCOMES.lock().await;
+                            notified.insert(wrapper_event_id.clone());
+                        }
+                    }
+                    return true;
+                } else {
+                    // MLS welcome failed — still save wrapper so negentropy doesn't re-fetch
+                    eprintln!("[Sync] MlsWelcome failed (wrapper {})", &wrapper_event_id[..8]);
+                    let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+                    return false;
+                }
+            } else {
+                eprintln!("[MLS] Failed to convert rumor to UnsignedEvent");
+                // Still save wrapper so negentropy doesn't re-fetch
+                let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
+                return false;
+            }
+        }
+        PreparedEvent::DedupSkip { .. } => false,
+        PreparedEvent::ErrorSkip { wrapper_id_bytes, wrapper_created_at } => {
+            // Save wrapper even on error — prevents negentropy from re-fetching permanently broken events
+            println!("[Sync] ErrorSkip (wrapper {:02x}{:02x}{:02x}{:02x})",
+                wrapper_id_bytes[0], wrapper_id_bytes[1], wrapper_id_bytes[2], wrapper_id_bytes[3]);
+            let _ = db::save_processed_wrapper(&wrapper_id_bytes, wrapper_created_at);
             false
         }
     }

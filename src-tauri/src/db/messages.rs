@@ -42,7 +42,7 @@ pub async fn save_message(
             } else {
                 false
             };
-            save_reaction_event(reaction, chat_int_id, user_id, is_mine).await?;
+            save_reaction_event(reaction, chat_int_id, user_id, is_mine, None).await?;
         }
     }
 

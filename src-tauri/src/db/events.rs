@@ -42,12 +42,16 @@ pub async fn save_event(
     };
 
     // Use INSERT OR REPLACE to update if event already exists (allows attachment updates)
+    // COALESCE preserves existing wrapper_event_id when the new value is NULL —
+    // prevents save_message from clobbering a previously backfilled wrapper_event_id
     conn.execute(
         r#"
         INSERT OR REPLACE INTO events (
             id, kind, chat_id, user_id, content, tags, reference_id,
             created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            COALESCE(?13, (SELECT wrapper_event_id FROM events WHERE id = ?1)),
+            ?14, ?15)
         "#,
         rusqlite::params![
             event.id,
@@ -306,6 +310,7 @@ pub async fn save_reaction_event(
     chat_id: i64,
     user_id: Option<i64>,
     mine: bool,
+    wrapper_event_id: Option<String>,
 ) -> Result<(), String> {
     let event = StoredEvent {
         id: reaction.id.clone(),
@@ -328,7 +333,7 @@ pub async fn save_reaction_event(
         mine,
         pending: false,
         failed: false,
-        wrapper_event_id: None,
+        wrapper_event_id,
         npub: Some(reaction.author_id.clone()),
         preview_metadata: None,
     };

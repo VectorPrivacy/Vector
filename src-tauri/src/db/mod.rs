@@ -51,8 +51,8 @@ pub use attachments::{
     lookup_attachment_cached, warm_file_hash_cache,
     get_chat_messages_paginated, get_chat_message_count,
     get_messages_around_id, message_exists_in_db, wrapper_event_exists,
-    update_wrapper_event_id, load_recent_wrapper_ids, update_attachment_downloaded_status,
-    check_downloaded_attachments_integrity,
+    update_wrapper_event_id, load_recent_wrapper_ids, save_processed_wrapper, load_processed_wrappers, load_negentropy_items, update_wrapper_timestamp,
+    update_attachment_downloaded_status, check_downloaded_attachments_integrity,
 };
 // Event database functions
 pub use events::{

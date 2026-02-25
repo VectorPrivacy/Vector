@@ -165,7 +165,6 @@ const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-t
 const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
-const domSettingsDeepRescanInfo = document.getElementById('deep-rescan-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
 const domSettingsDonorsInfo = document.getElementById('donors-info');
@@ -5290,9 +5289,10 @@ async function setupRustListeners() {
         fSyncComplete = true;
         
         // Fade out the sync line
-        domSyncLine.classList.remove('active');
+        domSyncLine.classList.remove('active', 'progress');
+        domSyncLine.style.removeProperty('--sync-progress');
         domSyncLine.classList.add('fade-out');
-        
+
         // Wait for fade animation to complete, then reset
         setTimeout(() => {
             domSyncLine.classList.remove('fade-out');
@@ -5300,19 +5300,21 @@ async function setupRustListeners() {
         }, 300);
     });
 
-    // Listen for Synchronisation Slice updates
-    _on('sync_slice_finished', (_) => {
-        // Continue synchronising until event `sync_finished` is emitted
-        invoke("fetch_messages", { init: false });
-    });
-
     // Listen for Synchronisation Progress updates
     _on('sync_progress', (evt) => {
-        // Show and activate the sync line when syncing is in progress
-        // Only add 'active' if it's not already active to avoid restarting the animation
-        if (!fInit && !domSyncLine.classList.contains('active')) {
-            domSyncLine.classList.remove('fade-out');
-            domSyncLine.classList.add('active');
+        if (fInit) return;
+        const { mode, current, total } = evt.payload || {};
+        if (mode === 'Syncing' && current && total) {
+            // Determinate progress bar: fill left-to-right
+            domSyncLine.classList.remove('active', 'fade-out');
+            domSyncLine.classList.add('progress');
+            domSyncLine.style.setProperty('--sync-progress', Math.min(current / total, 1));
+        } else {
+            // Indeterminate pulse (reconciliation phase — total unknown)
+            if (!domSyncLine.classList.contains('active')) {
+                domSyncLine.classList.remove('fade-out', 'progress');
+                domSyncLine.classList.add('active');
+            }
         }
         if (!strOpenChat) adjustSize();
     });
@@ -11529,12 +11531,6 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.', true);
-    };
-
-    domSettingsDeepRescanInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Deep Rescan', 'This will forcefully sync your message history backwards in two‑day sections until 30 days of no events are found. This may take some time.', true);
     };
 
     domSettingsExportAccountInfo.onclick = (e) => {

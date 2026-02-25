@@ -634,11 +634,19 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
 
                     match status {
                         RelayStatus::Connected => {
-                            let handle_inner = handle_clone.clone();
-                            let url_string = url_str.clone();
-                            tokio::spawn(async move {
-                                crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
-                            });
+                            // Only trigger single-relay sync for REconnections (mid-session).
+                            // During initial sync, the main sync already covers all relays.
+                            let is_syncing = {
+                                let state = crate::STATE.lock().await;
+                                state.is_syncing
+                            };
+                            if !is_syncing {
+                                let handle_inner = handle_clone.clone();
+                                let url_string = url_str.clone();
+                                tokio::spawn(async move {
+                                    crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
+                                });
+                            }
                         }
                         _ => {}
                     }
@@ -647,15 +655,16 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
         }
     });
 
-    // Spawn aggressive health check task
+    // Spawn health check task — checks relay responsiveness and reconnects dead relays.
+    // Uses a 10s timeout to avoid false positives on busy relays, and runs every 60s
+    // to prevent a disconnect→reconnect→sync death loop.
     let client_health = client.clone();
     let handle_health = handle.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
 
         loop {
             let relays = client_health.relays().await;
-            let mut unhealthy_relays = Vec::new();
 
             for (url, relay) in &relays {
                 let status = relay.status();
@@ -667,11 +676,11 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
 
                     let start = std::time::Instant::now();
                     let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
+                        std::time::Duration::from_secs(10),
                         client_health.fetch_events_from(
                             vec![url.to_string()],
                             test_filter,
-                            std::time::Duration::from_secs(2)
+                            std::time::Duration::from_secs(8)
                         )
                     ).await;
 
@@ -684,49 +693,50 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         .as_secs();
 
                     match result {
-                        Ok(Ok(events)) => {
-                            if events.is_empty() && elapsed.as_secs() >= 2 {
-                                unhealthy_relays.push((url.clone(), relay.clone()));
-                                add_relay_log(&url_str, "warn", "Health check failed: slow/empty response");
-                            } else {
-                                update_relay_metrics(&url_str, |m| {
-                                    m.ping_ms = Some(ping_ms);
-                                    m.last_check = Some(now_secs);
-                                });
-                            }
+                        Ok(Ok(_events)) => {
+                            update_relay_metrics(&url_str, |m| {
+                                m.ping_ms = Some(ping_ms);
+                                m.last_check = Some(now_secs);
+                            });
                         }
                         Ok(Err(e)) => {
-                            unhealthy_relays.push((url.clone(), relay.clone()));
                             add_relay_log(&url_str, "warn", &format!("Health check failed: {}", e));
+                            let _ = relay.disconnect();
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            add_relay_log(&url_str, "info", "Attempting reconnection...");
+                            let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                            let _ = handle_health.emit("relay_health_check", serde_json::json!({
+                                "url": url_str,
+                                "healthy": false,
+                                "action": "force_reconnect"
+                            }));
                         }
                         Err(_) => {
-                            unhealthy_relays.push((url.clone(), relay.clone()));
                             add_relay_log(&url_str, "warn", "Health check failed: timeout");
+                            let _ = relay.disconnect();
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            add_relay_log(&url_str, "info", "Attempting reconnection...");
+                            let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                            let _ = handle_health.emit("relay_health_check", serde_json::json!({
+                                "url": url_str,
+                                "healthy": false,
+                                "action": "force_reconnect"
+                            }));
                         }
                     }
                 } else if status == RelayStatus::Terminated || status == RelayStatus::Disconnected {
-                    unhealthy_relays.push((url.clone(), relay.clone()));
+                    let url_str = url.to_string();
+                    add_relay_log(&url_str, "info", "Attempting reconnection...");
+                    let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
+                    let _ = handle_health.emit("relay_health_check", serde_json::json!({
+                        "url": url_str,
+                        "healthy": false,
+                        "action": "force_reconnect"
+                    }));
                 }
             }
 
-            for (url, relay) in unhealthy_relays {
-                let url_str = url.to_string();
-                if relay.status() == RelayStatus::Connected {
-                    let _ = relay.disconnect();
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-
-                add_relay_log(&url_str, "info", "Attempting reconnection...");
-                let _ = relay.try_connect(std::time::Duration::from_secs(10)).await;
-
-                handle_health.emit("relay_health_check", serde_json::json!({
-                    "url": url_str,
-                    "healthy": false,
-                    "action": "force_reconnect"
-                })).unwrap();
-            }
-
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
 

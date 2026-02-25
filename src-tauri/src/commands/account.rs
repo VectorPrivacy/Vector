@@ -74,8 +74,7 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
         "npub": my_npub,
         "profiles": slim_profiles,
         "chats": serializable_chats,
-        "is_syncing": state.is_syncing,
-        "sync_mode": format!("{:?}", state.sync_mode)
+        "is_syncing": state.is_syncing
     }))
 }
 

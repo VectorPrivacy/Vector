@@ -9,7 +9,6 @@ use crate::{Profile, Chat, ChatType, Message};
 use crate::chat::SerializableChat;
 use crate::db::SlimProfile;
 use super::globals::TAURI_APP;
-use super::SyncMode;
 #[cfg(debug_assertions)]
 use super::stats::CacheStats;
 
@@ -21,11 +20,6 @@ pub struct ChatState {
     /// Global npub interner - stores each unique npub string once
     pub interner: NpubInterner,
     pub is_syncing: bool,
-    pub sync_window_start: u64,
-    pub sync_window_end: u64,
-    pub sync_mode: SyncMode,
-    pub sync_empty_iterations: u8,
-    pub sync_total_iterations: u8,
     /// Whether the initial DB load (profiles, chats, messages) has completed.
     /// Used instead of `profiles.len()` heuristics, which break when the
     /// background service preloads profiles into STATE before the GUI init.
@@ -43,11 +37,6 @@ impl ChatState {
             chats: Vec::new(),
             interner: NpubInterner::new(),
             is_syncing: false,
-            sync_window_start: 0,
-            sync_window_end: 0,
-            sync_mode: SyncMode::Finished,
-            sync_empty_iterations: 0,
-            sync_total_iterations: 0,
             db_loaded: false,
             #[cfg(debug_assertions)]
             cache_stats: CacheStats::new(),

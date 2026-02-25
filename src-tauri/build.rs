@@ -62,7 +62,6 @@ fn main() {
             "fetch_msg_metadata",
             // Core commands
             "fetch_messages",
-            "deep_rescan",
             "is_scanning",
             "get_chat_messages_paginated",
             "get_message_views",

@@ -60,7 +60,6 @@
     "allow-edit-message",
     "allow-fetch-msg-metadata",
     "allow-fetch-messages",
-    "allow-deep-rescan",
     "allow-is-scanning",
     "allow-get-chat-messages-paginated",
     "allow-get-message-views",

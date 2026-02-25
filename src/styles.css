@@ -4698,6 +4698,13 @@ select:disabled:hover {
   animation: pulse-sync 1.5s ease-in-out infinite 0.4s;
 }
 
+.sync-line.progress {
+  transform-origin: left;
+  transform: scaleX(var(--sync-progress, 0));
+  animation: none;
+  transition: transform 0.3s ease-out;
+}
+
 .sync-line.fade-out {
   transform: scaleX(0);
   animation: none;

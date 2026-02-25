@@ -1276,13 +1276,35 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     ensure_column_exists(conn, "mls_groups", "avatar_cached", "TEXT")?;
 
     // =========================================================================
-    // Future migrations (16+) follow the same pattern:
-    //
-    // run_atomic_migration(conn, 16, "Description here", |tx| {
-    //     tx.execute("...", [])?;
-    //     Ok(())
-    // })?;
+    // Migration 16: Create processed_wrappers table for NIP-59 gift wrap dedup
     // =========================================================================
+    // The events table stores ONE wrapper_event_id per message, but the same
+    // message arrives via multiple gift wraps (sender copy + recipient copy).
+    // This table tracks ALL wrapper_event_ids we've ever unwrapped.
+    run_atomic_migration(conn, 16, "Create processed_wrappers table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS processed_wrappers (
+                wrapper_id BLOB PRIMARY KEY
+            );"
+        ).map_err(|e| format!("Failed to create processed_wrappers table: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 17: Add wrapper_created_at for negentropy (NIP-77) reconciliation
+    // =========================================================================
+    // Negentropy fingerprints use (EventId, Timestamp) pairs. The gift wrap's
+    // created_at differs from the inner rumor's — it's randomized per NIP-59.
+    // We store the exact value the relay has for efficient reconciliation.
+    // Also wipes existing wrappers so they're re-synced with correct timestamps.
+    run_atomic_migration(conn, 17, "Add wrapper_created_at + wipe for negentropy", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE processed_wrappers ADD COLUMN wrapper_created_at INTEGER NOT NULL DEFAULT 0;"
+        ).map_err(|e| format!("Migration 17 failed: {}", e))?;
+        tx.execute("DELETE FROM processed_wrappers", [])
+            .map_err(|e| format!("Migration 17 (wipe) failed: {}", e))?;
+        Ok(())
+    })?;
 
     Ok(())
 }
