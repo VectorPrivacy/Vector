@@ -9684,6 +9684,7 @@ async function closeChat() {
  */
 async function openProfile(cProfile) {
     navbarSelect('profile-btn');
+    domNavbar.style.display = '';
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
@@ -9736,6 +9737,7 @@ async function openGroupOverview(chat) {
     if (!chat || chat.chat_type !== 'MlsGroup') return;
     
     navbarSelect('chat-btn');
+    domNavbar.style.display = 'none';
     domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
@@ -10601,6 +10603,7 @@ async function openInviteMemberToGroup(chat) {
 
 async function openChatlist() {
     navbarSelect('chat-btn');
+    domNavbar.style.display = '';
     domProfile.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
@@ -10627,6 +10630,7 @@ async function openChatlist() {
 
 function openSettings() {
     navbarSelect('settings-btn');
+    domNavbar.style.display = '';
     domSettings.style.display = '';
 
     // Hide the other tabs
@@ -10659,6 +10663,7 @@ function openSettings() {
 
 async function openInvites() {
     navbarSelect('invites-btn');
+    domNavbar.style.display = '';
     domInvites.style.display = '';
 
     // Hide the other tabs
