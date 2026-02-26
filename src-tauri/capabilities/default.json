@@ -217,6 +217,7 @@
     "allow-verify-credential",
     "allow-is-directory",
     "allow-zip-directory",
-    "allow-cleanup-zip"
+    "allow-cleanup-zip",
+    "allow-update-group-metadata"
   ]
 }

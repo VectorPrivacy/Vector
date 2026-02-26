@@ -728,6 +728,15 @@ impl MlsService {
             // 2. Publish evolution event with retries
             if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
                 eprintln!("[MLS] Failed to publish commit after retries: {}", e);
+                // Rollback the pending commit so the group isn't stuck
+                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
+                    let rollback_engine = MDK::new(s);
+                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
+                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
+                    } else {
+                        println!("[MLS] Rolled back pending commit after publish failure");
+                    }
+                }
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
@@ -943,6 +952,15 @@ impl MlsService {
             // 2. Publish evolution event with retries
             if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
                 eprintln!("[MLS] Failed to publish commit after retries: {}", e);
+                // Rollback the pending commit so the group isn't stuck
+                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
+                    let rollback_engine = MDK::new(s);
+                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
+                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
+                    } else {
+                        println!("[MLS] Rolled back pending commit after publish failure");
+                    }
+                }
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
@@ -1262,6 +1280,15 @@ impl MlsService {
             // 2. Publish evolution event with retries
             if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
                 eprintln!("[MLS] Failed to publish remove commit after retries: {}", e);
+                // Rollback the pending commit so the group isn't stuck
+                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
+                    let rollback_engine = MDK::new(s);
+                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
+                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
+                    } else {
+                        println!("[MLS] Rolled back pending commit after publish failure");
+                    }
+                }
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
@@ -1307,6 +1334,240 @@ impl MlsService {
             // 3. Sync participants + emit UI refresh
             if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_owned.clone()).await {
                 eprintln!("[MLS] Failed to sync participants after remove: {}", e);
+            }
+            if let Some(handle) = TAURI_APP.get() {
+                handle.emit("mls_group_updated", serde_json::json!({
+                    "group_id": group_id_owned
+                })).ok();
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Update group metadata (name, description, avatar, admins)
+    ///
+    /// Only admins can call this. Uses MDK's `update_group_data()` builder.
+    /// Background task with per-group lock (same pattern as `remove_member_device`).
+    pub async fn update_group_data(
+        &self,
+        group_id: &str,
+        name: Option<String>,
+        description: Option<String>,
+        admin_npubs: Option<Vec<String>>,
+        image_hash: Option<Option<[u8; 32]>>,
+        image_key: Option<Option<[u8; 32]>>,
+        image_nonce: Option<Option<[u8; 12]>>,
+    ) -> Result<(), MlsError> {
+        use nostr_sdk::prelude::*;
+
+        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+        let signer = client.signer().await
+            .map_err(|e| MlsError::NetworkError(e.to_string()))?;
+        let my_pubkey = signer.get_public_key().await
+            .map_err(|e| MlsError::NetworkError(e.to_string()))?;
+
+        // Find the group
+        let groups = self.read_groups().await?;
+        let group_meta = groups.iter()
+            .find(|g| g.group_id == group_id || g.engine_group_id == group_id)
+            .ok_or(MlsError::GroupNotFound)?;
+
+        let db_path = self.db_path.clone();
+        let group_id_owned = group_id.to_string();
+        let engine_group_id = group_meta.engine_group_id.clone();
+        let name_clone = name.clone();
+        let description_clone = description.clone();
+
+        tokio::spawn(async move {
+            let client = NOSTR_CLIENT.get().unwrap();
+
+            // Hold per-group lock
+            let group_lock = get_group_sync_lock(&group_id_owned);
+            let _guard = group_lock.lock().await;
+
+            let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
+
+            // 1. Build update and create commit under lock
+            let evolution_event = {
+                let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to open storage for update: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to open storage: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                };
+                let engine = MDK::new(storage);
+
+                // Build the update
+                let mut update = NostrGroupDataUpdate::new();
+                if let Some(ref n) = name_clone {
+                    update = update.name(n.clone());
+                }
+                if let Some(ref d) = description_clone {
+                    update = update.description(d.clone());
+                }
+                if let Some(ref npubs) = admin_npubs {
+                    let mut admin_pks = vec![my_pubkey]; // always include self
+                    for npub in npubs {
+                        if let Ok(pk) = PublicKey::from_bech32(npub) {
+                            if pk != my_pubkey {
+                                admin_pks.push(pk);
+                            }
+                        }
+                    }
+                    update = update.admins(admin_pks);
+                }
+                if let Some(hash) = image_hash {
+                    update = update.image_hash(hash);
+                }
+                if let Some(key) = image_key {
+                    update = update.image_key(key);
+                }
+                if let Some(nonce) = image_nonce {
+                    update = update.image_nonce(nonce);
+                }
+
+                match engine.update_group_data(&mls_group_id, update) {
+                    Ok(result) => {
+                        let h_tag = result.evolution_event.tags
+                            .find(nostr_sdk::TagKind::SingleLetter(nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::H)))
+                            .and_then(|t| t.content().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "MISSING".to_string());
+                        println!("[MLS] update_group_data commit created, event_id={}, kind={}, h_tag={}",
+                            result.evolution_event.id.to_hex(),
+                            result.evolution_event.kind.as_u16(),
+                            h_tag);
+                        result.evolution_event
+                    }
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to update group data: {}", e);
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_error", serde_json::json!({
+                                "group_id": group_id_owned,
+                                "error": format!("Failed to update group data: {}", e)
+                            })).ok();
+                        }
+                        return;
+                    }
+                }
+            }; // engine dropped before await
+
+            // 2. Publish evolution event with retries
+            println!("[MLS] Publishing update evolution event to relays...");
+            if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
+                eprintln!("[MLS] Failed to publish update commit after retries: {}", e);
+                // Rollback the pending commit so the group isn't stuck
+                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
+                    let rollback_engine = MDK::new(s);
+                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
+                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
+                    } else {
+                        println!("[MLS] Rolled back pending commit after publish failure");
+                    }
+                }
+                if let Some(handle) = TAURI_APP.get() {
+                    handle.emit("mls_error", serde_json::json!({
+                        "group_id": group_id_owned,
+                        "error": format!("Failed to publish update commit: {}", e)
+                    })).ok();
+                }
+                return;
+            }
+
+            println!("[MLS] Evolution event published successfully, event_id={}", evolution_event.id.to_hex());
+
+            // 3. Merge pending commit
+            let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[MLS] Failed to open storage for merge: {}", e);
+                    if let Some(handle) = TAURI_APP.get() {
+                        handle.emit("mls_error", serde_json::json!({
+                            "group_id": group_id_owned,
+                            "error": format!("Failed to open storage for merge: {}", e)
+                        })).ok();
+                    }
+                    return;
+                }
+            };
+            let engine = MDK::new(storage);
+            if let Err(e) = engine.merge_pending_commit(&mls_group_id) {
+                eprintln!("[MLS] Failed to merge update commit: {}", e);
+                if let Some(handle) = TAURI_APP.get() {
+                    handle.emit("mls_error", serde_json::json!({
+                        "group_id": group_id_owned,
+                        "error": format!("Failed to merge commit: {}", e)
+                    })).ok();
+                }
+                return;
+            }
+
+            println!("[MLS] Pending commit merged for group {}", group_id_owned);
+
+            // Track the event
+            let _ = track_mls_event_processed(
+                &evolution_event.id.to_hex(),
+                &group_id_owned,
+                evolution_event.created_at.as_secs(),
+            );
+
+            // 4. Update local MlsGroupMetadata if name or description changed
+            if name_clone.is_some() || description_clone.is_some() {
+                let mls = match MlsService::new_persistent_static() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("[MLS] Failed to create MlsService for local update: {}", e);
+                        // Still emit UI refresh even if local update fails
+                        if let Some(handle) = TAURI_APP.get() {
+                            handle.emit("mls_group_updated", serde_json::json!({
+                                "group_id": group_id_owned
+                            })).ok();
+                        }
+                        return;
+                    }
+                };
+                if let Ok(mut groups) = mls.read_groups().await {
+                    if let Some(meta) = groups.iter_mut().find(|g| g.group_id == group_id_owned || g.engine_group_id == group_id_owned) {
+                        if let Some(ref n) = name_clone {
+                            meta.name = n.clone();
+                        }
+                        if let Some(ref d) = description_clone {
+                            meta.description = Some(d.clone());
+                        }
+                        meta.updated_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                    }
+                    // Clone the updated meta for emit before passing groups by ref to write
+                    let updated_meta = groups.iter().find(|g| g.group_id == group_id_owned || g.engine_group_id == group_id_owned).cloned();
+                    let _ = mls.write_groups(&groups).await;
+                    if let Some(meta) = updated_meta {
+                        emit_group_metadata_event(&meta);
+                    }
+                }
+
+                // Also update STATE chat metadata
+                if let Some(ref n) = name_clone {
+                    let mut state = STATE.lock().await;
+                    if let Some(chat) = state.get_chat_mut(&group_id_owned) {
+                        chat.metadata.set_name(n.clone());
+                    }
+                }
+            }
+
+            // 5. Sync participants + emit UI refresh
+            if admin_npubs.is_some() {
+                if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_owned.clone()).await {
+                    eprintln!("[MLS] Failed to sync participants after update: {}", e);
+                }
             }
             if let Some(handle) = TAURI_APP.get() {
                 handle.emit("mls_group_updated", serde_json::json!({
@@ -1565,9 +1826,13 @@ impl MlsService {
             None
         };
 
+        // Buffer for metadata changes detected from processed commits
+        // (name, description) — applied to local MlsGroupMetadata after engine scope
+        let mut pending_metadata_update: Option<(String, String)> = None;
+
         {
             let engine = self.engine()?; // Arc<...> held in scope without awaits
-            
+
             if let Some(ref check_id) = group_check_id {
                 // Try to verify if the engine knows about this group
                 // We'll attempt to create a dummy message to see if the group exists
@@ -1650,7 +1915,7 @@ impl MlsService {
                                 events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
                             }
                             MessageProcessingResult::Commit { mls_group_id: _ } => {
-                                // Commit processed - member list may have changed
+                                // Commit processed - member list or metadata may have changed
                                 // Check if we're still a member of this group
                                 // Use group_check_id (engine's group_id) instead of gid_for_fetch (wrapper id)
                                 if let Some(ref check_id) = group_check_id {
@@ -1658,7 +1923,7 @@ impl MlsService {
                                     if !check_gid_bytes.is_empty() {
                                         let check_gid = GroupId::from_slice(&check_gid_bytes);
                                         let my_pk = nostr_sdk::PublicKey::from_hex(&my_pubkey_hex).ok();
-                                        
+
                                         let still_member = if let Some(pk) = my_pk {
                                             engine.get_members(&check_gid)
                                                 .ok()
@@ -1667,7 +1932,7 @@ impl MlsService {
                                         } else {
                                             false
                                         };
-                                        
+
                                         if !still_member {
                                             // We've been removed from the group!
                                             if let Some(handle) = TAURI_APP.get() {
@@ -1676,6 +1941,12 @@ impl MlsService {
                                                 })).ok();
                                             }
                                         } else {
+                                            // Sync metadata from MLS extensions → MDK storage,
+                                            // then read updated group data for local metadata refresh
+                                            let _ = engine.sync_group_metadata_from_mls(&check_gid);
+                                            if let Ok(Some(group)) = engine.get_group(&check_gid) {
+                                                pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                            }
                                             // Still a member, just update the UI
                                             if let Some(handle) = TAURI_APP.get() {
                                                 handle.emit("mls_group_updated", serde_json::json!({
@@ -1685,7 +1956,7 @@ impl MlsService {
                                         }
                                     }
                                 }
-                                
+
                                 // Successfully processed commit - advance cursor and queue for tracking
                                 processed = processed.saturating_add(1);
                                 last_seen_id = Some(ev.id);
@@ -1758,22 +2029,29 @@ impl MlsService {
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
-                        
+
                         // Check if this is an eviction error (user was removed from group)
                         if error_msg.contains("own leaf not found") ||
                            error_msg.contains("after being evicted") ||
                            error_msg.contains("evicted from it") {
                             eprintln!("[MLS] ⚠️  EVICTION DETECTED - We were removed from group: {}", gid_for_fetch);
-                            
+
                             // Set flag to remove this group after engine scope
                             was_evicted = true;
-                        } else if !error_msg.contains("group not found") {
+                        } else if error_msg.contains("group not found") {
+                            // Group not found locally — skip silently, don't track
+                        } else {
+                            // All other process_message errors are unrecoverable for this event.
+                            // Track and advance cursor to prevent the sync from getting permanently
+                            // stuck (e.g., corrupted MLS tree state from kick/reinvite cycles causes
+                            // cascading failures for all subsequent commits in the group).
                             eprintln!(
-                                "[MLS] process_message failed (group_id={}, id={}): {}",
-                                gid_for_fetch,
-                                ev.id,
-                                e
+                                "[MLS] process_message failed (group={}, id={}, created_at={}): {}",
+                                gid_for_fetch, ev.id, ev.created_at.as_secs(), error_msg
                             );
+                            events_to_track.push((ev.id.to_hex(), ev.created_at.as_secs()));
+                            last_seen_id = Some(ev.id);
+                            last_seen_at = ev.created_at.as_secs();
                         }
                         // Continue processing subsequent events
                     }
@@ -1875,10 +2153,17 @@ impl MlsService {
                                                         "group_id": gid_for_fetch
                                                     })).ok();
                                                 }
-                                            } else if let Some(handle) = TAURI_APP.get() {
-                                                handle.emit("mls_group_updated", serde_json::json!({
-                                                    "group_id": gid_for_fetch
-                                                })).ok();
+                                            } else {
+                                                // Sync metadata from MLS extensions (retry path)
+                                                let _ = engine.sync_group_metadata_from_mls(&check_gid);
+                                                if let Ok(Some(group)) = engine.get_group(&check_gid) {
+                                                    pending_metadata_update = Some((group.name.clone(), group.description.clone()));
+                                                }
+                                                if let Some(handle) = TAURI_APP.get() {
+                                                    handle.emit("mls_group_updated", serde_json::json!({
+                                                        "group_id": gid_for_fetch
+                                                    })).ok();
+                                                }
                                             }
                                         }
                                     }
@@ -2005,6 +2290,47 @@ impl MlsService {
             } else if retry_attempt > 0 {
                 println!("[MLS] ✓ All retry events processed successfully after {} passes", retry_attempt);
                 record_group_success(&gid_for_fetch).await;
+            }
+        }
+
+        // Apply metadata changes from processed commits (name/description updated via MLS extensions)
+        if let Some((new_name, new_desc)) = pending_metadata_update {
+            if let Ok(mut groups) = self.read_groups().await {
+                let mut changed = false;
+                if let Some(meta) = groups.iter_mut().find(|g| g.group_id == gid_for_fetch || g.engine_group_id == gid_for_fetch) {
+                    if meta.name != new_name {
+                        meta.name = new_name;
+                        changed = true;
+                    }
+                    if meta.description.as_deref().unwrap_or("") != new_desc {
+                        meta.description = if new_desc.is_empty() { None } else { Some(new_desc) };
+                        changed = true;
+                    }
+                    if changed {
+                        meta.updated_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                    }
+                }
+                if changed {
+                    // Clone updated meta for emit before passing groups by ref
+                    let updated_meta = groups.iter().find(|g| g.group_id == gid_for_fetch || g.engine_group_id == gid_for_fetch).cloned();
+                    let _ = self.write_groups(&groups).await;
+                    if let Some(meta) = updated_meta {
+                        emit_group_metadata_event(&meta);
+                    }
+                    // Also update STATE chat name
+                    let mut state = STATE.lock().await;
+                    if let Some(chat) = state.get_chat_mut(&gid_for_fetch) {
+                        let name = groups.iter().find(|g| g.group_id == gid_for_fetch || g.engine_group_id == gid_for_fetch)
+                            .map(|m| m.name.clone()).unwrap_or_default();
+                        if !name.is_empty() {
+                            chat.metadata.set_name(name);
+                        }
+                    }
+                    drop(state);
+                }
             }
         }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-group-metadata"
+description = "Enables the update_group_metadata command without any pre-configured scope."
+commands.allow = ["update_group_metadata"]
+
+[[permission]]
+identifier = "deny-update-group-metadata"
+description = "Denies the update_group_metadata command without any pre-configured scope."
+commands.deny = ["update_group_metadata"]

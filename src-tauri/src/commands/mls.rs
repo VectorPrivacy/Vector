@@ -1033,6 +1033,55 @@ pub async fn remove_mls_member_device(
     Ok(())
 }
 
+/// Update group metadata (name, description, avatar, admins) — admin only
+#[tauri::command]
+pub async fn update_group_metadata(
+    group_id: String,
+    name: Option<String>,
+    description: Option<String>,
+    admin_ids: Option<Vec<String>>,
+    image_hash: Option<String>,
+    image_key: Option<String>,
+    image_nonce: Option<String>,
+) -> Result<(), String> {
+    // Parse image fields: None = no change, Some("") = clear, Some(hex) = set
+    let image_hash_parsed: Option<Option<[u8; 32]>> = image_hash.as_deref().map(|h| {
+        if h.is_empty() { return None; }
+        let bytes = hex_string_to_bytes(h);
+        if bytes.len() == 32 { Some(bytes.try_into().unwrap()) } else { None }
+    });
+    let image_key_parsed: Option<Option<[u8; 32]>> = image_key.as_deref().map(|k| {
+        if k.is_empty() { return None; }
+        let bytes = hex_string_to_bytes(k);
+        if bytes.len() == 32 { Some(bytes.try_into().unwrap()) } else { None }
+    });
+    let image_nonce_parsed: Option<Option<[u8; 12]>> = image_nonce.as_deref().map(|n| {
+        if n.is_empty() { return None; }
+        let bytes = hex_string_to_bytes(n);
+        if bytes.len() == 12 { Some(bytes.try_into().unwrap()) } else { None }
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async move {
+            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
+            mls.update_group_data(
+                &group_id,
+                name,
+                description,
+                admin_ids,
+                image_hash_parsed,
+                image_key_parsed,
+                image_nonce_parsed,
+            )
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
 /// Sync MLS groups with the network
 /// If group_id is provided, sync only that group
 /// If None, sync all groups

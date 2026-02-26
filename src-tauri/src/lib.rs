@@ -348,6 +348,7 @@ pub fn run() {
             commands::mls::add_mls_member_device,
             commands::mls::get_mls_group_members,
             commands::mls::leave_mls_group,
+            commands::mls::update_group_metadata,
             commands::mls::refresh_keypackages_for_contact,
             commands::mls::regenerate_device_keypackage,
             // MLS welcome/invite commands

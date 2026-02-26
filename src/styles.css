@@ -5828,6 +5828,135 @@ select:disabled:hover {
 .member-pick-admin.active { opacity: 1; }
 .member-pick-admin .icon { width: 14px; height: 14px; background-color: #fce459; }
 
+/* Group Overview Edit Controls */
+.group-editable {
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s ease;
+  border-radius: 4px;
+}
+.group-editable:hover {
+  color: var(--icon-color-primary) !important;
+}
+.group-editable::after {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 6px;
+  vertical-align: middle;
+  mask-image: url("./icons/edit.svg");
+  -webkit-mask-image: url("./icons/edit.svg");
+  mask-size: contain;
+  -webkit-mask-size: contain;
+  mask-repeat: no-repeat;
+  -webkit-mask-repeat: no-repeat;
+  background-color: currentColor;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.group-editable:hover::after {
+  opacity: 0.6;
+}
+.group-desc-empty {
+  color: rgba(255, 255, 255, 0.35) !important;
+  font-style: italic !important;
+}
+.group-desc-empty::before {
+  content: 'Add description...';
+}
+.group-name-input {
+  font-size: 18px;
+  font-weight: 600;
+  color: #f7f4f4;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 6px 12px;
+  width: 80%;
+  max-width: 300px;
+  text-align: center;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.2s ease;
+}
+.group-name-input:focus {
+  border-color: var(--icon-color-primary);
+}
+.group-desc-textarea {
+  font-size: 13px;
+  color: #f7f4f4;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 8px 12px;
+  width: 85%;
+  min-height: 60px;
+  max-height: 200px;
+  resize: none;
+  outline: none;
+  font-family: inherit;
+  line-height: 1.4;
+  display: block;
+  margin: 10px auto 0;
+  transition: border-color 0.2s ease;
+}
+.group-desc-textarea:focus {
+  border-color: var(--icon-color-primary);
+}
+.group-avatar-edit-overlay {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+*:hover > .group-avatar-edit-overlay {
+  opacity: 1;
+}
+.group-admin-toggle {
+  width: 20px;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 5px;
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+.group-admin-toggle .icon {
+  width: 16px;
+  height: 16px;
+  background-color: #fce459;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.group-admin-toggle.active .icon {
+  opacity: 1;
+}
+.group-admin-toggle.toggleable {
+  cursor: pointer;
+  border-radius: 4px;
+}
+.group-admin-toggle.toggleable:not(.active) .icon {
+  opacity: 0.15;
+}
+.group-admin-toggle.toggleable:hover .icon {
+  opacity: 0.6;
+}
+.group-admin-toggle.toggleable.active:hover .icon {
+  opacity: 0.7;
+}
+
 /* MLS Group Invite Styles */
 .chatlist-invite {
   cursor: default !important;

@@ -481,14 +481,56 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                     }
                                 });
                             }
-                            Some(true) => {
-                                if let Some(handle) = TAURI_APP.get() {
-                                    handle.emit("mls_group_updated", serde_json::json!({
-                                        "group_id": group_id_for_persist
-                                    })).ok();
+                            Some(true) | None => {
+                                // Sync metadata from MLS group extensions to local storage
+                                // (handles name, description, admin list changes from remote commits)
+                                let _ = engine.sync_group_metadata_from_mls(&mls_group_id);
+                                if let Ok(Some(group)) = engine.get_group(&mls_group_id) {
+                                    let new_name = group.name.clone();
+                                    let new_desc = group.description.clone();
+                                    let gid = group_id_for_persist.clone();
+                                    rt.block_on(async {
+                                        if let Ok(mut groups) = svc.read_groups().await {
+                                            let mut changed = false;
+                                            if let Some(meta) = groups.iter_mut().find(|g| g.group_id == gid || g.engine_group_id == gid) {
+                                                if meta.name != new_name {
+                                                    meta.name = new_name.clone();
+                                                    changed = true;
+                                                }
+                                                if meta.description.as_deref().unwrap_or("") != new_desc {
+                                                    meta.description = if new_desc.is_empty() { None } else { Some(new_desc) };
+                                                    changed = true;
+                                                }
+                                                if changed {
+                                                    meta.updated_at = std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_secs();
+                                                }
+                                            }
+                                            if changed {
+                                                let updated_meta = groups.iter().find(|g| g.group_id == gid || g.engine_group_id == gid).cloned();
+                                                let _ = svc.write_groups(&groups).await;
+                                                if let Some(meta) = updated_meta {
+                                                    crate::mls::emit_group_metadata_event(&meta);
+                                                }
+                                                // Update STATE chat name
+                                                let mut state = crate::STATE.lock().await;
+                                                if let Some(chat) = state.get_chat_mut(&gid) {
+                                                    if !new_name.is_empty() {
+                                                        chat.metadata.set_name(new_name);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
-                            }
-                            None => {
+                                // Sync participants (handles admin list changes)
+                                rt.block_on(async {
+                                    if let Err(e) = crate::commands::mls::sync_mls_group_participants(group_id_for_persist.clone()).await {
+                                        eprintln!("[MLS] Live: Failed to sync participants after commit: {}", e);
+                                    }
+                                });
                                 if let Some(handle) = TAURI_APP.get() {
                                     handle.emit("mls_group_updated", serde_json::json!({
                                         "group_id": group_id_for_persist

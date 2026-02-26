@@ -9783,7 +9783,7 @@ async function renderGroupOverview(chat) {
     const memberCount = members.length;
     
     // Display Name (top header)
-    domGroupOverviewName.innerHTML = groupName;
+    domGroupOverviewName.textContent = groupName;
     domGroupOverviewStatus.textContent = `${memberCount} ${memberCount === 1 ? 'member' : 'members'}`;
 
     // Header avatar (small, next to name)
@@ -9793,6 +9793,9 @@ async function renderGroupOverview(chat) {
         const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
         headerAvatarContainer.appendChild(createAvatarImg(groupAvatarSrc, 22, true));
     }
+
+    // Check admin status (used for edit controls throughout)
+    const iAmGroupAdmin = admins.includes(strPubkey);
 
     // Large center avatar
     const avatarParent = domGroupOverviewAvatar.parentElement;
@@ -9819,17 +9822,159 @@ async function renderGroupOverview(chat) {
         if (prevImg) prevImg.remove();
         domGroupOverviewAvatar.style.display = 'inline-block';
     }
+    // Admin avatar edit overlay
+    const prevOverlay = avatarParent.querySelector('.group-avatar-edit-overlay');
+    if (prevOverlay) prevOverlay.remove();
+    if (iAmGroupAdmin) {
+        const overlay = document.createElement('div');
+        overlay.className = 'group-avatar-edit-overlay';
+        overlay.innerHTML = '<span class="icon icon-edit" style="width: 16px; height: 16px; background-color: #fff;"></span>';
+        overlay.onclick = async (e) => {
+            e.stopPropagation();
+            try {
+                const { open } = window.__TAURI__.dialog;
+                const selected = await open({
+                    multiple: false,
+                    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }]
+                });
+                if (!selected) return;
+                const filePath = typeof selected === 'string' ? selected : selected.path;
+                if (!filePath) return;
+                overlay.style.opacity = '0.5';
+                const result = await invoke('upload_group_avatar', { filepath: filePath });
+                if (result?.image_hash && result?.image_key && result?.image_nonce) {
+                    await invoke('update_group_metadata', {
+                        groupId: chat.id,
+                        imageHash: result.image_hash,
+                        imageKey: result.image_key,
+                        imageNonce: result.image_nonce,
+                    });
+                    // Cache the new avatar for instant display
+                    if (result.blob_url) {
+                        try {
+                            const cachedPath = await invoke('cache_group_avatar', {
+                                groupId: chat.id,
+                                blobUrl: result.blob_url,
+                                imageHash: result.image_hash,
+                                imageKey: result.image_key,
+                                imageNonce: result.image_nonce,
+                            });
+                            if (cachedPath) {
+                                chat.metadata.avatar_cached = cachedPath;
+                            }
+                        } catch (cacheErr) {
+                            console.error('[MLS] Failed to cache group avatar:', cacheErr);
+                        }
+                    }
+                    // Re-render to show new avatar
+                    await renderGroupOverview(chat);
+                }
+            } catch (err) {
+                console.error('[MLS] Failed to update group avatar:', err);
+                overlay.style.opacity = '';
+            }
+        };
+        avatarParent.appendChild(overlay);
+    }
 
-    // Secondary name
-    domGroupOverviewNameSecondary.innerHTML = groupName;
-    
-    // Group description (if available)
-    const description = chat.metadata?.custom_fields?.description;
-    if (description) {
-        domGroupOverviewDescription.textContent = description;
-        domGroupOverviewDescription.style.display = '';
+    // Secondary name (editable for admins)
+    domGroupOverviewNameSecondary.textContent = groupName;
+    if (iAmGroupAdmin) {
+        domGroupOverviewNameSecondary.classList.add('group-editable');
+        domGroupOverviewNameSecondary.onclick = () => {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'group-name-input';
+            input.value = groupName;
+            input.maxLength = 100;
+            domGroupOverviewNameSecondary.replaceWith(input);
+            input.focus();
+            input.select();
+            let saved = false;
+            const save = async () => {
+                if (saved) return;
+                saved = true;
+                const newName = input.value.trim();
+                input.replaceWith(domGroupOverviewNameSecondary);
+                if (newName && newName !== groupName) {
+                    domGroupOverviewNameSecondary.textContent = newName;
+                    domGroupOverviewName.textContent = newName;
+                    try {
+                        await invoke('update_group_metadata', { groupId: chat.id, name: newName });
+                    } catch (e) {
+                        console.error('[MLS] Failed to update group name:', e);
+                        domGroupOverviewNameSecondary.textContent = groupName;
+                        domGroupOverviewName.textContent = groupName;
+                    }
+                }
+            };
+            input.onblur = save;
+            input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } if (e.key === 'Escape') { saved = true; input.replaceWith(domGroupOverviewNameSecondary); } };
+        };
     } else {
-        domGroupOverviewDescription.style.display = 'none';
+        domGroupOverviewNameSecondary.classList.remove('group-editable');
+        domGroupOverviewNameSecondary.onclick = null;
+    }
+
+    // Group description (editable for admins)
+    const description = chat.metadata?.custom_fields?.description;
+    if (iAmGroupAdmin) {
+        domGroupOverviewDescription.style.display = '';
+        domGroupOverviewDescription.textContent = description || '';
+        domGroupOverviewDescription.classList.add('group-editable');
+        if (!description) {
+            domGroupOverviewDescription.setAttribute('data-placeholder', 'Add description...');
+            domGroupOverviewDescription.classList.add('group-desc-empty');
+        } else {
+            domGroupOverviewDescription.classList.remove('group-desc-empty');
+        }
+        domGroupOverviewDescription.onclick = () => {
+            const textarea = document.createElement('textarea');
+            textarea.className = 'group-desc-textarea';
+            textarea.value = description || '';
+            textarea.placeholder = 'Enter group description...';
+            textarea.maxLength = 500;
+            domGroupOverviewDescription.replaceWith(textarea);
+            textarea.focus();
+            // Auto-size
+            textarea.style.height = Math.max(60, textarea.scrollHeight) + 'px';
+            textarea.oninput = () => { textarea.style.height = 'auto'; textarea.style.height = Math.max(60, textarea.scrollHeight) + 'px'; };
+            let saved = false;
+            const save = async () => {
+                if (saved) return;
+                saved = true;
+                const newDesc = textarea.value.trim();
+                textarea.replaceWith(domGroupOverviewDescription);
+                if (newDesc !== (description || '')) {
+                    domGroupOverviewDescription.textContent = newDesc;
+                    if (!newDesc) {
+                        domGroupOverviewDescription.classList.add('group-desc-empty');
+                    } else {
+                        domGroupOverviewDescription.classList.remove('group-desc-empty');
+                    }
+                    try {
+                        await invoke('update_group_metadata', { groupId: chat.id, description: newDesc });
+                    } catch (e) {
+                        console.error('[MLS] Failed to update group description:', e);
+                        domGroupOverviewDescription.textContent = description || '';
+                        // Restore empty/non-empty class state
+                        if (description) { domGroupOverviewDescription.classList.remove('group-desc-empty'); }
+                        else { domGroupOverviewDescription.classList.add('group-desc-empty'); }
+                    }
+                }
+            };
+            textarea.onblur = save;
+            textarea.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); textarea.blur(); } if (e.key === 'Escape') { saved = true; textarea.replaceWith(domGroupOverviewDescription); } };
+        };
+    } else {
+        domGroupOverviewDescription.classList.remove('group-editable', 'group-desc-empty');
+        domGroupOverviewDescription.onclick = null;
+        if (description) {
+            domGroupOverviewDescription.textContent = description;
+            domGroupOverviewDescription.style.display = '';
+        } else {
+            domGroupOverviewDescription.style.display = 'none';
+        }
     }
     
     // Function to render the member list (can be called for search filtering)
@@ -9933,18 +10078,45 @@ async function renderGroupOverview(chat) {
             };
             memberDiv.onclick = openMemberProfile;
             
-            // Crown icon for admins (or invisible spacer for alignment)
+            // Crown icon for admins (clickable toggle for admins, decorative otherwise)
             const crownContainer = document.createElement('span');
-            crownContainer.style.width = '20px';
-            crownContainer.style.height = '25px';
-            crownContainer.style.display = 'inline-flex';
-            crownContainer.style.alignItems = 'center';
-            crownContainer.style.justifyContent = 'center';
-            crownContainer.style.marginRight = '5px';
-            crownContainer.style.position = 'relative';
-            crownContainer.style.zIndex = '1';
-            if (isAdmin) {
-                crownContainer.innerHTML = '<span class="icon icon-crown" style="width: 16px; height: 16px; background-color: #fce459;"></span>';
+            crownContainer.className = 'group-admin-toggle' + (isAdmin ? ' active' : '');
+            crownContainer.innerHTML = '<span class="icon icon-crown"></span>';
+            const isMe = member === strPubkey;
+            if (iAmGroupAdmin && !isMe) {
+                crownContainer.classList.add('toggleable');
+                crownContainer.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    const newIsAdmin = !admins.includes(member);
+                    // Demoting: confirm first
+                    if (!newIsAdmin) {
+                        const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
+                        const confirmed = await popupConfirm(
+                            'Remove Admin',
+                            `Remove admin privileges from <b>${escapeHtml(memberName)}</b>?`
+                        );
+                        if (!confirmed) return;
+                    }
+                    // Build new admin list
+                    let newAdmins;
+                    if (newIsAdmin) {
+                        newAdmins = [...admins, member];
+                    } else {
+                        newAdmins = admins.filter(a => a !== member);
+                    }
+                    // Always include self
+                    if (!newAdmins.includes(strPubkey)) newAdmins.push(strPubkey);
+                    try {
+                        await invoke('update_group_metadata', { groupId: chat.id, adminIds: newAdmins });
+                        // Update local admins list for immediate UI feedback
+                        if (newIsAdmin && !admins.includes(member)) admins.push(member);
+                        else if (!newIsAdmin) { const idx = admins.indexOf(member); if (idx >= 0) admins.splice(idx, 1); }
+                        renderMemberList(domGroupMemberSearchInput.value);
+                    } catch (err) {
+                        console.error('[MLS] Failed to update admin status:', err);
+                    }
+                });
             }
             memberDiv.appendChild(crownContainer);
             
@@ -9971,9 +10143,7 @@ async function renderGroupOverview(chat) {
             memberDiv.appendChild(nameSpan);
             
             // Kick button (only visible to admins, and not for themselves)
-            const isMe = member === strPubkey;
-            const iAmAdmin = admins.includes(strPubkey);
-            if (iAmAdmin && !isMe) {
+            if (iAmGroupAdmin && !isMe) {
                 const kickBtn = document.createElement('button');
                 kickBtn.textContent = 'Kick';
                 kickBtn.style.padding = '4px 12px';
@@ -10003,7 +10173,7 @@ async function renderGroupOverview(chat) {
                     
                     const memberName = memberProfile?.nickname || memberProfile?.name || member.substring(0, 10) + '...';
                     const confirmed = await popupConfirm(
-                        `Remove ${memberName} from the group?`,
+                        `Remove ${escapeHtml(memberName)} from the group?`,
                         'This will remove them from the group immediately.'
                     );
                     
@@ -10060,11 +10230,8 @@ async function renderGroupOverview(chat) {
         renderMemberList(e.target.value);
     };
     
-    // Check if current user is an admin to show/hide invite button
-    const myProfile = arrProfiles.find(p => p.mine);
-    const isAdmin = myProfile && admins.includes(myProfile.id);
-    
-    if (isAdmin) {
+    // Show/hide invite button based on admin status
+    if (iAmGroupAdmin) {
         domGroupInviteMemberBtn.style.display = 'flex';
         // Invite Member button - open member selection UI
         domGroupInviteMemberBtn.onclick = async () => {
@@ -10080,7 +10247,7 @@ async function renderGroupOverview(chat) {
         const groupName = chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 10)}...`;
 
         // Check if user is the group creator
-        const isCreator = myProfile && myProfile.id === chat.metadata?.creator_pubkey;
+        const isCreator = strPubkey === chat.metadata?.creator_pubkey;
 
         // Creators cannot leave unless they are the only member
         if (isCreator && memberCount > 1) {
