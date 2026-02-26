@@ -267,9 +267,9 @@ impl UltraPackedFileHashIndex {
                     continue;
                 }
 
-                // Skip MLS attachments - they use rolling keys and can't be reused for deduplication.
-                // MLS attachments have original_hash set (used for key derivation).
-                if att.original_hash.is_some() {
+                // Skip MLS attachments - they use group-derived keys and can't be
+                // reused for DM deduplication. MLS attachments have an empty key.
+                if att.key.is_empty() {
                     continue;
                 }
 

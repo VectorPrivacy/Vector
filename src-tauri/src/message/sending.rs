@@ -595,6 +595,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 'outer: for chat in &state.chats {
                     for message in chat.messages.iter() {
                         for attachment in &message.attachments {
+                            // Skip MLS attachments — they use group-derived keys
+                            // and can't be reused for DM deduplication.
+                            // MLS attachments have an empty key (all zeros).
+                            if attachment.key == [0u8; 32] {
+                                continue;
+                            }
                             if attachment.id_eq(&file_hash) && !attachment.url.is_empty() {
                                 found_attachment = Some(attachment.to_attachment());
                                 break 'outer;
