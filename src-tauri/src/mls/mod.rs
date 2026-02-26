@@ -43,28 +43,42 @@ pub fn get_group_sync_lock(group_id: &str) -> Arc<TokioMutex<()>> {
         .clone()
 }
 
-/// Publish a nostr event to TRUSTED_RELAYS with retries and exponential backoff.
+/// Publish a nostr event with retries and exponential backoff.
 ///
-/// Filters TRUSTED_RELAYS to only those currently in the relay pool (the user
-/// may have disabled some). 5 attempts, 250ms base backoff. Retries on all
-/// transient errors. Only bails early on definitive rejections like "duplicate"
-/// or "blocked".
+/// If `relay_urls` is provided, publishes to those relays (group-specific relays
+/// from MDK's `get_relays`). Otherwise falls back to the active TRUSTED_RELAYS
+/// (filtered to those currently in the relay pool).
+///
+/// 5 attempts, 250ms base backoff. Retries on all transient errors. Only bails
+/// early on definitive rejections like "duplicate" or "blocked".
 /// Returns `Ok(())` when at least one relay confirms, `Err` after exhausting retries.
 async fn publish_event_with_retries(
     client: &nostr_sdk::Client,
     event: &nostr_sdk::Event,
+    relay_urls: Option<&[nostr_sdk::RelayUrl]>,
 ) -> Result<(), String> {
     use std::time::Duration;
 
-    let active = active_trusted_relays().await;
-    if active.is_empty() {
-        return Err("no trusted relays connected".to_string());
+    // Build the target relay list: group relays (if provided) or active trusted relays
+    let targets: Vec<String> = if let Some(urls) = relay_urls {
+        if urls.is_empty() {
+            // Group has no relays configured — fall back to trusted relays
+            active_trusted_relays().await.into_iter().map(|s| s.to_string()).collect()
+        } else {
+            urls.iter().map(|u| u.to_string()).collect()
+        }
+    } else {
+        active_trusted_relays().await.into_iter().map(|s| s.to_string()).collect()
+    };
+
+    if targets.is_empty() {
+        return Err("no relays available for publishing".to_string());
     }
 
     let mut last_err: Option<String> = None;
     for attempt in 0..5u8 {
         match client
-            .send_event_to(active.iter().copied(), event)
+            .send_event_to(targets.iter().map(|s| s.as_str()), event)
             .await
         {
             Ok(output) if !output.success.is_empty() => {
@@ -96,6 +110,47 @@ async fn publish_event_with_retries(
         }
     }
     Err(last_err.unwrap_or_else(|| "unknown error".to_string()))
+}
+
+/// Publish an evolution event to relays, then merge the pending commit.
+///
+/// Follows the MIP-03 ordering: publish first, merge only after relay confirmation.
+/// On publish failure, rolls back the pending commit via `clear_pending_commit`.
+/// Uses group-specific relays from MDK when available, falling back to trusted relays.
+///
+/// This is the centralized pattern used by all group mutation operations
+/// (add member, remove member, update metadata) — matching Whitenoise's
+/// `publish_and_merge_commit` for interoperability.
+async fn publish_and_merge_commit(
+    client: &nostr_sdk::Client,
+    event: &nostr_sdk::Event,
+    db_path: &std::path::Path,
+    mls_group_id: &GroupId,
+    group_relay_urls: &[nostr_sdk::RelayUrl],
+) -> Result<(), String> {
+    // 1. Publish evolution event to group relays (or trusted relays as fallback)
+    let relay_arg = if group_relay_urls.is_empty() { None } else { Some(group_relay_urls) };
+    if let Err(e) = publish_event_with_retries(client, event, relay_arg).await {
+        // Rollback the pending commit so the group isn't stuck
+        if let Ok(s) = MdkSqliteStorage::new_unencrypted(db_path) {
+            let rollback_engine = MDK::new(s);
+            if let Err(re) = rollback_engine.clear_pending_commit(mls_group_id) {
+                eprintln!("[MLS] Failed to rollback pending commit: {}", re);
+            } else {
+                println!("[MLS] Rolled back pending commit after publish failure");
+            }
+        }
+        return Err(e);
+    }
+
+    // 2. Merge pending commit now that relay confirmed
+    let storage = MdkSqliteStorage::new_unencrypted(db_path)
+        .map_err(|e| format!("Failed to open storage for merge: {}", e))?;
+    let engine = MDK::new(storage);
+    engine.merge_pending_commit(mls_group_id)
+        .map_err(|e| format!("Failed to merge commit: {}", e))?;
+
+    Ok(())
 }
 
 /// Main MLS service facade
@@ -695,7 +750,7 @@ impl MlsService {
             // 1. Create the commit under lock (prevents sync from advancing epoch mid-operation)
             let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
 
-            let (evolution_event, welcome_rumors) = {
+            let (evolution_event, welcome_rumors, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                     Ok(s) => s,
                     Err(e) => {
@@ -710,8 +765,10 @@ impl MlsService {
                     }
                 };
                 let engine = MDK::new(storage);
+                let relays: Vec<nostr_sdk::RelayUrl> = engine.get_relays(&mls_group_id)
+                    .unwrap_or_default().into_iter().collect();
                 match engine.add_members(&mls_group_id, std::slice::from_ref(&kp_event)) {
-                    Ok(result) => (result.evolution_event, result.welcome_rumors),
+                    Ok(result) => (result.evolution_event, result.welcome_rumors, relays),
                     Err(e) => {
                         eprintln!("[MLS] Failed to add member: {}", e);
                         if let Some(handle) = TAURI_APP.get() {
@@ -725,48 +782,13 @@ impl MlsService {
                 }
             }; // engine dropped before await
 
-            // 2. Publish evolution event with retries
-            if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
-                eprintln!("[MLS] Failed to publish commit after retries: {}", e);
-                // Rollback the pending commit so the group isn't stuck
-                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
-                    let rollback_engine = MDK::new(s);
-                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
-                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
-                    } else {
-                        println!("[MLS] Rolled back pending commit after publish failure");
-                    }
-                }
+            // 2. Publish evolution event and merge pending commit (MIP-03 ordering)
+            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+                eprintln!("[MLS] Failed to publish/merge add-member commit: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
                         "error": format!("Failed to publish invite: {}", e)
-                    })).ok();
-                }
-                return;
-            }
-
-            // 3. Merge pending commit now that relay confirmed
-            let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[MLS] Failed to open storage for merge: {}", e);
-                    if let Some(handle) = TAURI_APP.get() {
-                        handle.emit("mls_error", serde_json::json!({
-                            "group_id": group_id_owned,
-                            "error": format!("Failed to open storage for merge: {}", e)
-                        })).ok();
-                    }
-                    return;
-                }
-            };
-            let engine = MDK::new(storage);
-            if let Err(e) = engine.merge_pending_commit(&mls_group_id) {
-                eprintln!("[MLS] Failed to merge commit after relay confirm: {}", e);
-                if let Some(handle) = TAURI_APP.get() {
-                    handle.emit("mls_error", serde_json::json!({
-                        "group_id": group_id_owned,
-                        "error": format!("Failed to merge commit: {}", e)
                     })).ok();
                 }
                 return;
@@ -919,7 +941,7 @@ impl MlsService {
             // 1. Create the commit under lock (prevents sync from advancing epoch mid-operation)
             let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
 
-            let (evolution_event, welcome_rumors) = {
+            let (evolution_event, welcome_rumors, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                     Ok(s) => s,
                     Err(e) => {
@@ -934,8 +956,10 @@ impl MlsService {
                     }
                 };
                 let engine = MDK::new(storage);
+                let relays: Vec<nostr_sdk::RelayUrl> = engine.get_relays(&mls_group_id)
+                    .unwrap_or_default().into_iter().collect();
                 match engine.add_members(&mls_group_id, &member_kp_events) {
-                    Ok(result) => (result.evolution_event, result.welcome_rumors),
+                    Ok(result) => (result.evolution_event, result.welcome_rumors, relays),
                     Err(e) => {
                         eprintln!("[MLS] Failed to add members: {}", e);
                         if let Some(handle) = TAURI_APP.get() {
@@ -949,48 +973,13 @@ impl MlsService {
                 }
             }; // engine dropped before await
 
-            // 2. Publish evolution event with retries
-            if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
-                eprintln!("[MLS] Failed to publish commit after retries: {}", e);
-                // Rollback the pending commit so the group isn't stuck
-                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
-                    let rollback_engine = MDK::new(s);
-                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
-                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
-                    } else {
-                        println!("[MLS] Rolled back pending commit after publish failure");
-                    }
-                }
+            // 2. Publish evolution event and merge pending commit (MIP-03 ordering)
+            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+                eprintln!("[MLS] Failed to publish/merge add-members commit: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
                         "error": format!("Failed to publish invite: {}", e)
-                    })).ok();
-                }
-                return;
-            }
-
-            // 3. Merge pending commit now that relay confirmed
-            let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[MLS] Failed to open storage for merge: {}", e);
-                    if let Some(handle) = TAURI_APP.get() {
-                        handle.emit("mls_error", serde_json::json!({
-                            "group_id": group_id_owned,
-                            "error": format!("Failed to open storage for merge: {}", e)
-                        })).ok();
-                    }
-                    return;
-                }
-            };
-            let engine = MDK::new(storage);
-            if let Err(e) = engine.merge_pending_commit(&mls_group_id) {
-                eprintln!("[MLS] Failed to merge commit after relay confirm: {}", e);
-                if let Some(handle) = TAURI_APP.get() {
-                    handle.emit("mls_error", serde_json::json!({
-                        "group_id": group_id_owned,
-                        "error": format!("Failed to merge commit: {}", e)
                     })).ok();
                 }
                 return;
@@ -1220,7 +1209,7 @@ impl MlsService {
             // 1. Create the remove commit under lock (prevents sync from advancing epoch mid-operation)
             let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
 
-            let evolution_event = {
+            let (evolution_event, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                     Ok(s) => s,
                     Err(e) => {
@@ -1262,8 +1251,10 @@ impl MlsService {
                     return;
                 }
 
+                let relays: Vec<nostr_sdk::RelayUrl> = engine.get_relays(&mls_group_id)
+                    .unwrap_or_default().into_iter().collect();
                 match engine.remove_members(&mls_group_id, &[member_pk]) {
-                    Ok(result) => result.evolution_event,
+                    Ok(result) => (result.evolution_event, relays),
                     Err(e) => {
                         eprintln!("[MLS] Failed to remove member: {}", e);
                         if let Some(handle) = TAURI_APP.get() {
@@ -1277,48 +1268,13 @@ impl MlsService {
                 }
             }; // engine dropped before await
 
-            // 2. Publish evolution event with retries
-            if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
-                eprintln!("[MLS] Failed to publish remove commit after retries: {}", e);
-                // Rollback the pending commit so the group isn't stuck
-                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
-                    let rollback_engine = MDK::new(s);
-                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
-                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
-                    } else {
-                        println!("[MLS] Rolled back pending commit after publish failure");
-                    }
-                }
+            // 2. Publish evolution event and merge pending commit (MIP-03 ordering)
+            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+                eprintln!("[MLS] Failed to publish/merge remove-member commit: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
                         "error": format!("Failed to publish remove commit: {}", e)
-                    })).ok();
-                }
-                return;
-            }
-
-            // 3. Merge pending commit now that relay confirmed
-            let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[MLS] Failed to open storage for merge: {}", e);
-                    if let Some(handle) = TAURI_APP.get() {
-                        handle.emit("mls_error", serde_json::json!({
-                            "group_id": group_id_owned,
-                            "error": format!("Failed to open storage for merge: {}", e)
-                        })).ok();
-                    }
-                    return;
-                }
-            };
-            let engine = MDK::new(storage);
-            if let Err(e) = engine.merge_pending_commit(&mls_group_id) {
-                eprintln!("[MLS] Failed to merge commit after relay confirm: {}", e);
-                if let Some(handle) = TAURI_APP.get() {
-                    handle.emit("mls_error", serde_json::json!({
-                        "group_id": group_id_owned,
-                        "error": format!("Failed to merge commit: {}", e)
                     })).ok();
                 }
                 return;
@@ -1389,7 +1345,7 @@ impl MlsService {
             let mls_group_id = GroupId::from_slice(&hex_string_to_bytes(&engine_group_id));
 
             // 1. Build update and create commit under lock
-            let evolution_event = {
+            let (evolution_event, group_relays) = {
                 let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
                     Ok(s) => s,
                     Err(e) => {
@@ -1434,17 +1390,13 @@ impl MlsService {
                     update = update.image_nonce(nonce);
                 }
 
+                let relays: Vec<nostr_sdk::RelayUrl> = engine.get_relays(&mls_group_id)
+                    .unwrap_or_default().into_iter().collect();
                 match engine.update_group_data(&mls_group_id, update) {
                     Ok(result) => {
-                        let h_tag = result.evolution_event.tags
-                            .find(nostr_sdk::TagKind::SingleLetter(nostr_sdk::SingleLetterTag::lowercase(nostr_sdk::Alphabet::H)))
-                            .and_then(|t| t.content().map(|s| s.to_string()))
-                            .unwrap_or_else(|| "MISSING".to_string());
-                        println!("[MLS] update_group_data commit created, event_id={}, kind={}, h_tag={}",
-                            result.evolution_event.id.to_hex(),
-                            result.evolution_event.kind.as_u16(),
-                            h_tag);
-                        result.evolution_event
+                        println!("[MLS] update_group_data commit created, event_id={}",
+                            result.evolution_event.id.to_hex());
+                        (result.evolution_event, relays)
                     }
                     Err(e) => {
                         eprintln!("[MLS] Failed to update group data: {}", e);
@@ -1459,19 +1411,9 @@ impl MlsService {
                 }
             }; // engine dropped before await
 
-            // 2. Publish evolution event with retries
-            println!("[MLS] Publishing update evolution event to relays...");
-            if let Err(e) = publish_event_with_retries(client, &evolution_event).await {
-                eprintln!("[MLS] Failed to publish update commit after retries: {}", e);
-                // Rollback the pending commit so the group isn't stuck
-                if let Ok(s) = MdkSqliteStorage::new_unencrypted(&db_path) {
-                    let rollback_engine = MDK::new(s);
-                    if let Err(re) = rollback_engine.clear_pending_commit(&mls_group_id) {
-                        eprintln!("[MLS] Failed to rollback pending commit: {}", re);
-                    } else {
-                        println!("[MLS] Rolled back pending commit after publish failure");
-                    }
-                }
+            // 2. Publish evolution event and merge pending commit (MIP-03 ordering)
+            if let Err(e) = publish_and_merge_commit(client, &evolution_event, &db_path, &mls_group_id, &group_relays).await {
+                eprintln!("[MLS] Failed to publish/merge update-group-data commit: {}", e);
                 if let Some(handle) = TAURI_APP.get() {
                     handle.emit("mls_error", serde_json::json!({
                         "group_id": group_id_owned,
@@ -1480,36 +1422,6 @@ impl MlsService {
                 }
                 return;
             }
-
-            println!("[MLS] Evolution event published successfully, event_id={}", evolution_event.id.to_hex());
-
-            // 3. Merge pending commit
-            let storage = match MdkSqliteStorage::new_unencrypted(&db_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[MLS] Failed to open storage for merge: {}", e);
-                    if let Some(handle) = TAURI_APP.get() {
-                        handle.emit("mls_error", serde_json::json!({
-                            "group_id": group_id_owned,
-                            "error": format!("Failed to open storage for merge: {}", e)
-                        })).ok();
-                    }
-                    return;
-                }
-            };
-            let engine = MDK::new(storage);
-            if let Err(e) = engine.merge_pending_commit(&mls_group_id) {
-                eprintln!("[MLS] Failed to merge update commit: {}", e);
-                if let Some(handle) = TAURI_APP.get() {
-                    handle.emit("mls_error", serde_json::json!({
-                        "group_id": group_id_owned,
-                        "error": format!("Failed to merge commit: {}", e)
-                    })).ok();
-                }
-                return;
-            }
-
-            println!("[MLS] Pending commit merged for group {}", group_id_owned);
 
             // Track the event
             let _ = track_mls_event_processed(
