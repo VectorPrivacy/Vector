@@ -30,9 +30,9 @@ tauri-build = { version = "2.5.5", features = [] }
 [dependencies]
 nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
 nostr-blossom = "0.44.0"
-mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", rev = "fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f", features = ["mip04"] }
-mdk-sqlite-storage = { git = "https://github.com/marmot-protocol/mdk.git", rev = "fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f" }
-mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", rev = "fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f" }
+mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d", features = ["mip04"] }
+mdk-sqlite-storage = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
+mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time"] }
 futures-util = "0.3.31"
@@ -59,6 +59,9 @@ cpal = "0.16.0"
 hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Pin OpenMLS crypto deps to versions MDK was tested with (newer versions pull broken sha3/digest pre-release chain)
+openmls_rust_crypto = "=0.5.0"
+hpke-rs-rust-crypto = "=0.4.0"
 rayon = "1.11.0"
 memmap2 = "0.9"
 

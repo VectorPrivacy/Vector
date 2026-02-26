@@ -1307,6 +1307,71 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 18: MDK 0.6.0 MLS reset — JSON→postcard codec migration
+    //
+    // MDK switched MLS storage serialization from JSON to postcard binary
+    // (PR #179). All existing MLS data is incompatible. Additionally, the
+    // KeyPackage event format changed (required 'i' tag per MIP-00, PR #182)
+    // and hash_ref_bytes are now postcard-encoded (PR #178).
+    //
+    // This migration:
+    // 1. Wipes all group chat data (DMs preserved)
+    // 2. Clears all MLS metadata tables
+    // 3. Recreates mls_keypackages (hash_ref format changed)
+    // 4. Clears processed_wrappers (group welcomes need re-processing)
+    // 5. Flags keypackage regeneration for new format
+    //
+    // The separate MDK SQLite database (vector-mls.db) is wiped in
+    // MlsService::init_at_path() via a codec version marker file.
+    //
+    // Users will need to re-join their groups after upgrading.
+    // =========================================================================
+    run_atomic_migration(conn, 18, "MDK 0.6.0 MLS reset: JSON to postcard codec migration", |tx| {
+        // Delete group chats (chat_type=1) — CASCADE deletes their events + messages
+        tx.execute("DELETE FROM chats WHERE chat_type = 1", [])
+            .map_err(|e| format!("Failed to delete group chats: {}", e))?;
+
+        // Clear all MLS metadata tables
+        tx.execute("DELETE FROM mls_groups", [])
+            .map_err(|e| format!("Failed to clear mls_groups: {}", e))?;
+        tx.execute("DELETE FROM mls_event_cursors", [])
+            .map_err(|e| format!("Failed to clear mls_event_cursors: {}", e))?;
+        tx.execute("DELETE FROM mls_processed_events", [])
+            .map_err(|e| format!("Failed to clear mls_processed_events: {}", e))?;
+        tx.execute("DELETE FROM processed_wrappers", [])
+            .map_err(|e| format!("Failed to clear processed_wrappers: {}", e))?;
+
+        // Recreate mls_keypackages (hash_ref format changed from JSON to postcard)
+        tx.execute("DROP TABLE IF EXISTS mls_keypackages", [])
+            .map_err(|e| format!("Failed to drop mls_keypackages: {}", e))?;
+        tx.execute(
+            "CREATE TABLE mls_keypackages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_pubkey TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                keypackage_ref TEXT NOT NULL,
+                created_at INTEGER,
+                fetched_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            )",
+            [],
+        ).map_err(|e| format!("Failed to recreate mls_keypackages: {}", e))?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypackages_owner ON mls_keypackages(owner_pubkey)",
+            [],
+        ).map_err(|e| format!("Failed to create keypackages index: {}", e))?;
+
+        // Flag keypackage regeneration (connect() will publish with new format + 'i' tag)
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('mls_force_keypackage_regen', '1')",
+            [],
+        ).map_err(|e| format!("Failed to set keypackage regen flag: {}", e))?;
+
+        println!("[DB] Migration 18: Complete MLS reset for MDK 0.6.0 (postcard codec + 'i' tag).");
+        Ok(())
+    })?;
+
     Ok(())
 }
 

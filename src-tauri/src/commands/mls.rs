@@ -126,7 +126,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
         .collect();
 
     // Create device KeyPackage using persistent MLS engine inside a no-await scope
-    let (kp_encoded, kp_tags) = {
+    let (kp_encoded, kp_tags, _hash_ref_bytes) = {
         let mls_service = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
         let engine = mls_service.engine().map_err(|e| e.to_string())?;
         engine

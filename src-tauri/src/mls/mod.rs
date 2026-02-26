@@ -147,18 +147,35 @@ impl MlsService {
     /// Shared init logic: given an MLS directory, set up the database and return the service.
     fn init_at_path(mls_dir: std::path::PathBuf) -> Result<Self, MlsError> {
         let db_path = mls_dir.join("vector-mls.db");
+        let codec_marker = mls_dir.join("mls-codec-v2");
 
         // v0.2.x → v0.3.0: The old MDK used a dual-connection architecture with incompatible
         // OpenMLS storage. No migration path exists — wipe the MLS database file.
         // (Main DB group data is wiped by Migration 12 in account_manager.)
-        // TODO(v0.3.2+): Remove this block once v0.2.x migration window has passed.
+        // TODO(v0.5.0+): Remove this block once v0.2.x migration window has passed.
         if db_path.exists() {
             wipe_legacy_mls_database(&db_path);
+        }
+
+        // v0.3.x → v0.4.0: MDK 0.6.0 switched from JSON to postcard codec.
+        // All existing MLS cryptographic state is incompatible — wipe the database file.
+        // (Main DB group data is wiped by Migration 18 in account_manager.)
+        // Detection: if DB exists but no codec-v2 marker file, it's pre-postcard.
+        if db_path.exists() && !codec_marker.exists() {
+            println!("[MLS] Detected pre-postcard MLS database — wiping for codec upgrade...");
+            let _ = std::fs::remove_file(&db_path);
+            let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+            let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(db_path.with_extension("db-journal"));
+            println!("[MLS] Pre-postcard database wiped. Groups will need to be re-joined.");
         }
 
         // Verify we can create a storage instance (validates path)
         let _storage = MdkSqliteStorage::new_unencrypted(&db_path)
             .map_err(|e| MlsError::StorageError(format!("init sqlite storage: {}", e)))?;
+
+        // Write codec version marker for future upgrades
+        let _ = std::fs::write(&codec_marker, b"postcard");
 
         Ok(Self { db_path })
     }
@@ -2484,7 +2501,7 @@ impl MlsService {
 
             // 1) Saul publishes a device KeyPackage (so Kim can add him)
             println!("[MLS Smoke Test] Saul publishing device KeyPackage...");
-            let (saul_kp_encoded, saul_kp_tags) = saul_mls
+            let (saul_kp_encoded, saul_kp_tags, _saul_hash_ref) = saul_mls
                 .create_key_package_for_event(&saul_keys.public_key(), [relay_url.clone()])
                 .map_err(|e| MlsError::NostrMlsError(format!("create_key_package_for_event (saul): {}", e)))?;
     

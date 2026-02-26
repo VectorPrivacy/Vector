@@ -4138,8 +4138,8 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "mdk-core"
-version = "0.5.3"
-source = "git+https://github.com/marmot-protocol/mdk.git?rev=fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f#fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f"
+version = "0.6.0"
+source = "git+https://github.com/marmot-protocol/mdk.git?rev=136a9ee929580206ea0357d48d9766427918186d#136a9ee929580206ea0357d48d9766427918186d"
 dependencies = [
  "blurhash",
  "chacha20poly1305",
@@ -4162,8 +4162,8 @@ dependencies = [
 
 [[package]]
 name = "mdk-sqlite-storage"
-version = "0.5.1"
-source = "git+https://github.com/marmot-protocol/mdk.git?rev=fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f#fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f"
+version = "0.6.0"
+source = "git+https://github.com/marmot-protocol/mdk.git?rev=136a9ee929580206ea0357d48d9766427918186d#136a9ee929580206ea0357d48d9766427918186d"
 dependencies = [
  "getrandom 0.3.2",
  "hex",
@@ -4183,12 +4183,13 @@ dependencies = [
 
 [[package]]
 name = "mdk-storage-traits"
-version = "0.5.1"
-source = "git+https://github.com/marmot-protocol/mdk.git?rev=fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f#fe69c3e50e4a66755ed4f04d34f5453c1ac6fd5f"
+version = "0.6.0"
+source = "git+https://github.com/marmot-protocol/mdk.git?rev=136a9ee929580206ea0357d48d9766427918186d#136a9ee929580206ea0357d48d9766427918186d"
 dependencies = [
  "nostr",
  "openmls",
  "openmls_traits",
+ "postcard",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
@@ -5235,8 +5236,9 @@ dependencies = [
 
 [[package]]
 name = "openmls"
-version = "0.7.1"
-source = "git+https://github.com/openmls/openmls?rev=b90ca23b1238d9e189142d06234527b2d344d748#b90ca23b1238d9e189142d06234527b2d344d748"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcb512bfe6a55777518853ea535c6241f069cb0e8984678c117151d2a1e7e903"
 dependencies = [
  "log",
  "openmls_traits",
@@ -5250,8 +5252,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_basic_credential"
-version = "0.4.1"
-source = "git+https://github.com/openmls/openmls?rev=b90ca23b1238d9e189142d06234527b2d344d748#b90ca23b1238d9e189142d06234527b2d344d748"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "983e8be1457dd6f316f409292cec334af3b57b49a19deadc925c83c3c35e15b6"
 dependencies = [
  "ed25519-dalek",
  "openmls_traits",
@@ -5263,8 +5266,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_memory_storage"
-version = "0.4.1"
-source = "git+https://github.com/openmls/openmls?rev=b90ca23b1238d9e189142d06234527b2d344d748#b90ca23b1238d9e189142d06234527b2d344d748"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a52c927ddb9940acb96d51aebd54b8b9c601c7119e6609622fb3f2cbe16abe3"
 dependencies = [
  "log",
  "openmls_traits",
@@ -5275,8 +5279,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_rust_crypto"
-version = "0.4.1"
-source = "git+https://github.com/openmls/openmls?rev=b90ca23b1238d9e189142d06234527b2d344d748#b90ca23b1238d9e189142d06234527b2d344d748"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8bc087eeb4cf230327b156014df77464f62ee5fcd682c3292be11fbba8e7811"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -5299,8 +5304,9 @@ dependencies = [
 
 [[package]]
 name = "openmls_traits"
-version = "0.4.1"
-source = "git+https://github.com/openmls/openmls?rev=b90ca23b1238d9e189142d06234527b2d344d748#b90ca23b1238d9e189142d06234527b2d344d748"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f88ccdd53448dfdbfa5b8da8ba4e527c418fdb966418172bace2e3b41eedd56"
 dependencies = [
  "serde",
  "tls_codec",
@@ -9239,6 +9245,7 @@ dependencies = [
  "fast-thumbhash",
  "futures-util",
  "hound",
+ "hpke-rs-rust-crypto",
  "http 1.3.1",
  "image",
  "iroh",
@@ -9251,6 +9258,7 @@ dependencies = [
  "ndk-context",
  "nostr-blossom",
  "nostr-sdk",
+ "openmls_rust_crypto",
  "openssl",
  "rand 0.8.5",
  "rayon",
