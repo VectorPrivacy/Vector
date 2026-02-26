@@ -9,10 +9,25 @@ let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
  * @property {"android" | "ios" | "macos" | "windows" | "linux" | "unknown"} os - The operating system
  * @property {boolean} is_mobile - Whether the platform is mobile (Android or iOS)
  * @property {boolean} debug_mode - Whether the app is running in debug/development mode
+ * @property {string|null} media_url - Localhost media server URL prefix (Android only)
  */
 
 /** @type {PlatformFeatures} */
 let platformFeatures = null;
+
+/**
+ * Returns a URL suitable for media element `src` attributes.
+ * On Android, uses the localhost media server (HTTP Range support for seeking/streaming).
+ * On other platforms, uses the standard Tauri asset protocol.
+ * @param {string} filePath - Absolute file path on disk
+ * @returns {string} URL for use in media element src
+ */
+function mediaUrl(filePath) {
+    if (platformFeatures && platformFeatures.media_url) {
+        return `${platformFeatures.media_url}/${encodeURIComponent(filePath)}`;
+    }
+    return convertFileSrc(filePath);
+}
 
 /**
  * Fetch platform features from the backend

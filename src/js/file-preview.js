@@ -357,24 +357,12 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
             `;
         }
     } else if (isVideo) {
-        // Show video preview (not supported on Android with content URIs)
-        const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-        
-        if (isAndroid) {
-            // On Android, just show video icon since video preview doesn't work with content URIs
-            contentArea.innerHTML = `
-                <div class="file-preview-icon-container">
-                    <div class="icon icon-video file-preview-icon"></div>
-                </div>
-            `;
-        } else {
-            const videoSrc = convertFileSrc(filepath);
-            contentArea.innerHTML = `
-                <div class="file-preview-video-container">
-                    <video src="${videoSrc}" class="file-preview-video" controls muted></video>
-                </div>
-            `;
-        }
+        const videoSrc = mediaUrl(filepath);
+        contentArea.innerHTML = `
+            <div class="file-preview-video-container">
+                <video src="${videoSrc}" class="file-preview-video" controls muted></video>
+            </div>
+        `;
     } else {
         // Show file icon
         const iconClass = getFileIcon(filepath);

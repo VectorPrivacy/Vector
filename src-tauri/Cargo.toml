@@ -34,7 +34,7 @@ mdk-core = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee9
 mdk-sqlite-storage = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
 mdk-storage-traits = { git = "https://github.com/marmot-protocol/mdk.git", rev = "136a9ee929580206ea0357d48d9766427918186d" }
 bip39 = { version = "2.2.2", features = ["rand"] }
-tokio = { version = "1.49.0", features = ["sync", "time"] }
+tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
 tauri = { version = "2.10.2", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -64,6 +64,9 @@ openmls_rust_crypto = "=0.5.0"
 hpke-rs-rust-crypto = "=0.4.0"
 rayon = "1.11.0"
 memmap2 = "0.9"
+
+# Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
+memchr = "2"
 
 # Mini Apps (WebXDC) support
 zip = { version = "2.4", default-features = false, features = ["deflate-zlib"] }

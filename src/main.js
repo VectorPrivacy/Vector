@@ -8220,7 +8220,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 pMessage.appendChild(imgContainer);
                 } else if (platformFeatures.os !== 'linux' && ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
                 // Audio
-                handleAudioAttachment(cAttachment, assetUrl, pMessage, msg);
+                handleAudioAttachment(cAttachment, pMessage, msg);
                 } else if (platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
                 // Videos
                 const handleMetadataLoaded = (video) => {
@@ -8239,32 +8239,22 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     }
                 };
                 
-                // Platform-specific video creation
-                if (platformFeatures.os === 'android') {
-                    // Android always uses blob method with size limit
-                    createAndroidVideo(assetUrl, cAttachment, handleMetadataLoaded, (element) => {
-                        pMessage.appendChild(element);
-                    });
-                } else {
-                    // Standard video element for other platforms
-                    const vidPreview = document.createElement('video');
-                    vidPreview.setAttribute('controlsList', 'nodownload');
-                    vidPreview.controls = true;
-                    vidPreview.style.width = `100%`;
-                    vidPreview.style.height = `auto`;
-                    vidPreview.style.borderRadius = `8px`;
-                    vidPreview.style.cursor = `pointer`;
-                    vidPreview.preload = "metadata";
-                    vidPreview.playsInline = true;
-                    vidPreview.src = assetUrl;
-                    
-                    // Add metadata loaded handler
-                    vidPreview.addEventListener('loadedmetadata', () => {
-                        handleMetadataLoaded(vidPreview);
-                    }, { once: true });
-                    
-                    pMessage.appendChild(vidPreview);
-                }
+                const vidPreview = document.createElement('video');
+                vidPreview.setAttribute('controlsList', 'nodownload');
+                vidPreview.controls = true;
+                vidPreview.style.width = `100%`;
+                vidPreview.style.height = `auto`;
+                vidPreview.style.borderRadius = `8px`;
+                vidPreview.style.cursor = `pointer`;
+                vidPreview.preload = "metadata";
+                vidPreview.playsInline = true;
+                vidPreview.src = mediaUrl(cAttachment.path);
+
+                vidPreview.addEventListener('loadedmetadata', () => {
+                    handleMetadataLoaded(vidPreview);
+                }, { once: true });
+
+                pMessage.appendChild(vidPreview);
             } else {
                 // File Attachment
                 const ext = cAttachment.extension.toLowerCase();
@@ -9590,18 +9580,11 @@ async function closeChat() {
             // Streamable media (audio + video) should be paused, then force-unloaded
             if (domMedia instanceof HTMLMediaElement) {
                 domMedia.pause();
-                
-                // For Android blob URLs, revoke them before clearing
-                if (platformFeatures.os === 'android' && domMedia.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(domMedia.src);
-                }
-                
                 domMedia.removeAttribute('src'); // Better than setting to empty string
                 domMedia.load();
             }
             // Static media (images) should simply be unloaded
             if (domMedia instanceof HTMLImageElement) {
-                // Also check for blob URLs on images if you use them
                 if (domMedia.src.startsWith('blob:')) {
                     URL.revokeObjectURL(domMedia.src);
                 }

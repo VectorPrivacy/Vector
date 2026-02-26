@@ -25,6 +25,15 @@ mod util;
 #[path = "android/mod.rs"]
 mod android;
 
+
+/// Media server state (Android only) — holds the localhost URL prefix
+/// that the frontend uses instead of `asset://` for media elements.
+#[cfg(target_os = "android")]
+pub struct MediaServerState {
+    /// Full URL prefix: `http://127.0.0.1:{port}/{token}`
+    pub url_prefix: String,
+}
+
 #[cfg(feature = "whisper")]
 mod whisper;
 
@@ -211,7 +220,33 @@ pub fn run() {
 
             // Set as our accessible static app handle
             TAURI_APP.set(handle.clone()).unwrap();
-            
+
+            // Start localhost media server on Android (provides Range request support for
+            // <video> and <audio> elements that asset:// doesn't support)
+            #[cfg(target_os = "android")]
+            {
+                let mut allowed_dirs = Vec::new();
+                if let Ok(dir) = handle.path().download_dir() {
+                    allowed_dirs.push(dir.join("vector"));
+                }
+                if let Ok(dir) = handle.path().document_dir() {
+                    allowed_dirs.push(dir.join("vector"));
+                }
+                if let Ok(dir) = handle.path().app_data_dir() {
+                    allowed_dirs.push(dir);
+                }
+                let url_prefix = match tauri::async_runtime::block_on(android::media_server::start(allowed_dirs)) {
+                    Ok((port, token)) => format!("http://127.0.0.1:{port}/{token}"),
+                    Err(e) => {
+                        eprintln!("[media_server] failed to start: {e}");
+                        String::new() // empty = frontend falls back to asset://
+                    }
+                };
+                app.manage(MediaServerState {
+                    url_prefix,
+                });
+            }
+
             // Start the profile sync background processor
             tauri::async_runtime::spawn(async {
                 profile_sync::start_profile_sync_processor().await;

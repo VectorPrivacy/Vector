@@ -419,6 +419,41 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let hash_file_path = dir.join(&filename);
             std::fs::write(&hash_file_path, &*attached_file.bytes).unwrap();
 
+            // Add the attachment to the pending message with the local path immediately,
+            // so the frontend can show a preview (with lowered opacity + progress bar)
+            // while the upload is in progress — matching the DM behavior.
+            {
+                let preview_attachment = Attachment {
+                    id: file_hash.clone(),
+                    key: String::new(),
+                    nonce: String::new(),
+                    extension: attached_file.extension.clone(),
+                    url: String::new(), // No URL yet — upload hasn't started
+                    path: hash_file_path.to_string_lossy().to_string(),
+                    size: attached_file.bytes.len() as u64,
+                    img_meta: attached_file.img_meta.clone(),
+                    downloading: false,
+                    downloaded: true, // Local file exists, so frontend can preview it
+                    webxdc_topic: webxdc_topic.clone(),
+                    group_id: Some(receiver.clone()),
+                    original_hash: Some(file_hash.clone()),
+                    scheme_version: None,
+                    mls_filename: Some(filename.clone()),
+                };
+                let compact_att = crate::message::CompactAttachment::from_attachment_owned(preview_attachment);
+
+                let mut state = STATE.lock().await;
+                state.add_attachment_to_message(&receiver, &pending_id, compact_att);
+
+                // Emit to frontend so the upload preview is visible immediately
+                if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id, |_| {}) {
+                    handle.emit("mls_message_new", serde_json::json!({
+                        "group_id": &receiver,
+                        "message": msg
+                    })).ok();
+                }
+            }
+
             // Create progress callback for MLS upload
             let pending_id_for_callback = Arc::clone(&pending_id);
             let handle_for_callback = handle.clone();
@@ -447,11 +482,11 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 }
             };
 
-            // Update the pending message with the uploaded attachment
+            // Replace the preview attachment with the final one (adds URL, nonce, etc.)
             {
-                let attachment = Attachment {
+                let final_attachment = Attachment {
                     id: file_hash.clone(),
-                    key: String::new(),  // MLS uses derived keys, not explicit
+                    key: String::new(),
                     nonce: mls_upload_result.nonce.clone(),
                     extension: attached_file.extension.clone(),
                     url: mls_upload_result.url.clone(),
@@ -466,13 +501,15 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     scheme_version: Some(mls_upload_result.scheme_version.clone()),
                     mls_filename: Some(filename.clone()),
                 };
-                let compact_att = crate::message::CompactAttachment::from_attachment_owned(attachment);
+                let compact_att = crate::message::CompactAttachment::from_attachment_owned(final_attachment);
 
                 let mut state = STATE.lock().await;
-                state.add_attachment_to_message(&receiver, &pending_id, compact_att);
-
-                // Emit update to frontend
-                if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id, |_| {}) {
+                // Replace the preview attachment (not push a second one)
+                if let Some(msg) = state.update_message_in_chat(&receiver, &pending_id, |m| {
+                    if let Some(att) = m.attachments.last_mut() {
+                        *att = compact_att;
+                    }
+                }) {
                     handle.emit("mls_message_new", serde_json::json!({
                         "group_id": &receiver,
                         "message": msg

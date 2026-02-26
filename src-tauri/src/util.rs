@@ -722,12 +722,22 @@ static MIME_TO_EXT: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::ne
 /// Convert a file extension (with or without leading dot) to a MIME type.
 /// Returns "application/octet-stream" when unknown.
 pub fn mime_from_extension(extension: &str) -> String {
-    let ext = extension.trim().trim_start_matches('.').to_lowercase();
+    mime_from_extension_static(extension).to_string()
+}
+
+/// Zero-allocation variant — returns a `&'static str` instead of `String`.
+pub fn mime_from_extension_static(extension: &str) -> &'static str {
+    let ext = extension.trim().trim_start_matches('.');
+    // Fast path: try direct lookup (extensions are usually already lowercase)
+    if let Some(&mime) = EXT_TO_MIME.get(ext) {
+        return mime;
+    }
+    // Slow path: lowercase and retry
+    let lower = ext.to_lowercase();
     EXT_TO_MIME
-        .get(ext.as_str())
+        .get(lower.as_str())
         .copied()
         .unwrap_or("application/octet-stream")
-        .to_string()
 }
 
 /// Convert a MIME type to a file extension.

@@ -9254,6 +9254,7 @@ dependencies = [
  "mdk-core",
  "mdk-sqlite-storage",
  "mdk-storage-traits",
+ "memchr",
  "memmap2",
  "ndk-context",
  "nostr-blossom",

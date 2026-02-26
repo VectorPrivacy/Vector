@@ -1356,11 +1356,10 @@ function createTranscriptionUI(transcriptionData, audioElement) {
 /**
  * Handles audio attachment rendering and transcription functionality.
  * @param {Object} cAttachment - Attachment data
- * @param {string} assetUrl - URL to the audio asset
  * @param {HTMLElement} pMessage - Message container element
  * @param {Object} msg - Message data
  */
-function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
+function handleAudioAttachment(cAttachment, pMessage, msg) {
     const audioContainer = document.createElement('div');
     audioContainer.classList.add('audio-message-container', 'custom-audio-player');
 
@@ -1377,21 +1376,7 @@ function handleAudioAttachment(cAttachment, assetUrl, pMessage, msg) {
     };
     audPreview.addEventListener('loadedmetadata', onMetadataLoaded);
     
-    // Platform-specific audio creation
-    if (platformFeatures.os === 'android') {
-        // Android uses blob method with size limit
-        createAndroidAudio(assetUrl, cAttachment, (result) => {
-            if (result.blobUrl) {
-                audPreview.src = result.blobUrl;
-            } else if (result.errorElement) {
-                // Replace the entire audio container with the error element
-                audioContainer.replaceWith(result.errorElement);
-            }
-        });
-    } else {
-        // Standard audio element for other platforms
-        audPreview.src = assetUrl;
-    }
+    audPreview.src = mediaUrl(cAttachment.path);
 
     // Create custom audio player
     const customPlayer = document.createElement('div');

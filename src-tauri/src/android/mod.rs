@@ -1,6 +1,7 @@
 pub mod background_sync;
 pub mod clipboard;
 pub mod filesystem;
+pub mod media_server;
 pub mod miniapp;
 pub mod miniapp_jni;
 pub mod permissions;

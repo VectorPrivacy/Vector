@@ -28,6 +28,10 @@ pub struct PlatformFeatures {
     pub os: String,
     pub is_mobile: bool,
     pub debug_mode: bool,
+    /// Localhost media server URL prefix (Android only).
+    /// When set, the frontend uses this instead of `asset://` for media elements
+    /// to get proper HTTP Range request support (seeking, streaming).
+    pub media_url: Option<String>,
 }
 
 // ============================================================================
@@ -53,12 +57,23 @@ pub async fn get_platform_features() -> PlatformFeatures {
 
     let is_mobile = cfg!(target_os = "android") || cfg!(target_os = "ios");
 
+    // On Android, read the media server URL prefix from managed state
+    #[cfg(target_os = "android")]
+    let media_url = TAURI_APP.get().and_then(|handle| {
+        handle.try_state::<crate::MediaServerState>()
+            .map(|state| state.url_prefix.clone())
+    });
+
+    #[cfg(not(target_os = "android"))]
+    let media_url: Option<String> = None;
+
     PlatformFeatures {
         transcription: cfg!(feature = "whisper"),
         notification_sounds: cfg!(desktop),
         os: os.to_string(),
         is_mobile,
         debug_mode: cfg!(debug_assertions),
+        media_url,
     }
 }
 
