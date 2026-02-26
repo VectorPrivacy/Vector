@@ -73,9 +73,7 @@ async function minifyJs(filePath) {
             passes: 3,
             pure_getters: true,
         },
-        mangle: {
-            toplevel: true,
-        },
+        mangle: true,
         format: {
             comments: false,
         },

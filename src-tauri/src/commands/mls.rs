@@ -842,6 +842,7 @@ pub async fn create_mls_group(
     avatar_ref: Option<String>,
     avatar_cached: Option<String>,
     initial_member_devices: Vec<(String, String)>,
+    admin_ids: Vec<String>,
     description: Option<String>,
     image_hash: Option<String>,
     image_key: Option<String>,
@@ -878,6 +879,7 @@ pub async fn create_mls_group(
                 image_hash_bytes,
                 image_key_bytes,
                 image_nonce_bytes,
+                &admin_ids,
             )
                 .await
                 .map_err(|e| e.to_string())
@@ -903,6 +905,7 @@ pub async fn create_mls_group(
 pub async fn create_group_chat(
     group_name: String,
     member_ids: Vec<String>,
+    admin_ids: Vec<String>,
     group_description: Option<String>,
     image_hash: Option<String>,
     image_key: Option<String>,
@@ -945,6 +948,7 @@ pub async fn create_group_chat(
         avatar_blob_url,
         avatar_cached,
         initial_member_devices,
+        admin_ids,
         group_description,
         image_hash,
         image_key,

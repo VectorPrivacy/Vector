@@ -5809,6 +5809,25 @@ select:disabled:hover {
     background-color: var(--icon-color-primary);
 }
 
+.member-pick-admin {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-right: 6px;
+    position: relative;
+    z-index: 2;
+    opacity: 0.3;
+    transition: opacity 0.15s ease;
+    flex-shrink: 0;
+}
+.member-pick-admin:hover { opacity: 0.7; }
+.member-pick-admin.active { opacity: 1; }
+.member-pick-admin .icon { width: 14px; height: 14px; background-color: #fce459; }
+
 /* MLS Group Invite Styles */
 .chatlist-invite {
   cursor: default !important;

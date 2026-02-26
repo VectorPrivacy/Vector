@@ -253,6 +253,7 @@ impl MlsService {
         image_hash: Option<[u8; 32]>,
         image_key: Option<[u8; 32]>,
         image_nonce: Option<[u8; 12]>,
+        admin_npubs: &[String],
     ) -> Result<String, MlsError> {
         // Persistent group creation using sqlite-backed engine.
         // - Resolve signer and relay config
@@ -285,6 +286,14 @@ impl MlsService {
             Some(d) => d.to_string(),
             None => format!("Vector group: {}", name),
         };
+        let mut admins = vec![my_pubkey];
+        for npub in admin_npubs {
+            if let Ok(pk) = nostr_sdk::PublicKey::from_bech32(npub) {
+                if pk != my_pubkey {
+                    admins.push(pk);
+                }
+            }
+        }
         let group_config = NostrGroupConfigData::new(
             name.to_string(),
             desc.clone(),
@@ -292,7 +301,7 @@ impl MlsService {
             image_key,
             image_nonce,
             relay_urls,
-            vec![my_pubkey], // admins - moved from create_group call
+            admins,
         );
 
         // Resolve member KeyPackage events before engine usage (awaits allowed here)

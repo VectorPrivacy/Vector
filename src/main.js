@@ -11840,6 +11840,7 @@ window.onresize = adjustSize;
  * Keep this decoupled from arrChats.
  */
 let arrSelectedGroupMembers = [];
+let arrSelectedGroupAdmins = [];
 /** Path to the selected group avatar image file (null if none selected) */
 let strCreateGroupAvatarPath = null;
 /**
@@ -11938,6 +11939,23 @@ function renderCreateGroupList(filterText = '') {
         if (name) twemojify(nameSpan);
         row.appendChild(nameSpan);
 
+        const isAdmin = arrSelectedGroupAdmins.includes(npub);
+        const adminToggle = document.createElement('div');
+        adminToggle.className = 'member-pick-admin' + (isAdmin ? ' active' : '');
+        adminToggle.style.display = isSelected ? '' : 'none';
+        adminToggle.innerHTML = '<span class="icon icon-crown"></span>';
+        adminToggle.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (arrSelectedGroupAdmins.includes(npub)) {
+                arrSelectedGroupAdmins = arrSelectedGroupAdmins.filter(n => n !== npub);
+            } else {
+                arrSelectedGroupAdmins.push(npub);
+            }
+            renderCreateGroupList(domCreateGroupFilter?.value || '');
+        });
+        row.appendChild(adminToggle);
+
         const indicator = document.createElement('div');
         indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
         row.appendChild(indicator);
@@ -11947,6 +11965,7 @@ function renderCreateGroupList(filterText = '') {
             e.stopPropagation();
             if (arrSelectedGroupMembers.includes(npub)) {
                 arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== npub);
+                arrSelectedGroupAdmins = arrSelectedGroupAdmins.filter(n => n !== npub);
             } else {
                 arrSelectedGroupMembers.push(npub);
             }
@@ -12042,6 +12061,7 @@ function openCreateGroup() {
 
     // Reset state
     arrSelectedGroupMembers = [];
+    arrSelectedGroupAdmins = [];
     strCreateGroupAvatarPath = null;
     fCreateGroupAttempt = false;
     if (domCreateGroupName) domCreateGroupName.value = '';
@@ -12201,6 +12221,7 @@ Create Group UI wiring
             const newGroupId = await invoke('create_group_chat', {
                 groupName: groupName,
                 memberIds: memberIds,
+                adminIds: [...arrSelectedGroupAdmins],
                 groupDescription: groupDescription,
                 imageHash: avatarResult?.image_hash || null,
                 imageKey: avatarResult?.image_key || null,
