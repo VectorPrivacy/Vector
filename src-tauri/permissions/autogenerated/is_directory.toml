@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-is-directory"
+description = "Enables the is_directory command without any pre-configured scope."
+commands.allow = ["is_directory"]
+
+[[permission]]
+identifier = "deny-is-directory"
+description = "Denies the is_directory command without any pre-configured scope."
+commands.deny = ["is_directory"]

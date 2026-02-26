@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cleanup-zip"
+description = "Enables the cleanup_zip command without any pre-configured scope."
+commands.allow = ["cleanup_zip"]
+
+[[permission]]
+identifier = "deny-cleanup-zip"
+description = "Denies the cleanup_zip command without any pre-configured scope."
+commands.deny = ["cleanup_zip"]

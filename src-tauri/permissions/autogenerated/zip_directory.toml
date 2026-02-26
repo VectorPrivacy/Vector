@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-zip-directory"
+description = "Enables the zip_directory command without any pre-configured scope."
+commands.allow = ["zip_directory"]
+
+[[permission]]
+identifier = "deny-zip-directory"
+description = "Denies the zip_directory command without any pre-configured scope."
+commands.deny = ["zip_directory"]

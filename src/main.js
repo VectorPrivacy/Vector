@@ -106,6 +106,7 @@ const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domAttachmentPanel = document.getElementById('attachment-panel');
 const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
 const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
+const domAttachmentPanelFolder = document.getElementById('attachment-panel-folder');
 const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
 const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
 const domMiniAppsGrid = document.getElementById('miniapps-grid');
@@ -10979,6 +10980,20 @@ window.addEventListener("DOMContentLoaded", async () => {
                 await openFilePreview(filepath, strOpenChat, strReplyRef);
             }
         };
+
+        // Show Folder button on desktop only
+        if (domAttachmentPanelFolder) {
+            domAttachmentPanelFolder.style.display = '';
+            domAttachmentPanelFolder.onclick = async () => {
+                closeAttachmentPanel();
+                let folderPath = await selectFolder();
+                if (folderPath) {
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    await openFolderZipPreview(folderPath, strOpenChat, strReplyRef);
+                }
+            };
+        }
     }
 
     // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
@@ -11425,8 +11440,14 @@ domChatMessageInput.oninput = async () => {
                     // Reset reply selection while passing a copy of the reference to the backend
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
-                    // Show file preview instead of sending directly
-                    await openFilePreview(event.payload.paths[0], strOpenChat, strReplyRef);
+                    // Check if dropped path is a directory or file
+                    const droppedPath = event.payload.paths[0];
+                    const isDir = await invoke('is_directory', { path: droppedPath });
+                    if (isDir) {
+                        await openFolderZipPreview(droppedPath, strOpenChat, strReplyRef);
+                    } else {
+                        await openFilePreview(droppedPath, strOpenChat, strReplyRef);
+                    }
                 } else {
                     // TODO: remove hover effects
                 }

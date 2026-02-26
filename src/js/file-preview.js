@@ -15,6 +15,10 @@ let compressionInProgress = false;
 let compressionComplete = false;
 let compressionPollingInterval = null;
 let pendingMiniAppInfo = null; // For marketplace publishing: stores Mini App info
+let pendingZipPath = null; // For folder zip: temp zip path for cleanup
+let zipInProgress = false; // For folder zip: compression in progress
+let pendingZipUnlisten = null; // For folder zip: unlisten function for zip_progress events
+let filePreviewGeneration = 0; // Guards against setTimeout race on rapid close+reopen
 
 // Image extensions supported by the image crate
 const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
@@ -212,6 +216,8 @@ function createFilePreviewOverlay() {
         if (e.key === 'Escape') {
             closeFilePreview();
         } else if (e.key === 'Enter') {
+            const sendBtn = document.getElementById('file-preview-send');
+            if (sendBtn && sendBtn.disabled) return;
             e.preventDefault();
             sendPreviewedFile();
         }
@@ -940,6 +946,287 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
 }
 
 /**
+ * Build a tree structure from the flat file list
+ * @param {Array} fileList - Array of {path, size, is_dir} entries
+ * @returns {object} Tree root with children
+ */
+function buildFileTree(fileList) {
+    const root = { name: '', children: [], files: [] };
+
+    for (const entry of fileList) {
+        const cleanPath = entry.path.replace(/\/$/, '');
+        const parts = cleanPath.split('/');
+
+        if (entry.is_dir) {
+            // Ensure directory nodes exist in tree
+            let node = root;
+            for (const part of parts) {
+                let child = node.children.find(c => c.name === part);
+                if (!child) {
+                    child = { name: part, children: [], files: [] };
+                    node.children.push(child);
+                }
+                node = child;
+            }
+        } else {
+            // Place file in its parent directory node
+            const fileName = parts.pop();
+            let node = root;
+            for (const part of parts) {
+                let child = node.children.find(c => c.name === part);
+                if (!child) {
+                    child = { name: part, children: [], files: [] };
+                    node.children.push(child);
+                }
+                node = child;
+            }
+            node.files.push({ name: fileName, size: entry.size });
+        }
+    }
+
+    return root;
+}
+
+/**
+ * Render a tree node as collapsible HTML
+ * @param {object} node - Tree node
+ * @param {number} depth - Nesting depth
+ * @returns {string} HTML string
+ */
+function renderTreeNode(node, depth) {
+    if (depth > 50) return '<div class="zip-file-more">Deeply nested...</div>';
+    let html = '';
+
+    // Render child directories first (sorted)
+    const sortedDirs = [...node.children].sort((a, b) => a.name.localeCompare(b.name));
+    for (const child of sortedDirs) {
+        const childHasContent = child.children.length > 0 || child.files.length > 0;
+        html += `<div class="zip-tree-dir" style="padding-left: ${depth * 16}px;">
+            <div class="zip-tree-dir-header${childHasContent ? ' zip-tree-toggle' : ''}">
+                <span class="zip-tree-chevron icon icon-chevron-down"></span>
+                <span class="zip-file-icon icon-folder"></span>
+                <span class="zip-file-name">${escapeHtml(child.name)}</span>
+            </div>
+            <div class="zip-tree-children">
+                ${renderTreeNode(child, depth + 1)}
+            </div>
+        </div>`;
+    }
+
+    // Render files (sorted)
+    const sortedFiles = [...node.files].sort((a, b) => a.name.localeCompare(b.name));
+    for (const file of sortedFiles) {
+        html += `<div class="zip-file-entry" style="padding-left: ${depth * 16 + 22}px;">
+            <span class="zip-file-icon icon-file"></span>
+            <span class="zip-file-name">${escapeHtml(file.name)}</span>
+            <span class="zip-file-size">${formatFileSize(file.size)}</span>
+        </div>`;
+    }
+
+    return html;
+}
+
+/**
+ * Build HTML for the file tree in zip preview
+ * @param {Array} fileList - Array of {path, size, is_dir} entries
+ * @param {number} totalCount - Total file + dir count (from server, may exceed fileList length)
+ * @returns {string} HTML string
+ */
+function buildFileListHtml(fileList, totalCount) {
+    const tree = buildFileTree(fileList);
+    let html = '<div class="file-preview-file-list">';
+    html += renderTreeNode(tree, 0);
+
+    const displayedCount = fileList.length;
+    if (totalCount > displayedCount) {
+        html += `<div class="zip-file-more">...and ${totalCount - displayedCount} more</div>`;
+    }
+
+    html += '</div>';
+    return html;
+}
+
+/**
+ * Set up click handlers for collapsible directory toggles
+ * Call this after inserting buildFileListHtml into the DOM
+ */
+function initFileTreeToggles() {
+    // Auto-expand top-level directories
+    const topLevel = document.querySelectorAll('.file-preview-file-list > .zip-tree-dir > .zip-tree-dir-header + .zip-tree-children');
+    for (const children of topLevel) {
+        children.style.maxHeight = 'none';
+        const chevron = children.previousElementSibling.querySelector('.zip-tree-chevron');
+        if (chevron) chevron.classList.add('zip-tree-chevron-open');
+    }
+
+    const toggles = document.querySelectorAll('.zip-tree-toggle');
+    for (const toggle of toggles) {
+        toggle.addEventListener('click', () => {
+            const children = toggle.nextElementSibling;
+            const chevron = toggle.querySelector('.zip-tree-chevron');
+
+            if (children.style.maxHeight && children.style.maxHeight !== '0px') {
+                // Close: animate from current height to 0
+                children.style.maxHeight = children.scrollHeight + 'px';
+                // Force reflow so the browser registers the starting value
+                children.offsetHeight; // eslint-disable-line no-unused-expressions
+                children.style.maxHeight = '0px';
+                chevron.classList.remove('zip-tree-chevron-open');
+            } else {
+                // Open: animate from 0 to exact content height, then unset for flexibility
+                children.style.maxHeight = children.scrollHeight + 'px';
+                chevron.classList.add('zip-tree-chevron-open');
+                // After transition, remove max-height so nested toggles can expand freely
+                const onEnd = (e) => {
+                    if (e.propertyName !== 'max-height') return;
+                    children.removeEventListener('transitionend', onEnd);
+                    if (children.style.maxHeight !== '0px') {
+                        children.style.maxHeight = 'none';
+                    }
+                };
+                children.addEventListener('transitionend', onEnd);
+            }
+        });
+    }
+}
+
+/**
+ * Open folder zip preview: compresses a directory and shows a preview
+ * @param {string} dirPath - Path to the directory
+ * @param {string} receiver - Receiver pubkey or group ID
+ * @param {string} replyRef - Reply reference (optional)
+ */
+async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
+    if (!filePreviewOverlay) {
+        createFilePreviewOverlay();
+    }
+
+    // Clean up any previous zip state (e.g., drag-drop while overlay is already open)
+    if (pendingZipUnlisten) { pendingZipUnlisten(); pendingZipUnlisten = null; }
+    if (pendingZipPath || zipInProgress) {
+        invoke('cleanup_zip').catch(() => {});
+    }
+
+    pendingFile = null;
+    pendingFileBytes = null;
+    pendingFileObject = null;
+    pendingReceiver = receiver;
+    pendingReplyRef = replyRef;
+    pendingZipPath = null;
+    zipInProgress = true;
+
+    // Track generation so stale catch blocks don't touch DOM
+    const myGeneration = ++filePreviewGeneration;
+
+    const folderName = dirPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'folder';
+
+    // Show overlay immediately with spinner
+    const contentArea = document.getElementById('file-preview-content');
+    contentArea.innerHTML = `
+        <div class="file-preview-icon-container">
+            <div class="zip-progress-spinner" id="zip-progress-spinner"></div>
+        </div>
+        <div class="file-preview-zip-label" id="zip-progress-label">Compressing...</div>
+    `;
+
+    document.getElementById('file-preview-name').textContent = folderName + '.zip';
+    document.getElementById('file-preview-size').textContent = 'Compressing...';
+
+    const optionsArea = document.getElementById('file-preview-options');
+    optionsArea.innerHTML = '';
+
+    // Disable send button during compression
+    const sendBtn = document.getElementById('file-preview-send');
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Compressing...';
+
+    // Hide publish button
+    const publishBtn = document.getElementById('file-preview-publish');
+    if (publishBtn) publishBtn.style.display = 'none';
+
+    // Show overlay
+    filePreviewOverlay.style.display = 'flex';
+    setTimeout(() => filePreviewOverlay.classList.add('active'), 10);
+
+    // Listen for progress events (stored for cleanup in closeFilePreview)
+    const { listen } = window.__TAURI__.event;
+    pendingZipUnlisten = await listen('zip_progress', (event) => {
+        const { percent } = event.payload;
+        const spinner = document.getElementById('zip-progress-spinner');
+        const label = document.getElementById('zip-progress-label');
+        if (spinner) spinner.style.setProperty('--progress', percent + '%');
+        if (label) label.textContent = `Compressing... ${percent}%`;
+    });
+
+    try {
+        const result = await invoke('zip_directory', { dirPath });
+        // If a newer preview was opened while we were compressing, discard this result
+        if (filePreviewGeneration !== myGeneration) return;
+        if (pendingZipUnlisten) { pendingZipUnlisten(); pendingZipUnlisten = null; }
+        zipInProgress = false;
+
+        pendingFile = result.zip_path;
+        pendingZipPath = result.zip_path;
+
+        // Build file list HTML (shared by both branches)
+        const fileTreeHtml = `
+            <div class="file-preview-icon-container">
+                <div class="icon icon-folder file-preview-icon"></div>
+            </div>
+            ${buildFileListHtml(result.file_list, result.file_count + result.dir_count)}
+        `;
+
+        // Check compressed size
+        if (result.compressed_size >= MAX_FILE_SIZE) {
+            document.getElementById('file-preview-size').textContent =
+                `${formatFileSize(result.compressed_size)} — Too Large`;
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Too Large';
+            contentArea.innerHTML = fileTreeHtml;
+        } else {
+            const sizeLabel = `${formatFileSize(result.compressed_size)} (${result.file_count} file${result.file_count !== 1 ? 's' : ''}${result.dir_count > 0 ? `, ${result.dir_count} folder${result.dir_count !== 1 ? 's' : ''}` : ''})`;
+            document.getElementById('file-preview-size').textContent = sizeLabel;
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send';
+            contentArea.innerHTML = fileTreeHtml;
+        }
+
+        // Init collapsible tree toggles
+        initFileTreeToggles();
+    } catch (e) {
+        // If a newer preview was opened while we were compressing, discard silently
+        if (filePreviewGeneration !== myGeneration) return;
+
+        if (pendingZipUnlisten) { pendingZipUnlisten(); pendingZipUnlisten = null; }
+        zipInProgress = false;
+
+        // "Cancelled" is expected when user hits Cancel during compression — no error popup
+        const errStr = String(e);
+        if (errStr.includes('Cancelled')) {
+            console.log('Zip compression cancelled by user');
+        } else {
+            console.error('Failed to zip directory:', e);
+
+            // Close the overlay and show error
+            filePreviewOverlay.classList.remove('active');
+            setTimeout(() => {
+                filePreviewOverlay.style.display = 'none';
+            }, 200);
+
+            popupConfirm('Folder Compression Failed', escapeHtml(errStr), true, '', 'vector_warning.svg');
+        }
+
+        // Reset state
+        pendingFile = null;
+        pendingReceiver = null;
+        pendingReplyRef = null;
+        pendingZipPath = null;
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send';
+    }
+}
+
+/**
  * Close file preview overlay
  */
 function closeFilePreview() {
@@ -965,26 +1252,41 @@ function closeFilePreview() {
     if (pendingFileBytes) {
         invoke('cancel_cached_bytes_compression').catch(() => {});
     }
-    
+
+    // Clean up pending zip file or cancel in-progress zip
+    if (pendingZipPath || zipInProgress) {
+        invoke('cleanup_zip').catch(() => {});
+    }
+
+    // Clean up zip progress listener
+    if (pendingZipUnlisten) {
+        pendingZipUnlisten();
+        pendingZipUnlisten = null;
+    }
+
+    // Clear state immediately (not in setTimeout) to prevent race with rapid reopen
+    const closeGeneration = ++filePreviewGeneration;
+    pendingFile = null;
+    pendingFileBytes = null;
+    pendingFileObject = null;
+    pendingFileName = null;
+    pendingFileExt = null;
+    pendingReceiver = null;
+    pendingReplyRef = null;
+    compressionInProgress = false;
+    compressionComplete = false;
+    pendingZipPath = null;
+    zipInProgress = false;
+
     filePreviewOverlay.classList.remove('active');
     setTimeout(() => {
+        // Only clear DOM if no new preview was opened during the animation
+        if (filePreviewGeneration !== closeGeneration) return;
         filePreviewOverlay.style.display = 'none';
-        
-        // Clear pending state
-        pendingFile = null;
-        pendingFileBytes = null;
-        pendingFileObject = null;
-        pendingFileName = null;
-        pendingFileExt = null;
-        pendingReceiver = null;
-        pendingReplyRef = null;
-        compressionInProgress = false;
-        compressionComplete = false;
-        
-        // Clear content
+
         const contentArea = document.getElementById('file-preview-content');
         if (contentArea) contentArea.innerHTML = '';
-        
+
         const optionsArea = document.getElementById('file-preview-options');
         if (optionsArea) optionsArea.innerHTML = '';
     }, 200);
@@ -1009,6 +1311,7 @@ async function sendPreviewedFile() {
     const fileName = pendingFileName;
     const ext = pendingFileExt;
     const usingBytes = !!fileBytes;
+    const isZipSend = !!pendingZipPath;
     
     // Check if this is an image for compression logic
     const isImage = (usingBytes || fileObject)
@@ -1055,6 +1358,8 @@ async function sendPreviewedFile() {
     pendingReplyRef = null;
     compressionInProgress = false;
     compressionComplete = false;
+    pendingZipPath = null;
+    zipInProgress = false;
     
     // Determine if this is a group or DM
     const isGroup = receiver.startsWith('group:');
@@ -1114,9 +1419,18 @@ async function sendPreviewedFile() {
         if (result && result.event_id) {
             finalizePendingMessage(chatId, result.pending_id, result.event_id);
         }
+
+        // Clean up temp zip file after successful send
+        if (isZipSend) {
+            invoke('cleanup_zip').catch(() => {});
+        }
     } catch (e) {
         console.error('Failed to send file:', e);
         popupConfirm(e.toString(), '', true, '', 'vector_warning.svg');
+        // Clean up temp zip on error too
+        if (isZipSend) {
+            invoke('cleanup_zip').catch(() => {});
+        }
     }
     
     nLastTypingIndicator = 0;

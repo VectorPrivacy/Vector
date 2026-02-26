@@ -783,6 +783,17 @@ async function selectFile() {
 }
 
 /**
+ * A GUI wrapper to ask the user for a folder path (desktop only).
+ */
+async function selectFolder() {
+    const folder = await open({
+        multiple: false,
+        directory: true
+    });
+    return folder || "";
+}
+
+/**
  * Apply the theme visually by hot-swapping theme CSS files
  * @param {string} theme - The theme name, i.e: vector, chatstr
  * @param {string} mode - The theme mode, i.e: light, dark
