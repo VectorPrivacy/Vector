@@ -1402,8 +1402,7 @@ pub async fn marketplace_get_app_by_hash(
     file_hash: String,
 ) -> Result<Option<MarketplaceApp>, Error> {
     let state = MARKETPLACE_STATE.read().await;
-    // Search through cached apps to find one with matching blossom_hash
-    Ok(state.get_apps().into_iter().find(|app| app.blossom_hash == file_hash))
+    Ok(state.get_app_by_hash(&file_hash).cloned())
 }
 
 /// Get the installation status of a marketplace app

@@ -45,6 +45,8 @@ let marketplaceError = null;
 let marketplaceSearchQuery = '';
 let marketplaceActiveFilters = []; // Array of category strings
 let marketplaceShouldAnimate = false; // Only animate after initial load from loading state
+let _marketplaceFetchPromise = null; // Dedup guard: shared promise for concurrent fetch calls
+let _marketplaceInitInProgress = false; // Dedup guard: prevent concurrent initMarketplace calls
 
 /**
  * Fetch apps from the marketplace
@@ -52,19 +54,27 @@ let marketplaceShouldAnimate = false; // Only animate after initial load from lo
  * @returns {Promise<MarketplaceApp[]>}
  */
 async function fetchMarketplaceApps(trustedOnly = true) {
-    try {
-        isMarketplaceLoading = true;
-        marketplaceError = null;
-        const apps = await invoke('marketplace_fetch_apps', { trustedOnly });
-        marketplaceApps = apps;
-        return apps;
-    } catch (error) {
-        console.error('Failed to fetch marketplace apps:', error);
-        marketplaceError = error.toString();
-        throw error;
-    } finally {
-        isMarketplaceLoading = false;
-    }
+    // Deduplicate concurrent fetches — return the in-flight promise if one exists
+    if (_marketplaceFetchPromise) return _marketplaceFetchPromise;
+
+    _marketplaceFetchPromise = (async () => {
+        try {
+            isMarketplaceLoading = true;
+            marketplaceError = null;
+            const apps = await invoke('marketplace_fetch_apps', { trustedOnly });
+            marketplaceApps = apps;
+            return apps;
+        } catch (error) {
+            console.error('Failed to fetch marketplace apps:', error);
+            marketplaceError = error.toString();
+            throw error;
+        } finally {
+            isMarketplaceLoading = false;
+            _marketplaceFetchPromise = null;
+        }
+    })();
+
+    return _marketplaceFetchPromise;
 }
 
 /**
@@ -1685,6 +1695,10 @@ function renderMarketplaceApps(container, apps) {
  * @param {HTMLElement} container - The marketplace container element
  */
 async function initMarketplace(container) {
+    // Prevent concurrent initializations (e.g., rapid tab switching)
+    if (_marketplaceInitInProgress) return;
+    _marketplaceInitInProgress = true;
+
     // Reset filters and search
     marketplaceSearchQuery = '';
     marketplaceActiveFilters = [];
@@ -1753,6 +1767,8 @@ async function initMarketplace(container) {
                 </button>
             </div>
         `;
+    } finally {
+        _marketplaceInitInProgress = false;
     }
 }
 

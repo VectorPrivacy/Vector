@@ -65,7 +65,8 @@ pub const MINIAPP_APP_ID: &str = "vector/miniapp";
 pub const TRUSTED_PUBLISHER: &str = "npub16ye7evyevwnl0fc9hujsxf9zym72e063awn0pvde0huvpyec5nyq4dg4wn";
 
 /// Represents a Mini App listing in the marketplace
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MarketplaceApp {
     /// Unique identifier (from d-tag)
     pub id: String,
@@ -160,8 +161,10 @@ pub enum InstallStatus {
 
 /// Marketplace state
 pub struct MarketplaceState {
-    /// Cached marketplace apps
+    /// Cached marketplace apps (keyed by app id)
     apps: HashMap<String, MarketplaceApp>,
+    /// Reverse index: blossom_hash → app id (for O(1) hash lookups)
+    hash_index: HashMap<String, String>,
     /// Installation status for each app
     install_status: HashMap<String, InstallStatus>,
     /// Last sync timestamp
@@ -174,6 +177,7 @@ impl MarketplaceState {
     pub fn new() -> Self {
         Self {
             apps: HashMap::new(),
+            hash_index: HashMap::new(),
             install_status: HashMap::new(),
             last_sync: 0,
             trusted_publishers: vec![TRUSTED_PUBLISHER.to_string()],
@@ -182,6 +186,13 @@ impl MarketplaceState {
 
     /// Add or update an app in the cache
     pub fn upsert_app(&mut self, app: MarketplaceApp) {
+        // If the app already exists with a different hash, remove the stale index entry
+        if let Some(existing) = self.apps.get(&app.id) {
+            if existing.blossom_hash != app.blossom_hash {
+                self.hash_index.remove(&existing.blossom_hash);
+            }
+        }
+        self.hash_index.insert(app.blossom_hash.clone(), app.id.clone());
         self.apps.insert(app.id.clone(), app);
     }
 
@@ -193,6 +204,11 @@ impl MarketplaceState {
     /// Get a specific app by ID
     pub fn get_app(&self, id: &str) -> Option<&MarketplaceApp> {
         self.apps.get(id)
+    }
+
+    /// Get a specific app by its blossom hash (O(1) via index)
+    pub fn get_app_by_hash(&self, hash: &str) -> Option<&MarketplaceApp> {
+        self.hash_index.get(hash).and_then(|id| self.apps.get(id))
     }
 
     /// Get installation status for an app
@@ -244,6 +260,10 @@ impl MarketplaceState {
 
 // Global marketplace state
 pub static MARKETPLACE_STATE: std::sync::LazyLock<Arc<RwLock<MarketplaceState>>> = std::sync::LazyLock::new(|| Arc::new(RwLock::new(MarketplaceState::new())));
+
+/// Serializes fetch_marketplace_apps calls to prevent concurrent relay storms.
+/// Second caller waits, then checks last_sync to skip redundant fetches.
+static FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Parse a Nostr event into a MarketplaceApp
 pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
@@ -422,8 +442,28 @@ pub async fn build_marketplace_event<T: NostrSigner>(
         .map_err(|e| format!("Failed to sign marketplace event: {}", e))
 }
 
-/// Fetch marketplace apps from Nostr relays
+/// Fetch marketplace apps from Nostr relays.
+///
+/// Serialized via FETCH_LOCK to prevent concurrent relay storms. If another
+/// fetch completed within the last 30 seconds, returns the cached result
+/// immediately (dedup).
 pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<MarketplaceApp>, String> {
+    // Serialize fetches — second caller waits, then checks last_sync
+    let _guard = FETCH_LOCK.lock().await;
+
+    // If a recent fetch already succeeded, return cached data (dedup)
+    {
+        let state = MARKETPLACE_STATE.read().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if state.last_sync > 0 && now.saturating_sub(state.last_sync) < 30 {
+            log_info!("[Marketplace] Skipping fetch — last sync {}s ago", now - state.last_sync);
+            return Ok(state.get_apps());
+        }
+    }
+
     let client = NOSTR_CLIENT.get().ok_or("Nostr client not initialized")?;
 
     // Build filter for marketplace events
@@ -438,7 +478,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
             .iter()
             .filter_map(|npub| PublicKey::from_bech32(npub).ok())
             .collect();
-        
+
         if !trusted_pubkeys.is_empty() {
             filter = filter.authors(trusted_pubkeys);
         }
@@ -451,35 +491,43 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
         .map_err(|e| format!("Failed to fetch marketplace events: {}", e))?;
 
     let mut apps = Vec::new();
-    let mut state = MARKETPLACE_STATE.write().await;
 
-    for event in events.iter() {
-        if let Some(app) = parse_marketplace_event(event) {
-            // Check if already installed by looking for local file
-            let mut app = app;
-            if let Some(existing) = state.get_app(&app.id) {
-                app.installed = existing.installed;
-                app.local_path = existing.local_path.clone();
-                // Preserve cached icon path if it exists
-                if app.icon_cached.is_none() {
-                    app.icon_cached = existing.icon_cached.clone();
+    // Scope the write lock to just the state updates
+    {
+        let mut state = MARKETPLACE_STATE.write().await;
+
+        for event in events.iter() {
+            if let Some(app) = parse_marketplace_event(event) {
+                let mut app = app;
+                if let Some(existing) = state.get_app(&app.id) {
+                    app.installed = existing.installed;
+                    app.local_path = existing.local_path.clone();
+                    if app.icon_cached.is_none() {
+                        app.icon_cached = existing.icon_cached.clone();
+                    }
                 }
+
+                state.upsert_app(app.clone());
+                apps.push(app);
             }
-
-            state.upsert_app(app.clone());
-            apps.push(app);
         }
-    }
 
-    state.last_sync = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        state.last_sync = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+    } // Write lock dropped — readers unblocked before I/O
 
     log_info!("Fetched {} marketplace apps", apps.len());
 
-    // Spawn background tasks to cache icons for apps that have icon URLs but no cached path
-    // Cache is stored globally (not per-account) for deduplication across accounts
+    // Persist to SQLite cache (fire-and-forget — outside the write lock)
+    if !apps.is_empty() {
+        if let Err(e) = crate::db::save_marketplace_cache(&apps) {
+            log_warn!("[Marketplace] Failed to save cache to SQLite: {}", e);
+        }
+    }
+
+    // Spawn background icon caching (no lock needed — uses owned values)
     if let Some(handle) = crate::TAURI_APP.get() {
         for app in &apps {
             if app.icon_url.is_some() && app.icon_cached.is_none() {
@@ -1026,5 +1074,39 @@ fn extract_icon_from_xdc(xdc_bytes: &[u8]) -> Option<Vec<u8>> {
     }
     
     None
+}
+
+/// Preload marketplace cache from SQLite into MARKETPLACE_STATE, then refresh from network.
+///
+/// Called at login (after init_finished) inside a spawned task. Populates the in-memory
+/// state instantly from the persistent DB cache so that permission checks
+/// (marketplace_get_app_by_hash) work immediately — even before the user visits the
+/// Nexus tab. Then runs a network fetch to refresh the data (sequential, not nested
+/// spawn — the caller already spawned this).
+pub async fn preload_marketplace_cache() {
+    let t = std::time::Instant::now();
+
+    // Step 1: Load from SQLite into MARKETPLACE_STATE (fast — sub-ms for ~30 apps)
+    match crate::db::load_marketplace_cache() {
+        Ok(apps) if !apps.is_empty() => {
+            let count = apps.len();
+            let mut state = MARKETPLACE_STATE.write().await;
+            for app in apps {
+                state.upsert_app(app);
+            }
+            println!("[Marketplace] Preloaded {} apps from SQLite cache ({:?})", count, t.elapsed());
+        }
+        Ok(_) => {
+            println!("[Marketplace] No cached apps in SQLite");
+        }
+        Err(e) => {
+            log_warn!("[Marketplace] Failed to load cache from SQLite: {}", e);
+        }
+    }
+
+    // Step 2: Network refresh (sequential — caller already spawned us)
+    if let Err(e) = fetch_marketplace_apps(true).await {
+        log_warn!("[Marketplace] Background refresh failed: {}", e);
+    }
 }
 

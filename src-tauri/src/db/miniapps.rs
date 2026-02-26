@@ -328,6 +328,73 @@ pub fn revoke_all_miniapp_permissions(
     Ok(())
 }
 
+// ============================================================================
+// Marketplace Cache Functions
+// ============================================================================
+
+/// Save marketplace apps to the SQLite cache (full replace).
+/// Upserts all provided apps and deletes any IDs not in the new set.
+pub fn save_marketplace_cache(apps: &[crate::miniapps::marketplace::MarketplaceApp]) -> Result<(), String> {
+    let mut conn = crate::account_manager::get_write_connection_guard_static()?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let tx = conn.transaction()
+        .map_err(|e| format!("Failed to start marketplace cache transaction: {}", e))?;
+
+    // Upsert each app
+    for app in apps {
+        let json = serde_json::to_string(app)
+            .map_err(|e| format!("Failed to serialize marketplace app {}: {}", app.id, e))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO marketplace_cache (id, data, fetched_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![app.id, json, now],
+        ).map_err(|e| format!("Failed to upsert marketplace app {}: {}", app.id, e))?;
+    }
+
+    // Delete any cached apps that are no longer in the fetched set
+    if !apps.is_empty() {
+        let placeholders: Vec<String> = (1..=apps.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "DELETE FROM marketplace_cache WHERE id NOT IN ({})",
+            placeholders.join(",")
+        );
+        let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        tx.execute(&sql, params.as_slice())
+            .map_err(|e| format!("Failed to clean stale marketplace cache entries: {}", e))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit marketplace cache: {}", e))?;
+
+    Ok(())
+}
+
+/// Load all marketplace apps from the SQLite cache.
+pub fn load_marketplace_cache() -> Result<Vec<crate::miniapps::marketplace::MarketplaceApp>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
+
+    let mut stmt = conn.prepare(
+        "SELECT data FROM marketplace_cache"
+    ).map_err(|e| format!("Failed to prepare marketplace cache query: {}", e))?;
+
+    let apps: Vec<crate::miniapps::marketplace::MarketplaceApp> = stmt.query_map([], |row| {
+        let json: String = row.get(0)?;
+        serde_json::from_str(&json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+    })
+    .map_err(|e| format!("Failed to query marketplace cache: {}", e))?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    Ok(apps)
+}
+
 /// Copy all permissions from one file hash to another (for app updates)
 pub fn copy_miniapp_permissions(
     old_hash: &str,

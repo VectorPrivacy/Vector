@@ -1372,6 +1372,24 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 19: Create marketplace_cache table for persistent Nexus cache
+    // =========================================================================
+    // Caches marketplace app listings in SQLite so they survive restarts.
+    // On login, the cache is loaded into MARKETPLACE_STATE immediately (so
+    // permission checks work before the user visits the Nexus tab), then a
+    // background network fetch refreshes the data.
+    run_atomic_migration(conn, 19, "Create marketplace_cache table", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS marketplace_cache (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL
+            );"
+        ).map_err(|e| format!("Failed to create marketplace_cache table: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }
 

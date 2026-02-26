@@ -387,6 +387,13 @@ pub async fn fetch_messages<R: Runtime>(
                 println!("[Boot] Total init time: {:?}", boot_start.elapsed());
             }
 
+            // Preload marketplace cache from SQLite → MARKETPLACE_STATE (non-blocking)
+            // Ensures permission checks work before the user visits the Nexus tab,
+            // then silently refreshes from the network in the background.
+            tokio::spawn(async {
+                crate::miniapps::marketplace::preload_marketplace_cache().await;
+            });
+
             // Preload wrapper IDs for sync deduplication (non-blocking)
             // DB fallback in handle_event ensures correctness if this completes after sync starts
             tokio::spawn(async move {
