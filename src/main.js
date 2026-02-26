@@ -6642,6 +6642,10 @@ async function login(skipAnimations = false) {
             // Initialize the updater
             initializeUpdater();
 
+            // Re-initialize encryption settings now that login is complete,
+            // so the toggle reflects the actual backend state.
+            initEncryptionSettings();
+
             // Execute any pending deep link action that was received before login
             try {
                 const pendingAction = await invoke('get_pending_deep_link');
