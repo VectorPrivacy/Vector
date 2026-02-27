@@ -168,6 +168,10 @@
   mask-image: url("./icons/cancel.svg");
 }
 
+#chat-input-cancel .icon-cancel {
+  background-color: #FC595C;
+}
+
 .icon-x {
   mask-image: url("./icons/x.svg");
 }
@@ -3172,7 +3176,7 @@ audio {
   left: 0;
   right: 0;
   height: 40px;
-  background: linear-gradient(#030303d9, #03030300 80%);
+  background: linear-gradient(#03030380, #03030300 20%);
   pointer-events: none;
 }
 
