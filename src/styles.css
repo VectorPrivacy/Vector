@@ -166,6 +166,9 @@
 
 .icon-cancel {
   mask-image: url("./icons/cancel.svg");
+}
+
+#chat-input-cancel .icon-cancel {
   background-color: #FC595C;
 }
 
