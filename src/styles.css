@@ -166,6 +166,7 @@
 
 .icon-cancel {
   mask-image: url("./icons/cancel.svg");
+  background-color: #FC595C;
 }
 
 .icon-x {
