@@ -1815,12 +1815,34 @@ async function loadMiniAppsHistory() {
                 });
 
                 item.onclick = async () => {
-                    // Don't launch if in edit mode
+                    // Don't launch if in edit mode or currently updating
                     if (miniAppsEditMode) return;
+                    if (item.dataset.updating) return;
                     hideGlobalTooltip();
                     // Open the Mini App using the stored attachment reference
                     await openMiniAppFromHistory(app);
                 };
+                // Set marketplace ID for update lookup
+                if (app.marketplace_id) {
+                    item.dataset.marketplaceId = app.marketplace_id;
+                }
+
+                // Check for marketplace update
+                if (app.marketplace_id) {
+                    const mktApp = marketplaceApps.find(m => m.id === app.marketplace_id);
+                    if (mktApp && mktApp.version && mktApp.version !== app.installed_version) {
+                        item.dataset.hasUpdate = 'true';
+                        const badge = document.createElement('div');
+                        badge.className = 'miniapp-update-badge';
+                        badge.innerHTML = '<span class="icon icon-arrow-up"></span>';
+                        badge.onclick = (e) => {
+                            e.stopPropagation();
+                            handleMiniAppPanelUpdate(app.marketplace_id);
+                        };
+                        item.appendChild(badge);
+                    }
+                }
+
                 domMiniAppsGrid.appendChild(item);
 
                 // Load the Mini App icon asynchronously
@@ -1926,8 +1948,9 @@ function activateMiniAppsEditMode() {
     // Add delete badges to all apps except Marketplace
     const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace)');
     items.forEach(item => {
-        // Don't add badge if already exists
+        // Don't add badge if already exists or app is updating
         if (item.querySelector('.miniapp-delete-badge')) return;
+        if (item.dataset.updating) return;
 
         const badge = document.createElement('div');
         badge.className = 'miniapp-delete-badge';
@@ -2110,8 +2133,17 @@ async function loadMiniAppIcon(app, btnElement) {
     try {
         const info = await invoke('miniapp_load_info', { filePath: app.src_url });
         if (info && info.icon_data) {
-            // Replace the placeholder icon with the actual Mini App icon
-            btnElement.innerHTML = `<img src="${info.icon_data}" alt="${escapeHtml(app.name)}" class="attachment-panel-miniapp-icon">`;
+            // Replace only the placeholder icon, preserving overlays (update badge, etc.)
+            const placeholder = btnElement.querySelector('.icon, .attachment-panel-miniapp-icon');
+            const img = document.createElement('img');
+            img.src = info.icon_data;
+            img.alt = app.name;
+            img.className = 'attachment-panel-miniapp-icon';
+            if (placeholder) {
+                placeholder.replaceWith(img);
+            } else {
+                btnElement.prepend(img);
+            }
         }
     } catch (e) {
         // Keep the placeholder icon if loading fails
@@ -2164,7 +2196,20 @@ async function showMiniAppLaunchDialog(app) {
     const actionText = isGame ? 'Play' : 'Open';
     domMiniAppLaunchSolo.textContent = actionText;
     domMiniAppLaunchInvite.textContent = `${actionText} & Invite`;
-    
+
+    // Check if this app has a marketplace update available
+    const hasUpdate = app.marketplace_id &&
+        marketplaceApps.find(m => m.id === app.marketplace_id && m.version && m.version !== app.installed_version);
+
+    if (hasUpdate) {
+        domMiniAppLaunchInvite.textContent = 'Update';
+        domMiniAppLaunchInvite.dataset.updateMode = 'true';
+        domMiniAppLaunchInvite.dataset.marketplaceId = app.marketplace_id;
+    } else {
+        delete domMiniAppLaunchInvite.dataset.updateMode;
+        delete domMiniAppLaunchInvite.dataset.marketplaceId;
+    }
+
     // Try to load the Mini App icon
     try {
         const info = await invoke('miniapp_load_info', { filePath: app.src_url });
@@ -2225,6 +2270,14 @@ async function playMiniAppSolo() {
  */
 async function playMiniAppAndInvite() {
     if (!pendingMiniAppLaunch) return;
+
+    // Intercept update mode
+    if (domMiniAppLaunchInvite.dataset.updateMode === 'true') {
+        const marketplaceId = domMiniAppLaunchInvite.dataset.marketplaceId;
+        closeMiniAppLaunchDialog();
+        await handleMiniAppPanelUpdate(marketplaceId);
+        return;
+    }
 
     const app = pendingMiniAppLaunch;
     const targetChatId = strOpenChat;
@@ -2420,6 +2473,45 @@ async function playMiniAppAndInvite() {
         finishAndClose();
         // Fallback to solo play if sending fails
         await playMiniAppSoloInternal(app);
+    }
+}
+
+/**
+ * Handle updating a Mini App directly from the panel grid
+ * @param {string} marketplaceId - The marketplace app ID to update
+ */
+async function handleMiniAppPanelUpdate(marketplaceId) {
+    const item = domMiniAppsGrid.querySelector(
+        `[data-marketplace-id="${CSS.escape(marketplaceId)}"]`
+    );
+    if (!item) return;
+
+    const btn = item.querySelector('.attachment-panel-btn');
+    if (!btn) return;
+
+    // Mark as updating (blocks taps and edit-mode deletion)
+    item.dataset.updating = 'true';
+
+    // Remove update badge
+    const badge = item.querySelector('.miniapp-update-badge');
+    if (badge) badge.remove();
+
+    // Add downloading overlay with progress spinner
+    const overlay = document.createElement('div');
+    overlay.className = 'miniapp-downloading-overlay';
+    overlay.innerHTML = `<div class="miniapp-downloading-spinner" data-app-id="${CSS.escape(marketplaceId)}"></div>`;
+    btn.appendChild(overlay);
+
+    try {
+        await updateMarketplaceApp(marketplaceId);
+        overlay.remove();
+        delete item.dataset.hasUpdate;
+        delete item.dataset.updating;
+        await loadMiniAppsHistory();
+    } catch (e) {
+        console.error('Failed to update Mini App from panel:', e);
+        overlay.remove();
+        delete item.dataset.updating;
     }
 }
 

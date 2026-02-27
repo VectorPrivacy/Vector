@@ -33,6 +33,7 @@ pub use miniapps::{
     record_miniapp_opened, record_miniapp_opened_with_metadata,
     get_miniapps_history, toggle_miniapp_favorite, set_miniapp_favorite,
     remove_miniapp_from_history, update_miniapp_version, get_miniapp_installed_version,
+    backfill_marketplace_ids,
     get_miniapp_granted_permissions, set_miniapp_permission, set_miniapp_permissions,
     has_miniapp_permission_prompt, revoke_all_miniapp_permissions, copy_miniapp_permissions,
     save_marketplace_cache, load_marketplace_cache,

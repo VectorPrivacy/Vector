@@ -2211,3 +2211,13 @@ function setupMarketplaceProgressListener() {
 
 // Initialize the progress listener
 setupMarketplaceProgressListener();
+
+// Listen for backend-pushed marketplace data (emitted on preload + network refresh)
+window.__TAURI__.event.listen('marketplace_apps_updated', (event) => {
+    const hadData = marketplaceApps.length > 0;
+    marketplaceApps = event.payload;
+    // Refresh mini apps grid to pick up update badges if this is the first load
+    if (!hadData && marketplaceApps.length > 0) {
+        loadMiniAppsHistory();
+    }
+});

@@ -231,12 +231,16 @@ async function openPublishDialog() {
     if (!pendingFile || !pendingMiniAppInfo) {
         return console.error('No pending file or Mini App info for publishing');
     }
-    
+
+    // Capture before closeFilePreview() clears them
+    const filePath = pendingFile;
+    const miniAppInfo = pendingMiniAppInfo;
+
     // Close the file preview first
     closeFilePreview();
-    
+
     // Open the publish dialog
-    await showPublishAppDialog(pendingFile, pendingMiniAppInfo);
+    await showPublishAppDialog(filePath, miniAppInfo);
 }
 
 /**

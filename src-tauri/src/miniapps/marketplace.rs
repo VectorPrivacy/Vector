@@ -1095,6 +1095,18 @@ pub async fn preload_marketplace_cache() {
                 state.upsert_app(app);
             }
             println!("[Marketplace] Preloaded {} apps from SQLite cache ({:?})", count, t.elapsed());
+
+            // Backfill history entries that predate marketplace_id tracking
+            let apps_for_backfill = state.get_apps();
+            drop(state); // Release write lock before DB I/O
+            match crate::db::backfill_marketplace_ids(&apps_for_backfill) {
+                Ok(n) if n > 0 => println!("[Marketplace] Backfilled marketplace_id for {} history entries", n),
+                Err(e) => log_warn!("[Marketplace] Backfill failed: {}", e),
+                _ => {}
+            }
+
+            // Emit cached apps to frontend immediately
+            emit_marketplace_apps(&apps_for_backfill);
         }
         Ok(_) => {
             println!("[Marketplace] No cached apps in SQLite");
@@ -1105,8 +1117,16 @@ pub async fn preload_marketplace_cache() {
     }
 
     // Step 2: Network refresh (sequential — caller already spawned us)
-    if let Err(e) = fetch_marketplace_apps(true).await {
-        log_warn!("[Marketplace] Background refresh failed: {}", e);
+    match fetch_marketplace_apps(true).await {
+        Ok(apps) => emit_marketplace_apps(&apps),
+        Err(e) => log_warn!("[Marketplace] Background refresh failed: {}", e),
+    }
+}
+
+/// Emit the current marketplace apps list to the frontend.
+fn emit_marketplace_apps(apps: &[MarketplaceApp]) {
+    if let Some(handle) = crate::TAURI_APP.get() {
+        let _ = handle.emit("marketplace_apps_updated", apps);
     }
 }
 

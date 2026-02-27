@@ -208,6 +208,49 @@ pub fn get_miniapp_installed_version(
     }
 }
 
+/// Backfill marketplace_id + installed_version for history entries that predate tracking.
+/// Matches the blossom hash in src_url filenames against the marketplace cache.
+/// Only hash-based matching is used — name matching is intentionally avoided to prevent
+/// phishing when public publishing is enabled.
+pub fn backfill_marketplace_ids(apps: &[super::super::miniapps::marketplace::MarketplaceApp]) -> Result<u32, String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
+
+    // Get history entries missing marketplace_id
+    let mut stmt = conn.prepare(
+        "SELECT id, src_url FROM miniapps_history WHERE marketplace_id IS NULL"
+    ).map_err(|e| format!("Failed to query orphan history: {}", e))?;
+
+    let orphans: Vec<(i64, String)> = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    }).map_err(|e| format!("Failed to iterate orphans: {}", e))?
+      .filter_map(|r| r.ok())
+      .collect();
+
+    let mut updated = 0u32;
+    for (id, src_url) in &orphans {
+        // Extract hash from filename (e.g. ".../c7069f82...6fae.xdc" → "c7069f82...6fae")
+        let hash = src_url
+            .rsplit('/')
+            .next()
+            .and_then(|f| f.strip_suffix(".xdc"));
+        let hash = match hash {
+            Some(h) => h,
+            None => continue,
+        };
+
+        // Exact hash match → user has this exact file from the marketplace
+        if let Some(app) = apps.iter().find(|a| a.blossom_hash == hash) {
+            conn.execute(
+                "UPDATE miniapps_history SET marketplace_id = ?1, installed_version = ?2 WHERE id = ?3",
+                rusqlite::params![app.id, app.version, id],
+            ).map_err(|e| format!("Failed to backfill marketplace_id: {}", e))?;
+            updated += 1;
+        }
+    }
+
+    Ok(updated)
+}
+
 // ============================================================================
 // Mini App Permissions Functions
 // ============================================================================
