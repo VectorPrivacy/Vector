@@ -401,216 +401,14 @@ async fn get_user_info() -> (String, String) {
 }
 
 /// Serve the webxdc.js bridge script
+/// Delegates to the canonical `generate_webxdc_bridge_js` to avoid maintaining two copies.
 fn serve_webxdc_js(
     _instance: &super::state::MiniAppInstance,
     user_npub: &str,
     user_display_name: &str,
     granted_permissions: &str,
 ) -> http::Response<Cow<'static, [u8]>> {
-    let js = format!(r#"
-// Mini App Bridge for Vector
-// This provides the webxdc-compatible API for Mini Apps
-
-(function() {{
-    'use strict';
-    
-    const selfAddr = {self_addr};
-    const selfName = {self_name};
-    
-    // State tracking
-    let updateListener = null;
-    let lastKnownSerial = 0;
-    
-    // The Mini App API
-    window.webxdc = {{
-        // Get self info
-        selfAddr: selfAddr,
-        selfName: selfName,
-        
-        // Set the update listener
-        setUpdateListener: function(listener, serial) {{
-            updateListener = listener;
-            lastKnownSerial = serial || 0;
-            
-            // Request updates since last known serial
-            window.__TAURI__.core.invoke('miniapp_get_updates', {{
-                lastKnownSerial: lastKnownSerial
-            }}).then(function(updates) {{
-                if (updates && updateListener) {{
-                    const parsed = JSON.parse(updates);
-                    parsed.forEach(function(update) {{
-                        updateListener(update);
-                    }});
-                }}
-            }}).catch(function(err) {{
-                console.error('Failed to get updates:', err);
-            }});
-            
-            return Promise.resolve();
-        }},
-        
-        // Send an update
-        sendUpdate: function(update, description) {{
-            return window.__TAURI__.core.invoke('miniapp_send_update', {{
-                update: update,
-                description: description || ''
-            }});
-        }},
-        
-        // Send a file to chat (not implemented in basic version)
-        sendToChat: function(content) {{
-            console.warn('sendToChat is not yet implemented');
-            return Promise.reject(new Error('Not implemented'));
-        }},
-        
-        // Import files (not implemented in basic version)
-        importFiles: function(filters) {{
-            console.warn('importFiles is not yet implemented');
-            return Promise.reject(new Error('Not implemented'));
-        }},
-        
-        // Join a realtime channel (for multiplayer games)
-        // Based on DeltaChat's implementation for cross-compatibility
-        joinRealtimeChannel: function() {{
-            console.log('joinRealtimeChannel called');
-            
-            // Check if already joined
-            if (window.__webxdc_realtime_channel && !window.__webxdc_realtime_channel._trashed) {{
-                console.error('Realtime channel already exists');
-                throw new Error('realtime listener already exists');
-            }}
-            
-            // Check if Tauri is available - it should be since we're in a Tauri webview
-            if (!window.__TAURI__) {{
-                console.error('Tauri API not available - window.__TAURI__ is undefined');
-                throw new Error('Tauri API not available');
-            }}
-            if (!window.__TAURI__.core) {{
-                console.error('Tauri core API not available - window.__TAURI__.core is undefined');
-                throw new Error('Tauri core API not available');
-            }}
-            
-            // Create a Tauri channel for receiving realtime events
-            const Channel = window.__TAURI__.core.Channel;
-            if (!Channel) {{
-                console.error('Tauri Channel class not available - window.__TAURI__.core.Channel is undefined');
-                console.log('Available in window.__TAURI__.core:', Object.keys(window.__TAURI__.core));
-                throw new Error('Tauri Channel class not available');
-            }}
-            console.log('Creating Tauri channel for realtime events');
-            let eventChannel;
-            try {{
-                eventChannel = new Channel();
-            }} catch (e) {{
-                console.error('Failed to create Tauri channel:', e);
-                throw e;
-            }}
-            
-            // Create the realtime channel object
-            const channel = {{
-                _listener: null,
-                _trashed: false,
-                _joined: false,
-                _eventChannel: eventChannel,
-                
-                setListener: function(listener) {{
-                    if (this._trashed) {{
-                        throw new Error('realtime listener is trashed and can no longer be used');
-                    }}
-                    this._listener = listener;
-                }},
-                
-                send: function(data) {{
-                    if (!(data instanceof Uint8Array)) {{
-                        throw new Error('realtime listener data must be a Uint8Array');
-                    }}
-                    if (this._trashed) {{
-                        throw new Error('realtime listener is trashed and can no longer be used');
-                    }}
-                    if (data.length > 128000) {{
-                        throw new Error('realtime data exceeds maximum size of 128000 bytes');
-                    }}
-                    
-                    // Convert Uint8Array to regular array for Tauri
-                    const dataArray = Array.from(data);
-                    window.__TAURI__.core.invoke('miniapp_send_realtime_data', {{
-                        data: dataArray
-                    }}).catch(function(err) {{
-                        console.error('Failed to send realtime data:', err);
-                    }});
-                }},
-                
-                leave: function() {{
-                    if (this._trashed) return;
-                    this._trashed = true;
-                    this._listener = null;
-                    
-                    window.__TAURI__.core.invoke('miniapp_leave_realtime_channel')
-                        .catch(function(err) {{
-                            console.error('Failed to leave realtime channel:', err);
-                        }});
-                    
-                    window.__webxdc_realtime_channel = null;
-                }}
-            }};
-            
-            // Set up event handler
-            eventChannel.onmessage = function(message) {{
-                if (channel._trashed) return;
-                
-                if (message.event === 'data' && message.data) {{
-                    // Convert array back to Uint8Array
-                    const data = new Uint8Array(message.data);
-                    if (channel._listener) {{
-                        channel._listener(data);
-                    }} else {{
-                        console.warn('No listener set for realtime data');
-                    }}
-                }} else if (message.event === 'connected') {{
-                    console.log('Realtime channel connected');
-                }} else if (message.event === 'peerJoined') {{
-                    console.log('Peer joined:', message.data);
-                }} else if (message.event === 'peerLeft') {{
-                    console.log('Peer left:', message.data);
-                }}
-            }};
-            
-            // Store reference
-            window.__webxdc_realtime_channel = channel;
-            
-            // Join the channel on the backend (pass the event channel)
-            console.log('Attempting to join realtime channel...');
-            window.__TAURI__.core.invoke('miniapp_join_realtime_channel', {{
-                channel: eventChannel
-            }})
-                .then(function(topicId) {{
-                    channel._joined = true;
-                    console.log('Successfully joined realtime channel with topic:', topicId);
-                }})
-                .catch(function(err) {{
-                    console.error('Failed to join realtime channel:', err);
-                    channel._trashed = true;
-                    window.__webxdc_realtime_channel = null;
-                }});
-            
-            return channel;
-        }}
-    }};
-    
-    // Listen for updates from the backend
-    window.__TAURI__.event.listen('miniapp_update', function(event) {{
-        if (updateListener && event.payload) {{
-            updateListener(event.payload);
-        }}
-    }});
-    
-    console.log('Mini App bridge initialized');
-}})();
-"#,
-        self_addr = serde_json::to_string(user_npub).unwrap_or_else(|_| "\"unknown\"".to_string()),
-        self_name = serde_json::to_string(user_display_name).unwrap_or_else(|_| "\"Unknown\"".to_string()),
-    );
-
+    let js = generate_webxdc_bridge_js(user_npub, user_display_name);
     make_success_response(js.into_bytes(), "text/javascript", granted_permissions)
 }
 
@@ -629,7 +427,7 @@ fn inject_webxdc_script(html_data: &[u8], user_npub: &str, user_display_name: &s
     }
     
     // Generate the inline webxdc script
-    let webxdc_script = generate_inline_webxdc_script(user_npub, user_display_name);
+    let webxdc_script = generate_webxdc_bridge_js(user_npub, user_display_name);
     
     // Try to inject after <head> tag, or at the start of the document
     let injected = if let Some(head_pos) = html_lower.find("<head>") {
@@ -662,24 +460,28 @@ fn inject_webxdc_script(html_data: &[u8], user_npub: &str, user_display_name: &s
     injected.into_bytes()
 }
 
-/// Generate the inline webxdc script content (without the <script> tags)
-fn generate_inline_webxdc_script(user_npub: &str, user_display_name: &str) -> String {
+/// Generate the canonical webxdc.js bridge script (used by both serve and inline injection).
+/// All console.log/warn calls stripped from hot paths — only console.error for actual failures.
+fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String {
     format!(r#"
-// Mini App Bridge for Vector (injected)
 (function() {{
     'use strict';
 
-    const selfAddr = {self_addr};
-    const selfName = {self_name};
+    // base91 codec (matches Rust fast-thumbhash alphabet, ~14% overhead vs base64's 33%)
+    var B91='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{{|}}~ ';
+    var B91D=new Uint8Array(256);B91D.fill(255);for(var _i=0;_i<91;_i++)B91D[B91.charCodeAt(_i)]=_i;
+    function b91e(buf){{var o='',n=0,b=0;for(var i=0;i<buf.length;i++){{n|=buf[i]<<b;b+=8;if(b>13){{var v=n&8191;if(v>88){{n>>=13;b-=13;}}else{{v=n&16383;n>>=14;b-=14;}}o+=B91[v%91]+B91[v/91|0];}}}}if(b>0){{o+=B91[n%91];if(b>7||n>90)o+=B91[n/91|0];}}return o;}}
+    function b91d(s){{var o=[],n=0,b=0,q=-1;for(var i=0;i<s.length;i++){{var d=B91D[s.charCodeAt(i)];if(d===255)continue;if(q<0){{q=d;}}else{{var v=q+d*91;q=-1;n|=v<<b;b+=(v&8191)>88?13:14;while(b>=8){{o.push(n&255);n>>=8;b-=8;}}}}}}if(q>=0)o.push((n|(q<<b))&255);return new Uint8Array(o);}}
 
-    // State tracking
-    let updateListener = null;
-    let lastKnownSerial = 0;
-    let realtimeChannel = null;
-    let realtimeListener = null;
-    let tauriChannel = null;
+    var selfAddr = {self_addr};
+    var selfName = {self_name};
 
-    // Helper to wait for Tauri
+    var updateListener = null;
+    var lastKnownSerial = 0;
+    var realtimeChannel = null;
+    var realtimeListener = null;
+    var tauriChannel = null;
+
     function waitForTauri(callback) {{
         if (window.__TAURI__ && window.__TAURI__.core) {{
             callback();
@@ -687,38 +489,29 @@ fn generate_inline_webxdc_script(user_npub: &str, user_display_name: &str) -> St
             setTimeout(function() {{ waitForTauri(callback); }}, 50);
         }}
     }}
-    
-    // The Mini App API
+
     window.webxdc = {{
-        // Get self info (immediately available, not a Promise)
         selfAddr: selfAddr,
         selfName: selfName,
-        
-        // Set the update listener
+
         setUpdateListener: function(listener, serial) {{
             updateListener = listener;
             lastKnownSerial = serial || 0;
-            
-            // Wait for Tauri to be ready, then request updates
             waitForTauri(function() {{
                 window.__TAURI__.core.invoke('miniapp_get_updates', {{
                     lastKnownSerial: lastKnownSerial
                 }}).then(function(updates) {{
                     if (updates && updateListener) {{
-                        const parsed = JSON.parse(updates);
-                        parsed.forEach(function(update) {{
-                            updateListener(update);
-                        }});
+                        var parsed = JSON.parse(updates);
+                        parsed.forEach(function(update) {{ updateListener(update); }});
                     }}
                 }}).catch(function(err) {{
-                    console.error('Failed to get updates:', err);
+                    console.error('[webxdc] Failed to get updates:', err);
                 }});
             }});
-            
             return Promise.resolve();
         }},
-        
-        // Send an update
+
         sendUpdate: function(update, description) {{
             return new Promise(function(resolve, reject) {{
                 waitForTauri(function() {{
@@ -729,56 +522,39 @@ fn generate_inline_webxdc_script(user_npub: &str, user_display_name: &str) -> St
                 }});
             }});
         }},
-        
-        // Send a file to chat (not implemented)
-        sendToChat: function(content) {{
-            console.warn('sendToChat is not yet implemented');
+
+        sendToChat: function() {{
             return Promise.reject(new Error('Not implemented'));
         }},
-        
-        // Import files (not implemented)
-        importFiles: function(filters) {{
-            console.warn('importFiles is not yet implemented');
+
+        importFiles: function() {{
             return Promise.reject(new Error('Not implemented'));
         }},
-        
-        // Join a realtime channel - returns a SYNCHRONOUS channel object
-        // Per WebXDC spec: https://webxdc.org/docs/spec/joinRealtimeChannel.html
+
         joinRealtimeChannel: function() {{
-            console.log('[webxdc] joinRealtimeChannel called');
-            
-            // Check if already joined
             if (realtimeChannel !== null) {{
                 throw new Error('Already joined realtime channel. Call leave() first.');
             }}
-            
-            // Create the channel object immediately (synchronous return)
+
             realtimeChannel = {{
-                // Set the listener for incoming data
                 setListener: function(listener) {{
-                    console.log('[webxdc] realtimeChannel.setListener called');
                     realtimeListener = listener;
                 }},
-                
-                // Send data to connected peers
+
                 send: function(data) {{
-                    if (realtimeChannel === null) {{
-                        console.warn('[webxdc] Cannot send: channel has been left');
-                        return;
-                    }}
-                    const arr = data instanceof Uint8Array ? Array.from(data) : Array.from(new Uint8Array(data));
+                    if (realtimeChannel === null) return;
+                    var buf = data instanceof Uint8Array ? data : new Uint8Array(data);
+                    var encoded = b91e(buf);
                     waitForTauri(function() {{
                         window.__TAURI__.core.invoke('miniapp_send_realtime_data', {{
-                            data: arr
+                            data: encoded
                         }}).catch(function(err) {{
                             console.error('[webxdc] Failed to send realtime data:', err);
                         }});
                     }});
                 }},
-                
-                // Leave the channel
+
                 leave: function() {{
-                    console.log('[webxdc] realtimeChannel.leave called');
                     realtimeListener = null;
                     realtimeChannel = null;
                     waitForTauri(function() {{
@@ -788,33 +564,24 @@ fn generate_inline_webxdc_script(user_npub: &str, user_display_name: &str) -> St
                     }});
                 }}
             }};
-            
-            // Start the Tauri channel connection in the background
+
             waitForTauri(function() {{
                 tauriChannel = new window.__TAURI__.core.Channel();
                 tauriChannel.onmessage = function(event) {{
-                    if (realtimeListener && event && event.data) {{
-                        // Convert to Uint8Array and call the listener
-                        const data = new Uint8Array(event.data);
-                        realtimeListener(data);
+                    if (realtimeListener && event && event.event === 'data' && event.data) {{
+                        realtimeListener(b91d(event.data));
                     }}
                 }};
-                
                 window.__TAURI__.core.invoke('miniapp_join_realtime_channel', {{
                     channel: tauriChannel
-                }}).then(function(topicId) {{
-                    console.log('[webxdc] Joined realtime channel, topic:', topicId);
                 }}).catch(function(err) {{
                     console.error('[webxdc] Failed to join realtime channel:', err);
                 }});
             }});
-            
-            // Return the channel object immediately (synchronous)
+
             return realtimeChannel;
         }}
     }};
-    
-    console.log('[webxdc] Mini App bridge initialized');
 }})();
 "#,
         self_addr = serde_json::to_string(user_npub).unwrap_or_else(|_| "\"unknown\"".to_string()),

@@ -47,20 +47,30 @@ pub struct MiniAppPackage {
 impl MiniAppPackage {
     /// Load a Mini App package from a .xdc file
     pub fn load(id: String, path: PathBuf) -> Result<Self, Error> {
-        // Memory-map the file for zero-copy hash + zip read
-        let file = std::fs::File::open(&path)?;
-        let file_data = unsafe { memmap2::Mmap::map(&file) }
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        // Pre-check: reject 0-byte or missing files without opening them
+        // (macOS can hang on open() for corrupted files with 0 logical bytes
+        // but non-zero physical blocks)
+        let meta = std::fs::metadata(&path)?;
+        let file_len = meta.len();
+        if file_len == 0 {
+            return Err(Error::InvalidPackage(format!(
+                "File is 0 bytes (corrupted?): {}", path.display()
+            )));
+        }
+        // Sanity: reject files > 500 MB (no legitimate .xdc should be this large)
+        if file_len > 500 * 1024 * 1024 {
+            return Err(Error::InvalidPackage(format!(
+                "File too large ({} MB): {}", file_len / (1024 * 1024), path.display()
+            )));
+        }
+        let file_data = std::fs::read(&path)?;
 
-        // Compute SHA-256 hash of the file
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
-        hasher.update(&*file_data);
+        hasher.update(&file_data);
         let file_hash = bytes_to_hex_string(&hasher.finalize());
-
-        // Open archive from the mmap'd data
         use std::io::Cursor;
-        let cursor = Cursor::new(&*file_data);
+        let cursor = Cursor::new(&file_data);
         let mut archive = zip::ZipArchive::new(cursor)?;
 
         // Try to read manifest.toml
@@ -72,7 +82,6 @@ impl MiniAppPackage {
                     .map_err(|e| Error::ManifestParseError(e.to_string()))?
             }
             Err(_) => {
-                // No manifest, try to get name from index.html title or use filename
                 let name = path.file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("Mini App")
@@ -84,7 +93,6 @@ impl MiniAppPackage {
             }
         };
 
-        // Verify index.html exists
         if archive.by_name("index.html").is_err() {
             return Err(Error::InvalidPackage("Missing index.html".to_string()));
         }
@@ -378,17 +386,31 @@ impl MiniAppsState {
         {
             let packages = self.packages.read().await;
             if let Some(pkg) = packages.get(id) {
+                log_trace!("[MiniApp] Package cache hit for {}", id);
                 return Ok(Arc::clone(pkg));
             }
         }
-        
-        // Load and cache
-        let package = Arc::new(MiniAppPackage::load(id.to_string(), path)?);
+
+        log_trace!("[MiniApp] Loading package {} from {:?}", id, path);
+
+        // Load on a blocking thread so sync I/O doesn't starve the async runtime
+        let id_owned = id.to_string();
+        let path_display = path.display().to_string();
+        let package = tokio::task::spawn_blocking(move || {
+            log_trace!("[MiniApp] spawn_blocking: starting load for {}", id_owned);
+            let result = MiniAppPackage::load(id_owned, path);
+            log_trace!("[MiniApp] spawn_blocking: load finished, success={}", result.is_ok());
+            result
+        }).await.map_err(|e| Error::Anyhow(anyhow::anyhow!("Package load task failed for {}: {}", path_display, e)))??;
+
+        log_trace!("[MiniApp] Package loaded: {} ({})", package.manifest.name, id);
+        let package = Arc::new(package);
+
         {
             let mut packages = self.packages.write().await;
             packages.insert(id.to_string(), Arc::clone(&package));
         }
-        
+
         Ok(package)
     }
     

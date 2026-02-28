@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use crate::util;
 use crate::shared::image::read_file_checked;
 
-use super::types::{CachedCompressedImage, AttachmentFile, FileBytes, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
+use super::types::{CachedCompressedImage, AttachmentFile, ImageMetadata, COMPRESSION_CACHE, ANDROID_FILE_CACHE};
 use super::compression::{compress_bytes_internal, compress_image_internal};
 use super::sending::{message, MessageSendResult};
 
@@ -22,7 +22,7 @@ use super::sending::{message, MessageSendResult};
 use crate::android::filesystem;
 
 /// Cache for bytes received from JavaScript (for Android file handling)
-static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<FileBytes>, String, String)>>> =
+static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
     LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Cache for compressed bytes from JavaScript file
@@ -53,7 +53,7 @@ pub fn cache_file_bytes(bytes: Vec<u8>, file_name: String, extension: String) ->
         None
     };
 
-    let bytes = Arc::new(FileBytes::Owned(bytes));
+    let bytes = Arc::new(bytes);
 
     let mut cache = JS_FILE_CACHE.lock().unwrap();
     *cache = Some((bytes, file_name.clone(), extension.clone()));
@@ -215,7 +215,7 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
                 use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
                 let rgba_img = img.to_rgba8();
                 match encode_rgba_auto(rgba_img.as_raw(), img.width(), img.height(), JPEG_QUALITY_STANDARD) {
-                    Ok(encoded) => (Arc::new(FileBytes::Owned(encoded.bytes)), encoded.extension.to_string(), thumbhash_meta),
+                    Ok(encoded) => (Arc::new(encoded.bytes), encoded.extension.to_string(), thumbhash_meta),
                     Err(_) => (original_bytes, original_extension, thumbhash_meta),
                 }
             }
@@ -291,7 +291,7 @@ pub async fn send_file_bytes(
             None // GIFs or no compression - just get metadata
         };
 
-        match compress_bytes_internal(Arc::new(FileBytes::Owned(file_bytes)), &extension, min_savings) {
+        match compress_bytes_internal(Arc::new(file_bytes), &extension, min_savings) {
             Ok(result) => AttachmentFile {
                 bytes: result.bytes,
                 extension: result.extension,
@@ -305,7 +305,7 @@ pub async fn send_file_bytes(
     } else {
         // Non-image file - send as-is
         AttachmentFile {
-            bytes: Arc::new(FileBytes::Owned(file_bytes)),
+            bytes: Arc::new(file_bytes),
             extension,
             img_meta: None,
         }
@@ -554,12 +554,10 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
 
     #[cfg(not(target_os = "android"))]
     {
-        let file = std::fs::File::open(&file_path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
-        let mmap = unsafe { memmap2::Mmap::map(&file) }
-            .map_err(|e| format!("Failed to mmap file: {}", e))?;
+        let file_data = std::fs::read(&file_path)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
 
-        let img = ::image::load_from_memory(&mmap)
+        let img = ::image::load_from_memory(&file_data)
             .map_err(|e| format!("Failed to decode image: {}", e))?;
 
         let (width, height) = (img.width(), img.height());
@@ -582,7 +580,7 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
             } else {
                 drop(cache);
                 // Fall back to reading directly (may fail if permission expired)
-                Arc::new(FileBytes::Owned(filesystem::read_android_uri_bytes(file_path)?.0))
+                Arc::new(filesystem::read_android_uri_bytes(file_path)?.0)
             }
         };
 
@@ -963,13 +961,11 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
                 continue;
             }
 
-            // mmap for zero-copy reading, write in chunks for progress
-            let f = std::fs::File::open(path)
-                .map_err(|e| format!("Failed to open file {}: {}", path.display(), e))?;
-            let mmap = unsafe { memmap2::Mmap::map(&f) }
-                .map_err(|e| format!("Failed to mmap file {}: {}", path.display(), e))?;
+            // Read file into memory, write in chunks for progress
+            let file_data = std::fs::read(path)
+                .map_err(|e| format!("Failed to read file {}: {}", path.display(), e))?;
 
-            let data = &mmap[..];
+            let data = &file_data[..];
             let mut offset = 0;
             while offset < data.len() {
                 // Check if this zip has been superseded (cancelled or new zip started)

@@ -5,11 +5,53 @@
 //! - Attachment download, decryption, and saving
 //! - MLS attachment decryption (MIP-04)
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment};
 use crate::{util, crypto, net, db, mls, simd};
 use crate::util::hex_string_to_bytes;
+
+/// Global set of attachment IDs currently being downloaded.
+/// Prevents duplicate download threads for the same file (deduplication).
+static ACTIVE_DOWNLOADS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// RAII guard that removes an attachment ID from ACTIVE_DOWNLOADS when dropped.
+/// Prevents leaking IDs if any code path panics or returns early.
+struct ActiveDownloadGuard {
+    id: String,
+}
+
+impl ActiveDownloadGuard {
+    /// Try to insert `id` into the active set. Returns `Some(guard)` if inserted,
+    /// `None` if already present (another download is in progress).
+    async fn try_new(id: String) -> Option<Self> {
+        let mut active = ACTIVE_DOWNLOADS.lock().await;
+        if active.insert(id.clone()) {
+            Some(Self { id })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for ActiveDownloadGuard {
+    fn drop(&mut self) {
+        // Use try_lock to avoid blocking in drop (tokio Mutex).
+        // In the rare case the lock is held, spawn a task to clean up.
+        match ACTIVE_DOWNLOADS.try_lock() {
+            Ok(mut active) => { active.remove(&self.id); }
+            Err(_) => {
+                let id = self.id.clone();
+                tokio::spawn(async move {
+                    ACTIVE_DOWNLOADS.lock().await.remove(&id);
+                });
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Helper Functions
@@ -55,8 +97,11 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
     // Create the vector directory if it doesn't exist
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
 
-    // Save the file to disk
-    std::fs::write(&file_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
+    // Atomic write: write to temp file then rename, so the file is never 0 bytes
+    // (prevents corrupted state if another thread reads concurrently on macOS APFS)
+    let tmp_path = dir.join(format!(".{}.{}.tmp", file_hash, attachment.extension));
+    std::fs::write(&tmp_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
+    std::fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to rename file: {}", e))?;
 
     Ok(file_path)
 }
@@ -196,6 +241,13 @@ pub fn decode_thumbhash(thumbhash: String) -> String {
 /// Download and decrypt an attachment
 #[tauri::command]
 pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+    // Check global download deduplication — prevent multiple threads for the same file.
+    // The RAII guard automatically removes the ID when this function returns (or panics).
+    let _download_guard = match ActiveDownloadGuard::try_new(attachment_id.clone()).await {
+        Some(guard) => guard,
+        None => return false, // Already downloading
+    };
+
     let handle = TAURI_APP.get().unwrap();
 
     // Grab the attachment's metadata by searching through chats
@@ -254,6 +306,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                     &attachment_id_clone,
                                     true,
                                     &path_str
+                                );
+
+                                // Backfill other messages with the same attachment hash
+                                let _ = db::backfill_attachment_downloaded_status(
+                                    &attachment_id_clone,
+                                    true,
+                                    &path_str,
+                                    &msg_id_clone,
                                 );
 
                                 return true;
@@ -398,6 +458,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     "old_id": attachment_id,
                     "id": file_hash,
                     "success": true,
+                    "result": &path_str,
                 })).unwrap();
 
                 // Persist updated message/attachment metadata to the database
@@ -416,10 +477,57 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         "chat_id": &chat_id
                     })).unwrap();
 
+                    // In-memory backfill: update all other messages in this chat that share
+                    // the same attachment hash, and push message_update events to the frontend.
+                    // Two passes to satisfy the borrow checker (mut for update, then immut for serialize).
+                    let hash_bytes = hex_string_to_bytes(&file_hash);
+                    let mut backfilled_msg_ids: Vec<String> = Vec::new();
+                    if let Some(chat_mut) = state.get_chat_mut(&npub) {
+                        for compact_msg in chat_mut.messages.iter_mut() {
+                            if compact_msg.id_hex() == msg_id { continue; }
+                            let mut changed = false;
+                            for att in compact_msg.attachments.iter_mut() {
+                                if att.id == hash_bytes.as_slice() && !att.downloaded() {
+                                    att.set_downloading(false);
+                                    att.set_downloaded(true);
+                                    att.path = path_str.clone().into_boxed_str();
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                backfilled_msg_ids.push(compact_msg.id_hex());
+                            }
+                        }
+                    }
+                    // Emit message_update for each backfilled message
+                    if let Some(chat_ref) = state.get_chat(&npub) {
+                        for backfill_id in &backfilled_msg_ids {
+                            if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
+                                let backfill_msg = compact_msg.to_message(&state.interner);
+                                handle.emit("message_update", serde_json::json!({
+                                    "old_id": &backfill_msg.id,
+                                    "message": &backfill_msg,
+                                    "chat_id": &chat_id
+                                })).unwrap();
+                            }
+                        }
+                    }
+
                     // Drop the STATE lock before performing async I/O
                     drop(state);
 
                     let _ = db::save_message(&npub, &updated_message).await;
+
+                    // Backfill other messages with the same attachment hash
+                    let file_hash_clone = file_hash.clone();
+                    let path_str_clone = path_str.clone();
+                    let msg_id_clone = msg_id.clone();
+                    let _ = db::backfill_attachment_downloaded_status(
+                        &file_hash_clone,
+                        true,
+                        &path_str_clone,
+                        &msg_id_clone,
+                    );
                 }
             }
 

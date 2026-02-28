@@ -785,11 +785,11 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
 
     // Compute the old file's hash before we replace it (for permission migration)
     let old_file_hash = if file_path.exists() {
-        match std::fs::File::open(&file_path).and_then(|f| unsafe { memmap2::Mmap::map(&f) }) {
+        match std::fs::read(&file_path) {
             Ok(old_data) => {
                 use sha2::{Sha256, Digest};
                 let mut hasher = Sha256::new();
-                hasher.update(&*old_data);
+                hasher.update(&old_data);
                 Some(bytes_to_hex_string(&hasher.finalize()))
             }
             Err(e) => {
@@ -928,11 +928,9 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     permissions: Option<&str>,
     blossom_servers: Vec<String>,
 ) -> Result<String, String> {
-    // Read the .xdc file via mmap (zero-copy)
-    let file = std::fs::File::open(xdc_path)
-        .map_err(|e| format!("Failed to open .xdc file: {}", e))?;
-    let file_data = unsafe { memmap2::Mmap::map(&file) }
-        .map_err(|e| format!("Failed to mmap .xdc file: {}", e))?;
+    // Read the .xdc file into memory
+    let file_data = std::fs::read(xdc_path)
+        .map_err(|e| format!("Failed to read .xdc file: {}", e))?;
 
     let file_size = file_data.len() as u64;
 
@@ -955,7 +953,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
         match blossom::upload_blob_with_failover(
             signer.clone(),
             blossom_servers.clone(),
-            Arc::new(crate::message::FileBytes::Owned(icon_data)),
+            Arc::new(icon_data),
             Some(mime_type),
         )
         .await
@@ -981,7 +979,7 @@ pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
     let download_url = blossom::upload_blob_with_failover(
         signer.clone(),
         blossom_servers,
-        Arc::new(crate::message::FileBytes::Mapped(file_data)),
+        Arc::new(file_data),
         Some("application/octet-stream"),
     )
     .await?;

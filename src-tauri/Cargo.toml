@@ -63,7 +63,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 openmls_rust_crypto = "=0.5.0"
 hpke-rs-rust-crypto = "=0.4.0"
 rayon = "1.11.0"
-memmap2 = "0.9"
 
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
 memchr = "2"
@@ -78,6 +77,7 @@ url = "2.5.7"
 # Realtime peer channels (Iroh P2P)
 iroh = "0.34"
 iroh-gossip = "0.34"
+iroh-quinn = "0.13"
 rand = "0.8"
 
 # PIVX Promos (addressless crypto payments)

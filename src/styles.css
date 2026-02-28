@@ -1532,8 +1532,6 @@ body.chat-bg-disabled .chat-messages::before {
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px));
   animation: inline-image-spin 2s linear infinite;
-  /* Smooth progress transitions */
-  transition: --progress 0.15s ease-out;
 }
 
 @keyframes inline-image-spin {
@@ -1558,8 +1556,6 @@ body.chat-bg-disabled .chat-messages::before {
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #fff calc(100% - 2px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #fff calc(100% - 2px));
   animation: inline-image-spin 2s linear infinite;
-  /* Smooth progress transitions */
-  transition: --progress 0.15s ease-out;
 }
 
 .msg-them .avatar {
@@ -4910,6 +4906,7 @@ select:disabled:hover {
     background: rgba(22, 22, 22, 0.8);
 }
 
+
 .audio-play-btn {
     width: 40px;
     height: 40px;
@@ -6936,7 +6933,7 @@ hr {
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #fff calc(100% - 4px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #fff calc(100% - 4px));
   animation: spin 2s linear infinite;
-  transition: --progress 0.15s ease-out;
+
 }
 
 .file-preview-zip-label {
@@ -8710,7 +8707,7 @@ hr {
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
   animation: inline-image-spin 2s linear infinite;
-  transition: --progress 0.15s ease-out;
+
 }
 
 /* Mini Apps panel - downloading app overlay */
@@ -8734,13 +8731,13 @@ hr {
   height: 32px;
   border-radius: 50%;
   background: conic-gradient(
-    var(--icon-color-primary) 0% var(--progress),
-    rgba(255, 255, 255, 0.2) var(--progress) 100%
+    var(--icon-color-primary) 0% max(2.5%, var(--progress)),
+    rgba(255, 255, 255, 0.2) max(2.5%, var(--progress)) 100%
   );
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
   animation: inline-image-spin 2s linear infinite;
-  transition: --progress 0.15s ease-out;
+
 }
 
 /* Version update indicator */

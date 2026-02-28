@@ -2243,6 +2243,7 @@ async function playMiniAppSolo() {
 
     const app = pendingMiniAppLaunch;
     closeMiniAppLaunchDialog();
+    closeAttachmentPanel();
 
     // Check permissions for marketplace apps
     const shouldContinue = await checkMiniAppPermissions(app);
@@ -2286,6 +2287,7 @@ async function playMiniAppAndInvite() {
     if (!targetChatId) {
         console.error('No active chat to send Mini App to');
         closeMiniAppLaunchDialog();
+        closeAttachmentPanel();
         // Fallback to solo play
         await playMiniAppSoloInternal(app);
         return;
@@ -2298,178 +2300,86 @@ async function playMiniAppAndInvite() {
         return; // User cancelled
     }
 
-    // Show loading state on the invite button
+    // Show upload progress spinner on the invite button and disable all buttons
     const inviteBtn = domMiniAppLaunchInvite;
     const originalText = inviteBtn.textContent;
     inviteBtn.disabled = true;
-    inviteBtn.innerHTML = '<span class="icon icon-loading"></span>';
-    
-    // Helper to reset button and close dialog
+    domMiniAppLaunchSolo.disabled = true;
+    domMiniAppLaunchCancel.disabled = true;
+    domMiniAppLaunchSolo.style.opacity = '0.3';
+    domMiniAppLaunchCancel.style.opacity = '0.3';
+    inviteBtn.innerHTML = '<div class="miniapp-downloading-spinner" style="width:18px;height:18px;display:inline-block;vertical-align:middle;--progress:2.5%;background:conic-gradient(var(--icon-color-primary) 0% max(2.5%, var(--progress)), rgba(255,255,255,0.5) max(2.5%, var(--progress)) 100%);"></div>';
+    const spinnerEl = inviteBtn.querySelector('.miniapp-downloading-spinner');
+
+    // Listen for upload progress to update the spinner
+    let progressUnlisten = null;
+    try {
+        progressUnlisten = await listen('attachment_upload_progress', (evt) => {
+            if (spinnerEl && evt.payload.progress != null) {
+                spinnerEl.style.setProperty('--progress', `${evt.payload.progress}%`);
+            }
+        });
+    } catch (_) { /* non-critical */ }
+
+    // Helper to reset buttons and close dialog
     const finishAndClose = () => {
+        if (progressUnlisten) progressUnlisten();
         inviteBtn.disabled = false;
         inviteBtn.textContent = originalText;
+        domMiniAppLaunchSolo.disabled = false;
+        domMiniAppLaunchCancel.disabled = false;
+        domMiniAppLaunchSolo.style.opacity = '';
+        domMiniAppLaunchCancel.style.opacity = '';
         closeMiniAppLaunchDialog();
+        closeAttachmentPanel();
     };
-    
-    // Determine if this is a group chat (MLS) or DM
-    const chat = arrChats.find(c => c.id === targetChatId);
-    const isGroupChat = chat && chat.chat_type === 'MlsGroup';
-    const eventName = isGroupChat ? 'mls_message_new' : 'message_new';
-    
-    // Set up a one-time listener to catch the new message and open the Mini App
-    let unlisten = null;
-    const timeoutId = setTimeout(() => {
-        // Timeout after 30 seconds - just in case the message doesn't arrive
-        if (unlisten) unlisten();
-        console.warn('Timeout waiting for Mini App message to be sent');
-        finishAndClose();
-    }, 30000);
-    
-    unlisten = await listen(eventName, async (evt) => {
-        const message = isGroupChat ? evt.payload?.message : evt.payload?.message;
-        const chatId = isGroupChat ? evt.payload?.group_id : evt.payload?.chat_id;
-        
-        console.log('Play & Invite: Received message event', { chatId, targetChatId, messageId: message?.id, attachments: message?.attachments });
-        
-        // Log full attachment details for debugging
-        if (message?.attachments) {
-            message.attachments.forEach((a, i) => {
-                console.log(`Play & Invite: Attachment ${i}:`, { name: a.name, filename: a.filename, path: a.path, mime: a.mime, ext: a.ext });
-            });
-        }
-        
-        // Check if this is our message in the target chat with a .miniapp or .xdc attachment
-        if (chatId === targetChatId && message && message.attachments) {
-            const miniAppAttachment = message.attachments.find(a => {
-                const filename = a.name || a.filename || '';
-                const path = a.path || '';
-                const ext = a.ext || '';
-                // Check for .xdc extensions
-                const isMiniApp = filename.toLowerCase().endsWith('.xdc') ||
-                                  path.toLowerCase().endsWith('.xdc') ||
-                                  ext.toLowerCase() === 'xdc';
-                return isMiniApp;
-            });
-            
-            console.log('Play & Invite: Found miniapp attachment?', miniAppAttachment);
-            
-            if (miniAppAttachment) {
-                // Found our Mini App message - clean up the message listener
-                clearTimeout(timeoutId);
-                if (unlisten) unlisten();
-                
-                const filePath = miniAppAttachment.path || app.src_url;
-                
-                // Check if this is a pending message - if so, wait for the real ID
-                if (message.id.startsWith('pending')) {
-                    console.log('Play & Invite: Message is pending, waiting for real ID...');
-                    
-                    // Track if we've already handled the update
-                    let updateHandled = false;
-                    let updateTimeoutId = null;
-                    
-                    // Set up a listener for the message_update event to get the real ID
-                    const updateUnlisten = await listen('message_update', async (updateEvt) => {
-                        if (updateHandled) return;
-                        if (updateEvt.payload.old_id === message.id && updateEvt.payload.chat_id === targetChatId) {
-                            updateHandled = true;
-                            const realMessage = updateEvt.payload.message;
-                            console.log('Play & Invite: Got real message ID:', realMessage.id);
-                            
-                            // Clear timeout and unlisten
-                            if (updateTimeoutId) clearTimeout(updateTimeoutId);
-                            updateUnlisten();
-                            
-                            // Get the topic ID from the real message's attachment
-                            let topicId = null;
-                            if (realMessage.attachments && realMessage.attachments.length > 0) {
-                                const miniappAttachment = realMessage.attachments.find(a =>
-                                    a.extension === 'xdc' || a.path?.endsWith('.xdc')
-                                );
-                                if (miniappAttachment) {
-                                    topicId = miniappAttachment.webxdc_topic;
-                                    console.log('Play & Invite: Got topic ID from attachment:', topicId);
-                                }
-                            }
-                            
-                            // Open the Mini App with the real message ID and topic
-                            try {
-                                await invoke('miniapp_open', {
-                                    filePath: filePath,
-                                    chatId: targetChatId,
-                                    messageId: realMessage.id,
-                                    href: null,
-                                    topicId: topicId,
-                                });
-                            } catch (e) {
-                                console.error('Failed to open Mini App from forwarded message:', e);
-                            }
-                            
-                            finishAndClose();
-                        }
-                    });
-                    
-                    // Set a timeout for the update listener too
-                    updateTimeoutId = setTimeout(() => {
-                        if (updateHandled) return;
-                        updateUnlisten();
-                        console.warn('Timeout waiting for message update');
-                        finishAndClose();
-                    }, 30000);
-                } else {
-                    // Message already has a real ID, open immediately
-                    console.log('Opening Mini App from forwarded message:', message.id, 'path:', filePath);
-                    
-                    // Get the topic ID from the message's attachment
-                    let topicId = null;
-                    if (message.attachments && message.attachments.length > 0) {
-                        const miniappAttachment = message.attachments.find(a =>
-                            a.extension === 'xdc' || a.path?.endsWith('.xdc')
-                        );
-                        if (miniappAttachment) {
-                            topicId = miniappAttachment.webxdc_topic;
-                            console.log('Play & Invite: Got topic ID from attachment:', topicId);
-                        }
-                    }
-                    
-                    try {
-                        await invoke('miniapp_open', {
-                            filePath: filePath,
-                            chatId: targetChatId,
-                            messageId: message.id,
-                            href: null,
-                            topicId: topicId,
-                        });
-                    } catch (e) {
-                        console.error('Failed to open Mini App from forwarded message:', e);
-                    }
-                    
-                    finishAndClose();
-                }
-            }
-        }
-    });
-    
+
     try {
-        // Send the Mini App file to the current chat
+        // Send the Mini App file to the current chat — awaits upload + relay send
         const result = await invoke('file_message', {
             receiver: targetChatId,
             repliedTo: '',
             filePath: app.src_url,
         });
 
-        // Finalize the pending message
-        if (result && result.event_id) {
-            finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+        if (!result || !result.event_id) {
+            console.error('Play & Invite: file_message returned no event_id');
+            finishAndClose();
+            return;
         }
 
-        console.log('Mini App sent to chat successfully');
+        // Finalize the pending message in local state
+        finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+
+        // Find the message in local state to get the topic ID from the attachment
+        const chat = getChat(targetChatId);
+        let topicId = null;
+        let filePath = app.src_url;
+        if (chat) {
+            const msg = chat.messages.find(m => m.id === result.event_id);
+            if (msg && msg.attachments) {
+                const xdcAtt = msg.attachments.find(a =>
+                    a.extension === 'xdc' || (a.path && a.path.endsWith('.xdc'))
+                );
+                if (xdcAtt) {
+                    topicId = xdcAtt.webxdc_topic || null;
+                    if (xdcAtt.path) filePath = xdcAtt.path;
+                }
+            }
+        }
+
+        // Open the Mini App
+        await invoke('miniapp_open', {
+            filePath,
+            chatId: targetChatId,
+            messageId: result.event_id,
+            href: null,
+            topicId,
+        });
+
+        finishAndClose();
     } catch (e) {
         console.error('Failed to send Mini App to chat:', e);
-        // Clean up listener
-        clearTimeout(timeoutId);
-        if (unlisten) unlisten();
-        // Close dialog and reset button
         finishAndClose();
         // Fallback to solo play if sending fails
         await playMiniAppSoloInternal(app);
@@ -5418,64 +5328,32 @@ async function setupRustListeners() {
     // Listen for Attachment Upload Progress events
     _on('attachment_upload_progress', async (evt) => {
         if (strOpenChat) {
-            let divUpload = document.getElementById(evt.payload.id + '_file');
+            const divUpload = document.getElementById(evt.payload.id + '_file');
             if (divUpload) {
-                // Update the Download Progress bar
-                divUpload.style.width = `${evt.payload.progress}%`;
+                // Update the conical progress spinner
+                divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
             }
         }
     });
 
     // Listen for Attachment Download Progress events
     _on('attachment_download_progress', async (evt) => {
-        // Update the in-memory attachment
-        if (strOpenChat) {
-            let divDownload = document.getElementById(evt.payload.id);
-            if (divDownload) {
-                // Check if we need a text label (for non-image files)
-                let iLabel = divDownload.querySelector('.download-label');
-                if (iLabel) {
-                    // Update the text with progress
-                    iLabel.textContent = `Downloading... (${evt.payload.progress}%)`;
-                }
-                
-                let divBar = divDownload.querySelector('.progress-bar');
-                if (divBar) {
-                    // Update the Download Progress bar
-                    divBar.style.width = `${evt.payload.progress}%`;
-                } else {
-                    // Create the Download Progress container
-                    let newDivDownload = document.createElement('div');
-                    newDivDownload.id = evt.payload.id;
-                    newDivDownload.style.minWidth = `200px`;
-                    newDivDownload.style.textAlign = `center`;
-                    
-                    // For non-image files, add a text label
-                    // Check if the element being updated is a non-image file by looking for existing download button attributes
-                    const attachmentElement = document.getElementById(evt.payload.id);
-                    const isNonImageAttachment = attachmentElement && (attachmentElement.hasAttribute('download') || attachmentElement.classList.contains('btn'));
-                    
-                    if (isNonImageAttachment) {
-                        const iLabel = document.createElement('i');
-                        iLabel.classList.add('download-label');
-                        iLabel.textContent = `Downloading... (${evt.payload.progress}%)`;
-                        iLabel.style.display = `block`;
-                        iLabel.style.marginBottom = `5px`;
-                        newDivDownload.appendChild(iLabel);
-                    }
+        if (!strOpenChat) return;
+        const escapedId = CSS.escape(evt.payload.id);
 
-                    // Create the Download Progress bar
-                    divBar = document.createElement('div');
-                    divBar.classList.add('progress-bar');
-                    divBar.style.width = `0%`;
-                    divBar.style.height = `5px`;
-                    divBar.style.marginTop = `0`;
-                    newDivDownload.appendChild(divBar);
-
-                    // Replace the previous UI
-                    divDownload.replaceWith(newDivDownload);
-                }
+        // Update ALL conical progress spinners with this attachment ID (handles deduplication)
+        const spinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
+        if (spinners.length) {
+            for (const spinner of spinners) {
+                spinner.style.setProperty('--progress', `${evt.payload.progress}%`);
             }
+            return;
+        }
+
+        // Fallback: image thumbhash download overlays
+        const overlays = document.querySelectorAll(`[data-attachment-id="${escapedId}"]:not(.miniapp-downloading-spinner)`);
+        for (const el of overlays) {
+            el.textContent = `Downloading... ${evt.payload.progress}%`;
         }
     });
 
@@ -5484,43 +5362,83 @@ async function setupRustListeners() {
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
-        
+
         let cMsg = cChat.messages.find(m => m.id === evt.payload.msg_id);
         if (!cMsg) return;
-    
+
         // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
-        let cAttachment = cMsg.attachments.find(a => a.id === evt.payload?.old_id || evt.payload.id);
+        const matchId = evt.payload?.old_id || evt.payload.id;
+        let cAttachment = cMsg.attachments.find(a => a.id === matchId);
         if (!cAttachment) return;
 
         cAttachment.downloading = false;
+        cAttachment.download_failed = false;
+        downloadingAttachmentIds.delete(matchId);
+        downloadingAttachmentIds.delete(evt.payload.id);
         if (evt.payload.success) {
             cAttachment.downloaded = true;
-            // Update our ID and Path
+            // Update path from backend result (always has the correct file path)
+            if (evt.payload.result) {
+                cAttachment.path = evt.payload.result;
+            }
+            // Update ID if hash changed (nonce → blossom hash)
             if (evt.payload.old_id) {
                 cAttachment.id = evt.payload.id;
-                cAttachment.path = cAttachment.path.replace(evt.payload.old_id, evt.payload.id);
             }
 
-            // If this user has an open chat, then update the rendered message
-            if (strOpenChat === evt.payload.profile_id) {
-                const domMsg = document.getElementById(evt.payload.msg_id);
-                const profile = getProfile(evt.payload.profile_id);
-                domMsg?.replaceWith(renderMessage(cMsg, profile, evt.payload.msg_id));
+            // Update ALL not-yet-downloaded in-memory attachments with the same hash (deduplication)
+            // and collect their message IDs for re-rendering
+            // Skip already-downloaded attachments — they have valid paths and loaded metadata
+            const affectedMsgIds = new Set();
+            affectedMsgIds.add(evt.payload.msg_id);
+            for (const msg of cChat.messages) {
+                if (msg.id === evt.payload.msg_id) continue;
+                for (const att of msg.attachments) {
+                    if (att.id === matchId && !att.downloaded) {
+                        att.downloading = false;
+                        att.downloaded = true;
+                        att.download_failed = false;
+                        att.path = cAttachment.path;
+                        if (evt.payload.old_id) {
+                            att.id = evt.payload.id;
+                        }
+                        affectedMsgIds.add(msg.id);
+                    }
+                }
+            }
 
-                // Scroll accordingly
+            // Re-render all affected messages in the open chat
+            if (strOpenChat === evt.payload.profile_id) {
+                const profile = getProfile(evt.payload.profile_id);
+                for (const msgId of affectedMsgIds) {
+                    const domMsg = document.getElementById(msgId);
+                    const memMsg = cChat.messages.find(m => m.id === msgId);
+                    if (domMsg && memMsg) {
+                        domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                    }
+                }
                 softChatScroll();
             }
         } else {
-            // Display the reason the download failed and allow restarting it
-            const divDownload = document.getElementById(evt.payload.id);
-            const iFailed = document.createElement('i');
-            iFailed.id = evt.payload.id;
-            iFailed.toggleAttribute('download', true);
-            iFailed.setAttribute('npub', evt.payload.profile_id);
-            iFailed.setAttribute('msg', evt.payload.msg_id);
-            iFailed.classList.add('btn');
-            iFailed.textContent = `Retry Download (${evt.payload.result})`;
-            divDownload.replaceWith(iFailed);
+            // Download failed — mark as failed to prevent auto-download retry loop, then re-render
+            if (strOpenChat === evt.payload.profile_id) {
+                const profile = getProfile(evt.payload.profile_id);
+                for (const msg of cChat.messages) {
+                    const hasAtt = msg.attachments.some(a => a.id === matchId);
+                    if (hasAtt) {
+                        const domMsg = document.getElementById(msg.id);
+                        if (domMsg) {
+                            for (const att of msg.attachments) {
+                                if (att.id === matchId) {
+                                    att.downloading = false;
+                                    att.download_failed = true;
+                                }
+                            }
+                            domMsg.replaceWith(renderMessage(msg, profile, msg.id));
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -7872,6 +7790,280 @@ function insertSystemEvent(content, parent = null) {
 }
 
 /**
+ * Creates a file attachment box (the .custom-audio-player styled div) for all download states.
+ * @param {Object} cAttachment - the attachment object
+ * @param {'downloaded'|'download'|'downloading'} state - the download state
+ * @returns {{ fileDiv: HTMLElement, isMiniApp: boolean, descriptionSpan: HTMLElement, iconElement: HTMLElement, updateMiniAppStatus: Function|null, statusSpan: HTMLElement|null }}
+ */
+function createFileBox(cAttachment, state = 'downloaded') {
+    const ext = (cAttachment.extension || '').toLowerCase();
+    const fileTypeInfo = getFileTypeInfo(ext);
+    const isMiniApp = fileTypeInfo.isMiniApp === true;
+
+    const fileDiv = document.createElement('div');
+    if (cAttachment.path) {
+        fileDiv.setAttribute('filepath', cAttachment.path);
+    }
+    if (isMiniApp) {
+        fileDiv.classList.add('miniapp-attachment');
+    }
+
+    // Create the main container
+    const btnDiv = document.createElement('div');
+    btnDiv.className = 'btn custom-audio-player';
+    btnDiv.style.display = 'flex';
+    btnDiv.style.alignItems = 'center';
+    btnDiv.style.padding = '10px';
+    btnDiv.style.paddingRight = '15px';
+
+    // Create the icon element (span for regular files, img for Mini Apps with icons)
+    let iconElement;
+    if (isMiniApp) {
+        iconElement = document.createElement('img');
+        iconElement.style.marginLeft = '5px';
+        iconElement.style.width = '40px';
+        iconElement.style.height = '40px';
+        iconElement.style.borderRadius = '8px';
+        iconElement.style.objectFit = 'cover';
+        iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+        iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+    } else {
+        iconElement = document.createElement('span');
+        iconElement.className = `icon icon-${fileTypeInfo.icon}`;
+        iconElement.style.marginLeft = '5px';
+        iconElement.style.width = '50px';
+        iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
+    }
+
+    // Create the text container span
+    const textContainerSpan = document.createElement('span');
+    textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
+    textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
+    textContainerSpan.style.lineHeight = '1.2';
+
+    // Create the description span
+    const descriptionSpan = document.createElement('span');
+    descriptionSpan.style.display = 'block';
+    descriptionSpan.style.color = 'var(--icon-color-primary)';
+    descriptionSpan.style.fontWeight = '400';
+    descriptionSpan.innerText = fileTypeInfo.description;
+
+    // Create the small element for file details
+    const smallElement = document.createElement('small');
+
+    let updateMiniAppStatus = null;
+    let statusSpan = null;
+
+    if (state === 'downloaded' && isMiniApp) {
+        // Downloaded Mini App: full UI with realtime, peer badge, etc.
+        smallElement.style.display = 'flex';
+        smallElement.style.alignItems = 'center';
+        smallElement.style.gap = '10px';
+
+        const playSpan = document.createElement('span');
+        playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+        playSpan.style.fontWeight = '400';
+        playSpan.innerText = 'Click to Play';
+        smallElement.appendChild(playSpan);
+
+        // Create peer count badge (hidden by default)
+        const peerBadge = document.createElement('span');
+        peerBadge.style.padding = '2px 8px';
+        peerBadge.style.borderRadius = '10px';
+        peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.3)';
+        peerBadge.style.color = '#2ed573';
+        peerBadge.style.fontSize = '0.85em';
+        peerBadge.style.fontWeight = '500';
+        peerBadge.style.display = 'none';
+        smallElement.appendChild(peerBadge);
+
+        // Store topic for event updates
+        const topicId = cAttachment.webxdc_topic;
+        if (topicId) {
+            fileDiv.setAttribute('data-webxdc-topic', topicId);
+        }
+
+        // Helper function to update the peer badge
+        const updatePeerBadge = (peerCount, isPlaying) => {
+            const totalPlayers = isPlaying ? peerCount + 1 : peerCount;
+            if (totalPlayers > 0) {
+                const groupIcon = document.createElement('img');
+                groupIcon.src = 'icons/group-placeholder.svg';
+                groupIcon.style.width = '14px';
+                groupIcon.style.height = '14px';
+                groupIcon.style.verticalAlign = 'middle';
+                groupIcon.style.marginRight = '4px';
+
+                peerBadge.innerHTML = '';
+                peerBadge.appendChild(groupIcon);
+                peerBadge.appendChild(document.createTextNode(`${totalPlayers} online`));
+                peerBadge.style.display = 'inline-flex';
+                peerBadge.style.alignItems = 'center';
+            } else {
+                peerBadge.style.display = 'none';
+            }
+        };
+
+        // Helper function to update the UI based on status
+        updateMiniAppStatus = (isPlaying, peerCount) => {
+            if (isPlaying) {
+                playSpan.innerText = 'Playing';
+                playSpan.style.color = '#2ed573';
+                fileDiv.style.cursor = 'default';
+                fileDiv.style.opacity = '0.9';
+                fileDiv.setAttribute('data-playing', 'true');
+            } else if (peerCount > 0) {
+                playSpan.innerText = 'Click to Join';
+                playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                fileDiv.style.cursor = 'pointer';
+                fileDiv.style.opacity = '1';
+                fileDiv.removeAttribute('data-playing');
+            } else {
+                playSpan.innerText = 'Click to Play';
+                playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+                fileDiv.style.cursor = 'pointer';
+                fileDiv.style.opacity = '1';
+                fileDiv.removeAttribute('data-playing');
+            }
+            updatePeerBadge(peerCount, isPlaying);
+        };
+
+        // Load Mini App info asynchronously to get name and icon
+        const miniAppPath = cAttachment.path;
+        if (miniAppPath) {
+            loadMiniAppInfo(miniAppPath).then(info => {
+                if (info) {
+                    descriptionSpan.innerText = info.name || 'Mini App';
+                    if (info.icon_data) {
+                        iconElement.src = info.icon_data;
+                    }
+                }
+            }).catch(err => {
+                console.warn('Failed to load Mini App info from path:', miniAppPath, err);
+            });
+        }
+
+        // Check for realtime channel status if we have a topic
+        if (topicId) {
+            invoke('miniapp_get_realtime_status', { topicId })
+                .then(status => {
+                    console.log('[MiniApp] Realtime status:', status);
+                    const peerCount = (status?.peer_count || 0) > 0
+                        ? status.peer_count
+                        : (status?.pending_peer_count || 0);
+                    updateMiniAppStatus(status?.active || false, peerCount);
+                })
+                .catch(err => {
+                    console.debug('Could not get realtime status:', err);
+                });
+
+            fileDiv._updateMiniAppStatus = updateMiniAppStatus;
+        }
+    } else if (state === 'downloaded') {
+        // Downloaded regular file: show extension and size
+        const extSpan = document.createElement('span');
+        extSpan.style.color = 'white';
+        extSpan.style.fontWeight = '400';
+        extSpan.innerText = `.${ext}`;
+
+        const sizeSpan = document.createElement('span');
+        sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+
+        smallElement.appendChild(extSpan);
+        smallElement.appendChild(sizeSpan);
+    } else {
+        // Non-downloaded states: 'download' or 'downloading'
+        statusSpan = document.createElement('span');
+        statusSpan.className = 'file-status';
+        statusSpan.style.color = 'rgba(255, 255, 255, 0.7)';
+        statusSpan.style.fontWeight = '400';
+
+        if (state === 'downloading') {
+            statusSpan.innerText = 'Downloading...';
+            fileDiv.style.cursor = 'default';
+
+            // Replace icon with conical progress spinner
+            const spinner = document.createElement('div');
+            spinner.className = 'miniapp-downloading-spinner';
+            spinner.setAttribute('data-attachment-id', cAttachment.id);
+            spinner.style.marginLeft = '5px';
+            spinner.style.width = '40px';
+            spinner.style.height = '40px';
+            spinner.style.flexShrink = '0';
+            iconElement = spinner;
+        } else {
+            // 'download' — waiting for user to click
+            let strSize = '';
+            if (cAttachment.size > 0) {
+                strSize = ` · ${formatBytes(cAttachment.size)}`;
+            }
+            statusSpan.innerText = `Click to Download${strSize}`;
+
+            // Tag the icon so click handlers can swap it for a spinner
+            iconElement.setAttribute('data-attachment-id', cAttachment.id);
+        }
+        smallElement.appendChild(statusSpan);
+
+        // For undownloaded Mini Apps, try to resolve name and icon from the Nexus Marketplace cache
+        if (isMiniApp) {
+            const iconRef = iconElement; // capture before possible spinner swap
+            invoke('marketplace_get_app_by_hash', { fileHash: cAttachment.id })
+                .then(app => {
+                    if (!app) return;
+                    if (app.name) descriptionSpan.innerText = app.name;
+                    const iconSrc = app.icon_cached ? convertFileSrc(app.icon_cached) : app.icon_url;
+                    if (iconSrc && iconRef.tagName === 'IMG') {
+                        iconRef.src = iconSrc;
+                    }
+                })
+                .catch(() => { /* Marketplace lookup is best-effort */ });
+        }
+    }
+
+    // Assemble the structure
+    textContainerSpan.appendChild(descriptionSpan);
+    textContainerSpan.appendChild(smallElement);
+    btnDiv.appendChild(iconElement);
+    btnDiv.appendChild(textContainerSpan);
+    fileDiv.appendChild(btnDiv);
+
+    return { fileDiv, isMiniApp, descriptionSpan, iconElement, updateMiniAppStatus, statusSpan };
+}
+
+/**
+ * Start downloading an attachment and update all deduped file boxes in the DOM.
+ * Shared by thumbhash-fallback and non-image click handlers.
+ */
+function startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender) {
+    if (downloadingAttachmentIds.has(cAttachment.id)) return;
+    downloadingAttachmentIds.add(cAttachment.id);
+    cAttachment.download_failed = false;
+    const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+    invoke('download_attachment', { npub: downloadNpub, msgId: msg.id, attachmentId: cAttachment.id })
+        .catch(() => downloadingAttachmentIds.delete(cAttachment.id));
+    // Update ALL file boxes with the same attachment ID (dedup support)
+    const escapedId = CSS.escape(cAttachment.id);
+    const allIcons = document.querySelectorAll(`[data-attachment-id="${escapedId}"]`);
+    for (const oldIcon of allIcons) {
+        if (oldIcon.classList.contains('miniapp-downloading-spinner')) continue;
+        const parentBox = oldIcon.closest('.custom-audio-player');
+        if (parentBox) {
+            const status = parentBox.querySelector('.file-status');
+            if (status) status.innerText = 'Downloading...';
+            parentBox.style.cursor = 'default';
+        }
+        const spinner = document.createElement('div');
+        spinner.className = 'miniapp-downloading-spinner';
+        spinner.setAttribute('data-attachment-id', cAttachment.id);
+        spinner.style.marginLeft = '5px';
+        spinner.style.width = '40px';
+        spinner.style.height = '40px';
+        spinner.style.flexShrink = '0';
+        oldIcon.replaceWith(spinner);
+    }
+}
+
+/**
  * Convert a Message in to a rendered HTML Element
  * @param {Message} msg - the Message to be converted
  * @param {Profile} sender - the Profile of the message sender
@@ -8352,198 +8544,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                 pMessage.appendChild(vidPreview);
             } else {
-                // File Attachment
-                const ext = cAttachment.extension.toLowerCase();
-                const fileTypeInfo = getFileTypeInfo(ext);
-                const isMiniApp = fileTypeInfo.isMiniApp === true;
-                
-                const fileDiv = document.createElement('div');
-                fileDiv.setAttribute('filepath', cAttachment.path);
-                if (isMiniApp) {
-                    fileDiv.classList.add('miniapp-attachment');
-                }
-
-                // Create the main container
-                const btnDiv = document.createElement('div');
-                btnDiv.className = 'btn custom-audio-player';
-                btnDiv.style.display = 'flex';
-                btnDiv.style.alignItems = 'center';
-                btnDiv.style.padding = '10px';
-                btnDiv.style.paddingRight = '15px';
-
-                // Create the icon element (span for regular files, img for Mini Apps with icons)
-                let iconElement;
-                if (isMiniApp) {
-                    // For Mini Apps, create an img element that will be populated with the icon
-                    iconElement = document.createElement('img');
-                    iconElement.style.marginLeft = '5px';
-                    iconElement.style.width = '40px';
-                    iconElement.style.height = '40px';
-                    iconElement.style.borderRadius = '8px';
-                    iconElement.style.objectFit = 'cover';
-                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
-                    // Set a placeholder initially
-                    iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
-                } else {
-                    iconElement = document.createElement('span');
-                    iconElement.className = `icon icon-${fileTypeInfo.icon}`;
-                    iconElement.style.marginLeft = '5px';
-                    iconElement.style.width = '50px';
-                    iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
-                }
-
-                // Create the text container span
-                const textContainerSpan = document.createElement('span');
-                textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-                textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
-                textContainerSpan.style.lineHeight = '1.2';
-
-                // Create the description span
-                const descriptionSpan = document.createElement('span');
-                descriptionSpan.style.display = 'block';
-                descriptionSpan.style.color = 'var(--icon-color-primary)';
-                descriptionSpan.style.fontWeight = '400';
-                descriptionSpan.innerText = fileTypeInfo.description;
-
-                // Create the small element for file details
-                const smallElement = document.createElement('small');
-
-                if (isMiniApp) {
-                    // Mini App: show status and optionally peer count
-                    // Make smallElement a flex container for proper alignment
-                    smallElement.style.display = 'flex';
-                    smallElement.style.alignItems = 'center';
-                    smallElement.style.gap = '10px';
-                    
-                    const playSpan = document.createElement('span');
-                    playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-                    playSpan.style.fontWeight = '400';
-                    playSpan.innerText = 'Click to Play';
-                    smallElement.appendChild(playSpan);
-                    
-                    // Create peer count badge (hidden by default)
-                    const peerBadge = document.createElement('span');
-                    peerBadge.style.padding = '2px 8px';
-                    peerBadge.style.borderRadius = '10px';
-                    peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.3)';
-                    peerBadge.style.color = '#2ed573';
-                    peerBadge.style.fontSize = '0.85em';
-                    peerBadge.style.fontWeight = '500';
-                    peerBadge.style.display = 'none';
-                    smallElement.appendChild(peerBadge);
-                    
-                    // Store topic for event updates
-                    const topicId = cAttachment.webxdc_topic;
-                    if (topicId) {
-                        fileDiv.setAttribute('data-webxdc-topic', topicId);
-                    }
-                    
-                    // Helper function to update the peer badge
-                    const updatePeerBadge = (peerCount, isPlaying) => {
-                        const totalPlayers = isPlaying ? peerCount + 1 : peerCount;
-                        if (totalPlayers > 0) {
-                            // Create inline icon
-                            const groupIcon = document.createElement('img');
-                            groupIcon.src = 'icons/group-placeholder.svg';
-                            groupIcon.style.width = '14px';
-                            groupIcon.style.height = '14px';
-                            groupIcon.style.verticalAlign = 'middle';
-                            groupIcon.style.marginRight = '4px';
-                            
-                            // Clear and rebuild badge content
-                            peerBadge.innerHTML = '';
-                            peerBadge.appendChild(groupIcon);
-                            peerBadge.appendChild(document.createTextNode(`${totalPlayers} online`));
-                            peerBadge.style.display = 'inline-flex';
-                            peerBadge.style.alignItems = 'center';
-                        } else {
-                            peerBadge.style.display = 'none';
-                        }
-                    };
-                    
-                    // Helper function to update the UI based on status
-                    const updateMiniAppStatus = (isPlaying, peerCount) => {
-                        if (isPlaying) {
-                            // We're playing - show "Playing" and make unclickable
-                            playSpan.innerText = 'Playing';
-                            playSpan.style.color = '#2ed573';
-                            fileDiv.style.cursor = 'default';
-                            fileDiv.style.opacity = '0.9';
-                            fileDiv.setAttribute('data-playing', 'true');
-                        } else if (peerCount > 0) {
-                            // Others are playing - show "Click to Join"
-                            playSpan.innerText = 'Click to Join';
-                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-                            fileDiv.style.cursor = 'pointer';
-                            fileDiv.style.opacity = '1';
-                            fileDiv.removeAttribute('data-playing');
-                        } else {
-                            // No one playing - show "Click to Play"
-                            playSpan.innerText = 'Click to Play';
-                            playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-                            fileDiv.style.cursor = 'pointer';
-                            fileDiv.style.opacity = '1';
-                            fileDiv.removeAttribute('data-playing');
-                        }
-                        updatePeerBadge(peerCount, isPlaying);
-                    };
-                    
-                    // Load Mini App info asynchronously to get name and icon
-                    loadMiniAppInfo(cAttachment.path).then(info => {
-                        if (info) {
-                            // Update the name
-                            descriptionSpan.innerText = info.name || 'Mini App';
-                            
-                            // Update the icon if available
-                            if (info.icon_data) {
-                                iconElement.src = info.icon_data;
-                            }
-                        }
-                    }).catch(err => {
-                        console.warn('Failed to load Mini App info:', err);
-                    });
-                    
-                    // Check for realtime channel status if we have a topic
-                    if (topicId) {
-                        invoke('miniapp_get_realtime_status', { topicId })
-                            .then(status => {
-                                console.log('[MiniApp] Realtime status:', status);
-                                // Use peer_count if we have a channel, otherwise use pending_peer_count
-                                // peer_count is from active Iroh channel, pending_peer_count is from advertisements
-                                const peerCount = (status?.peer_count || 0) > 0
-                                    ? status.peer_count
-                                    : (status?.pending_peer_count || 0);
-                                updateMiniAppStatus(status?.active || false, peerCount);
-                            })
-                            .catch(err => {
-                                // Silently ignore - realtime status is optional
-                                console.debug('Could not get realtime status:', err);
-                            });
-                        
-                        // Listen for realtime events to update the UI
-                        // Store the update function on the element for event handler access
-                        fileDiv._updateMiniAppStatus = updateMiniAppStatus;
-                    }
-                } else {
-                    // Regular file: show extension and size
-                    const extSpan = document.createElement('span');
-                    extSpan.style.color = 'white';
-                    extSpan.style.fontWeight = '400';
-                    extSpan.innerText = `.${ext}`;
-
-                    const sizeSpan = document.createElement('span');
-                    sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
-
-                    smallElement.appendChild(extSpan);
-                    smallElement.appendChild(sizeSpan);
-                }
-
-                // Assemble the structure
-                textContainerSpan.appendChild(descriptionSpan);
-                textContainerSpan.appendChild(smallElement);
-                btnDiv.appendChild(iconElement);
-                btnDiv.appendChild(textContainerSpan);
-                fileDiv.appendChild(btnDiv);
+                // File Attachment — use shared createFileBox helper
+                const { fileDiv, isMiniApp } = createFileBox(cAttachment, 'downloaded');
 
                 // Click handler
                 fileDiv.addEventListener('click', async (e) => {
@@ -8552,39 +8554,32 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                     if (isMiniApp) {
                         // Check if we're already playing
-                        if (e.currentTarget.getAttribute('data-playing') === 'true') {
+                        if (fileDiv.getAttribute('data-playing') === 'true') {
                             console.log('[MiniApp] Already playing, ignoring click');
                             return;
                         }
 
                         // Open Mini App in a new window
                         try {
-                            // Find the attachment to get the webxdc_topic
                             const attachment = msg.attachments.find(a => a.path === path);
                             const topicId = attachment?.webxdc_topic || null;
 
-                            // Check permissions before opening
                             const shouldOpen = await checkChatMiniAppPermissions(path);
-                            if (!shouldOpen) {
-                                return; // User cancelled the permission prompt
-                            }
+                            if (!shouldOpen) return;
 
                             await openMiniApp(path, strOpenChat, msg.id, null, topicId);
-                            
-                            // Update UI to show "Playing" after opening
-                            // Safety check: e.currentTarget may be null when called from non-click context
-                            if (e.currentTarget && e.currentTarget._updateMiniAppStatus) {
-                                // Get current peer count and update status
+
+                            if (fileDiv._updateMiniAppStatus) {
                                 if (topicId) {
                                     invoke('miniapp_get_realtime_status', { topicId })
                                         .then(status => {
-                                            e.currentTarget._updateMiniAppStatus(true, status?.peer_count || 0);
+                                            fileDiv._updateMiniAppStatus(true, status?.peer_count || 0);
                                         })
                                         .catch(() => {
-                                            e.currentTarget._updateMiniAppStatus(true, 0);
+                                            fileDiv._updateMiniAppStatus(true, 0);
                                         });
                                 } else {
-                                    e.currentTarget._updateMiniAppStatus(true, 0);
+                                    fileDiv._updateMiniAppStatus(true, 0);
                                 }
                             }
                         } catch (err) {
@@ -8599,23 +8594,25 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 pMessage.appendChild(fileDiv);
             }
 
-            // If the message is mine, and pending: display an uploading status
+            // If the message is mine, and pending: show upload progress
             if (msg.mine && msg.pending) {
-                // Lower the attachment opacity (if element exists - may be async for Android videos)
+                // Lower the attachment opacity
                 if (pMessage.lastElementChild) {
                     pMessage.lastElementChild.style.opacity = 0.25;
                 }
 
-                // Create the Progress Bar
-                const divBar = document.createElement('div');
-                divBar.id = msg.id + '_file';
-                divBar.classList.add('progress-bar');
-                divBar.style.width = `100%`;
-                divBar.style.height = `5px`;
-                divBar.style.marginTop = `0`;
-                divBar.style.transitionDuration = `0.75s`;
-                divBar.style.width = `0%`;
-                pMessage.appendChild(divBar);
+                // For file boxes: swap the icon for a conical progress spinner
+                const fileBoxIcon = pMessage.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
+                if (fileBoxIcon) {
+                    const uploadSpinner = document.createElement('div');
+                    uploadSpinner.className = 'miniapp-downloading-spinner';
+                    uploadSpinner.id = msg.id + '_file';
+                    uploadSpinner.style.marginLeft = '5px';
+                    uploadSpinner.style.width = '40px';
+                    uploadSpinner.style.height = '40px';
+                    uploadSpinner.style.flexShrink = '0';
+                    fileBoxIcon.replaceWith(uploadSpinner);
+                }
             }
         } else if (cAttachment.downloading) {
             // For images, show thumbhash preview while downloading (only for formats that support thumbhash)
@@ -8649,9 +8646,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         container.style.position = `relative`;
                         container.appendChild(imgPreview);
                         
-                        // Add downloading indicator (for progress bar targeting)
+                        // Add downloading indicator (for progress targeting)
                         const iDownloading = document.createElement('i');
-                        iDownloading.id = cAttachment.id;
+                        iDownloading.setAttribute('data-attachment-id', cAttachment.id);
                         iDownloading.textContent = `Downloading`;
                         iDownloading.style.position = `absolute`;
                         iDownloading.style.top = `50%`;
@@ -8666,22 +8663,18 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         pMessage.appendChild(container);
                     })
                     .catch(() => {
-                        // Fallback to simple downloading indicator if thumbhash fails
-                        const iDownloading = document.createElement('i');
-                        iDownloading.id = cAttachment.id;
-                        iDownloading.textContent = `Downloading`;
-                        pMessage.appendChild(iDownloading);
+                        // Fallback: file box with "Downloading..." if thumbhash fails
+                        const { fileDiv } = createFileBox(cAttachment, 'downloading');
+                        pMessage.appendChild(fileDiv);
                     });
             } else {
-                // Display download progression UI for non-images
-                const iDownloading = document.createElement('i');
-                iDownloading.id = cAttachment.id;
-                iDownloading.textContent = `Downloading`;
-                pMessage.appendChild(iDownloading);
+                // Non-image downloading: file box with "Downloading..." text
+                const { fileDiv } = createFileBox(cAttachment, 'downloading');
+                pMessage.appendChild(fileDiv);
             }
             } else {
-                // Check if this attachment will auto-download
-                const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES;
+                // Check if this attachment will auto-download (skip if previously failed)
+                const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
 
                 // For images, show thumbhash preview with download button (unless auto-downloading)
                 if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
@@ -8722,14 +8715,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                                 // Create download button overlay
                                 const iDownload = document.createElement('i');
-                                iDownload.id = cAttachment.id;
+                                iDownload.setAttribute('data-attachment-id', cAttachment.id);
                                 iDownload.toggleAttribute('download', true);
                                 // For group chats, use chat ID; for DMs, use sender.id
                                 const downloadNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
                                 iDownload.setAttribute('npub', downloadNpub2);
                                 iDownload.setAttribute('msg', msg.id);
                                 iDownload.classList.add('btn');
-                                iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
+                                iDownload.textContent = cAttachment.download_failed
+                                    ? `Download Failed · Tap to Retry`
+                                    : `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
                                 iDownload.style.position = `absolute`;
                                 iDownload.style.top = `50%`;
                                 iDownload.style.left = `50%`;
@@ -8749,7 +8744,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                             } else {
                                 // For auto-downloading images, create a hidden element for progress bar targeting
                                 const iHidden = document.createElement('i');
-                                iHidden.id = cAttachment.id;
+                                iHidden.setAttribute('data-attachment-id', cAttachment.id);
                                 iHidden.style.display = `none`;
                                 container.appendChild(iHidden);
                             }
@@ -8757,61 +8752,37 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                             pMessage.appendChild(container);
                         })
                         .catch(() => {
-                            // Fallback when thumbhash fails
-                            if (!willAutoDownload) {
-                                // Manual download: show download button
-                                let strSize = 'Unknown Size';
-                                if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
-
-                                const iDownload = document.createElement('i');
-                                iDownload.id = cAttachment.id;
-                                iDownload.toggleAttribute('download', true);
-                                // For group chats, use chat ID; for DMs, use sender.id
-                                const downloadNpub3 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                                iDownload.setAttribute('npub', downloadNpub3);
-                                iDownload.setAttribute('msg', msg.id);
-                                iDownload.classList.add('btn');
-                                iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
-                                pMessage.appendChild(iDownload);
-                            } else {
-                                // Auto-download: show downloading indicator for progress bar targeting
-                                const iDownloading = document.createElement('i');
-                                iDownloading.id = cAttachment.id;
-                                iDownloading.textContent = `Downloading image...`;
-                                iDownloading.style.textAlign = `center`;
-                                iDownloading.style.display = `block`;
-                                pMessage.appendChild(iDownloading);
+                            // Fallback when thumbhash fails — render as file box
+                            const fallbackState = willAutoDownload ? 'downloading' : 'download';
+                            const { fileDiv: fallbackDiv, statusSpan: fallbackStatus } = createFileBox(cAttachment, fallbackState);
+                            if (cAttachment.download_failed && fallbackStatus) {
+                                fallbackStatus.innerText = 'Download Failed · Tap to Retry';
                             }
+                            if (!willAutoDownload) {
+                                fallbackDiv.addEventListener('click', () => {
+                                    startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
+                                }, { once: true });
+                            }
+                            pMessage.appendChild(fallbackDiv);
                         });
                 } else if (!willAutoDownload) {
-                    // Only show download prompt for non-images if NOT auto-downloading
-                    // Determine and display file size
-                    let strSize = 'Unknown Size';
-                    if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
-
-                    // Display download prompt UI for non-images
-                    const iDownload = document.createElement('i');
-                    iDownload.id = cAttachment.id;
-                    iDownload.toggleAttribute('download', true);
-                    // For group chats, use chat ID; for DMs, use sender.id
-                    const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    iDownload.setAttribute('npub', downloadNpub);
-                    iDownload.setAttribute('msg', msg.id);
-                    iDownload.classList.add('btn');
-                    iDownload.textContent = `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
-                    pMessage.appendChild(iDownload);
+                    // Non-image, manual download: file box with "Click to Download"
+                    const { fileDiv: dlFileDiv, statusSpan: dlStatus } = createFileBox(cAttachment, 'download');
+                    if (cAttachment.download_failed && dlStatus) {
+                        dlStatus.innerText = 'Download Failed · Tap to Retry';
+                    }
+                    dlFileDiv.addEventListener('click', () => {
+                        startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
+                    }, { once: true });
+                    pMessage.appendChild(dlFileDiv);
                 }
 
                 // If the size is known and within auto-download range; immediately begin downloading
                 if (willAutoDownload) {
-                    // For non-images (which don't have thumbhash previews), create a placeholder for progress bar targeting
+                    // For non-images (which don't have thumbhash previews), file box with "Downloading..." text
                     if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                        const iDownloading = document.createElement('i');
-                        iDownloading.id = cAttachment.id;
-                        iDownloading.textContent = `Starting download...`;
-                        iDownloading.style.textAlign = `center`;
-                        iDownloading.style.display = `block`;
-                        pMessage.appendChild(iDownloading);
+                        const { fileDiv: autoFileDiv } = createFileBox(cAttachment, 'downloading');
+                        pMessage.appendChild(autoFileDiv);
                     }
                     
                     // For group chats, use chat ID; for DMs, use sender.id
@@ -12007,7 +11978,11 @@ document.addEventListener('click', (e) => {
 
     // If we're clicking an Attachment Download button, request the download
     if (e.target.hasAttribute('download')) {
-        return invoke('download_attachment', { npub: e.target.getAttribute('npub'), msgId: e.target.getAttribute('msg'), attachmentId: e.target.id });
+        const attId = e.target.getAttribute('data-attachment-id');
+        if (downloadingAttachmentIds.has(attId)) return;
+        downloadingAttachmentIds.add(attId);
+        return invoke('download_attachment', { npub: e.target.getAttribute('npub'), msgId: e.target.getAttribute('msg'), attachmentId: attId })
+            .catch(() => downloadingAttachmentIds.delete(attId));
     }
 
     // Run the emoji panel open/close logic

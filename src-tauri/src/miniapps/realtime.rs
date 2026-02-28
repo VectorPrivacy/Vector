@@ -8,12 +8,14 @@
 #![allow(dead_code)] // API functions that will be used as the feature matures
 
 use anyhow::{anyhow, bail, Context as _, Result};
+use fast_thumbhash::base91_encode;
 use futures_util::StreamExt;
 use iroh::{Endpoint, NodeAddr, NodeId, PublicKey, RelayMode, SecretKey};
 use iroh_gossip::net::{Event, Gossip, GossipEvent, JoinOptions, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, RwLock};
@@ -76,14 +78,14 @@ pub struct IrohState {
     /// Gossip protocol handler
     pub(crate) gossip: Gossip,
 
-    /// Sequence numbers for gossip channels (for deduplication)
-    pub(crate) sequence_numbers: Mutex<HashMap<TopicId, i32>>,
-
     /// Active realtime channels
     pub(crate) channels: RwLock<HashMap<TopicId, ChannelState>>,
 
     /// Our public key (attached to messages for deduplication)
     pub(crate) public_key: PublicKey,
+
+    /// Cached public key bytes (avoids repeated .as_bytes() calls in hot path)
+    pub(crate) public_key_bytes: [u8; PUBLIC_KEY_LENGTH],
 }
 
 impl IrohState {
@@ -94,17 +96,32 @@ impl IrohState {
         let secret_key = SecretKey::generate(rand::rngs::OsRng);
         let public_key = secret_key.public();
 
-        // Build the endpoint with default relay mode
+        // Build a QUIC transport config tuned for realtime gaming/streaming.
+        // Handles extreme RTT scenarios (500ms–5000ms) for globe-spanning connections.
+        let mut transport_config = iroh_quinn::TransportConfig::default();
+        transport_config
+            .keep_alive_interval(Some(std::time::Duration::from_secs(1)))
+            .max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into()?))
+            .stream_receive_window(iroh_quinn::VarInt::from_u32(512 * 1024))     // 512 KB per stream
+            .receive_window(iroh_quinn::VarInt::from_u32(2 * 1024 * 1024))       // 2 MB aggregate
+            .send_window(1_572_864)                                               // 1.5 MB burst sends
+            .max_concurrent_bidi_streams(iroh_quinn::VarInt::from_u32(256))
+            .max_concurrent_uni_streams(iroh_quinn::VarInt::from_u32(256))
+            .initial_rtt(std::time::Duration::from_millis(100))
+            .congestion_controller_factory(Arc::new(iroh_quinn::congestion::BbrConfig::default()));
+
+        // Build the endpoint with tuned transport
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![GOSSIP_ALPN.to_vec()])
             .relay_mode(RelayMode::Default)
+            .transport_config(transport_config)
             .bind()
             .await?;
 
         // Wait for the relay connection to be established
         // This is important because we need the relay URL in our node address
-        println!("[WEBXDC] Waiting for relay connection...");
+        log_info!("[WEBXDC] Waiting for relay connection...");
         let mut relay_watcher = endpoint.home_relay();
         let relay_timeout = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -112,7 +129,7 @@ impl IrohState {
                 loop {
                     match relay_watcher.get() {
                         Ok(Some(url)) => {
-                            println!("[WEBXDC] Connected to relay: {}", url);
+                            log_info!("[WEBXDC] Connected to relay: {}", url);
                             return Some(url);
                         }
                         Ok(None) => {
@@ -131,11 +148,11 @@ impl IrohState {
                 None
             }
         ).await;
-        
+
         match relay_timeout {
-            Ok(Some(url)) => println!("[WEBXDC] Relay connection established: {}", url),
-            Ok(None) => println!("[WEBXDC] WARNING: Relay watcher closed without connecting"),
-            Err(_) => println!("[WEBXDC] WARNING: Timeout waiting for relay connection"),
+            Ok(Some(_url)) => log_info!("[WEBXDC] Relay connection established: {}", _url),
+            Ok(None) => log_warn!("[WEBXDC] Relay watcher closed without connecting"),
+            Err(_) => log_warn!("[WEBXDC] Timeout waiting for relay connection"),
         }
 
         // Create gossip with max message size of 128 KB
@@ -148,65 +165,43 @@ impl IrohState {
         // The gossip protocol doesn't accept connections itself - we need to do it
         let accept_endpoint = endpoint.clone();
         let accept_gossip = gossip.clone();
-        // Use std::thread::spawn to ensure this runs on a separate OS thread
-        // This avoids potential issues with Tauri's async runtime on Windows
-        std::thread::spawn(move || {
-            // Create a new Tokio runtime for this thread
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create Tokio runtime for accept loop");
-            
-            rt.block_on(async move {
-                println!("[WEBXDC] Starting connection accept loop");
-                loop {
+        tokio::spawn(async move {
+            log_info!("[WEBXDC] Starting connection accept loop");
+            loop {
                 match accept_endpoint.accept().await {
                     Some(incoming) => {
                         let gossip = accept_gossip.clone();
                         tokio::spawn(async move {
                             match incoming.await {
                                 Ok(conn) => {
-                                    let alpn = conn.alpn();
-                                    match alpn {
-                                        Some(ref alpn_bytes) => {
-                                            println!("[WEBXDC] Accepted connection with ALPN: {:?}", String::from_utf8_lossy(alpn_bytes));
-                                            if alpn_bytes.as_slice() == GOSSIP_ALPN {
-                                                println!("[WEBXDC] Forwarding gossip connection to gossip handler");
-                                                if let Err(e) = gossip.handle_connection(conn).await {
-                                                    println!("[WEBXDC] ERROR: Failed to handle gossip connection: {}", e);
-                                                } else {
-                                                    println!("[WEBXDC] Gossip connection handled successfully");
-                                                }
-                                            } else {
-                                                println!("[WEBXDC] Ignoring non-gossip connection with ALPN: {:?}", String::from_utf8_lossy(alpn_bytes));
-                                            }
-                                        }
-                                        None => {
-                                            println!("[WEBXDC] Accepted connection with no ALPN, ignoring");
+                                    if conn.alpn().as_deref() == Some(GOSSIP_ALPN) {
+                                        if let Err(e) = gossip.handle_connection(conn).await {
+                                            log_error!("[WEBXDC] Failed to handle gossip connection: {}", e);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    println!("[WEBXDC] ERROR: Failed to accept incoming connection: {}", e);
+                                    log_error!("[WEBXDC] Failed to accept incoming connection: {}", e);
                                 }
                             }
                         });
                     }
                     None => {
-                        println!("[WEBXDC] Accept loop ended - endpoint closed");
+                        log_info!("[WEBXDC] Accept loop ended - endpoint closed");
                         break;
                     }
                 }
             }
-            });
         });
+
+        let public_key_bytes = *public_key.as_bytes();
 
         Ok(Self {
             endpoint,
             gossip,
-            sequence_numbers: Mutex::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
             public_key,
+            public_key_bytes,
         })
     }
 
@@ -215,21 +210,16 @@ impl IrohState {
         self.endpoint.network_change().await
     }
 
-    /// Close the Iroh endpoint
-    pub async fn close(self) -> Result<()> {
-        self.endpoint.close().await;
-        Ok(())
-    }
-
-    /// Get our node address (without direct IP addresses for privacy)
+    /// Get our node address for peer discovery.
+    /// Includes LAN/private addresses for direct same-network P2P (~1ms latency)
+    /// but strips public IPs to preserve privacy. Remote peers fall back to relay.
     pub async fn get_node_addr(&self) -> Result<NodeAddr> {
         let mut addr = self.endpoint.node_addr().await?;
-        println!("[WEBXDC] get_node_addr: node_id={}, relay_url={:?}, direct_addrs={}",
-            addr.node_id,
-            addr.relay_url(),
-            addr.direct_addresses.len());
-        // Remove direct addresses for privacy (only use relay)
-        addr.direct_addresses = std::collections::BTreeSet::new();
+        addr.direct_addresses = addr
+            .direct_addresses
+            .into_iter()
+            .filter(|sa| is_lan_addr(&sa.ip()))
+            .collect();
         Ok(addr)
     }
 
@@ -247,9 +237,8 @@ impl IrohState {
         // Update the shared event target so the subscribe loop uses the new frontend channel
         if let Some(channel_state) = channels.get(&topic) {
             log_info!("IROH_REALTIME: Re-joining existing gossip topic {:?}, updating event target", topic);
-            let mut shared_target = channel_state.event_target.write().await;
+            let mut shared_target = channel_state.event_target.write().unwrap_or_else(|e| e.into_inner());
             *shared_target = Some(event_target);
-            println!("[WEBXDC] Updated shared event target for existing topic");
             return Ok((true, None));
         }
 
@@ -276,17 +265,17 @@ impl IrohState {
             .split();
 
         // Create shared event target for the subscribe loop
-        let shared_event_target: SharedEventTarget = Arc::new(RwLock::new(Some(event_target)));
+        let shared_event_target: SharedEventTarget = Arc::new(std::sync::RwLock::new(Some(event_target)));
         let shared_target_clone = shared_event_target.clone();
         
         // Create shared peer count
-        let shared_peer_count: SharedPeerCount = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let shared_peer_count: SharedPeerCount = Arc::new(AtomicUsize::new(0));
         let peer_count_clone = shared_peer_count.clone();
 
-        let public_key = self.public_key;
+        let our_key_bytes = self.public_key_bytes;
         let topic_encoded = encode_topic_id(&topic);
         let subscribe_loop = tokio::spawn(async move {
-            if let Err(e) = run_subscribe_loop(gossip_receiver, topic, shared_target_clone, join_tx, public_key, peer_count_clone, app_handle, topic_encoded).await {
+            if let Err(e) = run_subscribe_loop(gossip_receiver, topic, shared_target_clone, join_tx, our_key_bytes, peer_count_clone, app_handle, topic_encoded).await {
                 log_warn!("Subscribe loop failed: {e}");
             }
         });
@@ -359,17 +348,25 @@ impl IrohState {
 
     /// Send data to a gossip topic
     pub async fn send_data(&self, topic: TopicId, mut data: Vec<u8>) -> Result<()> {
-        let channels = self.channels.read().await;
-        let state = channels
-            .get(&topic)
-            .ok_or_else(|| anyhow!("Channel not found for topic"))?;
+        // Clone sender and read seq under the lock, then release before broadcast.
+        // This prevents holding the read lock during potentially slow network I/O
+        // (backpressure under 4K video streaming, gaming, voice/video loads).
+        let sender = {
+            let channels = self.channels.read().await;
+            let state = channels
+                .get(&topic)
+                .ok_or_else(|| anyhow!("Channel not found for topic"))?;
 
-        // Append sequence number and public key for deduplication
-        let seq_num = self.get_and_incr_seq(&topic);
-        data.extend(seq_num.to_le_bytes());
-        data.extend(self.public_key.as_bytes());
+            // Pre-allocate for trailer: 4-byte seq + 32-byte public key
+            data.reserve(4 + PUBLIC_KEY_LENGTH);
+            let seq_num = state.seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            data.extend_from_slice(&seq_num.to_le_bytes());
+            data.extend_from_slice(&self.public_key_bytes);
 
-        state.sender.broadcast(data.into()).await?;
+            state.sender.clone()
+        };
+
+        sender.broadcast(data.into()).await?;
 
         log_trace!("Sent realtime data to topic {:?}", topic);
 
@@ -391,11 +388,8 @@ impl IrohState {
     pub async fn get_peer_count(&self, topic: &TopicId) -> usize {
         let channels = self.channels.read().await;
         if let Some(channel_state) = channels.get(topic) {
-            let count = channel_state.peer_count.load(std::sync::atomic::Ordering::Relaxed);
-            println!("[WEBXDC] get_peer_count for topic {:?}: {} (from ChannelState)", topic, count);
-            count
+            channel_state.peer_count.load(Ordering::Relaxed)
         } else {
-            println!("[WEBXDC] get_peer_count for topic {:?}: 0 (no channel found)", topic);
             0
         }
     }
@@ -406,7 +400,7 @@ impl IrohState {
     pub async fn clear_event_target(&self, topic: &TopicId) {
         let channels = self.channels.read().await;
         if let Some(channel_state) = channels.get(topic) {
-            let mut target = channel_state.event_target.write().await;
+            let mut target = channel_state.event_target.write().unwrap_or_else(|e| e.into_inner());
             *target = None;
         }
     }
@@ -416,13 +410,6 @@ impl IrohState {
         self.channels.read().await.contains_key(topic)
     }
 
-    /// Get and increment sequence number for a topic
-    fn get_and_incr_seq(&self, topic: &TopicId) -> i32 {
-        let mut seq_nums = self.sequence_numbers.lock().unwrap();
-        let entry = seq_nums.entry(*topic).or_default();
-        *entry = entry.wrapping_add(1);
-        *entry
-    }
 }
 
 /// Target for delivering realtime events (abstracts desktop vs Android)
@@ -434,11 +421,14 @@ pub enum EventTarget {
     MpscSender(tokio::sync::mpsc::Sender<RealtimeEvent>),
 }
 
-/// Shared event target that can be updated when a user re-joins
-pub(crate) type SharedEventTarget = Arc<RwLock<Option<EventTarget>>>;
+/// Shared event target that can be updated when a user re-joins.
+/// Uses std::sync::RwLock (not tokio) because the lock is held for <1μs
+/// (just dispatching one event) and this avoids async runtime overhead
+/// on every received message in the subscribe loop hot path.
+pub(crate) type SharedEventTarget = Arc<std::sync::RwLock<Option<EventTarget>>>;
 
 /// Shared peer count that can be updated by the subscribe loop
-pub(crate) type SharedPeerCount = Arc<std::sync::atomic::AtomicUsize>;
+pub(crate) type SharedPeerCount = Arc<AtomicUsize>;
 
 /// State for a single gossip channel
 pub(crate) struct ChannelState {
@@ -450,6 +440,8 @@ pub(crate) struct ChannelState {
     event_target: SharedEventTarget,
     /// Current number of connected peers
     peer_count: SharedPeerCount,
+    /// Sequence number for deduplication (lock-free)
+    seq: AtomicI32,
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -458,7 +450,8 @@ impl std::fmt::Debug for ChannelState {
             .field("subscribe_loop", &"JoinHandle<()>")
             .field("sender", &"GossipSender")
             .field("event_target", &"SharedEventTarget")
-            .field("peer_count", &self.peer_count.load(std::sync::atomic::Ordering::Relaxed))
+            .field("peer_count", &self.peer_count.load(Ordering::Relaxed))
+            .field("seq", &self.seq.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -470,6 +463,7 @@ impl ChannelState {
             sender,
             event_target,
             peer_count,
+            seq: AtomicI32::new(0),
         }
     }
 }
@@ -478,24 +472,26 @@ impl ChannelState {
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase", tag = "event", content = "data")]
 pub enum RealtimeEvent {
-    /// Received data from a peer
-    Data(Vec<u8>),
+    /// Received data from a peer (base91-encoded for minimal IPC overhead)
+    Data(String),
     /// Channel became operational (connected to peers)
     Connected,
     /// A peer joined the channel
     PeerJoined(String),
     /// A peer left the channel
     PeerLeft(String),
+    /// Gossip stream lagged — some messages were lost (app should request resync)
+    Lagged,
 }
 
-/// Helper to send an event through the shared event target
-async fn send_event(shared_target: &SharedEventTarget, event: RealtimeEvent) -> bool {
-    let guard = shared_target.read().await;
+/// Helper to send an event through the shared event target (sync — no async overhead)
+fn send_event(shared_target: &SharedEventTarget, event: RealtimeEvent) -> bool {
+    let guard = shared_target.read().unwrap_or_else(|e| e.into_inner());
     if let Some(ref target) = *guard {
         match target {
             EventTarget::TauriChannel(channel) => {
                 if let Err(e) = channel.send(event) {
-                    println!("[WEBXDC] ERROR: Failed to send event to frontend: {e}");
+                    log_error!("[WEBXDC] Failed to send event to frontend: {e}");
                     return false;
                 }
             }
@@ -504,10 +500,10 @@ async fn send_event(shared_target: &SharedEventTarget, event: RealtimeEvent) -> 
                 match sender.try_send(event) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
-                        println!("[WEBXDC] WARNING: Event delivery backpressure, dropping message");
+                        log_warn!("[WEBXDC] Event delivery backpressure, dropping message");
                     }
                     Err(TrySendError::Closed(_)) => {
-                        println!("[WEBXDC] ERROR: Event delivery channel closed");
+                        log_error!("[WEBXDC] Event delivery channel closed");
                         return false;
                     }
                 }
@@ -515,8 +511,6 @@ async fn send_event(shared_target: &SharedEventTarget, event: RealtimeEvent) -> 
         }
         true
     } else {
-        #[cfg(debug_assertions)]
-        println!("[WEBXDC] No event target available, skipping event delivery");
         false
     }
 }
@@ -540,108 +534,106 @@ async fn run_subscribe_loop(
     topic: TopicId,
     shared_event_target: SharedEventTarget,
     join_tx: oneshot::Sender<()>,
-    our_public_key: PublicKey,
+    our_key_bytes: [u8; PUBLIC_KEY_LENGTH],
     peer_count: SharedPeerCount,
     app_handle: Option<AppHandle>,
     topic_encoded: String,
 ) -> Result<()> {
     let mut join_tx = Some(join_tx);
-    println!("[WEBXDC] Subscribe loop started for topic {:?}", topic);
+    log_info!("[WEBXDC] Subscribe loop started for topic {:?}", topic);
+
+    const TRAILER_LEN: usize = 4 + PUBLIC_KEY_LENGTH; // seq(4) + pubkey(32)
 
     while let Some(event) = receiver.next().await {
         match event {
             Ok(Event::Gossip(gossip_event)) => match gossip_event {
                 GossipEvent::Received(msg) => {
-                    let mut data = msg.content.to_vec();
-                    
-                    // Extract and remove the appended public key and sequence number
-                    if data.len() >= PUBLIC_KEY_LENGTH + 4 {
-                        let sender_key_bytes = data.split_off(data.len() - PUBLIC_KEY_LENGTH);
-                        let _seq_bytes = data.split_off(data.len() - 4);
-                        
-                        // Skip messages from ourselves
-                        if let Ok(sender_key) = PublicKey::try_from(sender_key_bytes.as_slice()) {
-                            if sender_key == our_public_key {
-                                continue;
-                            }
-                        }
-                    }
+                    let content = &msg.content;
 
-                    // Send data to frontend via shared channel
-                    send_event(&shared_event_target, RealtimeEvent::Data(data)).await;
+                    // Extract trailer (seq + pubkey) via zero-copy slicing
+                    if content.len() >= TRAILER_LEN {
+                        let payload_len = content.len() - TRAILER_LEN;
+                        let sender_key = &content[payload_len + 4..];
+
+                        // Skip messages from ourselves (32-byte memcmp, no PublicKey construction)
+                        if sender_key == our_key_bytes {
+                            continue;
+                        }
+
+                        // Only encode the payload portion (excludes 36-byte trailer)
+                        send_event(&shared_event_target, RealtimeEvent::Data(base91_encode(&content[..payload_len])));
+                    } else {
+                        // Malformed message (no trailer) — forward as-is
+                        send_event(&shared_event_target, RealtimeEvent::Data(base91_encode(content)));
+                    }
                 }
                 GossipEvent::Joined(peers) => {
-                    println!("[WEBXDC] Peers joined: {:?}", peers.len());
                     // Update peer count based on joined peers
                     // This is more reliable than NeighborUp for initial count
                     let joined_count = peers.len();
                     if joined_count > 0 {
-                        let current = peer_count.load(std::sync::atomic::Ordering::Relaxed);
+                        let current = peer_count.load(Ordering::Relaxed);
                         if joined_count > current {
-                            peer_count.store(joined_count, std::sync::atomic::Ordering::Relaxed);
-                            println!("[WEBXDC] Updated peer count to {} from Joined event", joined_count);
+                            peer_count.store(joined_count, Ordering::Relaxed);
                             emit_realtime_status(&app_handle, &topic_encoded, joined_count, true);
                         }
                     }
                     for peer in peers {
                         let peer_id = base32_nopad_encode(peer.as_bytes());
-                        println!("[WEBXDC] Peer joined topic: {}", peer_id);
-                        send_event(&shared_event_target, RealtimeEvent::PeerJoined(peer_id)).await;
+                        send_event(&shared_event_target, RealtimeEvent::PeerJoined(peer_id));
                     }
                 }
-                GossipEvent::NeighborUp(peer) => {
-                    let peer_id = base32_nopad_encode(peer.as_bytes());
-                    println!("[WEBXDC] Neighbor UP for topic: {}", peer_id);
-                    
+                GossipEvent::NeighborUp(_peer) => {
                     // Increment peer count
-                    let new_count = peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    println!("[WEBXDC] Peer count now: {}", new_count);
-                    
+                    let new_count = peer_count.fetch_add(1, Ordering::Relaxed) + 1;
+
                     // Emit status update to main window
                     emit_realtime_status(&app_handle, &topic_encoded, new_count, true);
-                    
+
                     // Signal that we're connected when first neighbor comes up
                     if let Some(tx) = join_tx.take() {
                         let _ = tx.send(());
-                        send_event(&shared_event_target, RealtimeEvent::Connected).await;
+                        send_event(&shared_event_target, RealtimeEvent::Connected);
                     }
                 }
                 GossipEvent::NeighborDown(peer) => {
                     let peer_id = base32_nopad_encode(peer.as_bytes());
-                    println!("[WEBXDC] Neighbor DOWN for topic: {}", peer_id);
 
                     // Atomically decrement peer count (saturating to avoid underflow)
                     let _ = peer_count.fetch_update(
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
                         |count| if count > 0 { Some(count - 1) } else { None },
                     );
-                    let new_count = peer_count.load(std::sync::atomic::Ordering::Relaxed);
-                    println!("[WEBXDC] Peer count now: {}", new_count);
-                    
+                    let new_count = peer_count.load(Ordering::Relaxed);
+
                     // Emit status update to main window
                     emit_realtime_status(&app_handle, &topic_encoded, new_count, true);
-                    
-                    send_event(&shared_event_target, RealtimeEvent::PeerLeft(peer_id)).await;
+
+                    send_event(&shared_event_target, RealtimeEvent::PeerLeft(peer_id));
                 }
             },
             Ok(Event::Lagged) => {
-                println!("[WEBXDC] WARNING: Gossip lagged for topic {:?}", topic);
+                log_warn!("[WEBXDC] Gossip lagged for topic {:?}", topic);
+                send_event(&shared_event_target, RealtimeEvent::Lagged);
             }
             Err(e) => {
-                println!("[WEBXDC] ERROR: Gossip error for topic {:?}: {e}", topic);
+                log_error!("[WEBXDC] Gossip error for topic {:?}: {e}", topic);
             }
         }
     }
 
-    println!("[WEBXDC] Subscribe loop ended for topic {:?}", topic);
+    log_info!("[WEBXDC] Subscribe loop ended for topic {:?}", topic);
     Ok(())
 }
 
 /// Global Iroh state manager
+///
+/// Uses `OnceCell` for lock-free reads after initialization —
+/// `get_or_init()` is a single atomic load on the hot path.
 pub struct RealtimeManager {
-    /// Iroh state (lazily initialized)
-    iroh: RwLock<Option<IrohState>>,
+    /// Iroh state (initialized once, then read-only via atomic load)
+    iroh: tokio::sync::OnceCell<IrohState>,
     /// Custom relay URL (if any)
     relay_url: Option<String>,
 }
@@ -649,44 +641,23 @@ pub struct RealtimeManager {
 impl RealtimeManager {
     pub fn new(relay_url: Option<String>) -> Self {
         Self {
-            iroh: RwLock::new(None),
+            iroh: tokio::sync::OnceCell::new(),
             relay_url,
         }
     }
 
-    /// Get or initialize the Iroh state
-    pub async fn get_or_init(&self) -> Result<tokio::sync::RwLockReadGuard<'_, IrohState>> {
-        // Check if already initialized
-        {
-            let guard = self.iroh.read().await;
-            if guard.is_some() {
-                return Ok(tokio::sync::RwLockReadGuard::map(guard, |opt| {
-                    opt.as_ref().unwrap()
-                }));
-            }
-        }
-
-        // Initialize
-        {
-            let mut guard = self.iroh.write().await;
-            if guard.is_none() {
-                let iroh = IrohState::new(self.relay_url.clone()).await?;
-                *guard = Some(iroh);
-            }
-        }
-
-        // Return read guard
-        let guard = self.iroh.read().await;
-        Ok(tokio::sync::RwLockReadGuard::map(guard, |opt| {
-            opt.as_ref().unwrap()
-        }))
+    /// Get or initialize the Iroh state.
+    /// After first call, this is a single atomic load (~5ns).
+    pub async fn get_or_init(&self) -> Result<&IrohState> {
+        self.iroh
+            .get_or_try_init(|| IrohState::new(self.relay_url.clone()))
+            .await
     }
 
     /// Shutdown Iroh if initialized
     pub async fn shutdown(&self) -> Result<()> {
-        let mut guard = self.iroh.write().await;
-        if let Some(iroh) = guard.take() {
-            iroh.close().await?;
+        if let Some(iroh) = self.iroh.get() {
+            iroh.endpoint.close().await;
         }
         Ok(())
     }
@@ -758,13 +729,29 @@ pub fn decode_node_addr(s: &str) -> Result<NodeAddr> {
         .map_err(|e| anyhow!(e))
         .context("Invalid node address encoding")?;
     let json = String::from_utf8(bytes)?;
-    println!("[WEBXDC] decode_node_addr: json={}", json);
     let addr: NodeAddr = serde_json::from_str(&json)?;
-    println!("[WEBXDC] decode_node_addr: node_id={}, relay_url={:?}, direct_addrs={}",
-        addr.node_id,
-        addr.relay_url(),
-        addr.direct_addresses.len());
     Ok(addr)
+}
+
+/// Check if an IP address is a LAN/private address (safe to share without leaking public IP).
+///
+/// Includes:
+/// - IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (RFC 1918 private)
+/// - IPv4: 169.254.0.0/16 (link-local), 127.0.0.0/8 (loopback)
+/// - IPv6: ::1 (loopback), fe80::/10 (link-local), fc00::/7 (ULA)
+fn is_lan_addr(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || {
+                let seg0 = v6.segments()[0];
+                // fe80::/10 — link-local
+                (seg0 & 0xffc0) == 0xfe80 ||
+                // fc00::/7 — unique local address (ULA)
+                (seg0 & 0xfe00) == 0xfc00
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -777,5 +764,32 @@ mod tests {
         let encoded = encode_topic_id(&topic);
         let decoded = decode_topic_id(&encoded).unwrap();
         assert_eq!(topic, decoded);
+    }
+
+    #[test]
+    fn test_is_lan_addr() {
+        use std::net::IpAddr;
+
+        // IPv4 private ranges — should pass
+        assert!(is_lan_addr(&"192.168.1.1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"172.16.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"172.31.255.255".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"169.254.1.1".parse::<IpAddr>().unwrap()));
+
+        // IPv4 public — should fail
+        assert!(!is_lan_addr(&"8.8.8.8".parse::<IpAddr>().unwrap()));
+        assert!(!is_lan_addr(&"1.1.1.1".parse::<IpAddr>().unwrap()));
+        assert!(!is_lan_addr(&"203.0.113.1".parse::<IpAddr>().unwrap()));
+
+        // IPv6 private — should pass
+        assert!(is_lan_addr(&"::1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"fe80::1".parse::<IpAddr>().unwrap()));
+        assert!(is_lan_addr(&"fd12:3456:789a::1".parse::<IpAddr>().unwrap()));
+
+        // IPv6 public — should fail
+        assert!(!is_lan_addr(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+        assert!(!is_lan_addr(&"2607:f8b0:4004:800::200e".parse::<IpAddr>().unwrap()));
     }
 }

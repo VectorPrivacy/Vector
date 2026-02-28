@@ -97,9 +97,7 @@ pub async fn send_webxdc_peer_advertisement(
 ) -> bool {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
     let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
-    let my_npub = my_public_key.to_bech32().unwrap_or_else(|_| "unknown".to_string());
 
-    println!("[WEBXDC] Sending peer advertisement: my_npub={}, receiver={}, topic={}", my_npub, receiver, topic_id);
     log_info!("Sending WebXDC peer advertisement to {} for topic {}", receiver, topic_id);
     log_debug!("Node address: {}", node_addr);
 

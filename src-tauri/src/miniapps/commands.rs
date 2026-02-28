@@ -63,8 +63,6 @@ const INIT_SCRIPT: &str = r#"
 // Mini App initialization script
 // This runs in all frames to ensure security
 
-console.log("Mini App INIT_SCRIPT running");
-
 // Disable WebRTC to prevent IP leaks
 try {
     window.RTCPeerConnection = () => {};
@@ -380,7 +378,6 @@ try {
         };
     }
 
-    console.log('[MiniApp] Media API permission guards installed');
 })();
 
 // Wrap Tauri's __TAURI__ API to restrict access to only allowed commands
@@ -418,7 +415,6 @@ try {
             tauriObj.core.Channel = originalChannel;
         }
 
-        console.log("[MiniApp] Tauri restrictions applied");
         return tauriObj;
     }
 
@@ -474,15 +470,43 @@ pub async fn miniapp_load_info(
     app: AppHandle,
     file_path: String,
 ) -> Result<MiniAppInfo, Error> {
-    let path = PathBuf::from(&file_path);
-    
-    // Generate ID from file path hash
-    let id = format!("miniapp_{:x}", md5_hash(&file_path));
-    
-    let state = app.state::<MiniAppsState>();
-    let package = state.get_or_load_package(&id, path).await?;
-    
-    Ok(MiniAppInfo::from_package(package.as_ref()))
+    // Guard: empty paths
+    if file_path.is_empty() {
+        return Err(Error::InvalidPackage("Empty file path".to_string()));
+    }
+
+    // 10-second timeout so this command can NEVER hang forever
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // Check file existence on blocking thread (avoid sync I/O on async runtime)
+        let path = PathBuf::from(&file_path);
+        let path_check = path.clone();
+        let exists = tokio::task::spawn_blocking(move || path_check.exists())
+            .await
+            .unwrap_or(false);
+        if !exists {
+            return Err(Error::InvalidPackage(format!("File not found: {}", file_path)));
+        }
+
+        // Generate ID from file path hash
+        let id = format!("miniapp_{:x}", md5_hash(&file_path));
+
+        let state = app.state::<MiniAppsState>();
+        let package = state.get_or_load_package(&id, path).await?;
+
+        // Build MiniAppInfo on blocking thread (get_icon() does sync file I/O)
+        let info = tokio::task::spawn_blocking(move || {
+            MiniAppInfo::from_package(&package)
+        }).await.map_err(|e| Error::Anyhow(anyhow::anyhow!("{}", e)))?;
+
+        Ok(info)
+    }).await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(Error::Anyhow(anyhow::anyhow!(
+            "miniapp_load_info timed out after 10s for: {}", file_path
+        ))),
+    }
 }
 
 /// Load Mini App info from bytes (in-memory, no file needed)
@@ -553,10 +577,11 @@ pub async fn miniapp_open(
     };
     
     log_trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
-    
+
     let state = app.state::<MiniAppsState>();
-    
+
     // Check if already open
+    log_trace!("[MiniApp] Checking for existing instance...");
     if let Some((existing_label, _existing_instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
         #[cfg(target_os = "android")]
         {
@@ -597,8 +622,17 @@ pub async fn miniapp_open(
         }
     }
     
-    // Load the package
-    let package = state.get_or_load_package(&id, path).await?;
+    // Load the package (with timeout to prevent infinite hang)
+    log_trace!("[MiniApp] Loading package for {}...", window_label);
+    let package = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        state.get_or_load_package(&id, path)
+    ).await
+    .map_err(|_| {
+        log_error!("[MiniApp] Package load TIMED OUT after 15s for: {}", file_path);
+        Error::Anyhow(anyhow::anyhow!("miniapp_open: package load timed out after 15s for: {}", file_path))
+    })??;
+    log_trace!("[MiniApp] Package loaded successfully: {}", package.manifest.name);
     
     // Parse the topic ID if provided (from the message's webxdc-topic tag)
     let realtime_topic = if let Some(ref topic_str) = topic_id {
@@ -751,7 +785,6 @@ pub async fn miniapp_open(
                     
                     if let Some(channel) = channel_state {
                         let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
-                        println!("[WEBXDC] Window destroyed, marking inactive for topic: {}", topic_encoded);
 
                         // Get current peer count and clear the stale event target.
                         // Clearing prevents the subscribe loop from logging errors
@@ -771,7 +804,6 @@ pub async fn miniapp_open(
                                 "is_active": false,
                                 "has_pending_peers": peer_count > 0,
                             }));
-                            println!("[WEBXDC] Emitted miniapp_realtime_status: active=false, peer_count={} for topic {}", peer_count, topic_encoded);
                         }
                     }
                     
@@ -959,50 +991,32 @@ pub async fn miniapp_join_realtime_channel(
     channel: Channel<RealtimeEvent>,
 ) -> Result<String, Error> {
     let label = window.label();
-    println!("[WEBXDC] miniapp_join_realtime_channel called for window: {}", label);
-    
+
     if !label.starts_with("miniapp:") {
-        println!("[WEBXDC] ERROR: Window label doesn't start with 'miniapp:': {}", label);
         return Err(Error::InstanceNotFoundByLabel(label.to_string()));
     }
-    
+
     // Check if already has an active channel
     if state.has_realtime_channel(label).await {
-        println!("[WEBXDC] WARNING: Realtime channel already active for: {}", label);
         return Err(Error::RealtimeChannelAlreadyActive);
     }
-    
+
     // Get the instance to get the topic from the webxdc-topic tag
     let instance = state.get_instance(label).await
-        .ok_or_else(|| {
-            println!("[WEBXDC] ERROR: Instance not found for label: {}", label);
-            Error::InstanceNotFoundByLabel(label.to_string())
-        })?;
-    
-    println!("[WEBXDC] Found instance for Mini App: {} (chat: {}, message: {})",
-        instance.package.manifest.name, instance.chat_id, instance.message_id);
-    
+        .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
+
     // Use the topic from the Nostr event's webxdc-topic tag if available
     // Otherwise, derive a topic from the chat_id and message_id for local testing
     let topic = if let Some(t) = instance.realtime_topic {
-        println!("[WEBXDC] Using webxdc-topic from message tag");
         t
     } else {
-        // Generate a deterministic topic from chat_id and message_id
-        // This allows local testing but won't work for cross-device sync
-        // (since the topic won't match what other devices have)
-        println!("[WEBXDC] WARNING: No webxdc-topic tag found, generating local topic for Mini App: {}", label);
+        log_info!("[WEBXDC] No webxdc-topic tag, deriving local topic for: {}", label);
         super::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
     };
-    
-    println!("[WEBXDC] Initializing Iroh realtime manager...");
+
     // Get the realtime manager and join the channel
     let iroh = state.realtime.get_or_init().await
-        .map_err(|e| {
-            println!("[WEBXDC] ERROR: Failed to initialize Iroh: {}", e);
-            Error::RealtimeError(e.to_string())
-        })?;
-    println!("[WEBXDC] Iroh realtime manager initialized successfully");
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
     // Join the Iroh gossip channel with no initial peers
     // Peers will be added via advertisements
@@ -1013,9 +1027,7 @@ pub async fn miniapp_join_realtime_channel(
     let topic_encoded = encode_topic_id(&topic);
     
     if is_rejoin {
-        // Re-joining an existing channel - just update the event channel
         log_info!("Re-joined existing realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
-        println!("[WEBXDC] Re-joining existing channel, updating event channel for window: {}", label);
     } else {
         log_info!("Joined new realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
     }
@@ -1073,91 +1085,66 @@ pub async fn miniapp_join_realtime_channel(
     let node_addr_encoded = encode_node_addr(&node_addr)
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
-    // Send peer advertisement to the chat
-    // We send it immediately and then periodically while the channel is active
+    // Send peer advertisement to the chat so other participants can discover us.
+    // Late joiners will pick this up from the relay backlog via pending peers.
     let chat_id = instance.chat_id.clone();
     let topic_for_advert = topic_encoded.clone();
     let node_addr_for_advert = node_addr_encoded.clone();
-    
-    println!("[WEBXDC] Sending initial peer advertisement...");
-    
-    // Send initial advertisement
-    let chat_id_clone = chat_id.clone();
-    let topic_clone = topic_for_advert.clone();
-    let addr_clone = node_addr_for_advert.clone();
     tokio::spawn(async move {
-        println!("[WEBXDC] In spawn: sending initial peer advertisement");
-        if crate::commands::realtime::send_webxdc_peer_advertisement(chat_id_clone, topic_clone, addr_clone).await {
-            println!("[WEBXDC] Sent initial peer advertisement successfully");
-        } else {
-            println!("[WEBXDC] ERROR: Failed to send initial peer advertisement");
+        if !crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, topic_for_advert, node_addr_for_advert).await {
+            log_warn!("[WEBXDC] Failed to send peer advertisement");
         }
     });
-    
-    // Send a second advertisement after a short delay (helps with timing issues)
-    let chat_id_clone2 = chat_id.clone();
-    let topic_clone2 = topic_for_advert.clone();
-    let addr_clone2 = node_addr_for_advert.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        println!("[WEBXDC] In spawn: sending delayed peer advertisement");
-        if crate::commands::realtime::send_webxdc_peer_advertisement(chat_id_clone2, topic_clone2, addr_clone2).await {
-            println!("[WEBXDC] Sent delayed peer advertisement successfully");
-        } else {
-            println!("[WEBXDC] ERROR: Failed to send delayed peer advertisement");
-        }
-    });
-    
+
     // Emit status event to main window so UI updates to show "Playing"
-    // Use the pending peer count since NeighborUp events haven't been received yet
     if let Some(main_window) = app.get_webview_window("main") {
         let current_peer_count = iroh.get_peer_count(&topic).await;
-        // Use whichever is higher - the actual peer count or the pending peers we just added
         let effective_peer_count = std::cmp::max(current_peer_count, pending_peer_count);
         let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
             "topic": topic_encoded.clone(),
             "peer_count": effective_peer_count,
             "is_active": true,
-            "has_pending_peers": false,
         }));
-        println!("[WEBXDC] Emitted miniapp_realtime_status event: topic={}, peer_count={} (current={}, pending={}), active=true",
-            topic_encoded, effective_peer_count, current_peer_count, pending_peer_count);
     }
     
     Ok(topic_encoded)
 }
 
-/// Send data through the realtime channel
+/// Send data through the realtime channel (receives base91-encoded string from JS)
 #[tauri::command]
 pub async fn miniapp_send_realtime_data(
     window: WebviewWindow,
     state: State<'_, MiniAppsState>,
-    data: Vec<u8>,
+    data: String,
 ) -> Result<(), Error> {
     let label = window.label();
-    
+
     if !label.starts_with("miniapp:") {
         return Err(Error::InstanceNotFoundByLabel(label.to_string()));
     }
-    
+
+    // Decode base91 string to raw bytes
+    let bytes = fast_thumbhash::base91_decode(&data)
+        .map_err(|_| Error::RealtimeError("Invalid base91 encoding".to_string()))?;
+
     // Check data size (max 128 KB as per WebXDC spec)
-    if data.len() > 128_000 {
-        return Err(Error::RealtimeDataTooLarge(data.len()));
+    if bytes.len() > 128_000 {
+        return Err(Error::RealtimeDataTooLarge(bytes.len()));
     }
-    
+
     // Get the topic for this instance
     let topic = state.get_realtime_channel(label).await
         .ok_or(Error::RealtimeChannelNotActive)?;
-    
+
     // Send the data
     let iroh = state.realtime.get_or_init().await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
-    iroh.send_data(topic, data).await
+
+    iroh.send_data(topic, bytes).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
+
     log_trace!("Sent realtime data for Mini App: {}", label);
-    
+
     Ok(())
 }
 
@@ -1258,32 +1245,19 @@ pub async fn miniapp_get_realtime_status(
 ) -> Result<RealtimeChannelInfo, Error> {
     let topic = super::realtime::decode_topic_id(&topic_id)
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
-    println!("[WEBXDC] miniapp_get_realtime_status called for topic: {}", topic_id);
-    
-    // Get pending peer count (these are peers that advertised before we joined)
+
     let pending_peer_count = state.get_pending_peer_count(&topic).await;
-    println!("[WEBXDC] Pending peer count: {}", pending_peer_count);
-    
+
     // Check if WE are actively playing (have a Mini App window open for this topic)
     // This is different from whether we have an Iroh channel (which we keep open to see peers)
     let we_are_playing = {
         let channels = state.realtime_channels.read().await;
         channels.values().any(|ch| ch.topic == topic && ch.active)
     };
-    println!("[WEBXDC] We are playing: {}", we_are_playing);
-    
-    // Check if we have an active Iroh instance
-    let iroh_result = state.realtime.get_or_init().await;
-    
-    match iroh_result {
+
+    match state.realtime.get_or_init().await {
         Ok(iroh) => {
-            let has_channel = iroh.has_channel(&topic).await;
             let peer_count = iroh.get_peer_count(&topic).await;
-            
-            println!("[WEBXDC] miniapp_get_realtime_status: we_are_playing={}, has_channel={}, peer_count={}, pending={}",
-                we_are_playing, has_channel, peer_count, pending_peer_count);
-            
             Ok(RealtimeChannelInfo {
                 active: we_are_playing,
                 peer_count,
@@ -1291,9 +1265,7 @@ pub async fn miniapp_get_realtime_status(
                 topic_id,
             })
         }
-        Err(e) => {
-            // Iroh not initialized, no active channels
-            println!("[WEBXDC] miniapp_get_realtime_status: Iroh not initialized: {}", e);
+        Err(_) => {
             Ok(RealtimeChannelInfo {
                 active: false,
                 peer_count: 0,

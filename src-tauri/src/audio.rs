@@ -334,10 +334,8 @@ pub fn decode_for_whisper(path: &Path) -> Result<Vec<f32>, String> {
 
     let t0 = std::time::Instant::now();
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("Failed to open audio file: {}", e))?;
-    let file_bytes = unsafe { memmap2::Mmap::map(&file) }
-        .map_err(|e| format!("Failed to mmap audio file: {}", e))?;
+    let file_bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
 
     // Try WAV fast path first — raw PCM byte conversion, no codec overhead
     let (mono_samples, sample_rate) = match wav_fast_decode(&file_bytes, 16000) {
@@ -348,7 +346,7 @@ pub fn decode_for_whisper(path: &Path) -> Result<Vec<f32>, String> {
         }
         None => {
             // Symphonia needs owned Vec<u8>
-            let result = symphonia_decode_mono(file_bytes.to_vec(), path)?;
+            let result = symphonia_decode_mono(file_bytes, path)?;
             let t_decode = t0.elapsed();
             println!("[Whisper]     decode: {:?} (Symphonia)", t_decode);
             result

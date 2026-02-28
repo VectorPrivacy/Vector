@@ -926,6 +926,94 @@ pub fn update_attachment_downloaded_status(
     Ok(())
 }
 
+/// Backfill all other messages in the database that share the same attachment hash.
+/// When one message's attachment is downloaded, other messages with the same file hash
+/// should also be marked as downloaded with the same path, since they share the same file.
+pub fn backfill_attachment_downloaded_status(
+    attachment_hash: &str,
+    downloaded: bool,
+    path: &str,
+    exclude_msg_id: &str,
+) -> Result<usize, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
+
+    // Find all events that contain this attachment hash in their tags
+    let mut stmt = conn.prepare(
+        "SELECT id, tags FROM events WHERE kind = 15 AND id != ?1 AND tags LIKE ?2 ESCAPE '\\'"
+    ).map_err(|e| format!("Failed to prepare backfill query: {}", e))?;
+
+    let escaped_hash = attachment_hash.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("%{}%", escaped_hash);
+    let rows: Vec<(String, String)> = stmt.query_map(
+        rusqlite::params![exclude_msg_id, pattern],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    ).map_err(|e| format!("Failed to query for backfill: {}", e))?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    let mut updated_count = 0;
+
+    for (event_id, tags_json) in rows {
+        let mut tags: Vec<Vec<String>> = match serde_json::from_str(&tags_json) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let attachments_tag_idx = tags.iter().position(|tag| {
+            tag.first().map(|s| s.as_str()) == Some("attachments")
+        });
+
+        let attachments_json = attachments_tag_idx
+            .and_then(|idx| tags.get(idx))
+            .and_then(|tag| tag.get(1))
+            .map(|s| s.as_str())
+            .unwrap_or("[]");
+
+        let mut attachments: Vec<Attachment> = match serde_json::from_str(attachments_json) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        let mut modified = false;
+        for att in attachments.iter_mut() {
+            if att.id == attachment_hash && !att.downloaded {
+                att.downloaded = downloaded;
+                att.downloading = false;
+                att.path = path.to_string();
+                modified = true;
+            }
+        }
+
+        if !modified {
+            continue;
+        }
+
+        let updated_attachments_json = match serde_json::to_string(&attachments) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+
+        if let Some(idx) = attachments_tag_idx {
+            tags[idx] = vec!["attachments".to_string(), updated_attachments_json];
+        }
+
+        let updated_tags_json = match serde_json::to_string(&tags) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+
+        match conn.execute(
+            "UPDATE events SET tags = ?1 WHERE id = ?2",
+            rusqlite::params![updated_tags_json, event_id],
+        ) {
+            Ok(_) => updated_count += 1,
+            Err(e) => eprintln!("Failed to backfill attachment status for event {}: {}", event_id, e),
+        }
+    }
+
+    Ok(updated_count)
+}
+
 /// Check all downloaded attachments in the database for missing files.
 /// Updates the database directly for any files that no longer exist.
 /// Returns (total_checked, missing_count, elapsed_time).

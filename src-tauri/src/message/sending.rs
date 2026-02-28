@@ -27,7 +27,7 @@ use crate::TAURI_APP;
 use crate::NOSTR_CLIENT;
 use crate::miniapps::realtime::{generate_topic_id, encode_topic_id};
 
-use super::types::{AttachmentFile, FileBytes, ImageMetadata, Message, Attachment};
+use super::types::{AttachmentFile, ImageMetadata, Message, Attachment};
 
 /// Result of sending a message, returned to frontend for state update
 #[derive(serde::Serialize)]
@@ -145,7 +145,7 @@ async fn encrypt_and_upload_mls_media(
     let url = crate::blossom::upload_blob_with_progress_and_failover(
         signer,
         servers,
-        Arc::new(FileBytes::Owned(std::mem::take(&mut upload.encrypted_data))),
+        Arc::new(std::mem::take(&mut upload.encrypted_data)),
         Some(&mime_type),
         progress_callback,
         Some(3),
@@ -417,7 +417,17 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             let dir = handle.path().resolve("vector", base_directory).unwrap();
             std::fs::create_dir_all(&dir).unwrap();
             let hash_file_path = dir.join(&filename);
-            std::fs::write(&hash_file_path, &*attached_file.bytes).unwrap();
+            // Atomic write: write to temp file then rename, so the file is never 0 bytes
+            // (prevents corrupted state if another thread reads concurrently)
+            let tmp_path = dir.join(format!(".{}.tmp", &filename));
+            std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("Failed to write temp file: {}", e)
+            })?;
+            std::fs::rename(&tmp_path, &hash_file_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("Failed to rename temp file: {}", e)
+            })?;
 
             // Add the attachment to the pending message with the local path immediately,
             // so the frontend can show a preview (with lowered opacity + progress bar)
@@ -691,8 +701,17 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Create the vector directory if it doesn't exist
             std::fs::create_dir_all(&dir).unwrap();
 
-            // Save the hash-named file
-            std::fs::write(&hash_file_path, &*attached_file.bytes).unwrap();
+            // Atomic write: write to temp file then rename, so the file is never 0 bytes
+            // (prevents corrupted state if another thread reads concurrently)
+            let tmp_path = dir.join(format!(".{}.{}.tmp", &file_hash, &attached_file.extension));
+            std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("Failed to write temp file: {}", e)
+            })?;
+            std::fs::rename(&tmp_path, &hash_file_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("Failed to rename temp file: {}", e)
+            })?;
 
             // Determine encryption params and file size based on whether we found an existing attachment
             let (attachment_key, attachment_nonce, file_size) = if let Some(ref existing) = existing_attachment {
@@ -843,7 +862,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
 
             // Upload the file with progress, retries, and automatic server failover
-            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(FileBytes::Owned(enc_file)), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
                 Ok(url) => {
                     // Update our pending message with the uploaded URL
                     {
@@ -1163,7 +1182,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: Arc::new(FileBytes::Owned(encoded_bytes)),
+        bytes: Arc::new(encoded_bytes),
         img_meta,
         extension: extension.to_string(),
     };
@@ -1176,7 +1195,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {
     // Generate an Attachment File
     let attachment_file = AttachmentFile {
-        bytes: Arc::new(FileBytes::Owned(bytes)),
+        bytes: Arc::new(bytes),
         img_meta: None,
         extension: String::from("wav")
     };

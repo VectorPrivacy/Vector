@@ -9,54 +9,13 @@ use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::Mutex as TokioMutex;
 use std::sync::LazyLock;
-use memmap2::Mmap;
-
 use crate::net;
 use crate::TAURI_APP;
-
-/// Zero-copy file data: either heap-allocated or memory-mapped from disk.
-/// Derefs to `&[u8]` so all downstream consumers (hash, encrypt, upload) work unchanged.
-pub enum FileBytes {
-    Owned(Vec<u8>),
-    Mapped(Mmap),
-}
-
-impl std::fmt::Debug for FileBytes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FileBytes::Owned(v) => write!(f, "FileBytes::Owned({} bytes)", v.len()),
-            FileBytes::Mapped(m) => write!(f, "FileBytes::Mapped({} bytes)", m.len()),
-        }
-    }
-}
-
-impl std::ops::Deref for FileBytes {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            FileBytes::Owned(v) => v,
-            FileBytes::Mapped(m) => m,
-        }
-    }
-}
-
-impl AsRef<[u8]> for FileBytes {
-    fn as_ref(&self) -> &[u8] {
-        use std::ops::Deref;
-        self.deref()
-    }
-}
-
-impl FileBytes {
-    pub fn len(&self) -> usize { (**self).len() }
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool { (**self).is_empty() }
-}
 
 /// Cached compressed image data
 #[derive(Clone)]
 pub struct CachedCompressedImage {
-    pub bytes: Arc<FileBytes>,
+    pub bytes: Arc<Vec<u8>>,
     pub extension: String,
     pub img_meta: Option<ImageMetadata>,
     pub original_size: u64,
@@ -74,7 +33,7 @@ pub static COMPRESSION_NOTIFY: LazyLock<TokioMutex<HashMap<String, Arc<tokio::sy
 /// Cache for Android file bytes: uri -> (bytes, extension, name, size)
 /// This is used to cache file bytes immediately after file selection on Android,
 /// before the temporary content URI permission expires.
-pub static ANDROID_FILE_CACHE: LazyLock<std::sync::Mutex<HashMap<String, (Arc<FileBytes>, String, String, u64)>>> =
+pub static ANDROID_FILE_CACHE: LazyLock<std::sync::Mutex<HashMap<String, (Arc<Vec<u8>>, String, String, u64)>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -289,14 +248,14 @@ impl Default for Attachment {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AttachmentFile {
     #[serde(skip, default = "default_arc_bytes")]
-    pub bytes: Arc<FileBytes>,
+    pub bytes: Arc<Vec<u8>>,
     /// Image metadata (for images only)
     pub img_meta: Option<ImageMetadata>,
     pub extension: String,
 }
 
-fn default_arc_bytes() -> Arc<FileBytes> {
-    Arc::new(FileBytes::Owned(Vec::new()))
+fn default_arc_bytes() -> Arc<Vec<u8>> {
+    Arc::new(Vec::new())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]

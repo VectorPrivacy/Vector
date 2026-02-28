@@ -9,8 +9,6 @@ use futures_util::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::message::FileBytes;
-
 /// Progress callback function type
 pub type ProgressCallback = std::sync::Arc<dyn Fn(Option<u8>, Option<u64>) -> Result<(), String> + Send + Sync>;
 
@@ -21,7 +19,7 @@ struct ProgressTrackingStream {
 }
 
 impl ProgressTrackingStream {
-    fn new(data: Arc<FileBytes>, bytes_sent: Arc<Mutex<u64>>) -> Self {
+    fn new(data: Arc<Vec<u8>>, bytes_sent: Arc<Mutex<u64>>) -> Self {
         let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
 
         // Spawn a background task to feed the stream
@@ -113,7 +111,7 @@ where
 pub async fn upload_blob_with_progress<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<FileBytes>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
@@ -157,7 +155,7 @@ where
 async fn upload_attempt<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<FileBytes>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
 ) -> Result<String, String>
@@ -262,7 +260,7 @@ where
 pub async fn upload_blob<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<FileBytes>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
 ) -> Result<String, String>
 where
@@ -293,11 +291,8 @@ where
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
     // Perform the upload - extract or copy bytes for body
-    let body_data: Vec<u8> = match Arc::try_unwrap(file_data) {
-        Ok(FileBytes::Owned(v)) => v,
-        Ok(FileBytes::Mapped(m)) => m.to_vec(),
-        Err(arc) => arc.to_vec(),
-    };
+    let body_data: Vec<u8> = Arc::try_unwrap(file_data)
+        .unwrap_or_else(|arc| (*arc).clone());
     let response = client
         .put(upload_url)
         .headers(headers)
@@ -325,7 +320,7 @@ where
 pub async fn upload_blob_with_failover<T>(
     signer: T,
     server_urls: Vec<String>,
-    file_data: Arc<FileBytes>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
 ) -> Result<String, String>
 where
@@ -368,7 +363,7 @@ where
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
     server_urls: Vec<String>,
-    file_data: Arc<FileBytes>,
+    file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,

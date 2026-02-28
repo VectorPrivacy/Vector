@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use jni::objects::{JObject, JValue, JString};
 
-use crate::message::{AttachmentFile, FileBytes, FileInfo};
+use crate::message::{AttachmentFile, FileInfo};
 use super::utils::{with_android_context, get_content_resolver, STREAM_BUFFER_SIZE};
 
 /// Simple percent-decoding for URIs (e.g., %3A -> :)
@@ -419,7 +419,7 @@ fn read_from_android_uri_internal(
     let _ = env.call_method(&input_stream, "close", "()V", &[]);
 
     Ok(AttachmentFile {
-        bytes: Arc::new(FileBytes::Owned(bytes)),
+        bytes: Arc::new(bytes),
         img_meta: None,
         extension,
     })

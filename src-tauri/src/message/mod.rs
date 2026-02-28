@@ -23,7 +23,7 @@ pub use sending::*;
 pub use files::*;
 pub use types::{
     Message, ImageMetadata, Attachment,
-    AttachmentFile, FileBytes, Reaction, EditEntry,
+    AttachmentFile, Reaction, EditEntry,
 };
 #[allow(unused_imports)]
 pub use compact::{

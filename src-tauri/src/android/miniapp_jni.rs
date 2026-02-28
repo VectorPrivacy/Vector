@@ -778,13 +778,12 @@ fn get_user_display_name() -> String {
 }
 
 fn get_granted_permissions_for_package(package_path: &str) -> Result<String, String> {
-    // Compute file hash for permission lookup via mmap (zero-copy)
-    let file = std::fs::File::open(package_path).map_err(|e| format!("Failed to open package: {}", e))?;
-    let bytes = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("Failed to mmap package: {}", e))?;
+    // Compute file hash for permission lookup
+    let bytes = std::fs::read(package_path).map_err(|e| format!("Failed to read package: {}", e))?;
 
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
-    hasher.update(&*bytes);
+    hasher.update(&bytes);
     let file_hash = bytes_to_hex_string(&hasher.finalize());
 
     // Look up permissions from database using file_hash
@@ -994,7 +993,15 @@ async fn android_realtime_delivery_loop(
     let mut consecutive_failures: u32 = 0;
 
     while let Some(event) = rx.recv().await {
-        if let crate::miniapps::realtime::RealtimeEvent::Data(data) = event {
+        if let crate::miniapps::realtime::RealtimeEvent::Data(encoded) = event {
+            // Decode base91 back to raw bytes for JNI (Android WebView uses byte arrays)
+            let data = match fast_thumbhash::base91_decode(&encoded) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    log_warn!("[WEBXDC] Android: Failed to decode base91 realtime data, skipping");
+                    continue;
+                }
+            };
             // catch_unwind prevents a JNI panic from killing the delivery loop.
             // The JNI call is synchronous so this is safe (no async across unwind).
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
