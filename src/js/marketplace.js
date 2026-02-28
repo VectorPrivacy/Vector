@@ -2212,6 +2212,9 @@ function setupMarketplaceProgressListener() {
 // Initialize the progress listener
 setupMarketplaceProgressListener();
 
+// Re-truncate category tags on window resize (owned by marketplace module)
+window.addEventListener('resize', truncateAllCategoryTags);
+
 // Listen for backend-pushed marketplace data (emitted on preload + network refresh)
 window.__TAURI__.event.listen('marketplace_apps_updated', (event) => {
     const hadData = marketplaceApps.length > 0;

@@ -12038,9 +12038,6 @@ function adjustSize() {
 
     // If the chat is open, and they've not significantly scrolled up: auto-scroll down to correct against container resizes
     softChatScroll();
-
-    // Re-truncate marketplace category tags on resize
-    truncateAllCategoryTags();
 }
 
 /**
