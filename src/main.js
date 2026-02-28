@@ -2553,6 +2553,9 @@ function truncateGraphemes(text, maxLength) {
     return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
 }
 
+let emojiLazyLoadObserver = null;
+const EMOJI_CHUNK_SIZE = 36; // 6 columns x 6 rows
+
 /**
  * Renders the Recently Used emojis immediately, then renders
  * the All Emojis grid after the last recent emoji image loads.
@@ -2595,20 +2598,66 @@ function renderEmojiPanel() {
 }
 
 /**
- * Renders the full All Emojis grid using DocumentFragment.
+ * Renders the full All Emojis grid with lazy twemojification.
+ * All spans are created upfront (cheap text nodes) to preserve scroll height,
+ * but twemojify() is only called on chunks as they scroll into view.
+ * The first span of each chunk is observed — no sentinel elements needed.
  */
 function renderAllEmojisGrid(allGrid) {
+    // Disconnect any previous observer (handles re-opens)
+    if (emojiLazyLoadObserver) {
+        emojiLazyLoadObserver.disconnect();
+        emojiLazyLoadObserver = null;
+    }
+
     const allFragment = document.createDocumentFragment();
-    
-    arrEmojis.forEach(emoji => {
+    const chunkLeaders = [];
+
+    arrEmojis.forEach((emoji, i) => {
         const span = document.createElement('span');
         span.textContent = emoji.emoji;
         span.title = emoji.name;
         allFragment.appendChild(span);
+
+        // Mark the first span of each chunk as the observation target
+        if (i % EMOJI_CHUNK_SIZE === 0) {
+            span.dataset.chunkIndex = chunkLeaders.length;
+            chunkLeaders.push(span);
+        }
     });
-    
+
     allGrid.appendChild(allFragment);
-    twemojify(allGrid);
+
+    // Build an array of all emoji spans (excluding non-emoji children) for slicing
+    const allSpans = Array.from(allGrid.querySelectorAll('span[title]'));
+
+    // Set up IntersectionObserver on the scroll container
+    const scrollContainer = document.querySelector('.emoji-main');
+    emojiLazyLoadObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const leader = entry.target;
+                if (!leader.dataset.twemojified) {
+                    leader.dataset.twemojified = '1';
+                    const idx = Number(leader.dataset.chunkIndex);
+                    const start = idx * EMOJI_CHUNK_SIZE;
+                    const end = Math.min(start + EMOJI_CHUNK_SIZE, allSpans.length);
+                    for (let i = start; i < end; i++) {
+                        twemojify(allSpans[i]);
+                    }
+                }
+                emojiLazyLoadObserver.unobserve(leader);
+            }
+        });
+    }, {
+        root: scrollContainer,
+        rootMargin: '0px 0px 200px 0px'
+    });
+
+    // Observe the first span of each chunk
+    chunkLeaders.forEach(leader => {
+        emojiLazyLoadObserver.observe(leader);
+    });
 }
 
 /**
