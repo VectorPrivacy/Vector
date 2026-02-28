@@ -219,7 +219,7 @@ pub struct RealtimeChannelState {
 /// A pending peer advertisement (received before we joined the channel)
 #[derive(Clone, Debug)]
 pub struct PendingPeer {
-    pub node_addr: iroh::NodeAddr,
+    pub node_addr: iroh::EndpointAddr,
     pub received_at: std::time::Instant,
 }
 
@@ -273,22 +273,22 @@ impl MiniAppsState {
     }
     
     /// Add a pending peer for a topic (received before we joined)
-    pub async fn add_pending_peer(&self, topic: TopicId, node_addr: iroh::NodeAddr) {
+    pub async fn add_pending_peer(&self, topic: TopicId, node_addr: iroh::EndpointAddr) {
         let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
-        println!("[WEBXDC] add_pending_peer: Adding peer {} for topic {}", node_addr.node_id, topic_encoded);
-        
+        println!("[WEBXDC] add_pending_peer: Adding peer {} for topic {}", node_addr.id, topic_encoded);
+
         let mut pending = self.pending_peers.write().await;
         let peers = pending.entry(topic).or_insert_with(Vec::new);
-        
+
         // Don't add duplicates
-        if !peers.iter().any(|p| p.node_addr.node_id == node_addr.node_id) {
+        if !peers.iter().any(|p| p.node_addr.id == node_addr.id) {
             peers.push(PendingPeer {
                 node_addr: node_addr.clone(),
                 received_at: std::time::Instant::now(),
             });
-            println!("[WEBXDC] add_pending_peer: Stored pending peer {} for topic {}", node_addr.node_id, topic_encoded);
+            println!("[WEBXDC] add_pending_peer: Stored pending peer {} for topic {}", node_addr.id, topic_encoded);
         } else {
-            println!("[WEBXDC] add_pending_peer: Peer {} already exists for topic {}", node_addr.node_id, topic_encoded);
+            println!("[WEBXDC] add_pending_peer: Peer {} already exists for topic {}", node_addr.id, topic_encoded);
         }
     }
     

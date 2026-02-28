@@ -419,50 +419,46 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         if !pending_peers.is_empty() {
             log_info!("[WEBXDC] Android: Adding {} pending peers", pending_peer_count);
             for pending in pending_peers {
-                let node_id = pending.node_addr.node_id;
+                let peer_id = pending.node_addr.id;
                 if let Err(e) = iroh.add_peer(topic, pending.node_addr).await {
-                    log_warn!("[WEBXDC] Android: Failed to add pending peer {}: {}", node_id, e);
+                    log_warn!("[WEBXDC] Android: Failed to add pending peer {}: {}", peer_id, e);
                 }
             }
         }
 
         // Get node address and send peer advertisements
-        match iroh.get_node_addr().await {
-            Ok(node_addr) => {
-                match crate::miniapps::realtime::encode_node_addr(&node_addr) {
-                    Ok(node_addr_encoded) => {
-                        let chat_id = instance.chat_id.clone();
-                        let topic_for_ad = topic_encoded_for_join.clone();
-                        let addr_for_ad = node_addr_encoded.clone();
+        {
+            let node_addr = iroh.get_node_addr();
+            match crate::miniapps::realtime::encode_node_addr(&node_addr) {
+                Ok(node_addr_encoded) => {
+                    let chat_id = instance.chat_id.clone();
+                    let topic_for_ad = topic_encoded_for_join.clone();
+                    let addr_for_ad = node_addr_encoded.clone();
 
-                        // Send initial advertisement
-                        let chat_id_1 = chat_id.clone();
-                        let topic_1 = topic_for_ad.clone();
-                        let addr_1 = addr_for_ad.clone();
-                        tokio::spawn(async move {
-                            crate::commands::realtime::send_webxdc_peer_advertisement(
-                                chat_id_1, topic_1, addr_1,
-                            ).await;
-                        });
+                    // Send initial advertisement
+                    let chat_id_1 = chat_id.clone();
+                    let topic_1 = topic_for_ad.clone();
+                    let addr_1 = addr_for_ad.clone();
+                    tokio::spawn(async move {
+                        crate::commands::realtime::send_webxdc_peer_advertisement(
+                            chat_id_1, topic_1, addr_1,
+                        ).await;
+                    });
 
-                        // Send delayed advertisement
-                        let chat_id_2 = chat_id;
-                        let topic_2 = topic_for_ad;
-                        let addr_2 = addr_for_ad;
-                        tokio::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                            crate::commands::realtime::send_webxdc_peer_advertisement(
-                                chat_id_2, topic_2, addr_2,
-                            ).await;
-                        });
-                    }
-                    Err(e) => {
-                        log_warn!("[WEBXDC] Android: Failed to encode node addr: {}", e);
-                    }
+                    // Send delayed advertisement
+                    let chat_id_2 = chat_id;
+                    let topic_2 = topic_for_ad;
+                    let addr_2 = addr_for_ad;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        crate::commands::realtime::send_webxdc_peer_advertisement(
+                            chat_id_2, topic_2, addr_2,
+                        ).await;
+                    });
                 }
-            }
-            Err(e) => {
-                log_warn!("[WEBXDC] Android: Failed to get node addr: {}", e);
+                Err(e) => {
+                    log_warn!("[WEBXDC] Android: Failed to encode node addr: {}", e);
+                }
             }
         }
 

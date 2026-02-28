@@ -66,6 +66,7 @@ rayon = "1.11.0"
 
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
 memchr = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Mini Apps (WebXDC) support
 zip = { version = "2.4", default-features = false, features = ["deflate-zlib"] }
@@ -75,9 +76,9 @@ http = "1.3"
 url = "2.5.7"
 
 # Realtime peer channels (Iroh P2P)
-iroh = "0.34"
-iroh-gossip = "0.34"
-iroh-quinn = "0.13"
+iroh = "0.96"
+iroh-gossip = "0.96"
+iroh-quinn-proto = "0.15"
 rand = "0.8"
 
 # PIVX Promos (addressless crypto payments)
@@ -124,3 +125,6 @@ tempfile = "3"
 # builds from macOS don't try to link Apple's Accelerate/BLAS framework.
 [patch.crates-io]
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", branch = "master" }
+# pkarr uses reqwest with "rustls" feature which forces aws-lc-rs (breaks Android 11).
+# Patched to use "rustls-no-provider" so our ring install_default() is used instead.
+pkarr = { path = "patches/pkarr" }

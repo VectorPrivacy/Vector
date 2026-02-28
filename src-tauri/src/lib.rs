@@ -98,6 +98,10 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install rustls crypto provider before any TLS usage (required when both
+    // 'ring' and 'aws-lc-rs' features are pulled by different transitive deps)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     #[cfg(target_os = "linux")]
     {
         // WebKitGTK can be quite funky cross-platform: as a result, we'll fallback to a more compatible renderer

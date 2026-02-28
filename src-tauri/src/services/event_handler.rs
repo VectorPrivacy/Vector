@@ -1054,7 +1054,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_e
                     match iroh.add_peer(topic, node_addr.clone()).await {
                         Ok(_) => {
                             println!("[WEBXDC] Successfully added peer {} to realtime channel topic {}",
-                                node_addr.node_id, topic_id);
+                                node_addr.id, topic_id);
                             return true;
                         }
                         Err(e) => {

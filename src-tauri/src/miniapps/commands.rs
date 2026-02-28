@@ -1051,15 +1051,15 @@ pub async fn miniapp_join_realtime_channel(
         let add_peer_futures: Vec<_> = pending_peers.into_iter().map(|pending| {
             let iroh_ref = &iroh;
             async move {
-                let node_id = pending.node_addr.node_id;
+                let peer_id = pending.node_addr.id;
                 match iroh_ref.add_peer(topic, pending.node_addr).await {
                     Ok(_) => {
-                        log_info!("[WEBXDC] Successfully added pending peer {} to realtime channel", node_id);
-                        Ok(node_id)
+                        log_info!("[WEBXDC] Successfully added pending peer {} to realtime channel", peer_id);
+                        Ok(peer_id)
                     }
                     Err(e) => {
-                        log_warn!("[WEBXDC] Failed to add pending peer {}: {}", node_id, e);
-                        Err((node_id, e))
+                        log_warn!("[WEBXDC] Failed to add pending peer {}: {}", peer_id, e);
+                        Err((peer_id, e))
                     }
                 }
             }
@@ -1080,8 +1080,7 @@ pub async fn miniapp_join_realtime_channel(
     
     // Get our node address and send a peer advertisement to the chat
     // This allows other participants to discover and connect to us
-    let node_addr = iroh.get_node_addr().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+    let node_addr = iroh.get_node_addr();
     let node_addr_encoded = encode_node_addr(&node_addr)
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
@@ -1216,9 +1215,8 @@ pub async fn miniapp_get_realtime_node_addr(
     let iroh = state.realtime.get_or_init().await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
-    let addr = iroh.get_node_addr().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
+    let addr = iroh.get_node_addr();
+
     super::realtime::encode_node_addr(&addr)
         .map_err(|e| Error::RealtimeError(e.to_string()))
 }
