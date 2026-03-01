@@ -617,8 +617,32 @@ pub async fn upload_group_avatar(filepath: String) -> Result<serde_json::Value, 
 /// downloads the encrypted blob from Blossom, decrypts with ChaCha20-Poly1305,
 /// and caches the result locally using the image cache system.
 #[tauri::command]
-pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, String> {
+pub async fn cache_group_avatar(
+    group_id: String,
+    blob_url: Option<String>,
+    image_hash: Option<String>,
+    image_key: Option<String>,
+    image_nonce: Option<String>,
+) -> Result<Option<String>, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?.clone();
+
+    // If direct image params are provided (admin just uploaded), use them directly
+    // instead of reading from MLS engine state (which may not have merged the commit yet)
+    let direct_params = if let (Some(ref h), Some(ref k), Some(ref n)) = (&image_hash, &image_key, &image_nonce) {
+        if !h.is_empty() && !k.is_empty() && !n.is_empty() {
+            let hash_bytes: [u8; 32] = hex_string_to_bytes(h)
+                .try_into().map_err(|_| "Invalid image_hash length")?;
+            let key_bytes: [u8; 32] = hex_string_to_bytes(k)
+                .try_into().map_err(|_| "Invalid image_key length")?;
+            let nonce_bytes: [u8; 12] = hex_string_to_bytes(n)
+                .try_into().map_err(|_| "Invalid image_nonce length")?;
+            Some((hash_bytes, key_bytes, nonce_bytes))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Load group metadata from SQL
     let groups = db::load_mls_groups().await
@@ -626,49 +650,69 @@ pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, Stri
     let meta = groups.iter().find(|g| g.group_id == group_id)
         .ok_or_else(|| format!("Group not found: {}", group_id))?;
 
-    // If already cached, return immediately
-    if let Some(ref cached) = meta.avatar_cached {
-        if !cached.is_empty() {
-            return Ok(Some(cached.clone()));
+    // Only use cached path if we're NOT doing a direct update (no direct params)
+    if direct_params.is_none() {
+        if let Some(ref cached) = meta.avatar_cached {
+            if !cached.is_empty() {
+                return Ok(Some(cached.clone()));
+            }
         }
     }
 
     let avatar_ref = meta.avatar_ref.clone();
     let engine_group_id = meta.engine_group_id.clone();
 
-    // Read image encryption data from the MDK engine's stored Group
-    let image_data = tokio::task::spawn_blocking({
-        move || -> Result<Option<([u8; 32], [u8; 32], [u8; 12])>, String> {
-            let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
-            let engine = mls.engine().map_err(|e| e.to_string())?;
+    let (image_hash_bytes, image_key_bytes, image_nonce_bytes) = if let Some(params) = direct_params {
+        params
+    } else {
+        // Read image encryption data from the MDK engine's stored Group
+        let image_data = tokio::task::spawn_blocking({
+            move || -> Result<Option<([u8; 32], [u8; 32], [u8; 12])>, String> {
+                let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
+                let engine = mls.engine().map_err(|e| e.to_string())?;
 
-            // Find our group in the engine by engine_group_id
-            let engine_gid_bytes = hex_string_to_bytes(&engine_group_id);
-            let mls_group_id = mdk_core::prelude::GroupId::from_slice(&engine_gid_bytes);
-            let group = engine.get_group(&mls_group_id)
-                .map_err(|e| format!("Engine error: {}", e))?
-                .ok_or_else(|| "Group not found in engine".to_string())?;
+                // Find our group in the engine by engine_group_id
+                let engine_gid_bytes = hex_string_to_bytes(&engine_group_id);
+                let mls_group_id = mdk_core::prelude::GroupId::from_slice(&engine_gid_bytes);
+                let group = engine.get_group(&mls_group_id)
+                    .map_err(|e| format!("Engine error: {}", e))?
+                    .ok_or_else(|| "Group not found in engine".to_string())?;
 
-            // All three fields must be present for decryption
-            match (group.image_hash, &group.image_key, &group.image_nonce) {
-                (Some(hash), Some(key), Some(nonce)) => {
-                    Ok(Some((hash, *key.as_ref(), *nonce.as_ref())))
+                // All three fields must be present for decryption
+                match (group.image_hash, &group.image_key, &group.image_nonce) {
+                    (Some(hash), Some(key), Some(nonce)) => {
+                        Ok(Some((hash, *key.as_ref(), *nonce.as_ref())))
+                    }
+                    _ => Ok(None), // No image data — group has no avatar
                 }
-                _ => Ok(None), // No image data — group has no avatar
             }
-        }
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))??;
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
 
-    let (image_hash, image_key_bytes, image_nonce_bytes) = match image_data {
-        Some(data) => data,
-        None => return Ok(None), // Group has no avatar — not an error
+        match image_data {
+            Some(data) => data,
+            None => return Ok(None), // Group has no avatar — not an error
+        }
     };
 
-    // Construct download URL: prefer avatar_ref if set, otherwise try Blossom servers by hash
-    let hash_hex = bytes_to_hex_string(&image_hash);
-    let download_urls: Vec<String> = if let Some(ref url) = avatar_ref {
+    // Construct download URL: prefer blob_url param, then avatar_ref, then Blossom servers by hash
+    let hash_hex = bytes_to_hex_string(&image_hash_bytes);
+    let download_urls: Vec<String> = if let Some(ref url) = blob_url {
+        if !url.is_empty() {
+            vec![url.clone()]
+        } else if let Some(ref url) = avatar_ref {
+            if !url.is_empty() { vec![url.clone()] } else {
+                crate::get_blossom_servers().iter()
+                    .map(|s| format!("{}/{}", s.trim_end_matches('/'), hash_hex))
+                    .collect()
+            }
+        } else {
+            crate::get_blossom_servers().iter()
+                .map(|s| format!("{}/{}", s.trim_end_matches('/'), hash_hex))
+                .collect()
+        }
+    } else if let Some(ref url) = avatar_ref {
         if !url.is_empty() {
             vec![url.clone()]
         } else {
@@ -719,7 +763,7 @@ pub async fn cache_group_avatar(group_id: String) -> Result<Option<String>, Stri
     let image_nonce_secret = mdk_storage_traits::Secret::new(image_nonce_bytes);
     let decrypted = mdk_core::extension::decrypt_group_image(
         &encrypted,
-        Some(&image_hash),
+        Some(&image_hash_bytes),
         &image_key_secret,
         &image_nonce_secret,
     ).map_err(|e| format!("Failed to decrypt group avatar: {}", e))?;
@@ -1542,7 +1586,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
         });
         // Spawn background avatar caching (fire-and-forget)
         tokio::spawn(async move {
-            match cache_group_avatar(gid_for_avatar.clone()).await {
+            match cache_group_avatar(gid_for_avatar.clone(), None, None, None, None).await {
                 Ok(Some(path)) => println!("[MLS] Cached group avatar after welcome: {}", path),
                 Ok(None) => {} // No avatar data in this group
                 Err(e) => eprintln!("[MLS] Failed to cache group avatar after welcome for {}: {}", &gid_for_avatar[..8.min(gid_for_avatar.len())], e),
