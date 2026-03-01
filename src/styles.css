@@ -1080,6 +1080,7 @@ html, body {
 
 .account #account-status .emoji,
 .profile-header #profile-status .emoji,
+#chat-contact .emoji,
 #profile-name .emoji,
 #profile-secondary-name .emoji {
   height: 15px;

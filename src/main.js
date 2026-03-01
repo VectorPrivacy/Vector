@@ -12014,14 +12014,13 @@ document.addEventListener('click', (e) => {
     // If we're clicking a Contact in the main chat list (NOT inside the Create Group panel), open the chat
     const cg = document.getElementById('create-group');
     const inCreateGroup = cg && cg.style.display !== 'none' && cg.contains(e.target);
-    if (!inCreateGroup && (e.target.classList.contains("chatlist-contact") || e.target.parentElement?.classList.contains("chatlist-contact") ||  e.target.parentElement?.parentElement?.classList.contains("chatlist-contact"))) {
+    const chatlistItem = e.target.closest('.chatlist-contact');
+    if (!inCreateGroup && chatlistItem) {
         // Don't open chat if clicking on an invite item
-        if (e.target.classList.contains("chatlist-invite") || e.target.closest(".chatlist-invite")) {
+        if (chatlistItem.classList.contains("chatlist-invite")) {
             return;
         }
-        const strID = e.target.id || e.target.parentElement?.id || e.target.parentElement.parentElement.id;
-        // Strip the 'chatlist-' prefix if present
-        const chatId = strID.replace('chatlist-', '');
+        const chatId = chatlistItem.id.replace('chatlist-', '');
         return openChat(chatId);
     }
 
