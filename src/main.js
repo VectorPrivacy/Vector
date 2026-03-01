@@ -6974,7 +6974,7 @@ function renderProfileTab(cProfile) {
 
         // Setup Share option
         domProfileOptionShare.onclick = () => {
-            const npub = document.getElementById('profile-npub')?.textContent;
+            const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
             if (npub) {
                 const profileUrl = `https://vectorapp.io/profile/${npub}`;
                 navigator.clipboard.writeText(profileUrl).then(() => {
