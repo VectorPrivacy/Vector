@@ -45,7 +45,6 @@ This policy covers vulnerabilities related to:
 - Encryption and key management
 - Authentication & authorization
 - Message transport security
-- Secure storage of messages
 
 Out of scope:
 
