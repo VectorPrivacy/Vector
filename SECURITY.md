@@ -21,7 +21,7 @@ If you discover a security vulnerability, **please do not open a public GitHub i
 Instead, report it responsibly using one of the methods below:
 
 ### Preferred Method
-📧 Email: **security@yourdomain.com** (To change)<br>
+📧 Email: **security@vectorapp.io**<br>
 🔓 GitHub's Private Vulnerability Disclosure: [here](https://github.com/VectorPrivacy/Vector/security/advisories/new) (To confirm)
 
 ### What to Include
