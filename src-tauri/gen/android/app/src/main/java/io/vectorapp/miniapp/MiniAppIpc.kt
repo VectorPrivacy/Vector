@@ -2,7 +2,7 @@ package io.vectorapp.miniapp
 
 import android.webkit.JavascriptInterface
 import io.vectorapp.Logger
-import android.util.Base64
+
 
 /**
  * JavaScript interface for Mini App IPC communication.
@@ -28,6 +28,14 @@ class MiniAppIpc(
 
         init {
             System.loadLibrary("vector_lib")
+        }
+
+        /**
+         * Check granted permissions without needing a JavascriptInterface context.
+         * Used by MiniAppChromeClient to gate native permission requests.
+         */
+        fun getGrantedPermissionsStatic(miniappId: String, packagePath: String): String? {
+            return MiniAppIpc(miniappId, packagePath).getGrantedPermissions().ifEmpty { null }
         }
     }
 
@@ -101,18 +109,13 @@ class MiniAppIpc(
     /**
      * Send data through the realtime channel.
      *
-     * @param dataBase64 Base64-encoded binary data
+     * @param dataEncoded Base91-encoded binary data (decoded in Rust)
      */
     @JavascriptInterface
-    fun sendRealtimeData(dataBase64: String) {
-        Logger.debug(TAG, "[$miniappId] sendRealtimeData: ${dataBase64.length} chars")
+    fun sendRealtimeData(dataEncoded: String) {
+        Logger.debug(TAG, "[$miniappId] sendRealtimeData: ${dataEncoded.length} chars")
         try {
-            val bytes = Base64.decode(dataBase64, Base64.NO_WRAP)
-            if (bytes.size > REALTIME_DATA_MAX_SIZE) {
-                Logger.error(TAG, "[$miniappId] Realtime data too large: ${bytes.size} bytes (max ${REALTIME_DATA_MAX_SIZE / 1000}KB)", null)
-                return
-            }
-            sendRealtimeDataNative(miniappId, bytes)
+            sendRealtimeDataNative(miniappId, dataEncoded)
         } catch (e: Exception) {
             Logger.error(TAG, "[$miniappId] sendRealtimeData failed: ${e.message}", null)
         }
@@ -177,6 +180,21 @@ class MiniAppIpc(
     }
 
     /**
+     * Poll queued realtime data from the native side.
+     * Returns a JSON array of base91-encoded strings, or empty string if none.
+     * Called from JS on a background thread (JavascriptInterface runs on WebKit thread).
+     */
+    @JavascriptInterface
+    fun pollRealtimeData(): String {
+        return try {
+            MiniAppManager.pollRealtimeData() ?: ""
+        } catch (e: Exception) {
+            Logger.error(TAG, "[$miniappId] pollRealtimeData failed: ${e.message}", null)
+            ""
+        }
+    }
+
+    /**
      * Close the Mini App.
      */
     @JavascriptInterface
@@ -209,7 +227,7 @@ class MiniAppIpc(
 
     private external fun joinRealtimeChannelNative(miniappId: String): String?
 
-    private external fun sendRealtimeDataNative(miniappId: String, data: ByteArray)
+    private external fun sendRealtimeDataNative(miniappId: String, data: String)
 
     private external fun leaveRealtimeChannelNative(miniappId: String)
 

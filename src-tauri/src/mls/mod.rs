@@ -1523,6 +1523,11 @@ impl MlsService {
             }
         }
 
+        // Friendly name for log messages (e.g. "MyGroup (14f64f16)")
+        let group_display = group_metadata
+            .and_then(|m| if m.name.is_empty() { None } else { Some(format!("{} ({})", m.name, &group_id[..8.min(group_id.len())])) })
+            .unwrap_or_else(|| group_id[..16.min(group_id.len())].to_string());
+
         // EventTracker cleanup: Remove old processed events (older than 7 days) to prevent unbounded growth.
         // Run this once per sync cycle. Errors are logged but don't fail the sync.
         {
@@ -1549,14 +1554,14 @@ impl MlsService {
             // Fall back to 1 year if created_at is 0 or missing (legacy/edge cases).
             if let Some(meta) = group_metadata {
                 if meta.created_at > 0 {
-                    println!("[MLS] First sync for group {}, fetching from invite time {}", group_id, meta.created_at);
+                    println!("[MLS] First sync for group {}, fetching from invite time {}", group_display, meta.created_at);
                     Timestamp::from_secs(meta.created_at)
                 } else {
-                    println!("[MLS] First sync for group {} (no created_at), fetching 1 year history", group_id);
+                    println!("[MLS] First sync for group {} (no created_at), fetching 1 year history", group_display);
                     Timestamp::from_secs(now.as_secs().saturating_sub(60 * 60 * 24 * 365))
                 }
             } else {
-                println!("[MLS] First sync for group {} (no metadata), fetching 1 year history", group_id);
+                println!("[MLS] First sync for group {} (no metadata), fetching 1 year history", group_display);
                 Timestamp::from_secs(now.as_secs().saturating_sub(60 * 60 * 24 * 365))
             }
         };
@@ -1758,13 +1763,18 @@ impl MlsService {
                     
                     if let Err(e) = engine.create_message(&check_gid, dummy_rumor) {
                         eprintln!("[MLS] Engine missing group: {}", e);
-                        
+
                         if let Some(handle) = TAURI_APP.get() {
                             handle.emit("mls_group_needs_rejoin", serde_json::json!({
                                 "group_id": gid_for_fetch,
                                 "reason": "Group not found in MLS engine state"
                             })).ok();
                         }
+                    }
+
+                    // Read current epoch for diagnostic logging
+                    if let Ok(Some(g)) = engine.get_group(&check_gid) {
+                        println!("[MLS] Group {} at epoch {} before processing", group_display, g.epoch);
                     }
                 }
             }
@@ -1920,11 +1930,18 @@ impl MlsService {
                                 // 4. Decryption failed
                                 //
                                 // Log details to help diagnose. Note: ev.pubkey is ephemeral, not real sender.
-                                println!("[MLS] Unprocessable event: group={}, mls_gid={}, id={}, created_at={}",
-                                         gid_for_fetch,
+                                let current_epoch = group_check_id.as_ref()
+                                    .and_then(|cid| {
+                                        let gid_bytes = hex_string_to_bytes(cid);
+                                        if gid_bytes.is_empty() { return None; }
+                                        engine.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch)
+                                    });
+                                println!("[MLS] Unprocessable event: group={}, mls_gid={}, id={}, created_at={}, epoch={:?}",
+                                         group_display,
                                          bytes_to_hex_string(mls_group_id.as_slice()),
                                          ev.id.to_hex(),
-                                         ev.created_at.as_secs());
+                                         ev.created_at.as_secs(),
+                                         current_epoch);
 
                                 // Queue for retry - might succeed after other commits are processed
                                 pending_retry.push(ev.clone());
@@ -1992,9 +2009,6 @@ impl MlsService {
             while !pending_retry.is_empty() && retry_attempt < max_retry_passes {
                 retry_attempt += 1;
 
-                println!("[MLS] Retry pass {}/{} for {} events",
-                         retry_attempt, max_retry_passes, pending_retry.len());
-
                 // Sort pending events by created_at to ensure chronological processing
                 pending_retry.sort_by_key(|e| e.created_at.as_secs());
 
@@ -2006,6 +2020,14 @@ impl MlsService {
                         break;
                     }
                 };
+
+                let retry_epoch = group_check_id.as_ref().and_then(|cid| {
+                    let gid_bytes = hex_string_to_bytes(cid);
+                    if gid_bytes.is_empty() { return None; }
+                    engine.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch)
+                });
+                println!("[MLS] Retry pass {}/{} for {} events (epoch={:?})",
+                         retry_attempt, max_retry_passes, pending_retry.len(), retry_epoch);
 
                 // Track which events succeeded this round
                 let mut still_pending: Vec<nostr_sdk::Event> = Vec::new();
@@ -2123,8 +2145,8 @@ impl MlsService {
                                 }
                                 MessageProcessingResult::Unprocessable { mls_group_id } => {
                                     // Still can't process - keep for next retry round
-                                    println!("[MLS] ✗ Retry still unprocessable: id={}, mls_gid={}",
-                                             ev.id.to_hex(), bytes_to_hex_string(mls_group_id.as_slice()));
+                                    println!("[MLS] ✗ Retry still unprocessable: id={}, mls_gid={}, epoch={:?}",
+                                             ev.id.to_hex(), bytes_to_hex_string(mls_group_id.as_slice()), retry_epoch);
                                     still_pending.push(ev.clone());
                                 }
                                 MessageProcessingResult::PreviouslyFailed => {
@@ -2165,8 +2187,8 @@ impl MlsService {
 
                 // Stop if no progress (remaining events are genuinely stuck, not just out-of-order)
                 if !made_progress {
-                    eprintln!("[MLS] No progress in retry pass {} — {} events permanently unprocessable",
-                             retry_attempt, pending_retry.len());
+                    eprintln!("[MLS] No progress in retry pass {} — {} events permanently unprocessable (epoch={:?})",
+                             retry_attempt, pending_retry.len(), retry_epoch);
                     break;
                 }
 
@@ -2186,8 +2208,13 @@ impl MlsService {
                     processed = processed.saturating_add(1);
                 }
 
-                eprintln!("[MLS] {} events permanently unprocessable after {} retry passes (skipped, cursor advancing past them)",
-                         pending_retry.len(), retry_attempt);
+                let final_epoch = group_check_id.as_ref().and_then(|cid| {
+                    let gid_bytes = hex_string_to_bytes(cid);
+                    if gid_bytes.is_empty() { return None; }
+                    self.engine().ok().and_then(|eng| eng.get_group(&GroupId::from_slice(&gid_bytes)).ok().flatten().map(|g| g.epoch))
+                });
+                eprintln!("[MLS] {} events permanently unprocessable after {} retry passes (epoch={:?}, skipped, cursor advancing past them)",
+                         pending_retry.len(), retry_attempt, final_epoch);
 
                 // Record one failure for desync detection (not per-event to avoid spam)
                 if record_group_failure(&gid_for_fetch).await {
@@ -2565,7 +2592,7 @@ impl MlsService {
 
                 if last_seen_at > current_cursor_at {
                     println!("[MLS] Saving cursor: group={}, processed={}, seen_at={} (advanced from {})",
-                             gid_for_fetch, processed, last_seen_at, current_cursor_at);
+                             group_display, processed, last_seen_at, current_cursor_at);
                     cursors.insert(
                         gid_for_fetch.clone(),
                         EventCursor {
@@ -2578,7 +2605,7 @@ impl MlsService {
                     }
                     current_since = Timestamp::from_secs(last_seen_at);
                 } else {
-                    println!("[MLS] Cursor already up-to-date for group={} (at {})", gid_for_fetch, current_cursor_at);
+                    println!("[MLS] Cursor already up-to-date for group={} (at {})", group_display, current_cursor_at);
                 }
             }
         }

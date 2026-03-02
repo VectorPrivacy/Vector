@@ -190,8 +190,11 @@ class MiniAppWebView(
     init {
         Logger.debug(TAG, "Creating MiniAppWebView for: $miniappId")
 
-        // Enable hardware acceleration
-        setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        // Use default layer type for proper video playback
+        // LAYER_TYPE_HARDWARE forces offscreen texture rendering which causes
+        // video frames to freeze after the first frame on Android WebView.
+        // LAYER_TYPE_NONE lets the system compositor handle HW acceleration.
+        setLayerType(View.LAYER_TYPE_NONE, null)
 
         // Full-screen layout
         layoutParams = FrameLayout.LayoutParams(
@@ -247,7 +250,7 @@ class MiniAppWebView(
         webViewClient = MiniAppWebViewClient(context, miniappId, packagePath)
 
         // Set WebChromeClient for console logging and permission handling
-        chromeClient = MiniAppChromeClient(context, miniappId)
+        chromeClient = MiniAppChromeClient(context, miniappId, packagePath)
         webChromeClient = chromeClient
 
         // Inject initialization script
@@ -286,7 +289,8 @@ class MiniAppWebView(
      */
     private class MiniAppChromeClient(
         private val context: Context,
-        private val miniappId: String
+        private val miniappId: String,
+        private val packagePath: String
     ) : WebChromeClient() {
 
         companion object {
@@ -309,8 +313,10 @@ class MiniAppWebView(
             consoleMessage?.let { msg ->
                 val logMsg = "[MiniApp:$miniappId] ${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})"
                 when (msg.messageLevel()) {
-                    ConsoleMessage.MessageLevel.ERROR -> Logger.error(TAG, logMsg, null)
-                    ConsoleMessage.MessageLevel.WARNING -> Logger.warn(TAG, logMsg)
+                    // Always log errors and warnings (important for diagnosing issues in release)
+                    ConsoleMessage.MessageLevel.ERROR -> android.util.Log.e(TAG, logMsg)
+                    ConsoleMessage.MessageLevel.WARNING -> android.util.Log.w(TAG, logMsg)
+                    // Debug/info only in debug builds to avoid console.log noise in production
                     ConsoleMessage.MessageLevel.DEBUG -> Logger.debug(TAG, logMsg)
                     else -> Logger.info(TAG, logMsg)
                 }
@@ -319,11 +325,32 @@ class MiniAppWebView(
         }
 
         /**
+         * Get Vector's granted permissions for this Mini App via JNI.
+         * Returns a set of permission names like "microphone", "camera", etc.
+         */
+        private fun getVectorGrantedPermissions(): Set<String> {
+            return try {
+                val granted = MiniAppIpc.getGrantedPermissionsStatic(miniappId, packagePath)
+                granted?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+            } catch (e: Exception) {
+                Logger.error(TAG, "Failed to check Vector permissions: ${e.message}", null)
+                emptySet()
+            }
+        }
+
+        /**
          * Handle permission requests from web content (camera, microphone).
+         * First checks Vector's Mini App permission system — if the user hasn't
+         * granted the permission in Vector, we deny immediately without ever
+         * showing the Android system permission dialog.
          */
         override fun onPermissionRequest(request: PermissionRequest?) {
             request?.let { req ->
                 Logger.info(TAG, "Permission request for: ${req.resources.joinToString()}")
+
+                // Check Vector's permission system first
+                val vectorPermissions = getVectorGrantedPermissions()
+                Logger.info(TAG, "Vector granted permissions: $vectorPermissions")
 
                 val activity = context as? Activity
                 if (activity == null) {
@@ -332,13 +359,18 @@ class MiniAppWebView(
                     return
                 }
 
-                // Map WebView permissions to Android permissions
+                // Map WebView permissions to Android permissions,
+                // but ONLY for resources allowed by Vector's permission system
                 val androidPermissions = mutableListOf<String>()
                 val grantedResources = mutableListOf<String>()
 
                 for (resource in req.resources) {
                     when (resource) {
                         PermissionRequest.RESOURCE_AUDIO_CAPTURE -> {
+                            if ("microphone" !in vectorPermissions) {
+                                Logger.info(TAG, "Microphone denied by Vector permission system")
+                                continue
+                            }
                             if (hasPermission(Manifest.permission.RECORD_AUDIO)) {
                                 grantedResources.add(resource)
                             } else {
@@ -346,6 +378,10 @@ class MiniAppWebView(
                             }
                         }
                         PermissionRequest.RESOURCE_VIDEO_CAPTURE -> {
+                            if ("camera" !in vectorPermissions) {
+                                Logger.info(TAG, "Camera denied by Vector permission system")
+                                continue
+                            }
                             if (hasPermission(Manifest.permission.CAMERA)) {
                                 grantedResources.add(resource)
                             } else {
@@ -357,14 +393,14 @@ class MiniAppWebView(
                     }
                 }
 
-                // If all requested permissions are already granted
+                // If all requested permissions are already granted at both levels
                 if (androidPermissions.isEmpty() && grantedResources.isNotEmpty()) {
                     Logger.info(TAG, "Granting already-permitted resources: ${grantedResources.joinToString()}")
                     req.grant(grantedResources.toTypedArray())
                     return
                 }
 
-                // If we need to request Android permissions
+                // If we need to request Android permissions (Vector already approved)
                 if (androidPermissions.isNotEmpty()) {
                     pendingPermissionRequest = req
                     Logger.info(TAG, "Requesting Android permissions: ${androidPermissions.joinToString()}")
@@ -376,7 +412,7 @@ class MiniAppWebView(
                     return
                 }
 
-                // No valid resources to grant
+                // No valid resources to grant (either denied by Vector or unsupported)
                 Logger.warn(TAG, "No valid resources to grant, denying request")
                 req.deny()
             }
@@ -391,6 +427,7 @@ class MiniAppWebView(
 
         /**
          * Handle geolocation permission requests.
+         * Checks Vector's permission system before requesting Android permissions.
          */
         override fun onGeolocationPermissionsShowPrompt(
             origin: String?,
@@ -404,14 +441,22 @@ class MiniAppWebView(
                 return
             }
 
-            // Check if we already have location permission
+            // Check Vector's permission system first
+            val vectorPermissions = getVectorGrantedPermissions()
+            if ("geolocation" !in vectorPermissions) {
+                Logger.info(TAG, "Geolocation denied by Vector permission system")
+                callback.invoke(origin, false, false)
+                return
+            }
+
+            // Check if we already have Android location permission
             if (hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) {
                 Logger.info(TAG, "Geolocation already permitted")
                 callback.invoke(origin, true, false)
                 return
             }
 
-            // Request location permission
+            // Request Android location permission (Vector already approved)
             pendingGeoCallback = callback
             pendingGeoOrigin = origin
             ActivityCompat.requestPermissions(

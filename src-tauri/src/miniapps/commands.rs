@@ -399,32 +399,68 @@ try {
     function wrapTauriApi(tauriObj) {
         if (!tauriObj || !tauriObj.core) return tauriObj;
 
-        const originalInvoke = tauriObj.core.invoke;
-        const originalChannel = tauriObj.core.Channel;
+        const originalCore = tauriObj.core;
+        const originalInvoke = originalCore.invoke;
 
-        tauriObj.core.invoke = async (cmd, args) => {
+        // Build a plain wrapper object — avoids Proxy invariant violations
+        // on frozen/non-configurable properties
+        const wrappedCore = {};
+        for (const key of Object.getOwnPropertyNames(originalCore)) {
+            if (key === 'invoke') continue;
+            try {
+                Object.defineProperty(wrappedCore, key, {
+                    get() { return originalCore[key]; },
+                    configurable: true,
+                    enumerable: true
+                });
+            } catch(_) {
+                wrappedCore[key] = originalCore[key];
+            }
+        }
+        // Copy prototype methods (Channel, etc.)
+        const proto = Object.getPrototypeOf(originalCore);
+        if (proto && proto !== Object.prototype) {
+            for (const key of Object.getOwnPropertyNames(proto)) {
+                if (key === 'constructor' || key === 'invoke' || key in wrappedCore) continue;
+                try {
+                    Object.defineProperty(wrappedCore, key, {
+                        get() { return originalCore[key]; },
+                        configurable: true,
+                        enumerable: true
+                    });
+                } catch(_) {}
+            }
+        }
+
+        wrappedCore.invoke = async (cmd, args) => {
             if (allowedCommands.includes(cmd)) {
-                return originalInvoke.call(tauriObj.core, cmd, args);
+                return originalInvoke.call(originalCore, cmd, args);
             }
             console.warn('Mini App tried to invoke blocked Tauri command:', cmd);
             throw new Error('Tauri command not available in Mini Apps: ' + cmd);
         };
 
-        // Preserve Channel class (needed for realtime)
-        if (originalChannel) {
-            tauriObj.core.Channel = originalChannel;
+        // Build a plain wrapper for the top-level __TAURI__ object
+        const wrapped = {};
+        for (const key of Object.getOwnPropertyNames(tauriObj)) {
+            if (key === 'core') continue;
+            try {
+                Object.defineProperty(wrapped, key, {
+                    get() { return tauriObj[key]; },
+                    configurable: true,
+                    enumerable: true
+                });
+            } catch(_) {
+                wrapped[key] = tauriObj[key];
+            }
         }
+        wrapped.core = wrappedCore;
 
-        return tauriObj;
+        return wrapped;
     }
 
-    // If __TAURI__ already exists, wrap it immediately
-    if (window.__TAURI__) {
-        wrapTauriApi(window.__TAURI__);
-    }
-
-    // Intercept any future assignment to __TAURI__ (zero timing window)
-    let _tauriValue = window.__TAURI__;
+    // Intercept any assignment to __TAURI__ (zero timing window)
+    let _tauriValue = window.__TAURI__ ? wrapTauriApi(window.__TAURI__) : undefined;
     Object.defineProperty(window, '__TAURI__', {
         get() {
             return _tauriValue;

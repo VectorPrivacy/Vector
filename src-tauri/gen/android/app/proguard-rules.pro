@@ -45,9 +45,13 @@
     public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
     public static void closeMiniApp();
     public static void sendToMiniApp(java.lang.String, java.lang.String);
-    public static void sendRealtimeData(byte[]);
+    public static void sendRealtimeData(java.lang.String);
+    public static java.lang.String pollRealtimeData();
+    public static void closeMiniAppFromCrash();
+    public static void handlePermissionResult(int, int[]);
     public static boolean isOpen();
     public static java.lang.String getCurrentMiniAppId();
+    public static java.lang.String getCurrentPackagePath();
 }
 
 # Keep MiniAppWebViewClient native JNI method for file serving

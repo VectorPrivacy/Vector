@@ -5932,6 +5932,11 @@ async function setupRustListeners() {
         });
     });
 
+    // Listen for Mini App crashes (Android renderer process crash)
+    _on('miniapp_crashed', () => {
+        showToast('Mini App crashed unexpectedly');
+    });
+
     await Promise.all(_p);
 
     // Note: Deep link listener is set up early in DOMContentLoaded, before login flow

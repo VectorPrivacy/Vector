@@ -1006,7 +1006,7 @@ pub(crate) async fn commit_prepared_event(prepared: PreparedEvent, is_new: bool)
 pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_encoded: &str) -> bool {
     use crate::miniapps::realtime::{decode_topic_id, decode_node_addr};
     
-    println!("[WEBXDC] Received peer advertisement for topic {}", topic_id);
+    log_info!("[WEBXDC] Received peer advertisement for topic {}", topic_id);
     
     // Decode the topic ID
     let topic = match decode_topic_id(topic_id) {
@@ -1034,9 +1034,9 @@ pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_e
         // We need to find any instance that has this topic active
         let has_channel = {
             let channels = state.realtime_channels.read().await;
-            println!("[WEBXDC] Checking {} active channels for topic match", channels.len());
+            log_info!("[WEBXDC] Checking {} active channels for topic match", channels.len());
             for (label, ch) in channels.iter() {
-                println!("[WEBXDC]   Channel '{}': topic={}, active={}",
+                log_info!("[WEBXDC]   Channel '{}': topic={}, active={}",
                     label,
                     crate::miniapps::realtime::encode_topic_id(&ch.topic),
                     ch.active);
@@ -1044,31 +1044,31 @@ pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_e
             channels.values().any(|ch| ch.topic == topic && ch.active)
         };
         
-        println!("[WEBXDC] has_channel for topic {}: {}", topic_id, has_channel);
+        log_info!("[WEBXDC] has_channel for topic {}: {}", topic_id, has_channel);
         
         if has_channel {
-            println!("[WEBXDC] Found active channel for topic {}, adding peer", topic_id);
+            log_info!("[WEBXDC] Found active channel for topic {}, adding peer", topic_id);
             // Get the realtime manager and add the peer
             match state.realtime.get_or_init().await {
                 Ok(iroh) => {
                     match iroh.add_peer(topic, node_addr.clone()).await {
                         Ok(_) => {
-                            println!("[WEBXDC] Successfully added peer {} to realtime channel topic {}",
+                            log_info!("[WEBXDC] Successfully added peer {} to realtime channel topic {}",
                                 node_addr.id, topic_id);
                             return true;
                         }
                         Err(e) => {
-                            println!("[WEBXDC] ERROR: Failed to add peer to realtime channel: {}", e);
+                            log_error!("[WEBXDC] Failed to add peer to realtime channel: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("[WEBXDC] ERROR: Failed to get realtime manager: {}", e);
+                    log_error!("[WEBXDC] Failed to get realtime manager: {}", e);
                 }
             }
         } else {
             // Store as pending peer - we'll add them when we join the channel
-            println!("[WEBXDC] Storing pending peer for topic {} (no active channel yet)", topic_id);
+            log_info!("[WEBXDC] Storing pending peer for topic {} (no active channel yet)", topic_id);
             state.add_pending_peer(topic, node_addr).await;
             
             // Emit event to frontend so it can update the UI (show "Click to Join" and player count)
@@ -1081,7 +1081,7 @@ pub(crate) async fn handle_webxdc_peer_advertisement(topic_id: &str, node_addr_e
                     "is_active": false,
                     "has_pending_peers": true,
                 }));
-                println!("[WEBXDC] Emitted miniapp_realtime_status event: topic={}, pending_count={}", topic_id, pending_count);
+                log_info!("[WEBXDC] Emitted miniapp_realtime_status event: topic={}, pending_count={}", topic_id, pending_count);
             }
             
             return true;

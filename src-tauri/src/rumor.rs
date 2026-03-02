@@ -844,17 +844,17 @@ async fn process_app_specific(
 
     // Check if this is a WebXDC peer advertisement
     if is_webxdc_peer_advertisement(&rumor) {
-        println!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
+        log_info!("[WEBXDC] Found peer advertisement rumor, is_mine={}, sender={}",
             context.is_mine,
             rumor.pubkey.to_bech32().unwrap_or_else(|_| "unknown".to_string()));
-        
+
         // Skip our own peer advertisements - we don't need to connect to ourselves
         if context.is_mine {
-            println!("[WEBXDC] Ignoring our own peer advertisement");
+            log_info!("[WEBXDC] Ignoring our own peer advertisement");
             return Ok(RumorProcessingResult::Ignored);
         }
-        
-        println!("[WEBXDC] Detected peer advertisement in rumor from another device");
+
+        log_info!("[WEBXDC] Detected peer advertisement in rumor from another device");
         
         // Extract topic ID and node address
         let topic_id = rumor.tags
