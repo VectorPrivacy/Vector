@@ -2327,6 +2327,16 @@ impl MlsService {
                                     }
                                 }
 
+                                // Resolve missing attachment sizes from server (HEAD probe)
+                                let mut msg = msg;
+                                for att in &mut msg.attachments {
+                                    if att.size == 0 && !att.url.is_empty() {
+                                        if let Some(size) = crate::net::get_remote_file_size(&att.url).await {
+                                            att.size = size;
+                                        }
+                                    }
+                                }
+
                                 // Add message to the unified Chat storage
                                 let was_added = {
                                     let mut state = STATE.lock().await;

@@ -97,6 +97,50 @@ pub async fn download<R: tauri::Runtime>(
     download_with_reporter(content_url, &reporter, timeout).await
 }
 
+/// Determine a remote file's size without downloading it.
+/// Tries HTTP HEAD first, falls back to a 2-byte Range request.
+/// Returns None if size cannot be determined.
+pub async fn get_remote_file_size(url: &str) -> Option<u64> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .ok()?;
+
+    // Method 1: HEAD request
+    if let Ok(head_res) = client.head(url).send().await {
+        if let Some(length) = head_res.content_length() {
+            if length > 0 {
+                return Some(length);
+            }
+        }
+    }
+
+    // Method 2: Range request fallback
+    if let Ok(partial_res) = client
+        .get(url)
+        .header("Range", "bytes=0-1")
+        .send()
+        .await
+    {
+        if let Some(content_range) = partial_res.headers().get("content-range") {
+            if let Ok(range_str) = content_range.to_str() {
+                if let Some(size_part) = range_str.split('/').nth(1) {
+                    if let Ok(size) = size_part.parse::<u64>() {
+                        return Some(size);
+                    }
+                }
+            }
+        }
+        if let Some(length) = partial_res.content_length() {
+            if length > 100 {
+                return Some(length);
+            }
+        }
+    }
+
+    None
+}
+
 /// Generic download function that works with any progress reporter
 pub async fn download_with_reporter(
     content_url: &str,
@@ -112,46 +156,9 @@ pub async fn download_with_reporter(
     } else {
         Client::new()
     };
-    let mut total_size: Option<u64> = None;
 
-    // Method 1: Try HEAD request
-    if let Ok(head_res) = client.head(content_url).send().await {
-        if let Some(length) = head_res.content_length() {
-            if length > 0 {
-                total_size = Some(length);
-            }
-        }
-    }
-
-    // Method 2: Try a small GET request to check if it accepts ranges and get size
-    if total_size.is_none() {
-        if let Ok(partial_res) = client
-            .get(content_url)
-            .header("Range", "bytes=0-1")
-            .send()
-            .await
-        {
-            // Check for Content-Range header which typically looks like "bytes 0-1/12345"
-            if let Some(content_range) = partial_res.headers().get("content-range") {
-                if let Ok(range_str) = content_range.to_str() {
-                    if let Some(size_part) = range_str.split('/').nth(1) {
-                        if let Ok(size) = size_part.parse::<u64>() {
-                            total_size = Some(size);
-                        }
-                    }
-                }
-            }
-
-            // Some servers provide complete size with partial request
-            if let Some(length) = partial_res.content_length() {
-                // Check if this is the full file or just the range
-                // If it's much larger than our 2-byte request, it's likely the full file
-                if length > 100 && total_size.is_none() {
-                    total_size = Some(length);
-                }
-            }
-        }
-    }
+    // Determine file size using reusable probe
+    let total_size = get_remote_file_size(content_url).await;
 
     // Based on findings, choose the appropriate download method
     match total_size {

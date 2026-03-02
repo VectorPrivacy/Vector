@@ -478,6 +478,15 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
         let _ = db::populate_reply_context(&mut msg).await;
     }
 
+    // Resolve missing attachment sizes from server (HEAD probe)
+    for att in &mut msg.attachments {
+        if att.size == 0 && !att.url.is_empty() {
+            if let Some(size) = crate::net::get_remote_file_size(&att.url).await {
+                att.size = size;
+            }
+        }
+    }
+
     // Get file extension for notification
     let extension = msg.attachments.first()
         .map(|att| att.extension.clone())
