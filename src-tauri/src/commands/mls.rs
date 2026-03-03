@@ -1376,7 +1376,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
             let mls = MlsService::new_persistent_static().map_err(|e| e.to_string())?;
 
             // Get welcome details and accept it (engine work in no-await scope)
-            let (nostr_group_id, engine_group_id, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex) = {
+            let (nostr_group_id, engine_group_id, welcome_epoch, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex) = {
                 let engine = mls.engine().map_err(|e| e.to_string())?;
 
                 let id = nostr_sdk::EventId::from_hex(&welcome_event_id_hex).map_err(|e| e.to_string())?;
@@ -1402,7 +1402,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
 
                 // After accepting the welcome, get the actual group from the engine to find its internal ID
                 // This follows the pattern from the SDK example
-                let engine_group_id = {
+                let (engine_group_id, welcome_epoch) = {
                     // Get all groups from the engine (should include the one we just joined)
                     let groups = engine.get_groups()
                         .map_err(|e| format!("Failed to get groups after accepting welcome: {}", e))?;
@@ -1417,7 +1417,8 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                         println!("[MLS] Found group in engine after accept:");
                         println!("[MLS]   - nostr_group_id matches: {}", nostr_group_id);
                         println!("[MLS]   - engine mls_group_id: {}", engine_id);
-                        engine_id
+                        println!("[MLS]   - epoch: {}", group.epoch);
+                        (engine_id, group.epoch)
                     } else {
                         // This shouldn't happen, but fallback to nostr_group_id
                         eprintln!("[MLS] Warning: Could not find group in engine after accepting welcome");
@@ -1428,7 +1429,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                                      bytes_to_hex_string(g.mls_group_id.as_slice()));
                         }
                         // Use the nostr_group_id as fallback
-                        nostr_group_id.clone()
+                        (nostr_group_id.clone(), 0u64)
                     }
                 };
 
@@ -1436,10 +1437,11 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                 println!("[MLS] Welcome accepted:");
                 println!("[MLS]   - wire_id (h tag): {}", nostr_group_id);
                 println!("[MLS]   - engine_group_id: {}", engine_group_id);
+                println!("[MLS]   - epoch: {}", welcome_epoch);
                 println!("[MLS]   - group_name: {}", group_name);
                 println!("[MLS]   - invite_sent_at: {}", invite_sent_at);
 
-                (nostr_group_id, engine_group_id, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex)
+                (nostr_group_id, engine_group_id, welcome_epoch, group_name, group_description, welcomer_hex, wrapper_event_id_hex, invite_sent_at, image_hash_hex)
             }; // engine dropped here
 
             // Now persist the group metadata (awaitable section)
@@ -1451,7 +1453,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
             if let Some(idx) = existing_index {
                 // Group exists - check if it was evicted and we're being re-invited
                 if groups[idx].evicted {
-                    println!("[MLS] Re-invited to previously evicted group: {}", nostr_group_id);
+                    println!("[MLS] Re-invited to previously evicted group: {} (epoch={})", nostr_group_id, welcome_epoch);
                     // Clear the evicted flag and update metadata from the fresh welcome
                     groups[idx].evicted = false;
                     groups[idx].name = group_name;
@@ -1474,7 +1476,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     db::save_mls_group(&groups[idx]).await.map_err(|e| e.to_string())?;
                     mls::emit_group_metadata_event(&groups[idx]);
                 } else {
-                    println!("[MLS] Group already exists in metadata: group_id={}", nostr_group_id);
+                    println!("[MLS] Group already exists in metadata: group_id={} (epoch={})", nostr_group_id, welcome_epoch);
                 }
             } else {
                 // Build metadata for the accepted group
@@ -1529,7 +1531,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     }
                 }
 
-                println!("[MLS] Persisted group metadata after accept: group_id={}", nostr_group_id);
+                println!("[MLS] Persisted group metadata after accept: group_id={} (epoch={})", nostr_group_id, welcome_epoch);
             }
 
             // Remove this welcome from the notified set since it's been accepted
@@ -1556,7 +1558,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
             // (48h window by default in sync_group_since_cursor) rather than full history.
             match mls.sync_group_since_cursor(&nostr_group_id).await {
                 Ok((processed, new_msgs)) => {
-                    println!("[MLS] Post-accept initial sync: processed={}, new={}", processed, new_msgs);
+                    println!("[MLS] Post-accept initial sync (epoch={}): processed={}, new={}", welcome_epoch, processed, new_msgs);
                     // Optional: let UI know initial sync finished for this group
                     if let Some(app) = TAURI_APP.get() {
                         let _ = app.emit("mls_group_initial_sync", serde_json::json!({
@@ -1567,7 +1569,7 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
                     }
                 }
                 Err(e) => {
-                    eprintln!("[MLS] Post-accept initial sync failed for group {}: {}", nostr_group_id, e);
+                    eprintln!("[MLS] Post-accept initial sync failed for group {} (epoch={}): {}", nostr_group_id, welcome_epoch, e);
                 }
             }
 

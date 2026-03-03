@@ -91,7 +91,7 @@ bs58 = "0.5.1"
 jni = "0.21.1"
 ndk-context = "0.1.1"
 openssl = { version = "0.10.75", features = ["vendored"] }
-whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+whisper-rs = { version = "0.15.1", optional = true }
 
 # Whisper (with platform-specific GPU acceleration)
 [target.'cfg(target_os = "macos")'.dependencies]

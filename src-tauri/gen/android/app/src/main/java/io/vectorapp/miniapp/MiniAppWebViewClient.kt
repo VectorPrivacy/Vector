@@ -3,6 +3,8 @@ package io.vectorapp.miniapp
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.http.SslError
+import android.os.Build
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -50,147 +52,6 @@ class MiniAppWebViewClient(
          * Mini Apps must request permissions through the Vector permission system.
          */
         private const val PERMISSIONS_POLICY = """accelerometer=(), ambient-light-sensor=(), autoplay=(self), battery=(), bluetooth=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), speaker-selection=(), usb=(), web-share=(), xr-spatial-tracking=()"""
-
-        /**
-         * webxdc.js bridge script that provides the window.webxdc API.
-         */
-        private fun generateWebxdcJs(selfAddr: String, selfName: String): String {
-            return """
-                // Mini App Bridge for Vector (Android)
-                (function() {
-                    'use strict';
-
-                    const selfAddr = ${selfAddr.toJsString()};
-                    const selfName = ${selfName.toJsString()};
-
-                    // State tracking
-                    let updateListener = null;
-                    let lastKnownSerial = 0;
-
-                    // The Mini App API
-                    window.webxdc = {
-                        selfAddr: selfAddr,
-                        selfName: selfName,
-
-                        setUpdateListener: function(listener, serial) {
-                            updateListener = listener;
-                            lastKnownSerial = serial || 0;
-
-                            // Request updates since last known serial
-                            try {
-                                const updates = window.__MINIAPP_IPC__.getUpdates(lastKnownSerial);
-                                if (updates && updateListener) {
-                                    const parsed = JSON.parse(updates);
-                                    parsed.forEach(function(update) {
-                                        updateListener(update);
-                                    });
-                                }
-                            } catch(e) {
-                                console.error('Failed to get updates:', e);
-                            }
-
-                            return Promise.resolve();
-                        },
-
-                        sendUpdate: function(update, description) {
-                            return new Promise(function(resolve, reject) {
-                                try {
-                                    window.__MINIAPP_IPC__.sendUpdate(
-                                        JSON.stringify(update),
-                                        description || ''
-                                    );
-                                    resolve();
-                                } catch(e) {
-                                    reject(e);
-                                }
-                            });
-                        },
-
-                        sendToChat: function(content) {
-                            console.warn('sendToChat is not yet implemented');
-                            return Promise.reject(new Error('Not implemented'));
-                        },
-
-                        importFiles: function(filters) {
-                            console.warn('importFiles is not yet implemented');
-                            return Promise.reject(new Error('Not implemented'));
-                        },
-
-                        joinRealtimeChannel: function() {
-                            console.log('[webxdc] joinRealtimeChannel called');
-
-                            // Create the channel object synchronously (per WebXDC spec)
-                            const channel = {
-                                _listener: null,
-
-                                setListener: function(listener) {
-                                    this._listener = listener;
-                                    // Store globally for native callback
-                                    window.__miniapp_realtime_listener = listener;
-                                },
-
-                                send: function(data) {
-                                    if (!(data instanceof Uint8Array)) {
-                                        throw new Error('realtime data must be a Uint8Array');
-                                    }
-                                    if (data.length > 128000) {
-                                        throw new Error('realtime data exceeds maximum size of 128000 bytes');
-                                    }
-
-                                    // Convert to base64 for JNI transfer
-                                    let binary = '';
-                                    const bytes = new Uint8Array(data);
-                                    for (let i = 0; i < bytes.byteLength; i++) {
-                                        binary += String.fromCharCode(bytes[i]);
-                                    }
-                                    const base64 = btoa(binary);
-
-                                    try {
-                                        window.__MINIAPP_IPC__.sendRealtimeData(base64);
-                                    } catch(e) {
-                                        console.error('Failed to send realtime data:', e);
-                                    }
-                                },
-
-                                leave: function() {
-                                    this._listener = null;
-                                    window.__miniapp_realtime_listener = null;
-                                    try {
-                                        window.__MINIAPP_IPC__.leaveRealtimeChannel();
-                                    } catch(e) {
-                                        console.error('Failed to leave realtime channel:', e);
-                                    }
-                                }
-                            };
-
-                            // Join the channel on the backend
-                            try {
-                                const topicId = window.__MINIAPP_IPC__.joinRealtimeChannel();
-                                if (topicId) {
-                                    console.log('[webxdc] Joined realtime channel:', topicId);
-                                }
-                            } catch(e) {
-                                console.error('Failed to join realtime channel:', e);
-                            }
-
-                            return channel;
-                        }
-                    };
-
-                    console.log('[webxdc] Mini App bridge initialized');
-                })();
-            """.trimIndent()
-        }
-
-        private fun String.toJsString(): String {
-            val escaped = this
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t")
-            return "\"$escaped\""
-        }
 
         init {
             System.loadLibrary("vector_lib")
@@ -285,6 +146,29 @@ class MiniAppWebViewClient(
     }
 
     /**
+     * Handle renderer process crashes gracefully.
+     * Without this, a WebView renderer crash kills the entire app.
+     */
+    override fun onRenderProcessGone(
+        view: WebView?,
+        detail: RenderProcessGoneDetail?
+    ): Boolean {
+        val crashed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            detail?.didCrash() ?: true
+        } else {
+            true
+        }
+
+        Logger.error(TAG, "[$miniappId] Renderer process gone (crashed=$crashed)", null)
+
+        // Close the mini app gracefully instead of crashing the whole app
+        MiniAppManager.closeMiniAppFromCrash()
+
+        // Return true = we handled it, don't kill the app
+        return true
+    }
+
+    /**
      * Handle SSL errors - always cancel for security.
      */
     override fun onReceivedSslError(
@@ -299,22 +183,15 @@ class MiniAppWebViewClient(
 
     /**
      * Serve the webxdc.js bridge script.
+     * Uses the Rust-generated bridge (single source of truth shared with inline HTML injection).
      */
     private fun serveWebxdcJs(): WebResourceResponse {
-        // Get user info for selfAddr and selfName
-        val selfAddr = try {
-            getSelfAddrNative() ?: "unknown"
+        val js = try {
+            generateBridgeJsNative() ?: "// Bridge generation failed"
         } catch (e: Exception) {
-            "unknown"
+            Logger.error(TAG, "Failed to generate bridge JS: ${e.message}", null)
+            "// Bridge generation failed"
         }
-
-        val selfName = try {
-            getSelfNameNative() ?: "Unknown"
-        } catch (e: Exception) {
-            "Unknown"
-        }
-
-        val js = generateWebxdcJs(selfAddr, selfName)
 
         return WebResourceResponse(
             "text/javascript",
@@ -474,6 +351,9 @@ class MiniAppWebViewClient(
         path: String
     ): WebResourceResponse?
 
-    private external fun getSelfAddrNative(): String?
-    private external fun getSelfNameNative(): String?
+    /**
+     * Generate the webxdc bridge JavaScript from Rust.
+     * Single source of truth — same code used for inline HTML injection.
+     */
+    private external fun generateBridgeJsNative(): String?
 }

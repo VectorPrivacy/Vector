@@ -162,24 +162,24 @@ pub fn send_to_miniapp(event: &str, data: &str) -> Result<(), String> {
     })
 }
 
-/// Send realtime data to the Mini App.
+/// Send realtime data to the Mini App as a base91-encoded string.
+/// The JS bridge decodes it directly with b91d(), avoiding base64 re-encoding overhead.
 #[allow(dead_code)]
-pub fn send_realtime_data_to_miniapp(data: &[u8]) -> Result<(), String> {
-    log_debug!("Sending {} bytes realtime data to Mini App", data.len());
+pub fn send_realtime_data_to_miniapp(data: &str) -> Result<(), String> {
+    log_debug!("Sending {} chars base91 realtime data to Mini App", data.len());
 
     with_android_context(|env, activity| {
         let manager_class = load_class_from_activity(env, activity, "io/vectorapp/miniapp/MiniAppManager")
             .map_err(|e| format!("Failed to load MiniAppManager class: {:?}", e))?;
 
-        // Create byte array
         let j_data = env
-            .byte_array_from_slice(data)
-            .map_err(|e| format!("Failed to create byte array: {:?}", e))?;
+            .new_string(data)
+            .map_err(|e| format!("Failed to create JNI string: {:?}", e))?;
 
         env.call_static_method(
             manager_class,
             "sendRealtimeData",
-            "([B)V",
+            "(Ljava/lang/String;)V",
             &[JValue::Object(&j_data.into())],
         )
         .map_err(|e| format!("Failed to call MiniAppManager.sendRealtimeData: {:?}", e))?;

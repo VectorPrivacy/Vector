@@ -4,11 +4,12 @@ import android.app.Activity
 import android.view.ViewGroup
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
-import android.util.Base64
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.vectorapp.Logger
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Singleton manager for Mini App WebView overlays.
@@ -24,6 +25,10 @@ object MiniAppManager {
     private var currentMiniApp: MiniAppInstance? = null
     private var rootView: ViewGroup? = null
     private var activity: Activity? = null
+
+    /** Queue for realtime data — Rust pushes, JS polls via MiniAppIpc */
+    private val realtimeQueue = ConcurrentLinkedQueue<String>()
+    private val notifyPending = AtomicBoolean(false)
 
     data class MiniAppInstance(
         val webView: MiniAppWebView,
@@ -190,35 +195,74 @@ object MiniAppManager {
 
     /**
      * Send realtime data to the Mini App listener.
-     * Uses Base64 encoding for efficient binary transfer (matches JS→Kotlin direction).
+     * Uses a queue + notify pattern to avoid flooding the UI thread:
+     * 1. Data is pushed to a ConcurrentLinkedQueue (lock-free, any thread)
+     * 2. A tiny evaluateJavascript notification triggers JS to pull data
+     * 3. JS calls __MINIAPP_IPC__.pollRealtimeData() on a background thread
+     * This prevents 170KB+ base91 strings from being compiled as JS 20x/sec.
      */
     @JvmStatic
-    fun sendRealtimeData(data: ByteArray) {
+    fun sendRealtimeData(data: String) {
         val webView = currentMiniApp?.webView ?: return
 
+        realtimeQueue.add(data)
+
+        // Coalesce notifications: only post one evaluateJavascript if none pending.
+        // compareAndSet is atomic — exactly one thread wins even under contention.
+        // Losing threads' data is already in the queue and will be picked up by the poll.
+        if (notifyPending.compareAndSet(false, true)) {
+            activity?.runOnUiThread {
+                notifyPending.set(false)
+                webView.evaluateJavascript("if(window.__miniapp_rt_notify)window.__miniapp_rt_notify()", null)
+            }
+        }
+    }
+
+    /**
+     * Poll all queued realtime data items.
+     * Called from JS via MiniAppIpc on a background thread.
+     * Returns a JSON array of base91 strings, or null if empty.
+     */
+    @JvmStatic
+    fun pollRealtimeData(): String? {
+        if (realtimeQueue.isEmpty()) return null
+
+        val sb = StringBuilder()
+        sb.append('[')
+        var first = true
+        while (true) {
+            val item = realtimeQueue.poll() ?: break
+            if (!first) sb.append(',')
+            sb.append('"')
+            sb.append(item) // base91 doesn't contain " or \ so no escaping needed
+            sb.append('"')
+            first = false
+        }
+        sb.append(']')
+        return if (first) null else sb.toString() // null if nothing was polled
+    }
+
+    /**
+     * Close the Mini App due to a renderer crash.
+     * Notifies Rust so the frontend can show a toast.
+     *
+     * Ordering: onMiniAppCrashed() fires immediately on the calling thread,
+     * then closeMiniAppInternal() runs later on the UI thread (which calls
+     * onMiniAppClosed()). Rust receives crash before close — this is intentional:
+     * the crash event triggers a toast, the close event does cleanup.
+     */
+    @JvmStatic
+    fun closeMiniAppFromCrash() {
+        val miniappId = currentMiniApp?.miniappId
         activity?.runOnUiThread {
-            // Encode as Base64 for efficient transfer (avoids large string allocations)
-            val base64 = Base64.encodeToString(data, Base64.NO_WRAP)
-
-            val script = """
-                (function() {
-                    try {
-                        if (window.__miniapp_realtime_listener) {
-                            // Decode Base64 to Uint8Array
-                            const binary = atob('$base64');
-                            const bytes = new Uint8Array(binary.length);
-                            for (let i = 0; i < binary.length; i++) {
-                                bytes[i] = binary.charCodeAt(i);
-                            }
-                            window.__miniapp_realtime_listener(bytes);
-                        }
-                    } catch(e) {
-                        console.error('Failed to deliver realtime data:', e);
-                    }
-                })();
-            """.trimIndent()
-
-            webView.evaluateJavascript(script, null)
+            closeMiniAppInternal(animate = false)
+        }
+        if (miniappId != null) {
+            try {
+                onMiniAppCrashed(miniappId)
+            } catch (e: Exception) {
+                Logger.error(TAG, "Failed to notify Rust of Mini App crash: ${e.message}", null)
+            }
         }
     }
 
@@ -293,4 +337,5 @@ object MiniAppManager {
     // JNI callbacks to Rust
     private external fun onMiniAppOpened(miniappId: String, chatId: String, messageId: String)
     private external fun onMiniAppClosed(miniappId: String)
+    private external fun onMiniAppCrashed(miniappId: String)
 }

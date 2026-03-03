@@ -4,7 +4,7 @@
 //! called by the Kotlin code (MiniAppManager, MiniAppIpc, MiniAppWebViewClient)
 //! and routed to the appropriate Rust handlers.
 
-use jni::objects::{JByteArray, JClass, JString};
+use jni::objects::{JClass, JString};
 use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
 use std::io::Read;
@@ -148,6 +148,33 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
             // Remove the instance
             state.remove_instance(&miniapp_id_owned).await;
         });
+    }
+}
+
+/// Called when a Mini App's renderer process crashes.
+/// Emits an event to the frontend so it can show a toast notification.
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppCrashed(
+    mut env: JNIEnv,
+    _class: JClass,
+    miniapp_id: JString,
+) {
+    let miniapp_id: String = match env.get_string(&miniapp_id) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log_error!("Failed to get miniapp_id: {:?}", e);
+            return;
+        }
+    };
+
+    log_error!("Mini App crashed (renderer process gone): {}", miniapp_id);
+
+    if let Some(app) = TAURI_APP.get() {
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("miniapp_crashed", serde_json::json!({
+                "miniapp_id": miniapp_id,
+            }));
+        }
     }
 }
 
@@ -490,7 +517,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
     mut env: JNIEnv,
     _class: JClass,
     miniapp_id: JString,
-    data: JByteArray,
+    data: JString,
 ) {
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
@@ -500,10 +527,19 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
         }
     };
 
-    let bytes = match env.convert_byte_array(data) {
-        Ok(b) => b,
+    let encoded: String = match env.get_string(&data) {
+        Ok(s) => s.into(),
         Err(e) => {
-            log_error!("Failed to convert byte array: {:?}", e);
+            log_error!("Failed to get data string: {:?}", e);
+            return;
+        }
+    };
+
+    // Decode base91 to raw bytes
+    let bytes = match fast_thumbhash::base91_decode(&encoded) {
+        Ok(b) => b,
+        Err(_) => {
+            log_error!("[{}] sendRealtimeData: failed to decode base91", miniapp_id);
             return;
         }
     };
@@ -710,29 +746,18 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
     }
 }
 
-/// Get the user's npub (also used by WebViewClient).
+/// Generate the webxdc bridge JavaScript.
+/// Single source of truth — used by both inline HTML injection and /webxdc.js requests.
 #[no_mangle]
-pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_getSelfAddrNative(
+pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_generateBridgeJsNative(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let env = env;
-    let npub = get_user_npub();
-    match env.new_string(&npub) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
+    let self_addr = get_user_npub();
+    let self_name = get_user_display_name();
+    let js = generate_android_webxdc_bridge(&self_addr, &self_name);
 
-/// Get the user's display name (also used by WebViewClient).
-#[no_mangle]
-pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_getSelfNameNative(
-    env: JNIEnv,
-    _class: JClass,
-) -> jstring {
-    let env = env;
-    let name = get_user_display_name();
-    match env.new_string(&name) {
+    match env.new_string(&js) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
@@ -760,15 +785,21 @@ fn get_user_npub() -> String {
 }
 
 fn get_user_display_name() -> String {
-    // Try to get display name from STATE
-    if let Ok(state) = crate::STATE.try_lock() {
-        if let Some(profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
-            if !profile.nickname.is_empty() {
-                return profile.nickname.to_string();
-            } else if !profile.name.is_empty() {
-                return profile.name.to_string();
+    // STATE is a tokio::sync::Mutex — .lock() requires .await which we can't use
+    // from a synchronous JNI thread. Handle::current() also panics here because
+    // WebView's shouldInterceptRequest thread has no tokio runtime.
+    // Retry try_lock() briefly to ride out transient lock contention on slow devices.
+    for _ in 0..10 {
+        if let Ok(state) = crate::STATE.try_lock() {
+            if let Some(profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
+                if !profile.nickname.is_empty() {
+                    return profile.nickname.to_string();
+                } else if !profile.name.is_empty() {
+                    return profile.name.to_string();
+                }
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     "Unknown".to_string()
 }
@@ -822,8 +853,51 @@ fn serve_file_from_package(
     // Determine MIME type
     let mime_type = get_mime_type(file_path);
 
+    // For HTML files, inject the webxdc bridge INLINE to ensure window.webxdc is available
+    // before any game scripts run. This mirrors the desktop inject_webxdc_script approach.
+    // A <script src="/webxdc.js"> tag approach is unreliable on Android WebView due to
+    // caching and request interception timing.
+    if mime_type == "text/html" {
+        let html = String::from_utf8_lossy(&contents);
+
+        let self_addr = get_user_npub();
+        let self_name = get_user_display_name();
+        let bridge_js = generate_android_webxdc_bridge(&self_addr, &self_name);
+        let script_block = format!("<script>{}</script>", bridge_js);
+
+        // Case-insensitive search on raw bytes to avoid to_lowercase() byte-length
+        // mismatches with multi-byte Unicode characters before the tag.
+        let html_bytes = html.as_bytes();
+        let injected = if let Some(head_pos) = find_tag_ci(html_bytes, b"<head>") {
+            let insert_pos = head_pos + b"<head>".len();
+            log_info!("[MiniApp] Injected webxdc bridge after <head> for: {}", file_path);
+            format!("{}{}{}", &html[..insert_pos], script_block, &html[insert_pos..])
+        } else if let Some(html_pos) = find_tag_ci(html_bytes, b"<html") {
+            if let Some(close) = html[html_pos..].find('>') {
+                let insert_pos = html_pos + close + 1;
+                log_info!("[MiniApp] Injected webxdc bridge after <html> for: {}", file_path);
+                format!("{}{}{}", &html[..insert_pos], script_block, &html[insert_pos..])
+            } else {
+                log_info!("[MiniApp] Injected webxdc bridge at start for: {}", file_path);
+                format!("{}{}", script_block, html)
+            }
+        } else {
+            log_info!("[MiniApp] Injected webxdc bridge at start (no head/html tag) for: {}", file_path);
+            format!("{}{}", script_block, html)
+        };
+        contents = injected.into_bytes();
+    }
+
     // Create WebResourceResponse with security headers
     create_web_resource_response(env, &mime_type, &contents, CSP_HEADER)
+}
+
+/// Case-insensitive byte search for ASCII HTML tags.
+/// Returns the byte offset in `haystack` where `needle` starts.
+/// Uses raw bytes to avoid `to_lowercase()` byte-length mismatches with Unicode.
+fn find_tag_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
 }
 
 fn get_mime_type(path: &str) -> String {
@@ -929,6 +1003,22 @@ fn create_web_resource_response(
         .map_err(|e| format!("Failed to put Permissions-Policy header: {:?}", e))?;
     }
 
+    // Cache-Control: prevent WebView from caching stale content
+    let cc_key = env.new_string("Cache-Control").map_err(|e| format!("{:?}", e))?;
+    let cc_val = env.new_string("no-cache, no-store").map_err(|e| format!("{:?}", e))?;
+    unsafe {
+        env.call_method_unchecked(
+            &headers,
+            put_method,
+            jni::signature::ReturnType::Object,
+            &[
+                jni::sys::jvalue { l: cc_key.into_raw() },
+                jni::sys::jvalue { l: cc_val.into_raw() },
+            ],
+        )
+        .map_err(|e| format!("Failed to put Cache-Control header: {:?}", e))?;
+    }
+
     // Create ByteArrayInputStream
     let byte_array = env
         .byte_array_from_slice(data)
@@ -990,18 +1080,12 @@ async fn android_realtime_delivery_loop(
 
     while let Some(event) = rx.recv().await {
         if let crate::miniapps::realtime::RealtimeEvent::Data(encoded) = event {
-            // Decode base91 back to raw bytes for JNI (Android WebView uses byte arrays)
-            let data = match fast_thumbhash::base91_decode(&encoded) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    log_warn!("[WEBXDC] Android: Failed to decode base91 realtime data, skipping");
-                    continue;
-                }
-            };
+            // Pass base91-encoded string directly to the WebView (JS decodes with b91d).
+            // This avoids the decode→re-encode overhead of the old base64 path.
             // catch_unwind prevents a JNI panic from killing the delivery loop.
             // The JNI call is synchronous so this is safe (no async across unwind).
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                super::miniapp::send_realtime_data_to_miniapp(&data)
+                super::miniapp::send_realtime_data_to_miniapp(&encoded)
             }));
 
             match result {
@@ -1027,4 +1111,137 @@ async fn android_realtime_delivery_loop(
         // Connected, PeerJoined, PeerLeft are handled by emit_realtime_status
     }
     log_info!("[WEBXDC] Android realtime delivery loop ended (channel closed)");
+}
+
+/// Generate the Android webxdc bridge JavaScript for inline injection into HTML files.
+/// Uses `__MINIAPP_IPC__` (JNI JavascriptInterface) instead of `__TAURI__`.
+fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
+    // Escape for JS string literals inside an inline <script> block:
+    // 1. Backslash and double-quote for JS string safety
+    // 2. Newlines/carriage returns to prevent string literal breaks
+    // 3. </ to prevent </script> from closing the enclosing script tag (XSS)
+    let addr_escaped = self_addr.replace('\\', "\\\\").replace('"', "\\\"").replace("</", "<\\/");
+    let name_escaped = self_name.replace('\\', "\\\\").replace('"', "\\\"")
+        .replace('\n', "\\n").replace('\r', "\\r").replace("</", "<\\/");
+
+    format!(r#"
+(function() {{
+    'use strict';
+
+    // base91 codec (matches Rust fast-thumbhash alphabet, ~14% overhead vs base64's 33%)
+    var B91='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{{|}}~ ';
+    var B91D=new Uint8Array(256);B91D.fill(255);for(var _i=0;_i<91;_i++)B91D[B91.charCodeAt(_i)]=_i;
+    function b91e(buf){{var o='',n=0,b=0;for(var i=0;i<buf.length;i++){{n|=buf[i]<<b;b+=8;if(b>13){{var v=n&8191;if(v>88){{n>>=13;b-=13;}}else{{v=n&16383;n>>=14;b-=14;}}o+=B91[v%91]+B91[v/91|0];}}}}if(b>0){{o+=B91[n%91];if(b>7||n>90)o+=B91[n/91|0];}}return o;}}
+    function b91d(s){{var o=[],n=0,b=0,q=-1;for(var i=0;i<s.length;i++){{var d=B91D[s.charCodeAt(i)];if(d===255)continue;if(q<0){{q=d;}}else{{var v=q+d*91;q=-1;n|=v<<b;b+=(v&8191)>88?13:14;while(b>=8){{o.push(n&255);n>>=8;b-=8;}}}}}}if(q>=0)o.push((n|(q<<b))&255);return new Uint8Array(o);}}
+
+    var selfAddr = "{addr}";
+    var selfName = "{name}";
+    var updateListener = null;
+    var lastKnownSerial = 0;
+
+    // Global decoder for incoming realtime data
+    window.__miniapp_b91d = b91d;
+
+    // Realtime data notification handler: called from a tiny evaluateJavascript
+    // notification. Pulls queued data from native via JNI (runs on background thread),
+    // avoiding 170KB+ JS compilations on the UI thread that starve the video compositor.
+    window.__miniapp_rt_notify = function() {{
+        try {{
+            var json = window.__MINIAPP_IPC__.pollRealtimeData();
+            if (!json) return;
+            var items = JSON.parse(json);
+            var listener = window.__miniapp_realtime_listener;
+            if (!listener) return;
+            var decode = b91d;
+            for (var i = 0; i < items.length; i++) {{
+                listener(decode(items[i]));
+            }}
+        }} catch(e) {{
+            console.error('rt_notify error:', e);
+        }}
+    }};
+
+    window.webxdc = {{
+        selfAddr: selfAddr,
+        selfName: selfName,
+
+        setUpdateListener: function(listener, serial) {{
+            updateListener = listener;
+            lastKnownSerial = serial || 0;
+            try {{
+                var updates = window.__MINIAPP_IPC__.getUpdates(lastKnownSerial);
+                if (updates && updateListener) {{
+                    var parsed = JSON.parse(updates);
+                    parsed.forEach(function(update) {{
+                        updateListener(update);
+                    }});
+                }}
+            }} catch(e) {{
+                console.error('Failed to get updates:', e);
+            }}
+            return Promise.resolve();
+        }},
+
+        sendUpdate: function(update, description) {{
+            return new Promise(function(resolve, reject) {{
+                try {{
+                    window.__MINIAPP_IPC__.sendUpdate(
+                        JSON.stringify(update),
+                        description || ''
+                    );
+                    resolve();
+                }} catch(e) {{
+                    reject(e);
+                }}
+            }});
+        }},
+
+        sendToChat: function() {{
+            return Promise.reject(new Error('Not implemented'));
+        }},
+
+        importFiles: function() {{
+            return Promise.reject(new Error('Not implemented'));
+        }},
+
+        joinRealtimeChannel: function() {{
+            var channel = {{
+                _listener: null,
+                setListener: function(listener) {{
+                    this._listener = listener;
+                    window.__miniapp_realtime_listener = listener;
+                }},
+                send: function(data) {{
+                    if (!(data instanceof Uint8Array)) {{
+                        throw new Error('realtime data must be a Uint8Array');
+                    }}
+                    if (data.length > 128000) {{
+                        throw new Error('realtime data exceeds maximum size of 128000 bytes');
+                    }}
+                    try {{
+                        window.__MINIAPP_IPC__.sendRealtimeData(b91e(data));
+                    }} catch(e) {{
+                        console.error('Failed to send realtime data:', e);
+                    }}
+                }},
+                leave: function() {{
+                    this._listener = null;
+                    window.__miniapp_realtime_listener = null;
+                    try {{
+                        window.__MINIAPP_IPC__.leaveRealtimeChannel();
+                    }} catch(e) {{
+                        console.error('Failed to leave realtime channel:', e);
+                    }}
+                }}
+            }};
+            try {{
+                window.__MINIAPP_IPC__.joinRealtimeChannel();
+            }} catch(e) {{
+                console.error('Failed to join realtime channel:', e);
+            }}
+            return channel;
+        }}
+    }};
+}})();
+"#, addr = addr_escaped, name = name_escaped)
 }
