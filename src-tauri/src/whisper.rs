@@ -153,20 +153,29 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
         // Different model or first run — create new context
         let mut ctx_params = WhisperContextParameters::default();
         ctx_params.flash_attn(true);
-        ctx_params.use_gpu(true);
 
-        let ctx = match WhisperContext::new_with_params(&model_path, ctx_params) {
-            Ok(ctx) => {
-                println!("[Whisper] GPU context initialized");
-                ctx
+        // Android: CPU-only (Vulkan GPU hangs freeze the entire device via compositor stall)
+        // Desktop: try GPU first, fall back to CPU
+        let use_gpu = !cfg!(target_os = "android");
+        ctx_params.use_gpu(use_gpu);
+
+        let ctx = if use_gpu {
+            match WhisperContext::new_with_params(&model_path, ctx_params) {
+                Ok(ctx) => {
+                    println!("[Whisper] GPU context initialized");
+                    ctx
+                }
+                Err(gpu_err) => {
+                    println!("[Whisper] GPU init failed ({}), falling back to CPU", gpu_err);
+                    let mut cpu_params = WhisperContextParameters::default();
+                    cpu_params.flash_attn(true);
+                    cpu_params.use_gpu(false);
+                    WhisperContext::new_with_params(&model_path, cpu_params)?
+                }
             }
-            Err(gpu_err) => {
-                println!("[Whisper] GPU init failed ({}), falling back to CPU", gpu_err);
-                let mut cpu_params = WhisperContextParameters::default();
-                cpu_params.flash_attn(true);
-                cpu_params.use_gpu(false);
-                WhisperContext::new_with_params(&model_path, cpu_params)?
-            }
+        } else {
+            println!("[Whisper] CPU context initialized (GPU disabled on this platform)");
+            WhisperContext::new_with_params(&model_path, ctx_params)?
         };
 
         *cache_guard = Some(CachedWhisperCtx {
