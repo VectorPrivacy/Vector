@@ -21,7 +21,7 @@ If you discover a security vulnerability, **please do not open a public GitHub i
 Instead, report it responsibly using one of the methods below:
 
 ### Preferred Method
-📧 Email: **security@vectorapp.io**<br>
+📧 Emails: **security@vectorapp.io** **mail@jskitty.cat**<br>
 🔓 GitHub's Private Vulnerability Disclosure: [here](https://github.com/VectorPrivacy/Vector/security/advisories/new) (To confirm)
 
 ### What to Include
@@ -64,6 +64,10 @@ If reporting a cryptographic issue, please include:
 - Real-world impact
 
 ---
+
+## ⚖️ Compensation
+
+At this time, we are unable to offer financial compensation for disclosures, as Vector is a volunteer-based project. This may change in the future as the project grows. We sincerely appreciate your understanding and support.
 
 ## 🙏 Thank You
 
