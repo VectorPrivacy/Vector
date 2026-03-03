@@ -5876,11 +5876,12 @@ select:disabled:hover {
 }
 .group-editable::after {
   content: '';
-  display: inline-block;
+  position: absolute;
   width: 12px;
   height: 12px;
   margin-left: 6px;
-  vertical-align: middle;
+  top: 50%;
+  transform: translateY(-50%);
   mask-image: url("./icons/edit.svg");
   -webkit-mask-image: url("./icons/edit.svg");
   mask-size: contain;
