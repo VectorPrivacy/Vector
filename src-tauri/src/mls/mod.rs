@@ -437,7 +437,7 @@ impl MlsService {
 
             if let Some(ev) = kp_event {
                 // Validate keypackage has encoding tag (MIP-00/MIP-02 requirement)
-                if !has_encoding_tag(&ev) {
+                if !has_encoding_tag(&ev) || !ev.tags.iter().any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("i")) {
                     // Get display name for better error message
                     let display_name = {
                         let state = STATE.lock().await;
@@ -712,8 +712,8 @@ impl MlsService {
             MlsError::NetworkError(format!("No keypackage found for {}:{}", member_pubkey, device_id))
         })?;
 
-        // Validate keypackage has encoding tag (MIP-00/MIP-02 requirement)
-        if !has_encoding_tag(&kp_event) {
+        // Validate keypackage has encoding tag and i tag (MIP-00/MIP-02 requirement)
+        if !has_encoding_tag(&kp_event) || !kp_event.tags.iter().any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("i")) {
             // Get display name for better error message
             let display_name = {
                 let state = STATE.lock().await;
@@ -900,8 +900,8 @@ impl MlsService {
                 MlsError::NetworkError(format!("No keypackage found for {}:{}", member_npub, device_id))
             })?;
 
-            // Validate keypackage has encoding tag
-            if !has_encoding_tag(&kp_event) {
+            // Validate keypackage has encoding tag and i tag (required by MIP-00)
+            if !has_encoding_tag(&kp_event) || !kp_event.tags.iter().any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("i")) {
                 let display_name = {
                     let state = STATE.lock().await;
                     state.get_profile(&member_npub)
