@@ -9514,7 +9514,8 @@ async function openInviteMemberToGroup(chat) {
             if (filter) {
                 const name = (p.nickname || p.name || '').toLowerCase();
                 const npub = p.id.toLowerCase();
-                return name.includes(filter) || npub.includes(filter);
+                const match = filterNpub || filter;
+                return name.includes(match) || npub.includes(match);
             }
             return true;
         });
@@ -11072,10 +11073,10 @@ function renderCreateGroupList(filterText = '') {
         if (!p || !p.id) continue;
         if (p.id === mine) continue;
 
-        // Filter by nickname/name/npub
+        // Filter by nickname/name/npub (use extracted npub if input is a profile URL)
         const name = p.nickname || p.name || '';
         const hay = (name + ' ' + p.id).toLowerCase();
-        if (f && !hay.includes(f)) continue;
+        if (f && !hay.includes(filterNpub || f)) continue;
 
         frag.appendChild(buildRow(p.id, p));
     }
