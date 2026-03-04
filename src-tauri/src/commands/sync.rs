@@ -443,12 +443,12 @@ pub async fn fetch_messages<R: Runtime>(
     // This identifies which events the relay has that we don't, without transferring data.
     let sync_opts = nostr_sdk::SyncOptions::new()
         .direction(nostr_sdk::SyncDirection::Down)
-        .initial_timeout(std::time::Duration::from_secs(5))
+        .initial_timeout(std::time::Duration::from_secs(10))
         .dry_run();
 
     let reconcile_start = std::time::Instant::now();
     // Include ALL relays — not just connected ones. Relays still connecting will either
-    // finish their handshake and reconcile within the 8s timeout, or timeout gracefully.
+    // finish their handshake and reconcile within the 10s timeout, or timeout gracefully.
     // This avoids excluding late-connecting relays from the race entirely.
     let relay_map = client.relays().await;
     let all_relays: Vec<(RelayUrl, Relay)> = relay_map.iter()
@@ -468,7 +468,7 @@ pub async fn fetch_messages<R: Runtime>(
         let opts = sync_opts.clone();
         relay_futs.push(async move {
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(8),
+                std::time::Duration::from_secs(10),
                 relay.sync_with_items(f, items, &opts),
             ).await;
             (url, result)
@@ -491,7 +491,7 @@ pub async fn fetch_messages<R: Runtime>(
                 eprintln!("[Sync]   Relay {} failed: {}", url, e);
             }
             Err(_) => {
-                eprintln!("[Sync]   Relay {} timed out (8s)", url);
+                eprintln!("[Sync]   Relay {} timed out (10s)", url);
             }
         }
     }
@@ -516,7 +516,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
                     }
                     Ok(Err(e)) => eprintln!("[Sync][BG] {} failed: {}", url, e),
-                    Err(_) => eprintln!("[Sync][BG] {} timed out (8s)", url),
+                    Err(_) => eprintln!("[Sync][BG] {} timed out (10s)", url),
                 }
             }
 
