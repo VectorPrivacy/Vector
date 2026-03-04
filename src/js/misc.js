@@ -1,4 +1,69 @@
 /**
+ * Shows a simple toast notification
+ * @param {string} message - The message to display
+ */
+function showToast(message) {
+    // Create toast element if it doesn't exist
+    let toast = document.getElementById('pivx-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'pivx-toast';
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--toast-border-color, #161616);
+            box-shadow:
+            0 0 4px rgba(0, 0, 0, 0.8),
+            0 0 12px rgba(0, 0, 0, 0.6),
+            0 0 30px rgba(0, 0, 0, 0.4);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            z-index: 10000;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        `;
+        document.body.appendChild(toast);
+    }
+
+    let backdrop = document.getElementById('toast-backdrop');
+    if (!backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'toast-backdrop';
+    backdrop.style.cssText = `
+        position:fixed;
+        top:0;
+        left:0;
+        width:100%;
+        height:100%;
+        background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
+        opacity:0;
+        z-index:9999;pointer-events:none;
+        transition:opacity 0.3s ease;
+    `;
+    document.body.appendChild(backdrop);
+    }
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    backdrop.style.opacity = '1';
+
+    // Scale duration by message length: 1.5s base + 40ms per char, capped at 6s
+    const duration = Math.min(1500 + message.length * 40, 6000);
+    clearTimeout(toast._timeout);
+    toast._timeout = setTimeout(() => {
+        backdrop.style.opacity = '0';
+        toast.style.opacity = '0';
+    }, duration);
+}
+
+/**
  * Detects npub (Nostr public key) or vectorapp.io profile links in text
  * @param {string} text - Text to search for npub or profile links
  * @returns {Object|null} - Detected npub info or null if none found
