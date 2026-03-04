@@ -9379,6 +9379,10 @@ async function openInviteMemberToGroup(chat) {
     
     const searchInput = document.createElement('input');
     searchInput.placeholder = 'Search or paste npub...';
+    searchInput.autocomplete = 'off';
+    searchInput.setAttribute('autocorrect', 'off');
+    searchInput.setAttribute('autocapitalize', 'off');
+    searchInput.spellcheck = false;
     searchInput.style.padding = '10px 40px';
     searchInput.style.backgroundColor = 'transparent';
     searchInput.style.border = '1px solid rgba(57, 57, 57, 0.5)';
