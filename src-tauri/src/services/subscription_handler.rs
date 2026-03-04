@@ -37,7 +37,7 @@ use nostr_sdk::prelude::*;
 use tauri::Emitter;
 
 use crate::{
-    db,
+    commands, db,
     MlsService, NotificationData, show_notification_generic,
     TAURI_APP, NOSTR_CLIENT,
     util::get_file_type_description,
@@ -591,6 +591,8 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                 "group_id": group_id_for_emit,
                 "message": record
             }));
+            // Update OS badge counter for group messages
+            let _ = commands::messaging::update_unread_counter(handle.clone()).await;
         }
     }
 
