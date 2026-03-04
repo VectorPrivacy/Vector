@@ -166,6 +166,7 @@ impl DeepSize for Attachment {
             + self.key.capacity()
             + self.nonce.capacity()
             + self.extension.capacity()
+            + self.name.capacity()
             + self.url.capacity()
             + self.path.capacity()
             + self.img_meta.as_ref().map(|m| m.thumbhash.capacity()).unwrap_or(0)
@@ -293,6 +294,7 @@ impl DeepSize for CompactAttachment {
             + self.extension.len()  // Box<str> heap allocation
             + self.url.len()
             + self.path.len()
+            + self.name.capacity()  // String heap allocation
             + self.img_meta.as_ref().map(|m| m.deep_size()).unwrap_or(0)
             + self.group_id.as_ref().map(|_| 32).unwrap_or(0)
             + self.original_hash.as_ref().map(|_| 32).unwrap_or(0)

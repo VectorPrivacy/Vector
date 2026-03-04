@@ -416,18 +416,32 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             };
             let dir = handle.path().resolve("vector", base_directory).unwrap();
             std::fs::create_dir_all(&dir).unwrap();
-            let hash_file_path = dir.join(&filename);
-            // Atomic write: write to temp file then rename, so the file is never 0 bytes
-            // (prevents corrupted state if another thread reads concurrently)
-            let tmp_path = dir.join(format!(".{}.tmp", &filename));
-            std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                format!("Failed to write temp file: {}", e)
-            })?;
-            std::fs::rename(&tmp_path, &hash_file_path).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                format!("Failed to rename temp file: {}", e)
-            })?;
+            // Use human-readable name on disk if available, otherwise hash-based
+            let on_disk_name = if attached_file.name.is_empty() {
+                filename.clone()
+            } else {
+                attached_file.name.clone()
+            };
+            let candidate = dir.join(&on_disk_name);
+            let already_exists = candidate.exists()
+                && std::fs::metadata(&candidate).map(|m| m.len() == attached_file.bytes.len() as u64).unwrap_or(false)
+                && std::fs::read(&candidate).map(|b| util::calculate_file_hash(&b) == file_hash).unwrap_or(false);
+            let hash_file_path = if already_exists {
+                candidate
+            } else {
+                let path = crate::commands::attachments::resolve_unique_filename(&dir, &on_disk_name);
+                // Atomic write: write to temp file then rename
+                let tmp_path = dir.join(format!(".{}.tmp", &filename));
+                std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    format!("Failed to write temp file: {}", e)
+                })?;
+                std::fs::rename(&tmp_path, &path).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    format!("Failed to rename temp file: {}", e)
+                })?;
+                path
+            };
 
             // Add the attachment to the pending message with the local path immediately,
             // so the frontend can show a preview (with lowered opacity + progress bar)
@@ -438,6 +452,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     key: String::new(),
                     nonce: String::new(),
                     extension: attached_file.extension.clone(),
+                    name: attached_file.name.clone(),
                     url: String::new(), // No URL yet — upload hasn't started
                     path: hash_file_path.to_string_lossy().to_string(),
                     size: attached_file.bytes.len() as u64,
@@ -499,6 +514,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     key: String::new(),
                     nonce: mls_upload_result.nonce.clone(),
                     extension: attached_file.extension.clone(),
+                    name: attached_file.name.clone(),
                     url: mls_upload_result.url.clone(),
                     path: hash_file_path.to_string_lossy().to_string(),
                     size: mls_upload_result.encrypted_size,
@@ -532,6 +548,14 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 Kind::from_u16(crate::stored_event::event_kind::MLS_CHAT_MESSAGE),
                 msg.content.clone()
             ).tag(mls_upload_result.imeta_tag);
+
+            // Add filename tag if available
+            if !attached_file.name.is_empty() {
+                mls_rumor = mls_rumor.tag(Tag::custom(
+                    TagKind::custom("name"),
+                    [attached_file.name.as_str()]
+                ));
+            }
 
             // Add webxdc-topic if this is an XDC file
             if let Some(ref topic_encoded) = webxdc_topic {
@@ -629,6 +653,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         key: attachment_ref.key,
                         nonce: attachment_ref.nonce,
                         extension: attachment_ref.extension,
+                        name: attached_file.name.clone(),
                         size: attachment_ref.size,
                         path: String::new(),
                         img_meta: None,
@@ -695,23 +720,37 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             // Resolve the directory path using the determined base directory
             let dir = handle.path().resolve("vector", base_directory).unwrap();
 
-            // Store the hash-based file name on-disk for future reference
-            let hash_file_path = dir.join(format!("{}.{}", &file_hash, &attached_file.extension));
+            // Use human-readable name on disk if available, otherwise hash-based
+            let on_disk_name = if attached_file.name.is_empty() {
+                format!("{}.{}", &file_hash, &attached_file.extension)
+            } else {
+                attached_file.name.clone()
+            };
 
             // Create the vector directory if it doesn't exist
             std::fs::create_dir_all(&dir).unwrap();
 
-            // Atomic write: write to temp file then rename, so the file is never 0 bytes
-            // (prevents corrupted state if another thread reads concurrently)
-            let tmp_path = dir.join(format!(".{}.{}.tmp", &file_hash, &attached_file.extension));
-            std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                format!("Failed to write temp file: {}", e)
-            })?;
-            std::fs::rename(&tmp_path, &hash_file_path).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                format!("Failed to rename temp file: {}", e)
-            })?;
+            // If file with same name + same size + same hash already exists, reuse it (dedup)
+            let candidate = dir.join(&on_disk_name);
+            let already_exists = candidate.exists()
+                && std::fs::metadata(&candidate).map(|m| m.len() == attached_file.bytes.len() as u64).unwrap_or(false)
+                && std::fs::read(&candidate).map(|b| util::calculate_file_hash(&b) == file_hash).unwrap_or(false);
+            let hash_file_path = if already_exists {
+                candidate
+            } else {
+                let path = crate::commands::attachments::resolve_unique_filename(&dir, &on_disk_name);
+                // Atomic write: write to temp file then rename
+                let tmp_path = dir.join(format!(".{}.{}.tmp", &file_hash, &attached_file.extension));
+                std::fs::write(&tmp_path, &*attached_file.bytes).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    format!("Failed to write temp file: {}", e)
+                })?;
+                std::fs::rename(&tmp_path, &path).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    format!("Failed to rename temp file: {}", e)
+                })?;
+                path
+            };
 
             // Determine encryption params and file size based on whether we found an existing attachment
             let (attachment_key, attachment_nonce, file_size) = if let Some(ref existing) = existing_attachment {
@@ -728,6 +767,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 key: attachment_key,
                 nonce: attachment_nonce,
                 extension: attached_file.extension.clone(),
+                name: attached_file.name.clone(),
                 url: String::new(),
                 path: hash_file_path.to_string_lossy().to_string(),
                 size: file_size,
@@ -831,6 +871,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                         .tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic_encoded.clone()]));
                 }
 
+                // Add filename tag if available
+                if !attached_file.name.is_empty() {
+                    attachment_rumor = attachment_rumor
+                        .tag(Tag::custom(TagKind::custom("name"), [attached_file.name.as_str()]));
+                }
+
                 attachment_rumor
             } else {
                 // URL is dead, need to upload
@@ -911,6 +957,12 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     if let Some(ref topic_encoded) = webxdc_topic {
                         attachment_rumor = attachment_rumor
                             .tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic_encoded.clone()]));
+                    }
+
+                    // Add filename tag if available
+                    if !attached_file.name.is_empty() {
+                        attachment_rumor = attachment_rumor
+                            .tag(Tag::custom(TagKind::custom("name"), [attached_file.name.as_str()]));
                     }
 
                     attachment_rumor
@@ -1185,6 +1237,7 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
         bytes: Arc::new(encoded_bytes),
         img_meta,
         extension: extension.to_string(),
+        name: String::new(),
     };
 
     // Message the file to the intended user
@@ -1197,7 +1250,8 @@ pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>)
     let attachment_file = AttachmentFile {
         bytes: Arc::new(bytes),
         img_meta: None,
-        extension: String::from("wav")
+        extension: String::from("wav"),
+        name: String::new(),
     };
 
     // Message the file to the intended user

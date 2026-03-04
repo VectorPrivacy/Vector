@@ -57,17 +57,88 @@ impl Drop for ActiveDownloadGuard {
 // Helper Functions
 // ============================================================================
 
+/// Sanitize a filename for protocol transmission and on-disk storage.
+/// Permissive: allows spaces, accents, parentheses, unicode, etc.
+/// Only strips characters that are dangerous for filesystems or security:
+/// path separators (/ \), null bytes, and Windows-unsafe chars (: * ? " < > |).
+/// Truncates the stem to 64 characters. Returns empty string if nothing valid remains.
+pub(crate) fn sanitize_filename(name: &str) -> String {
+    // Take only the final path component (strip any directory traversal)
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let base = base.rsplit('\\').next().unwrap_or(base);
+
+    // Strip characters dangerous to filesystems (path separators, null, Windows-unsafe)
+    let sanitized: String = base.chars().filter(|c| {
+        !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0')
+    }).collect();
+
+    // Strip leading/trailing dots and spaces
+    let sanitized = sanitized.trim_matches(|c: char| c == '.' || c == ' ');
+
+    if sanitized.is_empty() {
+        return String::new();
+    }
+
+    // Truncate the stem to 64 characters (preserve extension)
+    if let Some(dot_pos) = sanitized.rfind('.') {
+        let stem = &sanitized[..dot_pos];
+        let ext = &sanitized[dot_pos..]; // includes the dot
+        if stem.len() > 64 {
+            // Truncate at a char boundary
+            let truncated = &stem[..stem.floor_char_boundary(64)];
+            return format!("{}{}", truncated, ext);
+        }
+    } else if sanitized.len() > 64 {
+        let truncated = &sanitized[..sanitized.floor_char_boundary(64)];
+        return truncated.to_string();
+    }
+
+    sanitized.to_string()
+}
+
+/// Resolve a unique filename in the directory, appending -1, -2, etc. on collision.
+pub(crate) fn resolve_unique_filename(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    // u32 counter — overflow is practically impossible (would require 4B+ same-named files)
+    let mut counter = 1u32;
+    loop {
+        let suffixed = if ext.is_empty() {
+            format!("{}-{}", stem, counter)
+        } else {
+            format!("{}-{}.{}", stem, counter, ext)
+        };
+        let candidate = dir.join(&suffixed);
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 /// Decrypt and save an attachment to disk
 ///
 /// For MLS attachments (when group_id is present), uses MDK's MIP-04 decryption.
 /// For DM attachments, uses explicit key/nonce with AES-GCM.
 ///
-/// Returns the path to the decrypted file if successful, or an error message if unsuccessful
+/// Returns (path, content_hash) if successful, or an error message if unsuccessful
 pub async fn decrypt_and_save_attachment<R: Runtime>(
     handle: &AppHandle<R>,
     encrypted_data: &[u8],
     attachment: &Attachment
-) -> Result<std::path::PathBuf, String> {
+) -> Result<(std::path::PathBuf, String), String> {
     // Decrypt the attachment using the appropriate method
     let decrypted_data = if let Some(ref group_id) = attachment.group_id {
         // MLS attachment - use MDK's MIP-04 decryption
@@ -91,19 +162,35 @@ pub async fn decrypt_and_save_attachment<R: Runtime>(
     // Resolve the directory path using the determined base directory
     let dir = handle.path().resolve("vector", base_directory).unwrap();
 
-    // Use hash-based filename
-    let file_path = dir.join(format!("{}.{}", file_hash, attachment.extension));
+    // Use human-readable filename if available, otherwise fall back to hash-based
+    let target_name = if attachment.name.is_empty() {
+        format!("{}.{}", file_hash, attachment.extension)
+    } else {
+        attachment.name.clone()
+    };
 
     // Create the vector directory if it doesn't exist
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
 
+    // If file with same name + same size + same hash already exists, reuse it (content dedup)
+    let candidate = dir.join(&target_name);
+    let already_exists = candidate.exists()
+        && std::fs::metadata(&candidate).map(|m| m.len() == decrypted_data.len() as u64).unwrap_or(false)
+        && std::fs::read(&candidate).map(|b| util::calculate_file_hash(&b) == file_hash).unwrap_or(false);
+
+    if already_exists {
+        return Ok((candidate, file_hash));
+    }
+
+    let file_path = resolve_unique_filename(&dir, &target_name);
+
     // Atomic write: write to temp file then rename, so the file is never 0 bytes
     // (prevents corrupted state if another thread reads concurrently on macOS APFS)
     let tmp_path = dir.join(format!(".{}.{}.tmp", file_hash, attachment.extension));
-    std::fs::write(&tmp_path, decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
+    std::fs::write(&tmp_path, &decrypted_data).map_err(|e| format!("Failed to write file: {}", e))?;
     std::fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to rename file: {}", e))?;
 
-    Ok(file_path)
+    Ok((file_path, file_hash))
 }
 
 /// Decrypt an MLS attachment using MDK's MIP-04 decryption
@@ -278,8 +365,19 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         };
 
                         if let Ok(vector_dir) = handle.path().resolve("vector", base_directory) {
-                            let file_path = vector_dir.join(format!("{}.{}", simd::bytes_to_hex_32(&attachment.id), &*attachment.extension));
-                            if file_path.exists() {
+                            // Check both hash-based and human-readable filenames
+                            let hash_path = vector_dir.join(format!("{}.{}", simd::bytes_to_hex_32(&attachment.id), &*attachment.extension));
+                            let name_path = if !attachment.name.is_empty() {
+                                Some(vector_dir.join(&*attachment.name))
+                            } else {
+                                None
+                            };
+                            let file_path = if hash_path.exists() {
+                                Some(hash_path)
+                            } else {
+                                name_path.filter(|p| p.exists())
+                            };
+                            if let Some(file_path) = file_path {
                                 // File already exists! Update the state and return success
                                 attachment.set_downloaded(true);
                                 attachment.path = file_path.to_string_lossy().to_string().into_boxed_str();
@@ -428,13 +526,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             })).unwrap();
             return false;
         }
-        Ok(hash_file_path) => {
-            // Successfully decrypted and saved
-            // Extract the hash from the filename (format: {hash}.{extension})
-            let file_hash = hash_file_path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&attachment_id)
-                .to_string();
+        Ok((hash_file_path, file_hash)) => {
 
             // Update state with successful download
             let path_str = hash_file_path.to_string_lossy().to_string();

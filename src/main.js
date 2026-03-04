@@ -7900,7 +7900,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
     descriptionSpan.style.display = 'block';
     descriptionSpan.style.color = 'var(--icon-color-primary)';
     descriptionSpan.style.fontWeight = '400';
-    descriptionSpan.innerText = fileTypeInfo.description;
+    descriptionSpan.innerText = cAttachment.name || fileTypeInfo.description;
 
     // Create the small element for file details
     const smallElement = document.createElement('small');
@@ -8015,16 +8015,23 @@ function createFileBox(cAttachment, state = 'downloaded') {
         }
     } else if (state === 'downloaded') {
         // Downloaded regular file: show extension and size
-        const extSpan = document.createElement('span');
-        extSpan.style.color = 'white';
-        extSpan.style.fontWeight = '400';
-        extSpan.innerText = `.${ext}`;
+        if (cAttachment.name) {
+            // Name already includes extension, just show size
+            const sizeSpan = document.createElement('span');
+            sizeSpan.innerText = formatBytes(cAttachment.size);
+            smallElement.appendChild(sizeSpan);
+        } else {
+            const extSpan = document.createElement('span');
+            extSpan.style.color = 'white';
+            extSpan.style.fontWeight = '400';
+            extSpan.innerText = `.${ext}`;
 
-        const sizeSpan = document.createElement('span');
-        sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
+            const sizeSpan = document.createElement('span');
+            sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
 
-        smallElement.appendChild(extSpan);
-        smallElement.appendChild(sizeSpan);
+            smallElement.appendChild(extSpan);
+            smallElement.appendChild(sizeSpan);
+        }
     } else {
         // Non-downloaded states: 'download' or 'downloading'
         statusSpan = document.createElement('span');

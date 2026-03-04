@@ -239,6 +239,21 @@ async fn process_text_message(
         Vec::new()
     };
 
+    // Extract filename from the event's name tag (MLS events carry one attachment per message)
+    let file_name = rumor.tags
+        .find(TagKind::Custom(Cow::Borrowed("name")))
+        .and_then(|tag| tag.content())
+        .map(|s| crate::commands::attachments::sanitize_filename(s))
+        .unwrap_or_default();
+
+    // Apply name to first attachment (MLS events have one attachment per message)
+    let mut attachments = attachments;
+    if !file_name.is_empty() {
+        if let Some(att) = attachments.first_mut() {
+            att.name = file_name;
+        }
+    }
+
     // Extract webxdc-topic for Mini Apps (realtime channel isolation)
     let webxdc_topic = rumor.tags
         .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
@@ -448,6 +463,7 @@ async fn parse_mls_imeta_attachments(
             key: String::new(),  // MLS uses derived keys
             nonce: bytes_to_hex_string(&media_ref.nonce),
             extension,
+            name: String::new(),  // Set by caller from top-level name tag
             url: media_ref.url.clone(),
             path: file_path,
             size,
@@ -556,13 +572,31 @@ async fn process_file_attachment(
         }
     };
     
-    // Figure out the file extension from the mime-type
+    // Figure out the file extension: prefer the name tag's extension, fall back to MIME-derived
     let mime_type = rumor.tags
         .find(TagKind::Custom(Cow::Borrowed("file-type")))
         .and_then(|tag| tag.content())
         .ok_or("Missing file-type tag")?;
-    let extension = crate::util::extension_from_mime(mime_type);
-    
+    let mime_extension = crate::util::extension_from_mime(mime_type);
+
+    // Extract filename from name tag (used for extension override and display name)
+    let file_name = rumor.tags
+        .find(TagKind::Custom(Cow::Borrowed("name")))
+        .and_then(|tag| tag.content())
+        .map(|s| crate::commands::attachments::sanitize_filename(s))
+        .unwrap_or_default();
+
+    // Use the extension from the original filename when available (more accurate than MIME for
+    // uncommon types like .sh, .toml, .rs, etc. which all map to application/octet-stream)
+    let extension = if !file_name.is_empty() {
+        file_name.rsplit('.').next()
+            .filter(|e| !e.is_empty() && *e != file_name)
+            .map(|e| e.to_lowercase())
+            .unwrap_or(mime_extension)
+    } else {
+        mime_extension
+    };
+
     // Resolve the download directory path.
     // In full-app mode, use Tauri's path resolver for the platform-appropriate Downloads dir.
     // In headless mode (background service), use a fallback under APP_DATA_DIR — the file
@@ -618,13 +652,14 @@ async fn process_file_attachment(
         .find(TagKind::Custom(Cow::Borrowed("webxdc-topic")))
         .and_then(|tag| tag.content())
         .map(|s| s.to_string());
-    
+
     // Create the attachment
     let attachment = Attachment {
         id: file_hash.clone(),
         key: decryption_key,
         nonce: decryption_nonce,
         extension: extension.to_string(),
+        name: file_name,
         url: content_url,
         path: file_path,
         size: reported_size,

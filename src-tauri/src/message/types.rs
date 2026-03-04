@@ -186,6 +186,8 @@ pub struct Attachment {
     pub nonce: String,
     /// The file extension
     pub extension: String,
+    /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}
+    pub name: String,
     /// The host URL, typically a NIP-96 server
     pub url: String,
     /// The storage directory path (typically the ~/Downloads folder)
@@ -227,6 +229,7 @@ impl Default for Attachment {
             key: String::new(),
             nonce: String::new(),
             extension: String::new(),
+            name: String::new(),
             url: String::new(),
             path: String::new(),
             size: 0,
@@ -252,6 +255,8 @@ pub struct AttachmentFile {
     /// Image metadata (for images only)
     pub img_meta: Option<ImageMetadata>,
     pub extension: String,
+    /// Original filename from the file picker (e.g. "memories.zip")
+    pub name: String,
 }
 
 fn default_arc_bytes() -> Arc<Vec<u8>> {

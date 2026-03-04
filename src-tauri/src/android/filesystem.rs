@@ -422,6 +422,7 @@ fn read_from_android_uri_internal(
         bytes: Arc::new(bytes),
         img_meta: None,
         extension,
+        name: String::new(),
     })
 }
 

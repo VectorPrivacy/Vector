@@ -4,6 +4,8 @@
  */
 
 let filePreviewOverlay = null;
+let filePreviewNameEl = null; // Persistent reference to #file-preview-name (survives hotswap)
+let filePreviewExtEl = null;  // Reference to #file-preview-ext badge
 let pendingFile = null;
 let pendingFileBytes = null; // For Android: flag indicating bytes mode
 let pendingFileObject = null; // For Android: stores the File object directly
@@ -14,6 +16,7 @@ let pendingReplyRef = null;
 let compressionInProgress = false;
 let compressionComplete = false;
 let compressionPollingInterval = null;
+let pendingEditedName = null; // User-edited filename (null = use original)
 let pendingMiniAppInfo = null; // For marketplace publishing: stores Mini App info
 let pendingZipPath = null; // For folder zip: temp zip path for cleanup
 let zipInProgress = false; // For folder zip: compression in progress
@@ -56,6 +59,72 @@ function formatFileSize(bytes) {
 }
 
 /**
+ * Ensure the file-preview-name element is in the DOM (not swapped for an input).
+ * If editing was active, restores the original element.
+ */
+function restoreFilePreviewName() {
+    if (!filePreviewNameEl) return;
+    const activeInput = filePreviewOverlay?.querySelector('.file-preview-name-input');
+    if (activeInput) {
+        activeInput.replaceWith(filePreviewNameEl);
+    }
+}
+
+/**
+ * Strip dangerous characters from a filename stem.
+ * Permissive: allows spaces, accents, parentheses, etc. — only blocks
+ * path separators, null bytes, and chars that break common filesystems.
+ */
+function sanitizeFilenameStem(str) {
+    // eslint-disable-next-line no-control-regex
+    return str.replace(/[\/\\:\*\?"<>\|\x00]/g, '');
+}
+
+/**
+ * Set up click-to-edit behavior on the file preview name element.
+ * Uses the same text-input hotswap mechanic as Group Chat Overview editing.
+ */
+function setupEditableFileName() {
+    const nameEl = filePreviewNameEl;
+    if (!nameEl) return;
+    nameEl.onclick = () => {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'file-preview-name-input';
+        input.value = nameEl.textContent;
+        input.maxLength = 64;
+        nameEl.replaceWith(input);
+        input.focus();
+        input.select();
+        // Live-filter: strip disallowed chars as the user types
+        input.oninput = () => {
+            const pos = input.selectionStart;
+            const before = input.value;
+            input.value = sanitizeFilenameStem(before);
+            // Preserve cursor position (adjust if chars were removed before cursor)
+            const diff = before.length - input.value.length;
+            input.setSelectionRange(pos - diff, pos - diff);
+        };
+        let saved = false;
+        const save = () => {
+            if (saved) return;
+            saved = true;
+            const newName = input.value.trim();
+            input.replaceWith(nameEl);
+            if (newName) {
+                nameEl.textContent = newName;
+                pendingEditedName = newName;
+            }
+        };
+        input.onblur = save;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); input.blur(); }
+            if (e.key === 'Escape') { e.stopPropagation(); saved = true; input.replaceWith(nameEl); }
+        };
+    };
+}
+
+/**
  * Get file extension from path
  * @param {string} filepath - File path
  * @returns {string} File extension (lowercase)
@@ -63,6 +132,17 @@ function formatFileSize(bytes) {
 function getFileExtension(filepath) {
     const parts = filepath.split('.');
     return parts.length > 1 ? parts.pop().toLowerCase() : '';
+}
+
+/**
+ * Get file stem (name without extension)
+ * @param {string} name - File name
+ * @returns {string} File stem
+ */
+function getFileStem(name) {
+    const ext = getFileExtension(name);
+    if (!ext) return name;
+    return name.substring(0, name.length - ext.length - 1);
 }
 
 /**
@@ -178,7 +258,10 @@ function createFilePreviewOverlay() {
             <div class="file-preview-inner">
                 <div id="file-preview-content"></div>
                 <div class="file-preview-info">
-                    <div class="file-preview-name" id="file-preview-name"></div>
+                    <div class="file-preview-name-row">
+                        <div class="file-preview-name" id="file-preview-name"></div>
+                        <span class="file-preview-ext-badge" id="file-preview-ext"></span>
+                    </div>
                     <div class="file-preview-details">
                         <span class="file-preview-detail" id="file-preview-size"></span>
                     </div>
@@ -196,7 +279,9 @@ function createFilePreviewOverlay() {
     `;
     
     document.body.appendChild(filePreviewOverlay);
-    
+    filePreviewNameEl = document.getElementById('file-preview-name');
+    filePreviewExtEl = document.getElementById('file-preview-ext');
+
     // Event listeners
     document.getElementById('file-preview-cancel').addEventListener('click', closeFilePreview);
     document.getElementById('file-preview-send').addEventListener('click', sendPreviewedFile);
@@ -262,6 +347,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     pendingFileObject = null; // Clear File object since we're using file path
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
+    pendingFileExt = null; // Will be set after extension is resolved
     
     const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
     
@@ -320,16 +406,22 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         }
     }
     
-    // Update file name - use Mini App name if available
+    // Update file name — show stem (editable) + extension badge (read-only)
+    pendingEditedName = null;
+    pendingFileExt = ext;
+    restoreFilePreviewName();
     const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
-    document.getElementById('file-preview-name').textContent = displayName;
-    
+    filePreviewNameEl.textContent = getFileStem(displayName) || displayName;
+    filePreviewExtEl.textContent = ext ? `.${ext}` : '';
+    filePreviewExtEl.style.display = ext ? '' : 'none';
+    setupEditableFileName();
+
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
-    
+
     // Update content area
     const contentArea = document.getElementById('file-preview-content');
-    
+
     if (isMiniApp) {
         // Show Mini App preview with icon
         displayMiniAppPreview(contentArea, miniAppInfo, fileName);
@@ -556,16 +648,21 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
         }
     }
     
-    // Update file name - use Mini App name if available
+    // Update file name — show stem (editable) + extension badge (read-only)
+    pendingEditedName = null;
+    restoreFilePreviewName();
     const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
-    document.getElementById('file-preview-name').textContent = displayName;
-    
+    filePreviewNameEl.textContent = getFileStem(displayName) || displayName;
+    filePreviewExtEl.textContent = ext ? `.${ext}` : '';
+    filePreviewExtEl.style.display = ext ? '' : 'none';
+    setupEditableFileName();
+
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(file.size);
-    
+
     // Update content area
     const contentArea = document.getElementById('file-preview-content');
-    
+
     // Update options area
     const optionsArea = document.getElementById('file-preview-options');
     
@@ -718,10 +815,15 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     
-    // Update file name - use Mini App name if available
+    // Update file name — show stem (editable) + extension badge (read-only)
+    pendingEditedName = null;
+    restoreFilePreviewName();
     const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
-    document.getElementById('file-preview-name').textContent = displayName;
-    
+    filePreviewNameEl.textContent = getFileStem(displayName) || displayName;
+    filePreviewExtEl.textContent = ext ? `.${ext}` : '';
+    filePreviewExtEl.style.display = ext ? '' : 'none';
+    setupEditableFileName();
+
     // Update file size
     document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
     
@@ -1121,7 +1223,13 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
         <div class="file-preview-zip-label" id="zip-progress-label">Compressing...</div>
     `;
 
-    document.getElementById('file-preview-name').textContent = folderName + '.zip';
+    pendingEditedName = null;
+    pendingFileExt = 'zip';
+    restoreFilePreviewName();
+    filePreviewNameEl.textContent = folderName;
+    filePreviewExtEl.textContent = '.zip';
+    filePreviewExtEl.style.display = '';
+    setupEditableFileName();
     document.getElementById('file-preview-size').textContent = 'Compressing...';
 
     const optionsArea = document.getElementById('file-preview-options');
@@ -1263,6 +1371,7 @@ function closeFilePreview() {
     pendingFileObject = null;
     pendingFileName = null;
     pendingFileExt = null;
+    pendingEditedName = null;
     pendingReceiver = null;
     pendingReplyRef = null;
     compressionInProgress = false;
@@ -1302,6 +1411,10 @@ async function sendPreviewedFile() {
     const fileObject = pendingFileObject;
     const fileName = pendingFileName;
     const ext = pendingFileExt;
+    const editedStem = pendingEditedName;
+    const nameOverride = editedStem
+        ? (ext ? `${editedStem}.${ext}` : editedStem)
+        : '';
     const usingBytes = !!fileBytes;
     const isZipSend = !!pendingZipPath;
     
@@ -1346,6 +1459,7 @@ async function sendPreviewedFile() {
     pendingFileObject = null;
     pendingFileName = null;
     pendingFileExt = null;
+    pendingEditedName = null;
     pendingReceiver = null;
     pendingReplyRef = null;
     compressionInProgress = false;
@@ -1369,7 +1483,8 @@ async function sendPreviewedFile() {
                 result = await invoke("send_cached_file", {
                     receiver: chatId,
                     repliedTo: replyRef,
-                    useCompression: shouldCompress
+                    useCompression: shouldCompress,
+                    nameOverride
                 });
             } else {
                 // No compression needed and bytes weren't cached, read directly
@@ -1380,7 +1495,8 @@ async function sendPreviewedFile() {
                     repliedTo: replyRef,
                     fileBytes: bytes,
                     fileName: fileObject.name,
-                    useCompression: false
+                    useCompression: false,
+                    nameOverride
                 });
             }
         } else if (usingBytes) {
@@ -1388,14 +1504,16 @@ async function sendPreviewedFile() {
             result = await invoke("send_cached_file", {
                 receiver: chatId,
                 repliedTo: replyRef,
-                useCompression: shouldCompress
+                useCompression: shouldCompress,
+                nameOverride
             });
         } else if (shouldCompress) {
             // Desktop: use cached compressed file (will wait if still compressing)
             result = await invoke("send_cached_compressed_file", {
                 receiver: chatId,
                 repliedTo: replyRef,
-                filePath: filePath
+                filePath: filePath,
+                nameOverride
             });
         } else {
             // Desktop: send without compression, but clear the cache first
@@ -1403,7 +1521,8 @@ async function sendPreviewedFile() {
             result = await invoke("file_message", {
                 receiver: chatId,
                 repliedTo: replyRef,
-                filePath: filePath
+                filePath: filePath,
+                nameOverride
             });
         }
 

@@ -253,7 +253,7 @@ pub async fn forward_attachment(
     
     // Send the file to the target chat using the existing file_message function
     // The hash-based reuse will automatically avoid re-uploading
-    file_message(target_chat_id, String::new(), attachment_path).await?;
+    file_message(target_chat_id, String::new(), attachment_path, String::new()).await?;
     
     // Return success - the new message ID will be emitted via the normal message flow
     Ok("forwarded".to_string())

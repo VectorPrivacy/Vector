@@ -725,6 +725,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
                 bytes: Arc::new(bytes),
                 img_meta: None,
                 extension,
+                name: String::new(),
             }
         }
         #[cfg(target_os = "android")]

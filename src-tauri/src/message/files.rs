@@ -153,7 +153,7 @@ pub async fn get_cached_bytes_compression_status() -> Result<Option<CompressionE
 
 /// Send cached file (with optional compression)
 #[tauri::command]
-pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool) -> Result<MessageSendResult, String> {
+pub async fn send_cached_file(receiver: String, replied_to: String, use_compression: bool, name_override: String) -> Result<MessageSendResult, String> {
     use super::compression::MIN_SAVINGS_PERCENT;
 
     if use_compression {
@@ -170,13 +170,24 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
             if savings_percent >= MIN_SAVINGS_PERCENT {
                 // Use compressed version - no clone needed, we own it
                 drop(comp_cache);
-                *JS_FILE_CACHE.lock().unwrap() = None;
+                // Extract name and clear the cache in one lock
+                let name = {
+                    let mut cache = JS_FILE_CACHE.lock().unwrap();
+                    let n = cache.as_ref().map(|(_, n, _)| n.clone()).unwrap_or_default();
+                    *cache = None;
+                    n
+                };
 
-                let attachment_file = AttachmentFile {
+                let mut attachment_file = AttachmentFile {
                     bytes: compressed.bytes,
                     extension: compressed.extension,
                     img_meta: compressed.img_meta,
+                    name,
                 };
+                if !name_override.is_empty() {
+                    let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+                    if !sanitized.is_empty() { attachment_file.name = sanitized; }
+                }
                 return message(receiver, String::new(), replied_to, Some(attachment_file)).await;
             }
         }
@@ -184,7 +195,7 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
     }
     
     // Use original bytes - compress on-the-fly if use_compression is true
-    let (original_bytes, _, original_extension) = {
+    let (original_bytes, original_name, original_extension) = {
         let mut cache = JS_FILE_CACHE.lock().unwrap();
         cache.take().ok_or("No cached file")?
     };
@@ -227,11 +238,16 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
         (original_bytes, original_extension, None)
     };
 
-    let attachment_file = AttachmentFile {
+    let mut attachment_file = AttachmentFile {
         bytes,
         extension,
         img_meta,
+        name: original_name,
     };
+    if !name_override.is_empty() {
+        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+        if !sanitized.is_empty() { attachment_file.name = sanitized; }
+    }
 
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
@@ -270,7 +286,8 @@ pub async fn send_file_bytes(
     replied_to: String,
     file_bytes: Vec<u8>,
     file_name: String,
-    use_compression: bool
+    use_compression: bool,
+    name_override: String
 ) -> Result<MessageSendResult, String> {
     use super::compression::MIN_SAVINGS_PERCENT;
 
@@ -284,7 +301,7 @@ pub async fn send_file_bytes(
     let is_image = matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
 
     // For images: compress if requested, otherwise just generate metadata
-    let attachment_file = if is_image {
+    let mut attachment_file = if is_image {
         let min_savings = if use_compression && extension != "gif" {
             Some(MIN_SAVINGS_PERCENT)
         } else {
@@ -296,6 +313,7 @@ pub async fn send_file_bytes(
                 bytes: result.bytes,
                 extension: result.extension,
                 img_meta: result.img_meta,
+                name: file_name.clone(),
             },
             Err(e) => {
                 eprintln!("Image processing failed: {}", e);
@@ -308,14 +326,26 @@ pub async fn send_file_bytes(
             bytes: Arc::new(file_bytes),
             extension,
             img_meta: None,
+            name: file_name,
         }
     };
+    if !name_override.is_empty() {
+        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+        if !sanitized.is_empty() { attachment_file.name = sanitized; }
+    }
 
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
 #[tauri::command]
-pub async fn file_message(receiver: String, replied_to: String, file_path: String) -> Result<MessageSendResult, String> {
+pub async fn file_message(receiver: String, replied_to: String, file_path: String, name_override: String) -> Result<MessageSendResult, String> {
+    // Extract filename from the path
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
     // Load the file as AttachmentFile
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
@@ -332,6 +362,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 bytes: Arc::new(file_bytes),
                 img_meta: None,
                 extension,
+                name: file_name.clone(),
             }
         }
         #[cfg(target_os = "android")]
@@ -339,12 +370,13 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
             // First check if we have cached bytes for this URI
             // Take ownership from cache to avoid clone - bytes already Arc
             let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((bytes, extension, _, _)) = cache.remove(&file_path) {
+            if let Some((bytes, extension, cached_name, _)) = cache.remove(&file_path) {
                 drop(cache);
                 AttachmentFile {
                     bytes,
                     img_meta: None,
                     extension,
+                    name: cached_name,
                 }
             } else {
                 drop(cache);
@@ -366,6 +398,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                         bytes: Arc::new(file_bytes),
                         img_meta: None,
                         extension,
+                        name: file_name.clone(),
                     }
                 }
             }
@@ -382,6 +415,12 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                     height: img.height(),
                 });
         }
+    }
+
+    // Apply user-edited name override (if any)
+    if !name_override.is_empty() {
+        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+        if !sanitized.is_empty() { attachment_file.name = sanitized; }
     }
 
     // Message the file to the intended user
@@ -600,7 +639,14 @@ pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<Strin
 
 /// Send a file with compression (for images)
 #[tauri::command]
-pub async fn file_message_compressed(receiver: String, replied_to: String, file_path: String) -> Result<MessageSendResult, String> {
+pub async fn file_message_compressed(receiver: String, replied_to: String, file_path: String, name_override: String) -> Result<MessageSendResult, String> {
+    // Extract filename from the path
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
     // Load the file as AttachmentFile
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
@@ -617,6 +663,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                 bytes: Arc::new(file_bytes),
                 img_meta: None,
                 extension,
+                name: file_name.clone(),
             }
         }
         #[cfg(target_os = "android")]
@@ -624,12 +671,13 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
             // First check if we have cached bytes for this URI
             // Take ownership from cache to avoid clone - bytes already Arc
             let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((bytes, extension, _, _)) = cache.remove(&file_path) {
+            if let Some((bytes, extension, cached_name, _)) = cache.remove(&file_path) {
                 drop(cache);
                 AttachmentFile {
                     bytes,
                     img_meta: None,
                     extension,
+                    name: cached_name,
                 }
             } else {
                 drop(cache);
@@ -651,6 +699,7 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
                         bytes: Arc::new(file_bytes),
                         img_meta: None,
                         extension,
+                        name: file_name.clone(),
                     }
                 }
             }
@@ -664,6 +713,12 @@ pub async fn file_message_compressed(receiver: String, replied_to: String, file_
             attachment_file.extension = compressed.extension;
             attachment_file.img_meta = compressed.img_meta;
         }
+    }
+
+    // Apply user-edited name override (if any)
+    if !name_override.is_empty() {
+        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+        if !sanitized.is_empty() { attachment_file.name = sanitized; }
     }
 
     // Message the file to the intended user
@@ -1057,9 +1112,16 @@ pub fn cleanup_zip() -> Result<(), String> {
 
 /// Send a file using the cached compressed version if available
 #[tauri::command]
-pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String) -> Result<MessageSendResult, String> {
+pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String, name_override: String) -> Result<MessageSendResult, String> {
     use super::compression::MIN_SAVINGS_PERCENT;
-    
+
+    // Extract filename from the path
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
     // First check if compression is complete or still in progress
     let status = {
         let cache = COMPRESSION_CACHE.lock().await;
@@ -1083,15 +1145,20 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
             
             if savings_percent >= MIN_SAVINGS_PERCENT {
                 // Compression provides significant savings - send compressed
-                let attachment_file = AttachmentFile {
+                let mut attachment_file = AttachmentFile {
                     bytes: compressed.bytes,
                     extension: compressed.extension,
                     img_meta: compressed.img_meta,
+                    name: file_name,
                 };
+                if !name_override.is_empty() {
+                    let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+                    if !sanitized.is_empty() { attachment_file.name = sanitized; }
+                }
                 message(receiver, String::new(), replied_to, Some(attachment_file)).await
             } else {
                 // No significant savings - send original file
-                file_message(receiver, replied_to, file_path).await
+                file_message(receiver, replied_to, file_path, name_override).await
             }
         }
         Some(None) => {
@@ -1119,25 +1186,30 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
                     };
 
                     if savings_percent >= MIN_SAVINGS_PERCENT {
-                        let attachment_file = AttachmentFile {
+                        let mut attachment_file = AttachmentFile {
                             bytes: compressed.bytes,
                             extension: compressed.extension,
                             img_meta: compressed.img_meta,
+                            name: file_name,
                         };
+                        if !name_override.is_empty() {
+                            let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+                            if !sanitized.is_empty() { attachment_file.name = sanitized; }
+                        }
                         message(receiver, String::new(), replied_to, Some(attachment_file)).await
                     } else {
-                        file_message(receiver, replied_to, file_path).await
+                        file_message(receiver, replied_to, file_path, name_override).await
                     }
                 }
                 _ => {
                     // Cache was cleared or missing — fall back to compressing now
-                    file_message_compressed(receiver, replied_to, file_path).await
+                    file_message_compressed(receiver, replied_to, file_path, name_override).await
                 }
             }
         }
         None => {
             // Not in cache, compress now
-            file_message_compressed(receiver, replied_to, file_path).await
+            file_message_compressed(receiver, replied_to, file_path, name_override).await
         }
     }
 }
