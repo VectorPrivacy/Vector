@@ -1573,35 +1573,46 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
     }
 
     // Play/Pause functionality with visualizer
-    playBtn.addEventListener('click', async () => {
-        if (audPreview.paused) {
-            // Initialize audio context on first play (browser requirement)
-            if (!audioContext) {
-                initAudioAnalyser();
-            }
-            
-            // Resume audio context if suspended
-            if (audioContext && audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-            
-            audPreview.play();
-            playBtn.innerHTML = '<span class="icon icon-pause"></span>';
-            customPlayer.classList.add('playing');
-            
-            // Start visualizer
-            updateVisualizer();
-        } else {
-            audPreview.pause();
-            playBtn.innerHTML = '<span class="icon icon-play"></span>';
-            customPlayer.classList.remove('playing');
-            
-            // Stop visualizer
-            if (animationId) {
-                cancelAnimationFrame(animationId);
-            }
+    const doPlay = async () => {
+        // Initialize audio context on first play (browser requirement)
+        if (!audioContext) {
+            initAudioAnalyser();
         }
+
+        // Resume audio context if suspended
+        if (audioContext && audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+
+        audPreview.play();
+        playBtn.innerHTML = '<span class="icon icon-pause"></span>';
+        customPlayer.classList.add('playing');
+
+        // Start visualizer
+        updateVisualizer();
+    };
+
+    const doPause = () => {
+        audPreview.pause();
+        playBtn.innerHTML = '<span class="icon icon-play"></span>';
+        customPlayer.classList.remove('playing');
+
+        // Stop visualizer
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+        }
+    };
+
+    playBtn.addEventListener('click', () => {
+        if (audPreview.paused) doPlay(); else doPause();
     });
+
+    // Register MediaSession handlers so OS media keys use our play/pause
+    // instead of WebKit's buggy default (EmptyRanges crash in WKWebView)
+    if (navigator.mediaSession) {
+        navigator.mediaSession.setActionHandler('play', doPlay);
+        navigator.mediaSession.setActionHandler('pause', doPause);
+    }
 
     // Update time display
     audPreview.addEventListener('timeupdate', () => {
