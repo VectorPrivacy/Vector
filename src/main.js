@@ -9599,7 +9599,10 @@ async function openInviteMemberToGroup(chat) {
     
     modal.appendChild(container);
     document.body.appendChild(modal);
-    
+
+    // Autofocus search on desktop (avoid triggering virtual keyboard on mobile)
+    if (!platformFeatures.is_mobile) searchInput.focus();
+
     // Close on background click
     modal.onclick = (e) => {
         if (e.target === modal) { activeInviteModalRerender = null; modal.remove(); }
