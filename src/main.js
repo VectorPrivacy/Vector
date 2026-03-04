@@ -1230,6 +1230,7 @@ async function playMiniAppAndInvite() {
             receiver: targetChatId,
             repliedTo: '',
             filePath: app.src_url,
+            nameOverride: '',
         });
 
         if (!result || !result.event_id) {
@@ -3911,7 +3912,7 @@ async function message(pubkey, content, replied_to) {
 async function sendFile(pubkey, replied_to, filepath) {
     try {
         // Use the protocol-agnostic file_message command for both DMs and MLS groups
-        const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath });
+        const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath, nameOverride: '' });
         if (result && result.event_id) {
             finalizePendingMessage(pubkey, result.pending_id, result.event_id);
         }
