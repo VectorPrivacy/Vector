@@ -4454,6 +4454,13 @@ async function setupRustListeners() {
             domMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
         }
 
+        // If this group's overview is open, update the mute button
+        const domGrpMuteBtn = document.getElementById('group-mute-btn');
+        if (domGrpMuteBtn && domGroupOverview.style.display !== 'none' && strOpenChat === evt.payload.chat_id) {
+            domGrpMuteBtn.querySelector('span').className = `icon icon-volume-${evt.payload.value ? 'mute' : 'max'} navbar-icon`;
+            domGrpMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
+        }
+
         // Re-render the chat list to immediately reflect glow/badge changes
         renderChatlist();
     });
@@ -8879,6 +8886,20 @@ async function renderGroupOverview(chat) {
             }
         };
         avatarParent.appendChild(overlay);
+    }
+
+    // Mute button
+    const domGroupMuteBtn = document.getElementById('group-mute-btn');
+    if (domGroupMuteBtn) {
+        const updateMuteBtn = (muted) => {
+            domGroupMuteBtn.querySelector('span').className = `icon icon-volume-${muted ? 'mute' : 'max'} navbar-icon`;
+            domGroupMuteBtn.querySelector('p').innerText = muted ? 'Unmute' : 'Mute';
+        };
+        updateMuteBtn(chat.muted);
+        domGroupMuteBtn.onclick = async () => {
+            const newMuted = await invoke('toggle_chat_mute', { chatId: chat.id });
+            updateMuteBtn(newMuted);
+        };
     }
 
     // Secondary name (editable for admins)
