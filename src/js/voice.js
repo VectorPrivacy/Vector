@@ -1719,6 +1719,14 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             bar.style.opacity = '0.3';
             bar.style.boxShadow = 'none';
         });
+
+        // Replace MediaSession handlers with no-ops so OS media keys are
+        // swallowed instead of falling back to WebKit's buggy default
+        if (navigator.mediaSession) {
+            navigator.mediaSession.setActionHandler('play', () => {});
+            navigator.mediaSession.setActionHandler('pause', () => {});
+            navigator.mediaSession.playbackState = 'none';
+        }
     });
     
     // Cleanup audio context and observers when element is removed from DOM
