@@ -1,14 +1,14 @@
-// PIVX DOM constants
-const domAttachmentPanelPivx = document.getElementById('attachment-panel-pivx');
-const domAttachmentPanelPivxView = document.getElementById('attachment-panel-pivx-view');
-const domAttachmentPanelPivxBack = document.getElementById('attachment-panel-pivx-back');
-const domPivxBalanceAmount = document.getElementById('pivx-balance-amount');
-const domPivxDepositBtn = document.getElementById('pivx-deposit-btn');
-const domPivxSendBtn = document.getElementById('pivx-send-btn');
-const domPivxSettingsBtn = document.getElementById('pivx-settings-btn');
-const domPivxDepositOverlay = document.getElementById('pivx-deposit-overlay');
-const domPivxSendOverlay = document.getElementById('pivx-send-overlay');
-const domPivxSettingsOverlay = document.getElementById('pivx-settings-overlay');
+// PIVX DOM references (resolved after DOM is parsed)
+let domAttachmentPanelPivx = null;
+let domAttachmentPanelPivxView = null;
+let domAttachmentPanelPivxBack = null;
+let domPivxBalanceAmount = null;
+let domPivxDepositBtn = null;
+let domPivxSendBtn = null;
+let domPivxSettingsBtn = null;
+let domPivxDepositOverlay = null;
+let domPivxSendOverlay = null;
+let domPivxSettingsOverlay = null;
 
 // ========== PIVX Wallet Functions ==========
 
@@ -1045,8 +1045,19 @@ function getChatDisplayName(chatId) {
 
 // ========== End PIVX Wallet Functions ==========
 
-// Wire up PIVX event listeners (defer guarantees DOM is parsed)
-(function initPivxListeners() {
+// Resolve DOM refs and wire up PIVX event listeners once DOM is parsed
+document.addEventListener('DOMContentLoaded', function initPivxListeners() {
+    // Resolve DOM references
+    domAttachmentPanelPivxView = document.getElementById('attachment-panel-pivx-view');
+    domAttachmentPanelPivxBack = document.getElementById('attachment-panel-pivx-back');
+    domPivxBalanceAmount = document.getElementById('pivx-balance-amount');
+    domPivxDepositBtn = document.getElementById('pivx-deposit-btn');
+    domPivxSendBtn = document.getElementById('pivx-send-btn');
+    domPivxSettingsBtn = document.getElementById('pivx-settings-btn');
+    domPivxDepositOverlay = document.getElementById('pivx-deposit-overlay');
+    domPivxSendOverlay = document.getElementById('pivx-send-overlay');
+    domPivxSettingsOverlay = document.getElementById('pivx-settings-overlay');
+
     // PIVX Wallet event handlers
     if (domAttachmentPanelPivx) {
         domAttachmentPanelPivx.onclick = () => {
@@ -1148,4 +1159,4 @@ function getChatDisplayName(chatId) {
     domPivxSettingsOverlay?.addEventListener('click', (e) => {
         if (e.target === domPivxSettingsOverlay) closePivxSettingsDialog();
     });
-})();
+});
