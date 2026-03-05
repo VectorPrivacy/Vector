@@ -4441,7 +4441,7 @@ async function setupRustListeners() {
         });
         
         // If this user is being viewed in the Expanded Profile View, update it
-        if (domProfileId.textContent === evt.payload.id) {
+        if (domProfile.style.display !== 'none' && domProfileId.textContent === evt.payload.id) {
             renderProfileTab(evt.payload);
         }
 
