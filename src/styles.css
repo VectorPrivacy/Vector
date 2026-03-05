@@ -6583,6 +6583,11 @@ hr {
   -webkit-box-decoration-break: clone;
 }
 
+/* Prevent clicks on child elements (mentions, links) until revealed */
+.spoiler:not(.revealed) > * {
+  pointer-events: none;
+}
+
 /* Blurred, glassy cover effect - animated gradient shows through the blur */
 .spoiler:not(.revealed) {
   background: linear-gradient(to right, #01ff96, #04110d, #00ff96);
