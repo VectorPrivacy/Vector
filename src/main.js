@@ -1434,6 +1434,66 @@ function escapeHtml(text) {
 }
 
 /**
+ * Strip HTML tags and block-level markdown from message content to produce clean preview plaintext.
+ * Idempotent — safe to call on already-cleaned text.
+ *
+ * Counterpart: strip_content_for_preview() in notification_service.rs (Rust, for OS notifications)
+ *
+ * @param {string} content - Raw message content
+ * @returns {string} Plain text suitable for previews (inline markdown like ** and || preserved)
+ */
+function contentToPreviewText(content) {
+    if (!content) return '';
+    let text = content;
+    // Replace <br> / <br/> with space
+    text = text.replace(/<br\s*\/?>/gi, ' ');
+    // Strip all remaining HTML tags (require letter, / or ! after < to avoid matching math like "3 < 5 > 2")
+    text = text.replace(/<\/?[a-zA-Z!][^>]*>/g, '');
+    // Strip block-level markdown: headers, blockquotes, code fences, horizontal rules
+    text = text.replace(/^#{1,6}\s+/gm, '');
+    text = text.replace(/^>\s?/gm, '');
+    text = text.replace(/^```[\s\S]*?^```/gm, '');
+    text = text.replace(/^---+$/gm, '');
+    text = text.replace(/^\*\*\*+$/gm, '');
+    // Strip inline code backticks (keep inner text)
+    text = text.replace(/`([^`]*)`/g, '$1');
+    // Collapse whitespace and trim
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+}
+
+/**
+ * Convert message content to safe HTML for inline preview rendering.
+ * Strips HTML/block markdown via contentToPreviewText(), HTML-escapes, then renders
+ * inline markdown (bold, italic, strikethrough, spoiler) as safe HTML tags.
+ *
+ * Security: escapeHtml() runs BEFORE markdown→HTML conversion, so only our own tags
+ * (<b>, <i>, <s>, <span>) appear in the output — no user-controlled HTML is possible.
+ *
+ * IMPORTANT: Truncate BEFORE calling this (not after), since truncating the output
+ * can break HTML tags. Use: contentToPreviewHtml(truncateGraphemes(contentToPreviewText(text), n))
+ *
+ * Used by: reply context (renderMessage), reply-on-edit listener, chat list (generateChatPreviewText)
+ * Counterpart: strip_content_for_preview() in notification_service.rs (plaintext only, for OS notifications)
+ *
+ * @param {string} content - Raw message content (or pre-cleaned plaintext)
+ * @returns {string} Safe HTML string — assign to .innerHTML
+ */
+function contentToPreviewHtml(content) {
+    let text = contentToPreviewText(content);
+    // HTML-escape to prevent injection — must happen before markdown conversion
+    text = escapeHtml(text);
+    // Convert inline markdown to HTML (order matters: bold before italic to avoid **x** matching **)
+    text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    text = text.replace(/\*(.+?)\*/g, '<i>$1</i>');
+    text = text.replace(/~~(.+?)~~/g, '<s>$1</s>');
+    // Spoilers → non-interactive blur effect (spoiler-preview class prevents click-to-reveal,
+    // unlike .spoiler in full messages which is revealable — see markdown.js click handler)
+    text = text.replace(/\|\|(.+?)\|\|/g, '<span class="spoiler-wrapper"><span class="spoiler spoiler-preview">$1</span></span>');
+    return text;
+}
+
+/**
  * Truncates a string to a maximum number of grapheme clusters (visual characters).
  * Unlike substring(), this properly handles emojis and other multi-byte characters.
  */
@@ -3563,8 +3623,8 @@ function generateChatPreviewText(chat) {
         return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
     }
 
-    // Regular text message — resolve @npub mentions to display names
-    return { text: senderPrefix + resolveMentionText(cLastMsg.content), isTyping: false, needsTwemoji: true };
+    // Regular text message — strip HTML/markdown, render inline formatting, resolve @npub mentions
+    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(cLastMsg.content)), isTyping: false, needsTwemoji: true, isHtml: true };
 }
 
 /**
@@ -3687,7 +3747,11 @@ function renderChat(chat, primaryColor) {
 
     const preview = generateChatPreviewText(chat);
     pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
-    pChatPreview.textContent = preview.text;
+    if (preview.isHtml) {
+        pChatPreview.innerHTML = preview.text;
+    } else {
+        pChatPreview.textContent = preview.text;
+    }
     if (preview.needsTwemoji) twemojify(pChatPreview);
 
     divPreviewContainer.appendChild(pChatPreview);
@@ -3739,7 +3803,11 @@ function updateChatlistPreview(chatId) {
     if (pChatPreview) {
         const preview = generateChatPreviewText(cChat);
         pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
-        pChatPreview.textContent = preview.text;
+        if (preview.isHtml) {
+            pChatPreview.innerHTML = preview.text;
+        } else {
+            pChatPreview.textContent = preview.text;
+        }
         if (preview.needsTwemoji) twemojify(pChatPreview);
     }
 
@@ -4717,8 +4785,8 @@ async function setupRustListeners() {
             for (const replyEl of replyElements) {
                 const replyTextSpan = replyEl.querySelector('.msg-reply-text');
                 if (replyTextSpan && newContent) {
-                    // Truncate using same method as renderMessage
-                    replyTextSpan.textContent = truncateGraphemes(newContent, 50);
+                    // Truncate plaintext first, then convert to HTML (truncating after would break tags)
+                    replyTextSpan.innerHTML = contentToPreviewHtml(truncateGraphemes(contentToPreviewText(newContent), 50));
                     twemojify(replyTextSpan);
                 }
             }
@@ -7345,7 +7413,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 spanRef = document.createElement('span');
                 spanRef.classList.add('msg-reply-text');
                 spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-                spanRef.textContent = truncateGraphemes(replyContent, 50);
+                // Truncate plaintext first, then convert to HTML (truncating after would break tags)
+                spanRef.innerHTML = contentToPreviewHtml(truncateGraphemes(contentToPreviewText(replyContent), 50));
                 twemojify(spanRef);
             } else if (hasAttachment) {
                 // For Attachments, we display an additional icon for quickly inferring the replied-to content

@@ -90,6 +90,115 @@ impl NotificationData {
     }
 }
 
+/// Strip HTML tags and markdown formatting from message content for notification previews.
+/// Returns clean plaintext suitable for OS notifications.
+///
+/// Used at notification call sites in `event_handler.rs` and `subscription_handler.rs`
+/// to clean content *after* mention resolution but *before* passing to OS notification APIs.
+pub fn strip_content_for_preview(text: &str) -> String {
+    // Replace <br> variants with space before tag stripping (so we don't lose line breaks)
+    let text = text.replace("<br>", " ").replace("<br/>", " ").replace("<br />", " ")
+                   .replace("<BR>", " ").replace("<BR/>", " ").replace("<BR />", " ");
+
+    // Strip remaining HTML tags: skip chars between '<' and '>'
+    // Only enter tag mode when '<' is followed by a letter, '/' or '!' to avoid
+    // false positives on math expressions like "3 < 5 > 2"
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '<' && !in_tag {
+            if let Some(&next) = chars.peek() {
+                if next.is_ascii_alphabetic() || next == '/' || next == '!' {
+                    in_tag = true;
+                    continue;
+                }
+            }
+            result.push(ch);
+        } else if ch == '>' && in_tag {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(ch);
+        }
+    }
+
+    let text = result;
+    let mut result = String::with_capacity(text.len());
+
+    // Process line by line for block-level markdown
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Skip code fences
+        if trimmed.starts_with("```") {
+            continue;
+        }
+        // Skip horizontal rules
+        if trimmed.chars().all(|c| c == '-' || c == ' ') && trimmed.matches('-').count() >= 3 {
+            continue;
+        }
+        if trimmed.chars().all(|c| c == '*' || c == ' ') && trimmed.matches('*').count() >= 3 && !trimmed.contains("**") {
+            continue;
+        }
+
+        let mut line_text = trimmed.to_string();
+
+        // Strip header prefixes
+        if line_text.starts_with('#') {
+            line_text = line_text.trim_start_matches('#').trim_start().to_string();
+        }
+        // Strip blockquote prefixes
+        if line_text.starts_with('>') {
+            line_text = line_text[1..].trim_start().to_string();
+        }
+
+        if !result.is_empty() && !line_text.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(&line_text);
+    }
+
+    // Strip inline formatting markers
+    // Bold **text** or __text__
+    let result = result.replace("**", "").replace("__", "");
+    // Strikethrough ~~text~~
+    let result = result.replace("~~", "");
+    // Spoiler ||text|| → replace hidden content with ▮▮▮
+    // split("||") yields: [before, spoiler_content, after, spoiler_content, after, ...]
+    // After consuming the first segment (before any ||), odd segments are spoiler content.
+    let mut final_result = String::with_capacity(result.len());
+    let mut parts = result.split("||");
+    if let Some(first) = parts.next() {
+        final_result.push_str(first);
+    }
+    let mut inside_spoiler = true;
+    for part in parts {
+        if inside_spoiler {
+            final_result.push_str("▮▮▮");
+        } else {
+            final_result.push_str(part);
+        }
+        inside_spoiler = !inside_spoiler;
+    }
+    // Strip inline code backticks
+    let final_result = final_result.replace('`', "");
+
+    // Collapse whitespace and trim
+    let mut collapsed = String::with_capacity(final_result.len());
+    let mut last_was_space = false;
+    for ch in final_result.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                collapsed.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            last_was_space = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
 /// Replace `@npub1...` mentions in message content with `@DisplayName`.
 /// Prioritises nickname > name > leaves raw npub unchanged.
 ///

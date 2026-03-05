@@ -486,8 +486,8 @@ document.addEventListener('click', (e) => {
  */
 document.addEventListener('click', (e) => {
     const spoiler = e.target.closest('.spoiler');
-    if (!spoiler) return;
-    
+    if (!spoiler || spoiler.classList.contains('spoiler-preview')) return;
+
     // Only reveal if not already revealed
     if (!spoiler.classList.contains('revealed')) {
         spoiler.classList.add('revealed');

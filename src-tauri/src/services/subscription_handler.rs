@@ -181,7 +181,9 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                         "Group Chat".to_string()
                                                     };
 
-                                                    let content = crate::services::resolve_mention_display_names(&message.content, &state);
+                                                    let content = crate::services::strip_content_for_preview(
+                                                        &crate::services::resolve_mention_display_names(&message.content, &state)
+                                                    );
 
                                                     (sender, group, av, None::<String>, content)
                                                 };

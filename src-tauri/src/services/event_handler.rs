@@ -430,11 +430,15 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                             } else {
                                 None
                             };
-                            let resolved_content = crate::services::resolve_mention_display_names(&msg.content, &state);
+                            let resolved_content = crate::services::strip_content_for_preview(
+                                &crate::services::resolve_mention_display_names(&msg.content, &state)
+                            );
                             Some((display_name, resolved_content, avatar))
                         }
                         None => {
-                            let resolved_content = crate::services::resolve_mention_display_names(&msg.content, &state);
+                            let resolved_content = crate::services::strip_content_for_preview(
+                                &crate::services::resolve_mention_display_names(&msg.content, &state)
+                            );
                             Some((String::from("New Message"), resolved_content, None))
                         },
                     }

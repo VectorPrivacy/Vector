@@ -6583,6 +6583,11 @@ hr {
   -webkit-box-decoration-break: clone;
 }
 
+/* Non-interactive spoilers in previews (reply context, chat list) */
+.spoiler-preview {
+  cursor: default;
+}
+
 /* Prevent clicks on child elements (mentions, links) until revealed */
 .spoiler:not(.revealed) > * {
   pointer-events: none;
