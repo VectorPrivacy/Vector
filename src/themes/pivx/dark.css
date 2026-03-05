@@ -132,6 +132,15 @@
   background: rgba(179, 89, 252, 0.25);
 }
 
+.emoji-shortcode-selector {
+  background: #1D003F;
+  border-color: #6202D4;
+}
+
+.emoji-shortcode-item.active::before {
+  background: #B359FC;
+}
+
 .input-box {
   background: linear-gradient(90deg, #6202D4, #1D003F);
 }

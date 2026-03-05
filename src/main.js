@@ -10454,8 +10454,9 @@ async function sendMessage(messageText) {
     // Desktop/iOS - traditional keydown approach (not for Android)
     if (platformFeatures.os !== 'android') {
         domChatMessageInput.addEventListener('keydown', async (evt) => {
-            // Skip send if mention selector is consuming this keypress
+            // Skip send if mention/emoji selector is consuming this keypress
             if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
+            if (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen()) return;
             if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
                 evt.preventDefault();
                 await sendMessage(domChatMessageInput.value);
@@ -10510,6 +10511,11 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
     },
     document.getElementById('chat-box')
 ) : null;
+
+// --- Emoji Shortcode Selector ---
+const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
+    ? initEmojiShortcodeSelector(domChatMessageInput, document.getElementById('chat-box'))
+    : null;
 
 /**
  * Immediately reset send/mic buttons to mic state (no animation)
