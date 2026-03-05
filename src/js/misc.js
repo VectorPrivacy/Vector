@@ -929,6 +929,7 @@ function sleep(ms) {
 function cleanTrackingFromUrl(urlString) {
   try {
     const url = new URL(urlString);
+    const normalizedOriginal = url.href;
     const hostname = url.hostname.toLowerCase();
     
     // Common tracking parameters across all sites
@@ -1042,6 +1043,9 @@ function cleanTrackingFromUrl(urlString) {
       url.searchParams.delete(param);
     });
     
+    // Only return the cleaned URL if tracking params were actually removed
+    // This avoids unwanted URL normalization (e.g., adding trailing slashes)
+    if (url.href === normalizedOriginal) return urlString;
     return url.toString();
   } catch (e) {
     // If URL parsing fails, return original

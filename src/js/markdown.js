@@ -59,8 +59,8 @@ function initializeMarked() {
     // Custom renderer for better control
     const renderer = new marked.Renderer();
 
-    // Disable markdown link rendering - Vector handles links separately with linkifyUrls()
-    // This prevents conflicts and allows Vector's link handling (OpenGraph, etc.) to work
+    // Render markdown links as clickable <a> tags
+    // Bare URL autolinks (text === href) are left for linkifyUrls to handle
     renderer.link = function(token) {
         const text = token.text || '';
         const href = token.href || '';
@@ -76,9 +76,18 @@ function initializeMarked() {
             return text;
         }
 
-        // Otherwise it's a markdown link [text](url) - return the markdown syntax
-        // so Vector's linkifyUrls can process it
-        return `[${text}](${href})`;
+        // Markdown link [text](url) - render as clickable <a> tag
+        const safeHref = sanitizeUrl(href);
+        if (!safeHref) {
+            // Unsafe protocol (javascript:, data:, etc.) - render as plain text
+            return encodeAttr(text);
+        }
+
+        // Detect [text](<url>) combo syntax: angle brackets in the raw source suppress previews
+        const noPreview = /\]\(<[^>]+>\)$/.test(token.raw || '');
+        const attrs = noPreview ? ' data-no-preview="true"' : '';
+
+        return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer"${attrs}>${encodeAttr(text)}</a>`;
     };
 
     // Disable markdown image rendering - Vector prefers images as file attachments
@@ -130,6 +139,30 @@ function initializeMarked() {
         </div>`;
     };
 
+    // No-preview autolink extension: <https://url> renders as a link but suppresses OG preview
+    const noPreviewAutolink = {
+        name: 'noPreviewAutolink',
+        level: 'inline',
+        start(src) {
+            return src.match(/<https?:\/\//)?.index;
+        },
+        tokenizer(src) {
+            const match = src.match(/^<(https?:\/\/[^\s>]+)>/);
+            if (match) {
+                return {
+                    type: 'noPreviewAutolink',
+                    raw: match[0],
+                    href: match[1]
+                };
+            }
+        },
+        renderer(token) {
+            const href = sanitizeUrl(token.href);
+            if (!href) return encodeAttr(token.raw);
+            return `<a href="${href}" target="_blank" rel="noopener noreferrer" data-no-preview="true">${encodeAttr(token.href)}</a>`;
+        }
+    };
+
     // Spoiler extension: ||spoiler text||
     const spoilerExtension = {
         name: 'spoiler',
@@ -152,7 +185,7 @@ function initializeMarked() {
         }
     };
 
-    marked.use({ tokenizer, renderer, extensions: [spoilerExtension] });
+    marked.use({ tokenizer, renderer, extensions: [noPreviewAutolink, spoilerExtension] });
 }
 
 /**
@@ -305,13 +338,14 @@ function parseMarkdown(md) {
 
 
     const SAFE_TAGS = [
-        'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em', 'h1', 'h2', 'h3', 'h4',
+        'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em', 'h1', 'h2', 'h3', 'h4',
         'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's', 'span', 'strong', 'sub',
         'summary', 'sup', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'u', 'ul'
     ];
 
     const SAFE_ATTRS = [
-        'class', 'aria-label', 'aria-hidden', 'open', 'data-raw-code', 'data-language', 'title', 'start', 'data-spoiler-text'
+        'class', 'aria-label', 'aria-hidden', 'open', 'data-raw-code', 'data-language', 'title', 'start', 'data-spoiler-text',
+        'href', 'target', 'rel', 'data-no-preview'
     ];
 
     // Whitelist of allowed class prefixes (for highlight.js and our own classes)

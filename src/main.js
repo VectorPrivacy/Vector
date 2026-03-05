@@ -7957,7 +7957,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         } else if (!msg.preview_metadata && msg.content) {
             // Grab the message's metadata (currently, only URLs can have extracted metadata)
             // Skip fetching metadata for direct image URLs (they render inline instead)
-            if (msg.content.includes('https') && !isImageUrl(msg.content)) {
+            // Strip <url> no-preview syntax before checking — only bare URLs trigger previews
+            const contentForPreview = msg.content.replace(/<https?:\/\/[^\s>]+>/g, '');
+            if (contentForPreview.includes('https') && !isImageUrl(msg.content)) {
                 // Pass the chat ID so backend can find both DMs and group chats
                 invoke("fetch_msg_metadata", { chatId: strOpenChat, msgId: msg.id });
             }
