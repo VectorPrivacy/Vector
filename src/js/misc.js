@@ -73,7 +73,8 @@ function detectNostrProfile(text) {
     
     // Pattern for raw npub (bech32 encoded public key)
     // npub1 + 58 characters of bech32 data = 63 total characters
-    const npubPattern = /\b(npub1[a-z0-9]{58})\b/i;
+    // Negative lookbehind for '@' so @npub mentions are handled by renderMentions instead
+    const npubPattern = /(?<!@)\b(npub1[a-z0-9]{58})\b/i;
     
     // Pattern for vectorapp.io profile links
     const profileLinkPattern = /https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i;
@@ -1415,4 +1416,71 @@ function getTextContentWithoutImages(element) {
         }
     }
     return text;
+}
+
+/**
+ * Replace @npub1... patterns in rendered message HTML with highlighted mention spans.
+ * Uses a TreeWalker over text nodes (same approach as linkifyUrls).
+ * @param {HTMLElement} element - The message span to process
+ */
+function renderMentions(element) {
+    const mentionPattern = /@(npub1[a-z0-9]{58})/g;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            // Skip text inside anchors, code blocks, or existing mention spans
+            let parent = node.parentElement;
+            while (parent && parent !== element) {
+                const tag = parent.tagName;
+                if (tag === 'A' || tag === 'CODE' || tag === 'PRE' || parent.classList.contains('mention')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                parent = parent.parentElement;
+            }
+            return NodeFilter.FILTER_ACCEPT;
+        }
+    });
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+    for (const node of textNodes) {
+        if (!mentionPattern.test(node.textContent)) continue;
+        mentionPattern.lastIndex = 0;
+
+        const frag = document.createDocumentFragment();
+        let lastIdx = 0;
+        let match;
+        while ((match = mentionPattern.exec(node.textContent)) !== null) {
+            // Text before this match
+            if (match.index > lastIdx) {
+                frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx, match.index)));
+            }
+            const npub = match[1];
+            const profile = typeof getProfile === 'function' ? getProfile(npub) : null;
+            const displayName = profile?.nickname || profile?.name || npub.substring(0, 12) + '...';
+
+            const span = document.createElement('span');
+            span.className = 'mention';
+            span.setAttribute('data-npub', npub);
+            span.textContent = '@' + displayName;
+            span.addEventListener('click', () => {
+                if (typeof openProfile === 'function') {
+                    const p = typeof getProfile === 'function' ? getProfile(npub) : null;
+                    if (p) {
+                        // Remember current chat so profile Back returns here
+                        if (typeof strOpenChat !== 'undefined' && strOpenChat) {
+                            previousChatBeforeProfile = strOpenChat;
+                        }
+                        openProfile(p);
+                    }
+                }
+            });
+            frag.appendChild(span);
+            lastIdx = match.index + match[0].length;
+        }
+        // Remaining text after last match
+        if (lastIdx < node.textContent.length) {
+            frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx)));
+        }
+        node.parentNode.replaceChild(frag, node);
+    }
 }

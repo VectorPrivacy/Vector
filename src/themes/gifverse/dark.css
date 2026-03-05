@@ -91,6 +91,32 @@
   border-color: #F7FFAE;
 }
 
+.mention-selector {
+  background: #161616;
+  border-color: #F7FFAE;
+}
+
+.mention-item.active::before {
+  background: #F7FFAE;
+}
+
+.mention-selector-header {
+  color: #F7FFAE;
+}
+
+.mention-item-avatar-placeholder {
+  color: #F7FFAE;
+}
+
+.mention {
+  background: rgba(247, 255, 174, 0.12);
+  color: #F7FFAE;
+}
+
+.mention:hover {
+  background: rgba(247, 255, 174, 0.22);
+}
+
 .input-box {
   background: linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE);
 }

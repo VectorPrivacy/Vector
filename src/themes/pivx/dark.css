@@ -114,6 +114,24 @@
   border-color: #6202D4;
 }
 
+.mention-selector {
+  background: #1D003F;
+  border-color: #6202D4;
+}
+
+.mention-item.active::before {
+  background: #B359FC;
+}
+
+.mention {
+  background: rgba(179, 89, 252, 0.15);
+  color: #B359FC;
+}
+
+.mention:hover {
+  background: rgba(179, 89, 252, 0.25);
+}
+
 .input-box {
   background: linear-gradient(90deg, #6202D4, #1D003F);
 }

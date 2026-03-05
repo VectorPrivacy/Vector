@@ -134,8 +134,18 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                             let (was_added, _active_typers, should_notify) = {
                                                 let mut state = crate::STATE.lock().await;
                                                 let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
+                                                // Mentions bypass group mute, but sender's DM mute blocks their pings
+                                                let mentions_me = crate::MY_PUBLIC_KEY.get()
+                                                    .and_then(|pk| pk.to_bech32().ok())
+                                                    .map_or(false, |my_npub| message.content.contains(&format!("@{}", my_npub)));
+                                                let sender_dm_muted = state.get_chat(&sender_npub)
+                                                    .map_or(false, |c| c.muted);
                                                 let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    !chat.muted && !message.mine
+                                                    if mentions_me {
+                                                        !message.mine && !sender_dm_muted
+                                                    } else {
+                                                        !message.mine && !chat.muted
+                                                    }
                                                 } else {
                                                     false
                                                 };
@@ -144,7 +154,7 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                             };
 
                                             if was_added && should_notify {
-                                                let (sender_name, group_name, avatar, group_avatar) = {
+                                                let (sender_name, group_name, avatar, group_avatar, resolved_content) = {
                                                     let state = crate::STATE.lock().await;
 
                                                     let (sender, av) = if let Some(profile) = state.get_profile(&sender_npub) {
@@ -171,7 +181,9 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                         "Group Chat".to_string()
                                                     };
 
-                                                    (sender, group, av, None::<String>)
+                                                    let content = crate::services::resolve_mention_display_names(&message.content, &state);
+
+                                                    (sender, group, av, None::<String>, content)
                                                 };
 
                                                 // Fetch group avatar from MLS metadata (outside STATE lock)
@@ -185,7 +197,7 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                     group_avatar
                                                 };
 
-                                                let notification = NotificationData::group_message(sender_name, group_name, message.content.clone(), avatar, group_avatar, group_id_for_persist.clone());
+                                                let notification = NotificationData::group_message(sender_name, group_name, resolved_content, avatar, group_avatar, group_id_for_persist.clone());
                                                 show_notification_generic(notification);
                                             }
 
@@ -215,8 +227,18 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                             let (was_added, _active_typers, should_notify) = {
                                                 let mut state = crate::STATE.lock().await;
                                                 let added = state.add_message_to_chat(&group_id_for_persist, message.clone());
+                                                // Mentions bypass group mute, but sender's DM mute blocks their pings
+                                                let mentions_me = crate::MY_PUBLIC_KEY.get()
+                                                    .and_then(|pk| pk.to_bech32().ok())
+                                                    .map_or(false, |my_npub| message.content.contains(&format!("@{}", my_npub)));
+                                                let sender_dm_muted = state.get_chat(&sender_npub)
+                                                    .map_or(false, |c| c.muted);
                                                 let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    !chat.muted && !message.mine
+                                                    if mentions_me {
+                                                        !message.mine && !sender_dm_muted
+                                                    } else {
+                                                        !message.mine && !chat.muted
+                                                    }
                                                 } else {
                                                     false
                                                 };

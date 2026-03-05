@@ -9873,3 +9873,115 @@ hr {
   background: rgba(255, 100, 100, 0.3);
   color: #ff6b6b;
 }
+
+/* --- Mention Selector --- */
+.mention-selector {
+  position: fixed;
+  background: #0a0a0a;
+  border: 1px solid var(--icon-color-primary);
+  border-radius: 12px;
+  z-index: 2000;
+  width: calc(100% - 55px);
+  max-width: 340px;
+  overflow: hidden;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  padding: 6px 0;
+  transform: translateY(8px);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.2s ease;
+}
+
+.mention-selector.visible {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mention-selector-header {
+  padding: 6px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--icon-color-primary, #59fcb3);
+  opacity: 0.7;
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+  transition: background-color 0.15s ease;
+  position: relative;
+}
+
+.mention-item:hover,
+.mention-item.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.mention-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--icon-color-primary, #59fcb3);
+}
+
+.mention-item img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.mention-item-avatar-placeholder {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1.5px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--icon-color-primary, #59fcb3);
+  flex-shrink: 0;
+}
+
+.mention-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* Inline mention highlight in rendered messages */
+.mention {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--icon-color-primary, #59fcb3);
+  border-radius: 4px;
+  padding: 1px 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.15s ease;
+}
+
+.mention:hover {
+  background: rgba(255, 255, 255, 0.12);
+  text-decoration: none;
+}

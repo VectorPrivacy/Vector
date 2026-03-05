@@ -90,6 +90,64 @@ impl NotificationData {
     }
 }
 
+/// Replace `@npub1...` mentions in message content with `@DisplayName`.
+/// Prioritises nickname > name > leaves raw npub unchanged.
+///
+/// Operates on `&str` slices to stay UTF-8 safe — npub1 + 58 bech32 chars are
+/// always ASCII, so we anchor on byte offsets only within the ASCII portion and
+/// copy surrounding text (which may contain emoji / multibyte) via `&content[..]`.
+pub fn resolve_mention_display_names(content: &str, state: &crate::state::ChatState) -> String {
+    // npub = "npub1" (5) + 58 bech32 chars = 63 ASCII bytes; with '@' prefix = 64
+    const MENTION_LEN: usize = 64; // '@' + 63
+    const NPUB_LEN: usize = 63;
+    const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut cursor = 0; // byte offset of uncopied content
+
+    // Scan for '@npub1' anchors
+    let mut i = 0;
+    while i + MENTION_LEN <= len {
+        if bytes[i] == b'@' && &bytes[i + 1..i + 6] == b"npub1" {
+            // Validate 58 bech32 chars after 'npub1'
+            let npub_start = i + 1;
+            let npub_end = npub_start + NPUB_LEN;
+            let valid = bytes[npub_start + 5..npub_end]
+                .iter()
+                .all(|b| BECH32.contains(&b.to_ascii_lowercase()));
+            if valid {
+                // Copy any text before this mention verbatim (UTF-8 safe)
+                result.push_str(&content[cursor..i]);
+
+                let npub = &content[npub_start..npub_end];
+                if let Some(profile) = state.get_profile(npub) {
+                    let name = if !profile.nickname.is_empty() {
+                        &profile.nickname
+                    } else if !profile.name.is_empty() {
+                        &profile.name
+                    } else {
+                        npub
+                    };
+                    result.push('@');
+                    result.push_str(name);
+                } else {
+                    result.push_str(&content[i..npub_end]);
+                }
+                cursor = npub_end;
+                i = npub_end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    // Append remaining content after last match (or entire string if no matches)
+    result.push_str(&content[cursor..]);
+    result
+}
+
 /// Show an OS notification with generic notification data
 pub fn show_notification_generic(data: NotificationData) {
     // On Android, always use our native JNI notification path.

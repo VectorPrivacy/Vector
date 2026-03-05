@@ -410,7 +410,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
         if !is_mine && is_new {
             let display_info = {
                 let state = STATE.lock().await;
-                // Check chat-level mute (covers both DM and group mutes)
+                // DM mute blocks everything including mentions
                 let chat_muted = state.get_chat(contact)
                     .map_or(false, |c| c.muted);
                 if chat_muted {
@@ -430,9 +430,13 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
                             } else {
                                 None
                             };
-                            Some((display_name, msg.content.clone(), avatar))
+                            let resolved_content = crate::services::resolve_mention_display_names(&msg.content, &state);
+                            Some((display_name, resolved_content, avatar))
                         }
-                        None => Some((String::from("New Message"), msg.content.clone(), None)),
+                        None => {
+                            let resolved_content = crate::services::resolve_mention_display_names(&msg.content, &state);
+                            Some((String::from("New Message"), resolved_content, None))
+                        },
                     }
                 }
             };
@@ -517,7 +521,7 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
         if !is_mine && is_new {
             let display_info = {
                 let state = STATE.lock().await;
-                // Check chat-level mute (covers both DM and group mutes)
+                // DM mute blocks everything including mentions
                 let chat_muted = state.get_chat(contact)
                     .map_or(false, |c| c.muted);
                 if chat_muted {

@@ -3485,6 +3485,22 @@ function generateTypingText(chat) {
 }
 
 /**
+ * Replace @npub1... mentions in text with display names for previews/notifications
+ * @param {string} text
+ * @returns {string}
+ */
+function resolveMentionText(text) {
+    if (!text) return text;
+    return text.replace(/@(npub1[a-z0-9]{58})/g, (full, npub) => {
+        const profile = getProfile(npub);
+        if (profile) {
+            return '@' + (profile.nickname || profile.name || npub);
+        }
+        return full;
+    });
+}
+
+/**
  * Generate chat preview text for the chatlist
  * @param {Chat} chat - The chat object
  * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
@@ -3547,8 +3563,8 @@ function generateChatPreviewText(chat) {
         return { text: cLastMsg.content, isTyping: false, needsTwemoji: false };
     }
 
-    // Regular text message
-    return { text: senderPrefix + cLastMsg.content, isTyping: false, needsTwemoji: true };
+    // Regular text message — resolve @npub mentions to display names
+    return { text: senderPrefix + resolveMentionText(cLastMsg.content), isTyping: false, needsTwemoji: true };
 }
 
 /**
@@ -7396,6 +7412,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
         // Process inline image URLs (async - will load images in background)
         processInlineImages(spanMessage);
+
+        // Render @npub1... mentions as highlighted display names
+        renderMentions(spanMessage);
     }
 
     // Only process Text Content if any exists
@@ -10312,6 +10331,21 @@ async function sendMessage(messageText) {
         });
     }
 
+    // Replace @DisplayName with @npub1... for any tracked mentions
+    if (mentionCtrl) {
+        const tracked = mentionCtrl.getMentions();
+        // Sort by name length descending so longer names are replaced first,
+        // preventing partial matches (e.g. "Al" matching inside "Alice")
+        const sorted = tracked.slice().sort((a, b) => b.name.length - a.name.length);
+        for (const m of sorted) {
+            // Escape regex special chars in the display name
+            const escaped = m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // Match @Name only at word boundaries to avoid substring collisions
+            const re = new RegExp('(?<=^|\\s)@' + escaped + '(?=\\s|[.,!?;:]|$)', 'g');
+            cleanedText = cleanedText.replace(re, '@' + m.npub);
+        }
+    }
+
     // Check if we're in edit mode
     if (strCurrentEditMessageId) {
         // Don't send if content hasn't changed
@@ -10340,6 +10374,7 @@ async function sendMessage(messageText) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
                     processInlineImages(spanMessage);
+                    renderMentions(spanMessage);
                     twemojify(spanMessage);
                 }
                 // Add edited indicator if not already present
@@ -10410,6 +10445,7 @@ async function sendMessage(messageText) {
         await message(strOpenChat, cleanedText, replyRef);
 
         nLastTypingIndicator = 0;
+        if (mentionCtrl) mentionCtrl.clearMentions();
     } catch(e) {
         console.error('Failed to send message:', e);
     }
@@ -10418,6 +10454,8 @@ async function sendMessage(messageText) {
     // Desktop/iOS - traditional keydown approach (not for Android)
     if (platformFeatures.os !== 'android') {
         domChatMessageInput.addEventListener('keydown', async (evt) => {
+            // Skip send if mention selector is consuming this keypress
+            if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
             if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
                 evt.preventDefault();
                 await sendMessage(domChatMessageInput.value);
@@ -10432,6 +10470,46 @@ async function sendMessage(messageText) {
             }
         });
     }
+
+// --- Mention Selector ---
+const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelector(
+    domChatMessageInput,
+    () => {
+        const chat = arrChats.find(c => c.id === strOpenChat);
+        if (!chat || !chat.participants) return [];
+        // Build a map of each participant's most recent message timestamp
+        const lastActive = {};
+        if (chat.messages) {
+            for (let i = chat.messages.length - 1; i >= 0; i--) {
+                const m = chat.messages[i];
+                const sender = m.npub || (m.mine ? strPubkey : chat.id);
+                if (!lastActive[sender]) lastActive[sender] = m.at || 0;
+            }
+        }
+        const candidates = chat.participants
+            .filter(npub => npub !== strPubkey)
+            .map(npub => {
+                const p = getProfile(npub);
+                return {
+                    npub,
+                    name: p?.nickname || p?.name || npub.substring(0, 12) + '...',
+                    avatarSrc: p ? getProfileAvatarSrc(p) : null,
+                    lastActive: lastActive[npub] || 0
+                };
+            })
+            .sort((a, b) => b.lastActive - a.lastActive);
+        // Disambiguate duplicate display names with a short npub suffix
+        const nameCount = {};
+        for (const c of candidates) nameCount[c.name] = (nameCount[c.name] || 0) + 1;
+        for (const c of candidates) {
+            if (nameCount[c.name] > 1) {
+                c.name = c.name + ' (~' + c.npub.slice(5, 9) + ')';
+            }
+        }
+        return candidates;
+    },
+    document.getElementById('chat-box')
+) : null;
 
 /**
  * Immediately reset send/mic buttons to mic state (no animation)
