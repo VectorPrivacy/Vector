@@ -375,7 +375,15 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             let file_path = if hash_path.exists() {
                                 Some(hash_path)
                             } else {
-                                name_path.filter(|p| p.exists())
+                                // Only reuse a name-based file if its content hash matches
+                                let expected_hash = simd::bytes_to_hex_32(&attachment.id);
+                                name_path.filter(|p| {
+                                    p.exists()
+                                        && std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false)
+                                        && std::fs::read(p)
+                                            .map(|b| util::calculate_file_hash(&b) == expected_hash)
+                                            .unwrap_or(false)
+                                })
                             };
                             if let Some(file_path) = file_path {
                                 // File already exists! Update the state and return success
