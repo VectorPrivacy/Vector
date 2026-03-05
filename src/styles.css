@@ -1643,7 +1643,7 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: var(--accent-transparent);
   gap: 10px;
   width: 100%;
-  max-width: min(470px, calc(100vw - 60px));
+  max-width: min(470px, calc(100vw - 160px));
   min-width: 0;
   box-sizing: border-box;
   overflow: hidden;
