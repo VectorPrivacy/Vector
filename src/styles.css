@@ -1631,8 +1631,10 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 /* Nostr Profile Preview (for shared npubs and profile links) */
-/* Note: This is appended inside <p> elements but browsers move block elements outside <p> tags,
-   so we need explicit width constraints here rather than inheriting from parent */
+/* Browsers hoist this block element out of the parent <p> tag, so it sits
+   directly inside .msg-me/.msg-them with no inherited width constraints from the bubble.
+   We must cap width explicitly using viewport units to prevent overflow.
+   The 160px accounts for chat padding, scrollbar, and message alignment margins. */
 .msg-profile-preview {
   display: flex;
   align-items: center;
@@ -1665,7 +1667,6 @@ body.chat-bg-disabled .chat-messages::before {
 .msg-profile-info {
   display: block;
   min-width: 0;
-  width: 50%;
   line-height: 18px;
   flex: 1;
   overflow: hidden;
