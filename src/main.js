@@ -8066,6 +8066,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         const nReacts = msg.reactions.reduce((a, b) => b.emoji === cReaction.emoji ? a + 1 : a, 0);
         spanReaction = document.createElement('span');
         spanReaction.classList.add('reaction');
+        spanReaction.setAttribute('data-emoji', cReaction.emoji);
+        spanReaction.setAttribute('data-msg-id', msg.id);
+        // Mark if we already reacted with this emoji (prevents duplicate reactions on click)
+        if (msg.reactions.some(r => r.emoji === cReaction.emoji && r.author_id === strPubkey)) {
+            spanReaction.setAttribute('data-reacted', 'true');
+        }
         spanReaction.textContent = `${cReaction.emoji} ${nReacts}`;
         twemojify(spanReaction);
     } else if (!msg.mine) {
@@ -11016,6 +11022,33 @@ document.addEventListener('click', (e) => {
         downloadingAttachmentIds.add(attId);
         return invoke('download_attachment', { npub: e.target.getAttribute('npub'), msgId: e.target.getAttribute('msg'), attachmentId: attId })
             .catch(() => downloadingAttachmentIds.delete(attId));
+    }
+
+    // Click an existing reaction badge to add your own matching reaction (one per emoji per user)
+    const clickedReaction = e.target.closest('.reaction');
+    if (clickedReaction && isReactionLongPressed()) return;
+    if (clickedReaction && !clickedReaction.hasAttribute('data-reacted')) {
+        const emoji = clickedReaction.getAttribute('data-emoji');
+        const msgId = clickedReaction.getAttribute('data-msg-id');
+        if (emoji && msgId) {
+            for (const cChat of arrChats) {
+                const cMsg = cChat.messages.find(a => a.id === msgId);
+                if (!cMsg) continue;
+                // Check if we already reacted with this emoji
+                const alreadyReacted = cMsg.reactions.some(r => r.emoji === emoji && r.author_id === strPubkey);
+                if (alreadyReacted) break;
+                // Mark as reacted to prevent double-clicks before backend re-render
+                clickedReaction.setAttribute('data-reacted', 'true');
+                // Optimistic UI: increment the displayed count
+                const countNode = [...clickedReaction.childNodes].find(n => n.nodeType === Node.TEXT_NODE);
+                if (countNode) {
+                    const count = parseInt(countNode.textContent.trim()) || 1;
+                    countNode.textContent = ` ${count + 1}`;
+                }
+                invoke('react_to_message', { referenceId: msgId, chatId: cChat.id, emoji });
+                break;
+            }
+        }
     }
 
     // Run the emoji panel open/close logic

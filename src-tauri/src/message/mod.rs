@@ -75,12 +75,12 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
                 let client = crate::NOSTR_CLIENT.get().unwrap();
                 let _ = client.gift_wrap(&my_public_key, rumor, []).await;
             });
-            
-            // Add reaction to local state
+
+            // Add reaction to local state (bech32 npub to match DB format and frontend strPubkey)
             let reaction = Reaction {
                 id: rumor_id,
                 reference_id: reference_id.clone(),
-                author_id: my_public_key.to_hex(),
+                author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
                 emoji,
             };
             
@@ -121,12 +121,12 @@ pub async fn react_to_message(reference_id: String, chat_id: String, emoji: Stri
             
             // Send through MLS
             crate::mls::send_mls_message(&chat_id, rumor, None).await?;
-            
-            // Add reaction to local state
+
+            // Add reaction to local state (bech32 npub to match DB format and frontend strPubkey)
             let reaction = Reaction {
                 id: rumor_id,
                 reference_id: reference_id.clone(),
-                author_id: my_public_key.to_hex(),
+                author_id: my_public_key.to_bech32().unwrap_or_else(|_| my_public_key.to_hex()),
                 emoji,
             };
             

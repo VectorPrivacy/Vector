@@ -719,11 +719,11 @@ async fn process_reaction(
         .ok_or("Reaction reference tag has no content")?
         .to_string();
     
-    // Create the reaction
+    // Create the reaction (bech32 npub to match DB format and frontend strPubkey)
     let reaction = Reaction {
         id: rumor.id.to_hex(),
         reference_id,
-        author_id: rumor.pubkey.to_hex(),
+        author_id: rumor.pubkey.to_bech32().unwrap_or_else(|_| rumor.pubkey.to_hex()),
         emoji: rumor.content,
     };
     

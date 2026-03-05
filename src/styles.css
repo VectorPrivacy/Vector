@@ -1917,12 +1917,16 @@ body.chat-bg-disabled .chat-messages::before {
 }
 
 .reaction {
-  cursor: default;
+  cursor: pointer;
   position: relative;
   height: 18px !important;
   width: max-content !important;
   display: flex;
   line-height: normal;
+}
+
+.reaction[data-reacted] {
+  cursor: default;
 }
 
 .reaction .emoji {
@@ -1990,6 +1994,79 @@ body.chat-bg-disabled .chat-messages::before {
 
 .msg-status-hidden {
   display: none;
+}
+
+/* Reaction Details Popup (long-press on reaction badge) */
+.reaction-details-popup {
+  position: fixed;
+  z-index: 1000;
+  background: #1a1a1a;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  padding: 4px 0;
+  min-width: 180px;
+  max-width: 280px;
+  max-height: 250px;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  animation: popupFadeIn 0.2s ease-out;
+}
+
+.reaction-details-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 4px;
+}
+
+.reaction-details-count {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.reaction-details-emoji {
+  display: flex;
+  align-items: center;
+}
+
+.reaction-details-emoji img.emoji {
+  width: 18px;
+  height: 18px;
+}
+
+.reaction-details-label {
+  font-size: 13px;
+  color: rgba(255,255,255,0.45);
+}
+
+.reaction-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  cursor: default;
+}
+
+.reaction-detail-row:hover {
+  background: linear-gradient(90deg, rgba(255,255,255,0.04), transparent);
+}
+
+.reaction-detail-row .reaction-avatar {
+  width: 25px;
+  height: 25px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.reaction-detail-name {
+  font-size: 13px;
+  color: #e0e0e0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Edit History Popup */
