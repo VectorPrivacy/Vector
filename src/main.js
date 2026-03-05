@@ -10718,7 +10718,7 @@ domChatMessageInput.oninput = async () => {
 
         await getCurrentWindow().onFocusChanged(async (event) => {
             if (event.payload && strOpenChat) {
-                const currentChat = getDMChat(strOpenChat);
+                const currentChat = getChat(strOpenChat);
                 if (currentChat && currentChat.messages.length > 0) {
                     // Find the last message from the contact (not from current user)
                     let lastContactMsg = null;
