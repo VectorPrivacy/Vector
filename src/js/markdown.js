@@ -139,6 +139,24 @@ function initializeMarked() {
         </div>`;
     };
 
+    // Escape unknown HTML tags as literal text — prevents DOMPurify from stripping
+    // user content like "<insert text here>" which gets parsed as an unknown HTML element.
+    // Safe tags (b, em, strong, etc.) pass through for user HTML support.
+    const safeHtmlTags = new Set([
+        'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's',
+        'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'th', 'thead',
+        'tr', 'u', 'ul'
+    ]);
+    renderer.html = function(token) {
+        const html = typeof token === 'string' ? token : (token.text || token.raw || '');
+        const tagMatch = html.match(/^<\/?([a-zA-Z][a-zA-Z0-9]*)/);
+        if (tagMatch && safeHtmlTags.has(tagMatch[1].toLowerCase())) {
+            return html; // Known safe tag — pass through
+        }
+        return encodeAttr(html); // Unknown tag — escape as literal text
+    };
+
     // No-preview autolink extension: <https://url> renders as a link but suppresses OG preview
     const noPreviewAutolink = {
         name: 'noPreviewAutolink',

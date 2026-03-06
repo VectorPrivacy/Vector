@@ -1447,8 +1447,8 @@ function contentToPreviewText(content) {
     let text = content;
     // Replace <br> / <br/> with space
     text = text.replace(/<br\s*\/?>/gi, ' ');
-    // Strip all remaining HTML tags (require letter, / or ! after < to avoid matching math like "3 < 5 > 2")
-    text = text.replace(/<\/?[a-zA-Z!][^>]*>/g, '');
+    // Strip known HTML tags only (preserve unknown angle bracket content like "<insert text here>")
+    text = text.replace(/<\/?(a|abbr|b|blockquote|br|code|del|details|div|em|h[1-6]|hr|i|li|ol|p|pre|s|span|strong|sub|summary|sup|table|tbody|td|th|thead|tr|u|ul)(?:\s[^>]*)?\/?>/gi, '');
     // Strip block-level markdown: headers, blockquotes, code fences, horizontal rules
     text = text.replace(/^#{1,6}\s+/gm, '');
     text = text.replace(/^>\s?/gm, '');
