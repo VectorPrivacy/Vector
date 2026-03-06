@@ -6275,6 +6275,14 @@ select:disabled:hover {
   max-height: 100px;
 }
 
+/* Disable resize grip on touch devices (Android WebView renders it as a broken 1px dot) */
+@media (pointer: coarse) {
+  .create-group-description,
+  .publish-app-field textarea {
+    resize: none;
+  }
+}
+
 /* Override: show real checkboxes inside Create Group panel only */
 #create-group input[type="checkbox"] {
   display: inline-block !important;
