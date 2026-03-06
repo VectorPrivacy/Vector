@@ -26,6 +26,7 @@ pub use mls::{
     save_mls_keypackages, load_mls_keypackages,
     save_mls_event_cursors, load_mls_event_cursors,
     save_mls_device_id, load_mls_device_id,
+    load_mls_negentropy_items,
 };
 // Mini Apps database functions
 pub use miniapps::{

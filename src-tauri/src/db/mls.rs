@@ -233,6 +233,39 @@ pub async fn load_mls_event_cursors() -> Result<HashMap<String, crate::mls::Even
     Ok(cursors)
 }
 
+/// Load processed MLS event IDs as (EventId, Timestamp) pairs for NIP-77 negentropy reconciliation.
+/// When `since` is provided, only returns items with `created_at >= since` (pushed to SQL).
+pub fn load_mls_negentropy_items(since: Option<u64>) -> Result<Vec<(nostr_sdk::EventId, nostr_sdk::Timestamp)>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()
+        .map_err(|_| "No DB connection".to_string())?;
+
+    let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(ts) = since {
+        ("SELECT event_id, created_at FROM mls_processed_events WHERE created_at >= ?1",
+         vec![Box::new(ts as i64)])
+    } else {
+        ("SELECT event_id, created_at FROM mls_processed_events",
+         vec![])
+    };
+
+    let mut stmt = conn.prepare(sql)
+        .map_err(|e| format!("Failed to prepare MLS negentropy query: {}", e))?;
+
+    let items: Vec<_> = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        let event_id_hex: String = row.get(0)?;
+        let created_at: i64 = row.get(1)?;
+        Ok((event_id_hex, created_at))
+    }).map_err(|e| format!("Failed to query mls_processed_events: {}", e))?
+    .filter_map(|r| r.ok())
+    .filter_map(|(hex, ts)| {
+        nostr_sdk::EventId::from_hex(&hex).ok().map(|eid| {
+            (eid, nostr_sdk::Timestamp::from_secs(ts as u64))
+        })
+    })
+    .collect();
+
+    Ok(items)
+}
+
 /// Save MLS device ID to SQL database (plaintext)
 pub async fn save_mls_device_id(
     device_id: &str,

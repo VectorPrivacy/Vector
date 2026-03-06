@@ -172,8 +172,8 @@ pub async fn fetch_messages<R: Runtime>(
             }
         }
 
-        // Also sync MLS group messages after single-relay reconnection
-        if let Err(e) = crate::commands::mls::sync_mls_groups_now(None).await {
+        // Also sync MLS group messages after single-relay reconnection (negentropy)
+        if let Err(e) = crate::commands::mls::sync_mls_groups_quick().await {
             eprintln!("[Single-Relay Sync] Failed to sync MLS groups: {}", e);
         }
 
@@ -414,10 +414,15 @@ pub async fn fetch_messages<R: Runtime>(
     } // STATE lock released — no lock held during network operations
 
     // ========================================================================
-    // Negentropy (NIP-77) set reconciliation — single-pass sync
+    // Negentropy (NIP-77) + MLS group sync — run concurrently
     // ========================================================================
 
     let sync_start = std::time::Instant::now();
+
+    // Run DM quick phase and MLS group sync concurrently
+    let (_dm_new_messages, _mls_result) = tokio::join!(
+        // Task A: DM Quick Phase (negentropy reconciliation)
+        async {
     let mut new_messages_count: u32 = 0;
 
     // Load our known wrapper IDs + timestamps for reconciliation fingerprinting
@@ -426,9 +431,9 @@ pub async fn fetch_messages<R: Runtime>(
     println!("[Sync] Loaded {} negentropy items ({} with valid timestamps)",
         negentropy_items.len(), valid_ts_count);
 
-    // Quick phase: last 2 days — tiny item set for near-instant reconciliation.
+    // Quick phase: last 7 days — small item set for near-instant reconciliation.
     // Shows recent offline messages within ~1s. Full archive sync runs in background after.
-    let quick_since = Timestamp::now().as_secs().saturating_sub(2 * 24 * 3600);
+    let quick_since = Timestamp::now().as_secs().saturating_sub(7 * 24 * 3600);
     let quick_items: Vec<(EventId, Timestamp)> = negentropy_items.iter()
         .filter(|(_, ts)| ts.as_secs() >= quick_since)
         .cloned()
@@ -437,7 +442,7 @@ pub async fn fetch_messages<R: Runtime>(
         .pubkey(my_public_key)
         .kind(Kind::GiftWrap)
         .since(Timestamp::from_secs(quick_since));
-    println!("[Sync] Quick phase: {} items (last 2d), full: {}", quick_items.len(), negentropy_items.len());
+    println!("[Sync] Quick phase: {} items (last 7d), full: {}", quick_items.len(), negentropy_items.len());
 
     // Dry-run negentropy reconciliation — exchange fingerprints only
     // This identifies which events the relay has that we don't, without transferring data.
@@ -698,6 +703,17 @@ pub async fn fetch_messages<R: Runtime>(
     // Quick phase done — recent messages visible to user
     println!("[Sync] Quick phase: {:.2?}, {} new messages", sync_start.elapsed(), new_messages_count);
 
+    new_messages_count
+        },
+        // Task B: MLS Quick Sync (batched single-request fetch for recently-active groups)
+        async {
+            let mls_start = std::time::Instant::now();
+            if let Err(e) = crate::commands::mls::sync_mls_groups_quick().await {
+                eprintln!("[Sync] Parallel MLS group sync failed: {}", e);
+            }
+            println!("[Sync] MLS group sync: {:.2?}", mls_start.elapsed());
+        }
+    );
     // ========================================================================
     // Archive sync — full negentropy reconciliation (drives sync UI)
     // ========================================================================

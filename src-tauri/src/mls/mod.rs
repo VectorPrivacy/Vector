@@ -26,7 +26,7 @@ pub use types::{
     record_group_failure, record_group_success,
 };
 pub use messaging::{send_mls_message, emit_group_metadata_event, metadata_to_frontend};
-pub use tracking::{is_mls_event_processed, track_mls_event_processed, cleanup_old_processed_events};
+pub use tracking::{is_mls_event_processed, track_mls_event_processed};
 use types::{has_encoding_tag, KeyPackageIndexEntry};
 use tracking::wipe_legacy_mls_database;
 
@@ -1495,12 +1495,16 @@ impl MlsService {
     ///
     /// This will:
     /// 1. Read cursor from "mls_event_cursors" for the group
-    /// 2. Query TRUSTED_RELAYS for events since cursor
+    /// 2. Query TRUSTED_RELAYS for events since cursor (or use prefetched_events if provided)
     /// 3. Process each event via engine.process_message
     /// 4. Update cursor position
     ///
+    /// When `prefetched_events` is `Some`, skips the relay fetch entirely and processes
+    /// the given events in a single pass (no pagination). Used by batched multi-group sync
+    /// to avoid O(n) relay requests.
+    ///
     /// Returns (processed_events_count, new_messages_count)
-    pub async fn sync_group_since_cursor(&self, group_id: &str) -> Result<(u32, u32), MlsError> {
+    pub async fn sync_group_since_cursor(&self, group_id: &str, prefetched_events: Option<Vec<nostr_sdk::Event>>) -> Result<(u32, u32), MlsError> {
         use nostr_sdk::prelude::*;
 
         if group_id.is_empty() {
@@ -1527,15 +1531,6 @@ impl MlsService {
         let group_display = group_metadata
             .and_then(|m| if m.name.is_empty() { None } else { Some(format!("{} ({})", m.name, &group_id[..8.min(group_id.len())])) })
             .unwrap_or_else(|| group_id[..16.min(group_id.len())].to_string());
-
-        // EventTracker cleanup: Remove old processed events (older than 7 days) to prevent unbounded growth.
-        // Run this once per sync cycle. Errors are logged but don't fail the sync.
-        {
-            let seven_days_secs = 7 * 24 * 60 * 60;
-            if let Err(e) = cleanup_old_processed_events(seven_days_secs) {
-                eprintln!("[MLS] EventTracker cleanup failed: {}", e);
-            }
-        }
 
         // 2) Load last cursor and compute since/until window
         let mut cursors = self.read_event_cursors().await.unwrap_or_default();
@@ -1574,7 +1569,6 @@ impl MlsService {
             group_id.to_string()
         };
         // 2) Build filter for MLS wrapper events (Kind 445) with 'h' tag = gid_for_fetch
-        let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
         let group_id_len = gid_for_fetch.len();
         if group_id_len != 32 && group_id_len != 64 {
             eprintln!(
@@ -1595,6 +1589,10 @@ impl MlsService {
         let mut current_since = since;
         let mut batch_count: usize = 0;
 
+        // If prefetched events were provided, consume them in a single pass (no relay fetch)
+        let had_prefetched = prefetched_events.is_some();
+        let mut prefetched_remaining = prefetched_events;
+
         // Pagination loop: fetch and process in batches until we've caught up
         loop {
             batch_count += 1;
@@ -1603,7 +1601,25 @@ impl MlsService {
                 break;
             }
 
-            // 3) Build filter for this batch
+        // Fetch or consume prefetched events
+        let mut ordered: Vec<nostr_sdk::Event>;
+        let batch_size: usize;
+
+        if let Some(events) = prefetched_remaining.take() {
+            // Pre-fetched path: events already filtered by h-tag at the caller
+            if events.is_empty() {
+                return Ok((0, 0));
+            }
+            ordered = events;
+            ordered.sort_by_key(|e| e.created_at.as_secs());
+            batch_size = ordered.len();
+        } else if had_prefetched {
+            // Prefetched events already consumed in pass 1 — done (single pass, no pagination)
+            break;
+        } else {
+            // Standard relay fetch path
+            let client = NOSTR_CLIENT.get().ok_or(MlsError::NotInitialized)?;
+
             let mut filter = Filter::new()
                 .kind(Kind::MlsGroupMessage)
                 .since(current_since)
@@ -1666,37 +1682,34 @@ impl MlsService {
                 break;
             }
 
-            let batch_size = events.len();
+            batch_size = events.len();
             if batch_count > 1 {
                 println!("[MLS] Pagination batch {} for group {}: {} events", batch_count, gid_for_fetch, batch_size);
             }
 
-        // 4) Sort by created_at ascending to ensure deterministic processing
-        let mut ordered: Vec<nostr_sdk::Event> = events.into_iter().collect();
-        ordered.sort_by_key(|e| e.created_at.as_secs());
+            ordered = events.into_iter().collect();
+            ordered.sort_by_key(|e| e.created_at.as_secs());
 
-        // 4b) If we had to fall back to a broad fetch (no 'h' tag in the filter),
-        // first, log observed 'h' tags to verify encoding; then, ONLY IF we positively match, filter.
-        if used_fallback {
-            // Attempt to filter only if we observe any h tag; otherwise, do not filter and rely on engine.
-            let saw_any_h = ordered
-                .iter()
-                .any(|ev| ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))).is_some());
-            if saw_any_h {
-                // Try to narrow to our group via h-tag; if none match, proceed unfiltered and let engine decide.
-                let original = ordered.clone();
-                let filtered: Vec<nostr_sdk::Event> = original
-                    .into_iter()
-                    .filter(|ev| {
-                        match ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
-                            Some(tag) => tag.content().map(|s| s == gid_for_fetch).unwrap_or(false),
-                            None => false,
-                        }
-                    })
-                    .collect();
-
-                if !filtered.is_empty() {
-                    ordered = filtered;
+            // If we had to fall back to a broad fetch (no 'h' tag in the filter),
+            // filter to our group's h-tag to avoid cross-contamination
+            if used_fallback {
+                let saw_any_h = ordered
+                    .iter()
+                    .any(|ev| ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))).is_some());
+                if saw_any_h {
+                    let original = ordered.clone();
+                    let filtered: Vec<nostr_sdk::Event> = original
+                        .into_iter()
+                        .filter(|ev| {
+                            match ev.tags.find(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))) {
+                                Some(tag) => tag.content().map(|s| s == gid_for_fetch).unwrap_or(false),
+                                None => false,
+                            }
+                        })
+                        .collect();
+                    if !filtered.is_empty() {
+                        ordered = filtered;
+                    }
                 }
             }
         }

@@ -51,29 +51,6 @@ pub fn track_mls_event_processed(
     Ok(())
 }
 
-/// Cleanup old processed events to prevent unbounded table growth.
-/// Removes events older than the specified age (in seconds).
-/// Call this periodically (e.g., once per sync cycle).
-pub fn cleanup_old_processed_events(
-    max_age_secs: u64,
-) -> Result<usize, String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-
-    let cutoff = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .saturating_sub(max_age_secs);
-
-    let deleted = conn.execute(
-        "DELETE FROM mls_processed_events WHERE processed_at < ?1",
-        rusqlite::params![cutoff as i64],
-    ).map_err(|e| format!("Failed to cleanup old events: {}", e))?;
-
-
-    Ok(deleted)
-}
-
 /// Message record for persisting decrypted MLS messages
 
 /// TODO(v0.3.2+): Remove this function and its call site in `new_persistent()` once
