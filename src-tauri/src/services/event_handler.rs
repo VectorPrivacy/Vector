@@ -101,6 +101,13 @@ pub(crate) async fn handle_event_with_context(
             // Persist wrapper for negentropy reconciliation (so next boot knows we've seen this event)
             let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
 
+            // Skip NIP-17 group messages (multiple p-tags) — Vector uses MLS for group chats.
+            // Without this, multi-recipient messages appear incorrectly in random DM chats.
+            // The wrapper is already persisted above for negentropy reconciliation.
+            if rumor.tags.public_keys().count() > 1 {
+                return false;
+            }
+
             // Special handling for MLS Welcomes (not processed by rumor processor)
             if rumor.kind == Kind::MlsWelcome {
                 // Dedup: the same welcome can arrive from multiple relays simultaneously
@@ -735,6 +742,14 @@ pub(crate) async fn prepare_event(
     } else {
         sender.to_bech32().unwrap_or_default()
     };
+
+    // Skip NIP-17 group messages (multiple p-tags) — Vector uses MLS for group chats.
+    // Still save wrapper for negentropy so we don't re-fetch this event.
+    if rumor.tags.public_keys().count() > 1 {
+        return PreparedEvent::ErrorSkip {
+            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+        };
+    }
 
     // MLS Welcome — defer full processing to sequential phase
     if rumor.kind == Kind::MlsWelcome {
