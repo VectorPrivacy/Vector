@@ -156,6 +156,7 @@ const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-t
 const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
+const domSettingsNotifMuteEveryoneInfo = document.getElementById('notif-mute-everyone-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
 const domSettingsChangePinLabel = document.getElementById('change-pin-label');
@@ -3137,7 +3138,11 @@ async function refreshGroupMemberCount(groupId) {
             chat.metadata.custom_fields = chat.metadata.custom_fields || {};
             chat.metadata.custom_fields.member_count = result.members.length;
             chat.participants = result.members.slice();
-            
+            // Cache admin list for @everyone and admin checks
+            if (result.admins) {
+                chat.metadata.admins = result.admins.slice();
+            }
+
             console.log(`[MLS] Updated member count for ${groupId.substring(0, 8)}: ${result.members.length} members`);
         }
         if (strOpenChat === groupId) {
@@ -7483,7 +7488,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         processInlineImages(spanMessage);
 
         // Render @npub1... mentions as highlighted display names
-        renderMentions(spanMessage);
+        const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
+        const senderIsAdmin = isGroupChat && currentChat?.metadata?.admins?.includes(senderNpub);
+        renderMentions(spanMessage, senderIsAdmin);
     }
 
     // Only process Text Content if any exists
@@ -10451,7 +10458,9 @@ async function sendMessage(messageText) {
                     spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
                     linkifyUrls(spanMessage);
                     processInlineImages(spanMessage);
-                    renderMentions(spanMessage);
+                    const editChat = arrChats.find(c => c.id === strOpenChat);
+                    const editIsAdmin = editChat?.chat_type === 'MlsGroup' && editChat?.metadata?.admins?.includes(strPubkey);
+                    renderMentions(spanMessage, editIsAdmin);
                     twemojify(spanMessage);
                 }
                 // Add edited indicator if not already present
@@ -10576,6 +10585,15 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
                 };
             })
             .sort((a, b) => b.lastActive - a.lastActive);
+        // Add @everyone option for group admins (lowest priority)
+        if (chat.chat_type === 'MlsGroup' && chat.metadata?.admins?.includes(strPubkey)) {
+            candidates.push({
+                npub: 'everyone',
+                name: 'everyone',
+                avatarSrc: null,
+                lastActive: -1
+            });
+        }
         // Disambiguate duplicate display names with a short npub suffix
         const nameCount = {};
         for (const c of candidates) nameCount[c.name] = (nameCount[c.name] || 0) + 1;
@@ -10824,6 +10842,11 @@ domChatMessageInput.oninput = async () => {
         e.preventDefault();
         e.stopPropagation();
         popupConfirm('Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.', true);
+    };
+    domSettingsNotifMuteEveryoneInfo.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        popupConfirm('Mute @everyone Pings', 'When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.', true);
     };
 
     domSettingsExportAccountInfo.onclick = (e) => {

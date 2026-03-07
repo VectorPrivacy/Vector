@@ -27,6 +27,7 @@ pub use mls::{
     save_mls_event_cursors, load_mls_event_cursors,
     save_mls_device_id, load_mls_device_id,
     load_mls_negentropy_items,
+    get_mls_engine_group_id,
 };
 // Mini Apps database functions
 pub use miniapps::{

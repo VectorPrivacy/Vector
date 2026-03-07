@@ -129,6 +129,18 @@ pub async fn load_mls_groups() -> Result<Vec<crate::mls::MlsGroupMetadata>, Stri
     Ok(groups)
 }
 
+/// Look up the engine_group_id for a given wire group_id (sync, for use in spawn_blocking)
+pub fn get_mls_engine_group_id(group_id: &str) -> Result<Option<String>, String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT engine_group_id FROM mls_groups WHERE group_id = ?1")
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+    let result = stmt
+        .query_row([group_id], |row| row.get::<_, String>(0))
+        .ok();
+    Ok(result)
+}
+
 /// Save MLS keypackage index to SQL database (plaintext)
 pub async fn save_mls_keypackages(
     packages: &[serde_json::Value],

@@ -926,7 +926,7 @@
           <hr class="divider settings-divider">
           <h2>Notifications</h2>
 
-          <div class="form-group">
+          <div class="form-group" id="notif-mute-group">
             <label class="toggle-container">
               <span><span id="notif-mute-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Mute All Notification Sounds</span>
               <input type="checkbox" id="notif-mute-toggle">
@@ -934,7 +934,15 @@
             </label>
           </div>
 
-          <div class="form-group" style="display: flex; align-items: center; gap: 5px;">
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="notif-mute-everyone-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Mute @Everyone Pings</span>
+              <input type="checkbox" id="notif-mute-everyone-toggle">
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group" id="notif-sound-group" style="display: flex; align-items: center; gap: 5px;">
             <div class="select-container" style="margin: 0; flex: 1">
               <select id="notif-sound-select" style="margin-bottom: 0 !important;">
                 <option value="default">Prélude</option>
@@ -957,6 +965,7 @@
               </div>
             </div>
           </div>
+
         </div>
 
         <!-- Battery & Background Service Section (mobile only) -->

@@ -1445,6 +1445,36 @@ let currentNotificationSettings = null;
 let customSoundPath = null;
 
 /**
+ * Initialize the Mute @Everyone toggle (works on both desktop and mobile).
+ * On desktop, piggybacks on currentNotificationSettings + saveCurrentNotificationSettings.
+ * On mobile, reads/writes the DB setting directly via set_sql_setting/get_sql_setting.
+ */
+async function initMuteEveryoneSetting(useDirect = false) {
+    const muteEveryoneToggle = document.getElementById('notif-mute-everyone-toggle');
+    if (!muteEveryoneToggle) return;
+    if (useDirect) {
+        // Mobile: read/write the DB setting directly
+        try {
+            const val = await invoke('get_sql_setting', { key: 'notif_mute_everyone' });
+            muteEveryoneToggle.checked = val === 'true';
+        } catch (_) {
+            muteEveryoneToggle.checked = false;
+        }
+        muteEveryoneToggle.addEventListener('change', async (e) => {
+            await invoke('set_sql_setting', { key: 'notif_mute_everyone', value: e.target.checked ? 'true' : 'false' });
+        });
+    } else {
+        // Desktop: use NotificationSettings
+        muteEveryoneToggle.checked = currentNotificationSettings?.mute_everyone || false;
+        muteEveryoneToggle.addEventListener('change', async (e) => {
+            if (!currentNotificationSettings) currentNotificationSettings = {};
+            currentNotificationSettings.mute_everyone = e.target.checked;
+            await saveCurrentNotificationSettings();
+        });
+    }
+}
+
+/**
  * Initialize notification sound settings UI
  */
 async function initNotificationSettings() {
@@ -1453,7 +1483,7 @@ async function initNotificationSettings() {
         currentNotificationSettings = await loadNotificationSettings();
     } catch (e) {
         console.error('Failed to load notification settings:', e);
-        currentNotificationSettings = { global_mute: false, sound: { type: 'Default' } };
+        currentNotificationSettings = { global_mute: false, sound: { type: 'Default' }, mute_everyone: false };
     }
 
     const muteToggle = document.getElementById('notif-mute-toggle');
@@ -1480,6 +1510,9 @@ async function initNotificationSettings() {
     } else {
         soundSelect.value = 'default';
     }
+
+    // Mute @everyone toggle (shared with mobile via initMuteEveryoneSetting)
+    await initMuteEveryoneSetting();
 
     // Mute toggle handler
     muteToggle.addEventListener('change', async (e) => {
@@ -1637,13 +1670,19 @@ async function initSettings() {
         });
     }
 
-    // Initialize notification sound settings (desktop only)
+    // Initialize notification sound settings (desktop only) + @everyone toggle (all platforms)
     if (platformFeatures.notification_sounds) {
         await initNotificationSettings();
     } else {
-        // Hide notification sounds section on mobile
-        const notifSection = document.getElementById('settings-notifications');
-        if (notifSection) notifSection.style.display = 'none';
+        // Mobile: hide desktop-only notification controls, but keep the section visible
+        const muteGroup = document.getElementById('notif-mute-group');
+        const soundGroup = document.getElementById('notif-sound-group');
+        const customGroup = document.getElementById('notif-custom-group');
+        if (muteGroup) muteGroup.style.display = 'none';
+        if (soundGroup) soundGroup.style.display = 'none';
+        if (customGroup) customGroup.style.display = 'none';
+        // Init @everyone toggle on mobile (direct DB read/write since notification commands are desktop-only)
+        await initMuteEveryoneSetting(true);
     }
 
     // Set up clear storage button

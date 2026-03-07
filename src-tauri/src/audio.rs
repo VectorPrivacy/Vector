@@ -258,6 +258,8 @@ pub struct NotificationSettings {
     pub global_mute: bool,
     /// The selected notification sound
     pub sound: NotificationSound,
+    /// Whether @everyone pings are muted
+    pub mute_everyone: bool,
 }
 
 #[cfg(desktop)]
@@ -266,6 +268,7 @@ impl Default for NotificationSettings {
         Self {
             global_mute: false,
             sound: NotificationSound::Default,
+            mute_everyone: false,
         }
     }
 }
@@ -993,7 +996,12 @@ fn load_notification_settings_internal<R: Runtime>(
         _ => NotificationSound::Default,
     };
 
-    Ok(NotificationSettings { global_mute, sound })
+    let mute_everyone = match db::get_sql_setting("notif_mute_everyone".to_string()) {
+        Ok(Some(val)) => val == "true",
+        _ => false,
+    };
+
+    Ok(NotificationSettings { global_mute, sound, mute_everyone })
 }
 
 #[cfg(desktop)]
@@ -1012,6 +1020,12 @@ fn save_notification_settings_internal<R: Runtime>(
         serialize_notification_sound(&settings.sound),
     )
     .map_err(|e| format!("Failed to save sound: {}", e))?;
+
+    db::set_sql_setting(
+        "notif_mute_everyone".to_string(),
+        settings.mute_everyone.to_string(),
+    )
+    .map_err(|e| format!("Failed to save mute_everyone: {}", e))?;
 
     Ok(())
 }

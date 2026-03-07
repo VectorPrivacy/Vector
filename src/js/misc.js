@@ -1427,7 +1427,7 @@ function getTextContentWithoutImages(element) {
  * Uses a TreeWalker over text nodes (same approach as linkifyUrls).
  * @param {HTMLElement} element - The message span to process
  */
-function renderMentions(element) {
+function renderMentions(element, senderIsAdmin = false) {
     const mentionPattern = /@(npub1[a-z0-9]{58})/g;
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
@@ -1486,5 +1486,48 @@ function renderMentions(element) {
             frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx)));
         }
         node.parentNode.replaceChild(frag, node);
+    }
+
+    // Second pass: render @everyone for admin senders in group chats
+    if (senderIsAdmin) {
+        const everyonePattern = /@everyone\b/g;
+        const walker2 = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                let parent = node.parentElement;
+                while (parent && parent !== element) {
+                    const tag = parent.tagName;
+                    if (tag === 'A' || tag === 'CODE' || tag === 'PRE' || parent.classList.contains('mention')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    parent = parent.parentElement;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+        const textNodes2 = [];
+        while (walker2.nextNode()) textNodes2.push(walker2.currentNode);
+
+        for (const node of textNodes2) {
+            if (!everyonePattern.test(node.textContent)) continue;
+            everyonePattern.lastIndex = 0;
+
+            const frag = document.createDocumentFragment();
+            let lastIdx = 0;
+            let match;
+            while ((match = everyonePattern.exec(node.textContent)) !== null) {
+                if (match.index > lastIdx) {
+                    frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx, match.index)));
+                }
+                const span = document.createElement('span');
+                span.className = 'mention mention-everyone';
+                span.textContent = '@everyone';
+                frag.appendChild(span);
+                lastIdx = match.index + match[0].length;
+            }
+            if (lastIdx < node.textContent.length) {
+                frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx)));
+            }
+            node.parentNode.replaceChild(frag, node);
+        }
     }
 }

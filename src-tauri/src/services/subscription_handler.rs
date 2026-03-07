@@ -111,6 +111,27 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
 
                         let is_mine = !my_npub.is_empty() && msg.pubkey.to_bech32().ok().as_deref() == Some(my_npub.as_str());
 
+                        // Extract admin npubs from engine only when message contains @everyone
+                        let group_admin_npubs: Vec<String> = if msg.content.contains("@everyone") {
+                            let eid = db::get_mls_engine_group_id(&group_id_for_persist)
+                                .ok().flatten();
+                            if let Some(eid) = eid {
+                                engine.get_groups().ok().and_then(|groups| {
+                                    groups.into_iter().find(|g| {
+                                        crate::util::bytes_to_hex_string(g.mls_group_id.as_slice()) == eid
+                                    }).map(|g| {
+                                        g.admin_pubkeys.iter()
+                                            .filter_map(|pk| pk.to_bech32().ok())
+                                            .collect()
+                                    })
+                                }).unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
                         let processed = rt.block_on(async {
                             use crate::rumor::{process_rumor, RumorContext, ConversationType, RumorProcessingResult};
 
@@ -138,10 +159,16 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                 let mentions_me = crate::MY_PUBLIC_KEY.get()
                                                     .and_then(|pk| pk.to_bech32().ok())
                                                     .map_or(false, |my_npub| message.content.contains(&format!("@{}", my_npub)));
+                                                // @everyone ping: any admin, respects user opt-out
+                                                let everyone_ping = if message.content.contains("@everyone") {
+                                                    group_admin_npubs.contains(&sender_npub)
+                                                        && !db::get_sql_setting("notif_mute_everyone".to_string())
+                                                            .ok().flatten().map_or(false, |v| v == "true")
+                                                } else { false };
                                                 let sender_dm_muted = state.get_chat(&sender_npub)
                                                     .map_or(false, |c| c.muted);
                                                 let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    if mentions_me {
+                                                    if mentions_me || everyone_ping {
                                                         !message.mine && !sender_dm_muted
                                                     } else {
                                                         !message.mine && !chat.muted
@@ -233,10 +260,16 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                 let mentions_me = crate::MY_PUBLIC_KEY.get()
                                                     .and_then(|pk| pk.to_bech32().ok())
                                                     .map_or(false, |my_npub| message.content.contains(&format!("@{}", my_npub)));
+                                                // @everyone ping: any admin, respects user opt-out
+                                                let everyone_ping = if message.content.contains("@everyone") {
+                                                    group_admin_npubs.contains(&sender_npub)
+                                                        && !db::get_sql_setting("notif_mute_everyone".to_string())
+                                                            .ok().flatten().map_or(false, |v| v == "true")
+                                                } else { false };
                                                 let sender_dm_muted = state.get_chat(&sender_npub)
                                                     .map_or(false, |c| c.muted);
                                                 let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    if mentions_me {
+                                                    if mentions_me || everyone_ping {
                                                         !message.mine && !sender_dm_muted
                                                     } else {
                                                         !message.mine && !chat.muted
