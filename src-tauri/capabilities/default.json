@@ -31,7 +31,6 @@
     "allow-toggle-chat-mute",
     "allow-message",
     "allow-paste-message",
-    "allow-voice-message",
     "allow-file-message",
     "allow-file-message-compressed",
     "allow-forward-attachment",
@@ -218,6 +217,15 @@
     "allow-is-directory",
     "allow-zip-directory",
     "allow-cleanup-zip",
-    "allow-update-group-metadata"
+    "allow-update-group-metadata",
+    "allow-audio-probe",
+    "allow-audio-load",
+    "allow-audio-play",
+    "allow-audio-pause",
+    "allow-audio-seek",
+    "allow-audio-stop",
+    "allow-audio-stop-all",
+    "allow-audio-set-volume",
+    "allow-send-recording"
   ]
 }

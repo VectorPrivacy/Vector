@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-audio-probe"
+description = "Enables the audio_probe command without any pre-configured scope."
+commands.allow = ["audio_probe"]
+
+[[permission]]
+identifier = "deny-audio-probe"
+description = "Denies the audio_probe command without any pre-configured scope."
+commands.deny = ["audio_probe"]

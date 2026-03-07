@@ -7560,7 +7560,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
 
                 pMessage.appendChild(imgContainer);
-                } else if (platformFeatures.os !== 'linux' && ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg', 'opus'].includes(cAttachment.extension)) {
+                } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
                 // Audio
                 handleAudioAttachment(cAttachment, pMessage, msg);
                 } else if (platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
@@ -8693,6 +8693,9 @@ function openNewChat() {
  * Closes the current chat, taking the user back to the chat list
  */
 async function closeChat() {
+    // Stop all audio engine playback (voice messages, music, etc.)
+    invoke('audio_stop_all').catch(() => {});
+
     // Clear any auto-scroll timer
     if (chatOpenAutoScrollTimer) {
         clearTimeout(chatOpenAutoScrollTimer);
@@ -10676,16 +10679,15 @@ domChatMessageInput.oninput = async () => {
     domChatMessageInputSend.onclick = async () => {
         // Check if we're in voice preview mode first
         if (recorder.isInPreview) {
-            const wavData = recorder.send();
-            if (wavData && strOpenChat) {
+            const sent = recorder.send();
+            if (sent && strOpenChat) {
                 domChatMessageInput.setAttribute('placeholder', 'Sending...');
                 try {
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
-                    await invoke('voice_message', {
+                    await invoke('send_recording', {
                         receiver: strOpenChat,
-                        repliedTo: strReplyRef,
-                        bytes: wavData
+                        repliedTo: strReplyRef
                     });
                 } catch (e) {
                     popupConfirm(e, '', true, '', 'vector_warning.svg');

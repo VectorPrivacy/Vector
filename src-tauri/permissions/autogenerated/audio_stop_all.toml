@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-audio-stop-all"
+description = "Enables the audio_stop_all command without any pre-configured scope."
+commands.allow = ["audio_stop_all"]
+
+[[permission]]
+identifier = "deny-audio-stop-all"
+description = "Denies the audio_stop_all command without any pre-configured scope."
+commands.deny = ["audio_stop_all"]

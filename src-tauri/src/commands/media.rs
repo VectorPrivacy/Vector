@@ -37,9 +37,10 @@ pub async fn start_recording() -> Result<(), String> {
     AudioRecorder::global().start()
 }
 
-/// Stop audio recording and return the recorded audio data
+/// Stop audio recording and load into audio engine for preview.
+/// Returns source ID, duration, and precomputed waveform data.
 #[tauri::command]
-pub async fn stop_recording() -> Result<Vec<u8>, String> {
+pub async fn stop_recording() -> Result<crate::audio_engine::AudioLoadResult, String> {
     AudioRecorder::global().stop()
 }
 

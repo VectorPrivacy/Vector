@@ -26,3 +26,4 @@ pub mod messaging;
 pub mod mls;
 pub mod realtime;
 pub mod encryption;
+pub mod audio;

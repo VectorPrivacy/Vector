@@ -33,7 +33,6 @@ fn main() {
             // Message commands
             "message",
             "paste_message",
-            "voice_message",
             "file_message",
             "file_message_compressed",
             "get_file_info",
@@ -193,6 +192,16 @@ fn main() {
             "run_maintenance",
             // Debug commands (conditional)
             "debug_hot_reload_sync",
+            // Audio engine commands
+            "audio_probe",
+            "audio_load",
+            "audio_play",
+            "audio_pause",
+            "audio_seek",
+            "audio_stop",
+            "audio_stop_all",
+            "audio_set_volume",
+            "send_recording",
             // Encryption toggle commands
             "get_encryption_status",
             "disable_encryption",

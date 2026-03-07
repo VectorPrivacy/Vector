@@ -12,7 +12,7 @@ use std::fs::File;
 
 // Desktop-only imports for notification sound playback
 #[cfg(desktop)]
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
 #[cfg(desktop)]
 use serde::{Deserialize, Serialize};
 #[cfg(desktop)]
@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 #[cfg(desktop)]
 use std::path::PathBuf;
 #[cfg(desktop)]
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(desktop)]
 use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(desktop)]
@@ -449,13 +449,17 @@ fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
                     // Check if exact integer decimation to target rate is possible
                     // (e.g., 48kHz→16kHz = 3:1, 32kHz→16kHz = 2:1)
                     // If so, skip fused path — regular SIMD + integer decimation in caller is faster
-                    let exact_ratio = sample_rate / target_rate;
-                    let is_exact = exact_ratio >= 2 && exact_ratio * target_rate == sample_rate;
+                    let (_exact_ratio, is_exact) = if target_rate > 0 {
+                        let r = sample_rate / target_rate;
+                        (r, r >= 2 && r * target_rate == sample_rate)
+                    } else {
+                        (0, false)
+                    };
 
                     // SIMD fused: stereo→mono + 2:1 decimation in one pass
                     // Only when exact integer decimation isn't possible (e.g., 44.1kHz→22.05kHz)
                     // Halves the output allocation (2.3MB vs 4.6MB) — fewer page faults
-                    if ch == 2 && !is_exact && sample_rate / target_rate >= 2 {
+                    if ch == 2 && !is_exact && target_rate > 0 && sample_rate / target_rate >= 2 {
                         let output_rate = sample_rate / 2;
                         return Some((crate::simd::audio::i16_le_stereo_decimate2_mono(data), output_rate));
                     }
@@ -712,88 +716,24 @@ fn decode_audio_file_raw(path: &Path) -> Result<(Vec<f32>, u32, usize), String> 
 }
 
 // ============================================================================
+// Public wrappers for audio_engine
+// ============================================================================
+
+/// WAV fast path for the audio engine (no target_rate decimation, just decode)
+pub fn wav_fast_decode_for_engine(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
+    wav_fast_decode(bytes, 0) // target_rate=0 disables fused decimation path
+}
+
+
+// ============================================================================
 // Audio Playback (desktop only)
 // ============================================================================
 
 #[cfg(desktop)]
-/// Play pre-resampled audio samples (already at device sample rate)
-/// Uses Arc to allow sharing cached samples without copying
-fn play_samples_cached(samples: Arc<Vec<f32>>, device_sample_rate: u32) -> Result<(), String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("No output device found")?;
-
-    // Get the device's preferred channel count - Windows WASAPI often requires stereo
-    let default_config = device
-        .default_output_config()
-        .map_err(|e| format!("Failed to get output config: {}", e))?;
-    let device_channels = default_config.channels();
-
-    let config = cpal::StreamConfig {
-        channels: device_channels,
-        sample_rate: cpal::SampleRate(device_sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
-
-    // Shared state for playback
-    let position = Arc::new(AtomicUsize::new(0));
-    let finished = Arc::new(AtomicBool::new(false));
-
-    let samples_clone = Arc::clone(&samples);
-    let position_clone = Arc::clone(&position);
-    let finished_clone = Arc::clone(&finished);
-
-    let stream = device
-        .build_output_stream(
-            &config,
-            move |data: &mut [f32], _: &_| {
-                let samples = &*samples_clone;
-                let mut pos = position_clone.load(Ordering::Relaxed);
-                let channels = device_channels as usize;
-
-                // Fill buffer, duplicating mono sample to all channels (e.g., stereo)
-                for frame in data.chunks_mut(channels) {
-                    if pos < samples.len() {
-                        let sample = samples[pos];
-                        for channel_sample in frame.iter_mut() {
-                            *channel_sample = sample;
-                        }
-                        pos += 1;
-                    } else {
-                        for channel_sample in frame.iter_mut() {
-                            *channel_sample = 0.0;
-                        }
-                        finished_clone.store(true, Ordering::Relaxed);
-                    }
-                }
-
-                position_clone.store(pos, Ordering::Relaxed);
-            },
-            |err| eprintln!("Audio playback error: {}", err),
-            None,
-        )
-        .map_err(|e| format!("Failed to build output stream: {}", e))?;
-
-    stream
-        .play()
-        .map_err(|e| format!("Failed to start playback: {}", e))?;
-
-    // Wait for playback to finish (with timeout)
-    let start = Instant::now();
-    let max_duration = Duration::from_secs(10); // 10 second max
-
-    while !finished.load(Ordering::Relaxed) {
-        if start.elapsed() > max_duration {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    // Small delay to ensure audio buffer is flushed
-    std::thread::sleep(Duration::from_millis(100));
-
-    Ok(())
+/// Play pre-resampled audio samples through the unified audio engine.
+/// Routes notification sounds as oneshots through the persistent cpal stream.
+fn play_samples_cached(samples: Arc<Vec<f32>>, _device_sample_rate: u32) -> Result<(), String> {
+    crate::audio_engine::AudioEngine::get()?.play_oneshot((*samples).clone())
 }
 
 #[cfg(desktop)]

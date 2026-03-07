@@ -72,6 +72,9 @@ mod pivx;
 // Audio processing: resampling (all platforms) + notification playback (desktop only)
 mod audio;
 
+// Unified audio engine: persistent cpal stream, mixing, precomputed FFT waveform
+mod audio_engine;
+
 // Shared utilities module (error handling, image encoding, state access)
 mod shared;
 
@@ -225,6 +228,9 @@ pub fn run() {
             // Set as our accessible static app handle
             TAURI_APP.set(handle.clone()).unwrap();
 
+            // Initialize the unified audio engine (persistent cpal output stream)
+            audio_engine::AudioEngine::init();
+
             // Start localhost media server on Android (provides Range request support for
             // <video> and <audio> elements that asset:// doesn't support)
             #[cfg(target_os = "android")]
@@ -304,7 +310,6 @@ pub fn run() {
             profile::set_nickname,
             message::message,
             message::paste_message,
-            message::voice_message,
             message::file_message,
             message::file_message_compressed,
             message::forward_attachment,
@@ -469,6 +474,16 @@ pub fn run() {
             pivx::pivx_get_price,
             pivx::pivx_set_preferred_currency,
             pivx::pivx_get_preferred_currency,
+            // Audio engine commands (all platforms)
+            commands::audio::audio_probe,
+            commands::audio::audio_load,
+            commands::audio::audio_play,
+            commands::audio::audio_pause,
+            commands::audio::audio_seek,
+            commands::audio::audio_stop,
+            commands::audio::audio_stop_all,
+            commands::audio::audio_set_volume,
+            commands::audio::send_recording,
             // Notification sound commands (desktop only)
             #[cfg(desktop)]
             audio::get_notification_settings,

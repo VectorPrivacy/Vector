@@ -57,7 +57,8 @@ fast-thumbhash = "0.2"
 base64-simd = "0.8"
 cpal = "0.16.0"
 hound = "3.5.1"
-symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm"] }
+symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis"] }
+rustfft = "6.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Pin OpenMLS crypto deps to versions MDK was tested with (newer versions pull broken sha3/digest pre-release chain)
 openmls_rust_crypto = "=0.5.0"

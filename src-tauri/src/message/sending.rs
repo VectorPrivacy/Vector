@@ -1244,7 +1244,6 @@ pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, r
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
-#[tauri::command]
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {
     // Generate an Attachment File
     let attachment_file = AttachmentFile {

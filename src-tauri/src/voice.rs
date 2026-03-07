@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use crate::audio;
+use crate::audio_engine::{AudioEngine, AudioLoadResult};
 
 static RECORDER: OnceLock<AudioRecorder> = OnceLock::new();
 
@@ -64,11 +65,41 @@ fn trim_silence_i16(samples: &[i16], sample_rate: u32) -> Vec<i16> {
 // Standard sample rate for voice recording with good quality-to-size ratio
 const TARGET_SAMPLE_RATE: u32 = 22000;
 
+/// Stashed recording data for send_recording command
+pub struct PendingRecording {
+    pub samples: Vec<i16>,   // i16 samples for WAV encoding on send
+    pub source_id: u32,      // engine source ID for preview playback
+}
+
+impl PendingRecording {
+    /// Encode stashed i16 samples into a WAV byte buffer
+    pub fn encode_wav(&self) -> Result<Vec<u8>, String> {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: TARGET_SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buffer), spec)
+                .map_err(|e| e.to_string())?;
+            for &sample in self.samples.iter() {
+                writer.write_sample(sample).map_err(|e| e.to_string())?;
+            }
+            writer.finalize().map_err(|e| e.to_string())?;
+        }
+        Ok(buffer)
+    }
+}
+
 pub struct AudioRecorder {
     recording: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<i16>>>,
     device_sample_rate: Arc<Mutex<u32>>,
     stop_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    pending: Mutex<Option<PendingRecording>>,
 }
 
 impl AudioRecorder {
@@ -82,6 +113,7 @@ impl AudioRecorder {
             samples: Arc::new(Mutex::new(Vec::new())),
             device_sample_rate: Arc::new(Mutex::new(48000)),
             stop_tx: Arc::new(Mutex::new(None)),
+            pending: Mutex::new(None),
         }
     }
 
@@ -147,14 +179,16 @@ impl AudioRecorder {
         Ok(())
     }
 
-    pub fn stop(&self) -> Result<Vec<u8>, String> {
+    /// Stop recording and load the result into the audio engine for preview.
+    /// Returns AudioLoadResult with source ID and precomputed waveform.
+    pub fn stop(&self) -> Result<AudioLoadResult, String> {
         if let Some(tx) = self.stop_tx.lock().unwrap().take() {
             let _ = tx.send(());
         }
 
         self.recording.store(false, Ordering::SeqCst);
 
-        let wav_buffer = {
+        let resampled_samples = {
             let samples = self.samples.lock().map_err(|_| "Failed to get samples")?;
 
             if samples.is_empty() {
@@ -163,30 +197,30 @@ impl AudioRecorder {
 
             let device_sample_rate = *self.device_sample_rate.lock().unwrap();
             let resampled_samples = audio::resample_mono_i16(&samples, device_sample_rate, TARGET_SAMPLE_RATE)?;
-            let resampled_samples = trim_silence_i16(&resampled_samples, TARGET_SAMPLE_RATE);
-
-            let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: TARGET_SAMPLE_RATE,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-
-            let mut buffer: Vec<u8> = Vec::new();
-            {
-                let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buffer), spec)
-                    .map_err(|e| e.to_string())?;
-
-                for &sample in resampled_samples.iter() {
-                    writer.write_sample(sample).map_err(|e| e.to_string())?;
-                }
-                writer.finalize().map_err(|e| e.to_string())?;
-            }
-            buffer
+            trim_silence_i16(&resampled_samples, TARGET_SAMPLE_RATE)
         };
 
         self.samples.lock().unwrap().clear();
 
-        Ok(wav_buffer)
+        // Convert i16 samples to f32 for engine
+        let f32_samples: Vec<f32> = resampled_samples.iter()
+            .map(|&s| s as f32 / 32767.0)
+            .collect();
+
+        // Add to engine as paused source + precompute FFT waveform
+        let result = AudioEngine::get()?.load_from_samples(f32_samples, TARGET_SAMPLE_RATE)?;
+
+        // Stash i16 samples for WAV encoding on send
+        *self.pending.lock().unwrap() = Some(PendingRecording {
+            samples: resampled_samples,
+            source_id: result.id,
+        });
+
+        Ok(result)
+    }
+
+    /// Take the pending recording (consumes it). Used by send_recording command.
+    pub fn take_pending(&self) -> Option<PendingRecording> {
+        self.pending.lock().unwrap().take()
     }
 }
