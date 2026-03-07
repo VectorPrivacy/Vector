@@ -1357,6 +1357,9 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
     playBtn.classList.add('audio-play-btn');
     playBtn.innerHTML = '<span class="icon icon-play"></span>';
 
+    // Detect voice messages vs uploaded audio files
+    const isVoiceMessage = !cAttachment.name;
+
     // Disable playback for pending (uploading) messages
     const isPending = msg.mine && msg.pending;
     if (isPending) {
@@ -1496,7 +1499,19 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
 
     // Assemble custom player
     customPlayer.appendChild(playBtn);
-    customPlayer.appendChild(waveform);
+    if (!isVoiceMessage && cAttachment.name) {
+        const waveformWrapper = document.createElement('div');
+        waveformWrapper.classList.add('audio-waveform-wrapper');
+        const filenameLabel = document.createElement('div');
+        filenameLabel.classList.add('audio-filename', 'cutoff');
+        filenameLabel.textContent = cAttachment.name;
+        filenameLabel.title = cAttachment.name;
+        waveformWrapper.appendChild(filenameLabel);
+        waveformWrapper.appendChild(waveform);
+        customPlayer.appendChild(waveformWrapper);
+    } else {
+        customPlayer.appendChild(waveform);
+    }
     customPlayer.appendChild(timeDisplay);
 
     audioContainer.appendChild(customPlayer);
@@ -1724,8 +1739,8 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
 
     }
 
-    // Only add transcription UI for supported formats and platforms
-    if (platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
+    // Only add transcription UI for voice messages with supported formats
+    if (isVoiceMessage && platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
         // Display the Transcribe button
         customPlayer.appendChild(transcribeBtn);
 

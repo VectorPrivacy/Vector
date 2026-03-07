@@ -4971,7 +4971,8 @@ select:disabled:hover {
     border-radius: 12px;
     position: relative;
     overflow: hidden;
-    min-width: 280px;
+    width: min(500px, calc(100vw - 100px));
+    box-sizing: border-box;
     transition: all 0.3s ease;
 }
 
@@ -5078,6 +5079,25 @@ select:disabled:hover {
     position: relative;
     flex: 1;
     cursor: pointer;
+}
+
+.audio-waveform-wrapper {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    width: 0;
+    gap: 2px;
+    margin: 0 8px;
+}
+
+.audio-waveform-wrapper .audio-waveform {
+    margin: 0;
+}
+
+.audio-filename {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.8);
+    line-height: 1;
 }
 
 /* Visual feedback on hover */
