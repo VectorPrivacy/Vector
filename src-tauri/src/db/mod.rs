@@ -62,7 +62,7 @@ pub use attachments::{
 pub use events::{
     save_event, save_pivx_payment_event, save_system_event_by_id,
     get_pivx_payments_for_chat, get_system_events_for_chat,
-    save_reaction_event, save_edit_event, event_exists,
+    save_reaction_event, save_edit_event, event_exists, delete_event,
     populate_reply_context, get_message_views, get_all_chats_last_messages,
 };
 

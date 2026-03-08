@@ -4905,9 +4905,9 @@ async function setupRustListeners() {
         }
     });
 
-    // Listen for message removal (e.g., cancelled upload)
+    // Listen for message removal (e.g., cancelled upload, deleted failed message)
     _on('message_removed', (evt) => {
-        const { id, chat_id } = evt.payload;
+        const { id, chat_id, reason } = evt.payload;
         const cChat = getChat(chat_id);
         if (!cChat) return;
 
@@ -4949,8 +4949,10 @@ async function setupRustListeners() {
             }
         }
 
-        // Show toast
-        showToast('Upload Cancelled');
+        // Show toast only for cancelled uploads (not for deleted failed messages)
+        if (reason !== 'deleted') {
+            showToast('Upload Cancelled');
+        }
 
         // Update chatlist preview if the last message was removed
         updateChatlistPreview(chat_id);
@@ -7287,6 +7289,46 @@ function startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sen
     }
 }
 
+async function retryFailedMessage(msg) {
+    const chatId = strOpenChat;
+    if (!chatId) return;
+    try {
+        await invoke('delete_failed_message', { messageId: msg.id });
+    } catch (e) {
+        console.error('Failed to delete failed message for retry:', e);
+        return;
+    }
+    // Re-send: use file_message if attachment exists, otherwise text message
+    try {
+        if (msg.attachments && msg.attachments.length > 0) {
+            const att = msg.attachments[0];
+            await invoke('file_message', {
+                receiver: chatId,
+                repliedTo: msg.replied_to || '',
+                filePath: att.path,
+                nameOverride: att.name || ''
+            });
+        } else {
+            await invoke('message', {
+                receiver: chatId,
+                content: msg.content,
+                repliedTo: msg.replied_to || '',
+                file: null
+            });
+        }
+    } catch (e) {
+        console.error('Retry send failed:', e);
+    }
+}
+
+async function deleteFailedMessage(msgId) {
+    try {
+        await invoke('delete_failed_message', { messageId: msgId });
+    } catch (e) {
+        console.error('Failed to delete failed message:', e);
+    }
+}
+
 /**
  * Convert a Message in to a rendered HTML Element
  * @param {Message} msg - the Message to be converted
@@ -8401,7 +8443,18 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         statusEl.classList.add('msg-status');
         if (msg.failed) {
             statusEl.classList.add('msg-status-failed');
-            statusEl.textContent = 'Failed';
+            statusEl.textContent = 'Failed · ';
+            const retryBtn = document.createElement('span');
+            retryBtn.className = 'msg-failed-action';
+            retryBtn.textContent = 'Retry';
+            retryBtn.onclick = (e) => { e.stopPropagation(); retryFailedMessage(msg); };
+            statusEl.appendChild(retryBtn);
+            statusEl.appendChild(document.createTextNode(' · '));
+            const deleteBtn = document.createElement('span');
+            deleteBtn.className = 'msg-failed-action';
+            deleteBtn.textContent = 'Delete';
+            deleteBtn.onclick = (e) => { e.stopPropagation(); deleteFailedMessage(msg.id); };
+            statusEl.appendChild(deleteBtn);
         } else if (msg.pending) {
             statusEl.textContent = 'Sending...';
         } else {

@@ -386,6 +386,16 @@ pub async fn save_edit_event(
     save_event(&event).await
 }
 
+/// Delete an event from the events table by ID
+pub async fn delete_event(event_id: &str) -> Result<(), String> {
+    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM events WHERE id = ?1",
+        rusqlite::params![event_id],
+    ).map_err(|e| format!("Failed to delete event: {}", e))?;
+    Ok(())
+}
+
 /// Check if an event exists in the events table
 pub fn event_exists(
     event_id: &str,

@@ -66,6 +66,44 @@ async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
     }
 }
 
+/// Delete a failed message from state and database.
+/// Only allows deletion of messages with `failed == true` (security guard).
+#[tauri::command]
+pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
+    // Verify failed flag and remove in a single lock to prevent TOCTOU races
+    let removed = {
+        let mut state = STATE.lock().await;
+        let is_failed = state.find_message(&message_id)
+            .map(|(_, msg)| msg.failed)
+            .unwrap_or(false);
+        if !is_failed {
+            None
+        } else {
+            state.remove_message(&message_id)
+        }
+    };
+
+    if let Some((chat_id, _)) = removed {
+        // Delete from database
+        if let Err(e) = crate::db::delete_event(&message_id).await {
+            eprintln!("[delete_failed_message] DB delete failed: {}", e);
+        }
+
+        // Emit message_removed event so frontend removes the DOM element
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_removed", serde_json::json!({
+                "id": &message_id,
+                "chat_id": &chat_id,
+                "reason": "deleted"
+            })).ok();
+        }
+    } else {
+        return Err("Message is not failed or does not exist".to_string());
+    }
+
+    Ok(())
+}
+
 /// Cancel an in-progress file upload by setting its cancel flag.
 /// Removes the pending message from state and emits `message_removed`.
 #[tauri::command]
@@ -97,7 +135,8 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_removed", serde_json::json!({
                 "id": &pending_id,
-                "chat_id": &chat_id
+                "chat_id": &chat_id,
+                "reason": "cancelled"
             })).ok();
         }
     }

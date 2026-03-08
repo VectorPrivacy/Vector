@@ -1992,6 +1992,17 @@ body.chat-bg-disabled .chat-messages::before {
   color: #ff6464;
 }
 
+.msg-failed-action {
+  cursor: pointer;
+  text-decoration: underline;
+  opacity: 0.85;
+  pointer-events: auto;
+}
+
+.msg-failed-action:hover {
+  opacity: 1;
+}
+
 .msg-status-hidden {
   display: none;
 }

@@ -309,6 +309,7 @@ pub fn run() {
             chat::toggle_chat_mute,
             profile::set_nickname,
             message::message,
+            message::delete_failed_message,
             message::cancel_upload,
             message::paste_message,
             message::file_message,

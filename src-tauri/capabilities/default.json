@@ -31,6 +31,7 @@
     "allow-toggle-chat-mute",
     "allow-message",
     "allow-cancel-upload",
+    "allow-delete-failed-message",
     "allow-paste-message",
     "allow-file-message",
     "allow-file-message-compressed",
