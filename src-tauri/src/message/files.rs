@@ -103,6 +103,38 @@ pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
     Ok(encoded.to_data_uri())
 }
 
+/// Generate a thumbhash data-URL from an image.
+/// Tries the JS byte cache first (Android / clipboard paste), then falls back to
+/// reading `file_path` from disk (desktop).
+#[tauri::command]
+pub fn generate_thumbhash_for_preview(file_path: String) -> Result<String, String> {
+    // 1. Try the JS byte cache
+    let img = {
+        let cache = JS_FILE_CACHE.lock().unwrap();
+        if let Some((bytes, _, _)) = cache.as_ref() {
+            ::image::load_from_memory(bytes).ok()
+        } else {
+            None
+        }
+    };
+
+    // 2. Fall back to reading from file path
+    let img = match img {
+        Some(i) => i,
+        None => {
+            if file_path.is_empty() {
+                return Err("No cached file and no file path provided".into());
+            }
+            ::image::open(&file_path)
+                .map_err(|e| format!("Failed to open image: {}", e))?
+        }
+    };
+
+    let thumbhash = util::generate_thumbhash_from_image(&img)
+        .ok_or_else(|| "Failed to generate thumbhash".to_string())?;
+    Ok(util::decode_thumbhash_to_base64(&thumbhash))
+}
+
 /// Start compression of cached bytes
 #[tauri::command]
 pub async fn start_cached_bytes_compression() -> Result<(), String> {

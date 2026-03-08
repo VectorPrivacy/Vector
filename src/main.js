@@ -7027,6 +7027,10 @@ function createFileBoxSpinner(target, opts = {}) {
     return spinner;
 }
 
+function isSpoilerAttachment(attachment) {
+    return attachment.name && attachment.name.toUpperCase().startsWith('SPOILER_');
+}
+
 function createFileBox(cAttachment, state = 'downloaded') {
     const ext = (cAttachment.extension || '').toLowerCase();
     const fileTypeInfo = getFileTypeInfo(ext);
@@ -7743,41 +7747,119 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 const imgContainer = document.createElement('div');
                 imgContainer.style.position = 'relative';
                 imgContainer.style.display = 'inline-block';
-                
-                const imgPreview = document.createElement('img');
-                // SVGs need a specific width to scale properly
-                if (cAttachment.extension === 'svg') {
-                    imgPreview.style.width = `25vw`;
+
+                if (isSpoilerAttachment(cAttachment)) {
+                    // Spoiler image: show thumbhash with overlay, click to reveal
+                    const spoilerNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+                    invoke('generate_thumbhash_preview', { npub: spoilerNpub, msgId: msg.id })
+                        .then(base64Image => {
+                            const imgPreview = document.createElement('img');
+                            imgPreview.className = 'spoiler-img';
+                            if (cAttachment.img_meta) {
+                                imgPreview.width = cAttachment.img_meta.width;
+                                imgPreview.height = cAttachment.img_meta.height;
+                                imgPreview.style.aspectRatio = `${cAttachment.img_meta.width} / ${cAttachment.img_meta.height}`;
+                            }
+                            imgPreview.style.maxWidth = `100%`;
+                            imgPreview.style.height = `auto`;
+                            imgPreview.style.borderRadius = `8px`;
+                            imgPreview.src = base64Image;
+                            imgPreview.addEventListener('load', () => {
+                                if (proceduralScrollState.isLoadingOlderMessages) {
+                                    correctScrollForMediaLoad();
+                                } else {
+                                    softChatScroll();
+                                }
+                            }, { once: true });
+                            imgContainer.appendChild(imgPreview);
+
+                            if (msg.mine && msg.pending) {
+                                // Uploading: just show spinner, no spoiler label
+                                imgPreview.style.opacity = '0.25';
+                                const uploadOverlay = document.createElement('div');
+                                uploadOverlay.className = 'attachment-progress-overlay';
+                                const spinner = document.createElement('div');
+                                spinner.className = 'miniapp-downloading-spinner';
+                                spinner.id = msg.id + '_file';
+                                spinner.style.width = '48px';
+                                spinner.style.height = '48px';
+                                uploadOverlay.appendChild(spinner);
+                                const cancelBtn = document.createElement('div');
+                                cancelBtn.className = 'upload-cancel-btn';
+                                cancelBtn.addEventListener('click', (e) => {
+                                    e.stopPropagation();
+                                    invoke('cancel_upload', { pendingId: msg.id });
+                                });
+                                uploadOverlay.appendChild(cancelBtn);
+                                imgContainer.appendChild(uploadOverlay);
+                            } else {
+                                // Not uploading: show spoiler overlay with click to reveal
+                                const overlay = document.createElement('div');
+                                overlay.className = 'spoiler-overlay';
+                                overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
+                                imgContainer.appendChild(overlay);
+                                overlay.addEventListener('click', () => {
+                                    const realUrl = convertFileSrc(cAttachment.path);
+                                    imgPreview.src = realUrl;
+                                    imgPreview.classList.remove('spoiler-img');
+                                    imgPreview.style.aspectRatio = '';
+                                    overlay.remove();
+                                    attachImagePreview(imgPreview);
+                                }, { once: true });
+                            }
+                        })
+                        .catch(() => {
+                            // Thumbhash failed — show revealed image directly
+                            const imgPreview = document.createElement('img');
+                            imgPreview.style.maxWidth = `100%`;
+                            imgPreview.style.height = `auto`;
+                            imgPreview.style.borderRadius = `8px`;
+                            imgPreview.src = assetUrl;
+                            attachImagePreview(imgPreview);
+                            imgContainer.appendChild(imgPreview);
+                        });
+
+                    attachFileExtBadge(null, imgContainer, cAttachment.extension);
+                    // Mark so the post-loop upload spinner code knows an async spinner is coming
+                    if (msg.mine && msg.pending) imgContainer.dataset.spoilerUpload = '1';
+                    pMessage.appendChild(imgContainer);
                 } else {
-                    imgPreview.style.maxWidth = `100%`;
-                }
-                imgPreview.style.height = `auto`;
-                imgPreview.style.borderRadius = `8px`;
-                imgPreview.src = assetUrl;
-
-                // Add event listener for auto-scrolling
-                imgPreview.addEventListener('load', () => {
-                    // Auto-scroll if within 100ms of chat opening
-                    if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
-                        scrollToBottom(domChatMessages, false);
-                    } else if (proceduralScrollState.isLoadingOlderMessages) {
-                        // Correct scroll position for media loading during procedural scroll
-                        correctScrollForMediaLoad();
+                    // Normal (non-spoiler) image
+                    const imgPreview = document.createElement('img');
+                    // SVGs need a specific width to scale properly
+                    if (cAttachment.extension === 'svg') {
+                        imgPreview.style.width = `25vw`;
                     } else {
-                        // Normal soft scroll for layout adjustments
-                        softChatScroll();
+                        imgPreview.style.maxWidth = `100%`;
                     }
-                }, { once: true });
+                    imgPreview.style.height = `auto`;
+                    imgPreview.style.borderRadius = `8px`;
+                    imgPreview.src = assetUrl;
 
-                // Attach image preview handler
-                attachImagePreview(imgPreview);
+                    // Add event listener for auto-scrolling
+                    imgPreview.addEventListener('load', () => {
+                        // Auto-scroll if within 100ms of chat opening
+                        if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+                            scrollToBottom(domChatMessages, false);
+                        } else if (proceduralScrollState.isLoadingOlderMessages) {
+                            // Correct scroll position for media loading during procedural scroll
+                            correctScrollForMediaLoad();
+                        } else {
+                            // Normal soft scroll for layout adjustments
+                            softChatScroll();
+                        }
+                    }, { once: true });
 
-                imgContainer.appendChild(imgPreview);
+                    // Attach image preview handler
+                    attachImagePreview(imgPreview);
 
-                // Add file extension badge (handles size checking automatically)
-                attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
+                    imgContainer.appendChild(imgPreview);
 
-                pMessage.appendChild(imgContainer);
+                    // Add file extension badge (handles size checking automatically)
+                    attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
+
+                    pMessage.appendChild(imgContainer);
+                }
                 } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
                 // Audio
                 handleAudioAttachment(cAttachment, pMessage, msg);
@@ -7954,7 +8036,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 }
 
                 // Fallback: dim the whole attachment if no spinner was added
-                if (!hasSpinner && pMessage.lastElementChild) {
+                // Skip if a spoiler upload is handling its own spinner asynchronously
+                const hasSpoilerUpload = pMessage.querySelector('[data-spoiler-upload]');
+                if (!hasSpinner && !hasSpoilerUpload && pMessage.lastElementChild) {
                     pMessage.lastElementChild.style.opacity = 0.25;
                 }
             }
@@ -8000,7 +8084,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         dlSpinner.style.height = '48px';
                         dlOverlay.appendChild(dlSpinner);
                         container.appendChild(dlOverlay);
-                        
+
                         pMessage.appendChild(container);
                     })
                     .catch(() => {
@@ -8094,7 +8178,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                                 adOverlay.appendChild(adSpinner);
                                 container.appendChild(adOverlay);
                             }
-                            
+
                             pMessage.appendChild(container);
                         })
                         .catch(() => {

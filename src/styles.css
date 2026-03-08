@@ -112,6 +112,14 @@
   mask-image: url("./icons/mic-off.svg");
 }
 
+.icon-eye {
+  mask-image: url("./icons/eye.svg");
+}
+
+.icon-eye-off {
+  mask-image: url("./icons/eye-off.svg");
+}
+
 .icon-video {
   mask-image: url("./icons/video.svg");
 }
@@ -6871,6 +6879,7 @@ hr {
   overflow: hidden;
   border-radius: 8px;
   flex-shrink: 1;
+  position: relative;
 }
 
 .file-preview-image {
@@ -6878,6 +6887,80 @@ hr {
   max-height: 40vh;
   object-fit: contain;
   border-radius: 8px;
+}
+
+/* Spoiler toggle button in file preview overlay */
+.spoiler-toggle {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  transition: background 0.15s;
+  padding: 0;
+}
+.spoiler-toggle:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+.spoiler-toggle .icon {
+  position: static;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  background-color: white;
+}
+
+/* Fallback blur if thumbhash generation fails in file preview */
+.file-preview-image.spoiler-blur {
+  filter: blur(20px);
+  transform: scale(1.1);
+}
+
+/* Spoiler overlay on message images (click to reveal) */
+.spoiler-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 2;
+  gap: 4px;
+  border-radius: 8px;
+}
+.spoiler-overlay .spoiler-label {
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.spoiler-overlay .icon {
+  position: static;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  background-color: white;
+  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+}
+
+/* Spoiler image in message — blurred thumbhash (no extra blur needed, thumbhash is inherently low-res) */
+.spoiler-img {
+  display: block;
+  transition: opacity 0.3s;
 }
 
 .file-preview-video-container {

@@ -41,6 +41,7 @@
     "allow-cache-file-bytes",
     "allow-get-cached-file-info",
     "allow-get-cached-image-preview",
+    "allow-generate-thumbhash-for-preview",
     "allow-start-cached-bytes-compression",
     "allow-get-cached-bytes-compression-status",
     "allow-send-cached-file",

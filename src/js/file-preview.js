@@ -22,6 +22,7 @@ let pendingZipPath = null; // For folder zip: temp zip path for cleanup
 let zipInProgress = false; // For folder zip: compression in progress
 let pendingZipUnlisten = null; // For folder zip: unlisten function for zip_progress events
 let filePreviewGeneration = 0; // Guards against setTimeout race on rapid close+reopen
+let pendingSpoiler = false; // Spoiler mode: prepends SPOILER_ to filename on send
 
 // Image extensions supported by the image crate
 const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
@@ -43,6 +44,158 @@ function validateImageSrc(src) {
     }
     console.warn('[file-preview] Rejected invalid image src:', src.substring(0, 50));
     return null;
+}
+
+/**
+ * Create and append a spoiler toggle button to an image container in the file preview.
+ * Toggles pendingSpoiler state and swaps the preview between real image and thumbhash.
+ * @param {HTMLElement} container - The .file-preview-image-container element
+ */
+function appendSpoilerToggle(container, autoActivate = false) {
+    const btn = document.createElement('button');
+    btn.className = 'spoiler-toggle';
+    btn.type = 'button';
+    // Cache the original src so we can restore on toggle-off
+    let originalSrc = null;
+    let thumbhashSrc = null;
+
+    function activateSpoiler() {
+        const icon = btn.querySelector('.icon');
+        const img = container.querySelector('.file-preview-image');
+        icon.className = 'icon icon-eye-off';
+        btn.title = 'Remove spoiler';
+        if (img) {
+            originalSrc = img.src;
+            // Freeze rendered size so thumbhash displays at same dimensions
+            const rect = img.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                img.style.width = rect.width + 'px';
+                img.style.height = rect.height + 'px';
+            } else {
+                // Image not painted yet (auto-activate) — use natural dimensions
+                img.width = img.naturalWidth;
+                img.height = img.naturalHeight;
+                img.style.height = 'auto';
+            }
+            img.style.maxWidth = 'none';
+            img.style.maxHeight = 'none';
+            img.style.objectFit = 'fill';
+            if (thumbhashSrc) {
+                img.src = thumbhashSrc;
+            } else {
+                invoke('generate_thumbhash_for_preview', { filePath: pendingFile || '' })
+                    .then(dataUrl => {
+                        thumbhashSrc = dataUrl;
+                        if (pendingSpoiler) img.src = dataUrl;
+                    })
+                    .catch(() => {
+                        img.classList.add('spoiler-blur');
+                    });
+            }
+            // Add "Spoiler" label overlay if the image is large enough
+            const w = rect.width || img.naturalWidth;
+            const h = rect.height || img.naturalHeight;
+            if (w >= 80 && h >= 60) {
+                const overlay = document.createElement('div');
+                overlay.className = 'spoiler-overlay';
+                overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
+                container.appendChild(overlay);
+            }
+        }
+    }
+
+    function deactivateSpoiler() {
+        const icon = btn.querySelector('.icon');
+        const img = container.querySelector('.file-preview-image');
+        icon.className = 'icon icon-eye';
+        btn.title = 'Mark as spoiler';
+        if (img) {
+            img.classList.remove('spoiler-blur');
+            if (originalSrc) img.src = originalSrc;
+            img.style.width = '';
+            img.style.height = '';
+            img.style.maxWidth = '';
+            img.style.maxHeight = '';
+            img.style.objectFit = '';
+            img.removeAttribute('width');
+            img.removeAttribute('height');
+        }
+        const overlay = container.querySelector('.spoiler-overlay');
+        if (overlay) overlay.remove();
+    }
+
+    btn.title = autoActivate ? 'Remove spoiler' : 'Mark as spoiler';
+    btn.innerHTML = autoActivate
+        ? '<span class="icon icon-eye-off"></span>'
+        : '<span class="icon icon-eye"></span>';
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pendingSpoiler = !pendingSpoiler;
+        if (pendingSpoiler) {
+            activateSpoiler();
+        } else {
+            deactivateSpoiler();
+        }
+    });
+    container.appendChild(btn);
+
+    // Auto-activate: set state and fetch thumbhash immediately
+    if (autoActivate) {
+        pendingSpoiler = true;
+        const img = container.querySelector('.file-preview-image');
+        if (img) {
+            originalSrc = img.src;
+            invoke('generate_thumbhash_for_preview', { filePath: pendingFile || '' })
+                .then(dataUrl => {
+                    thumbhashSrc = dataUrl;
+                    if (pendingSpoiler) {
+                        // Set dimensions from current state
+                        const rect = img.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            img.style.width = rect.width + 'px';
+                            img.style.height = rect.height + 'px';
+                        } else {
+                            img.width = img.naturalWidth;
+                            img.height = img.naturalHeight;
+                            img.style.height = 'auto';
+                        }
+                        img.style.maxWidth = 'none';
+                        img.style.maxHeight = 'none';
+                        img.style.objectFit = 'fill';
+                        img.src = dataUrl;
+                        // Add overlay
+                        const w = rect.width || img.naturalWidth;
+                        const h = rect.height || img.naturalHeight;
+                        if (w >= 80 && h >= 60 && !container.querySelector('.spoiler-overlay')) {
+                            const overlay = document.createElement('div');
+                            overlay.className = 'spoiler-overlay';
+                            overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
+                            container.appendChild(overlay);
+                        }
+                    }
+                })
+                .catch(() => {
+                    if (pendingSpoiler) img.classList.add('spoiler-blur');
+                });
+        }
+    }
+}
+
+/**
+ * Detect SPOILER_ prefix in filename, auto-enable pendingSpoiler, and return the clean name.
+ * @param {string} name - The filename (with or without extension)
+ * @returns {string} The filename with SPOILER_ prefix stripped (if present)
+ */
+function detectAndStripSpoilerPrefix(name) {
+    const stem = getFileStem(name);
+    if (stem.toUpperCase().startsWith('SPOILER_')) {
+        pendingSpoiler = true;
+        const cleanStem = stem.substring(8); // strip "SPOILER_"
+        const ext = getFileExtension(name);
+        return ext ? `${cleanStem}.${ext}` : cleanStem;
+    }
+    return name;
 }
 
 /**
@@ -350,6 +503,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     pendingFile = filepath;
     pendingFileBytes = null; // Clear bytes mode since we're using file path
     pendingFileObject = null; // Clear File object since we're using file path
+    pendingSpoiler = false; // Reset spoiler toggle for new preview
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     pendingFileExt = null; // Will be set after extension is resolved
@@ -411,6 +565,9 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         }
     }
     
+    // Detect SPOILER_ prefix and strip from display name
+    fileName = detectAndStripSpoilerPrefix(fileName);
+
     // Update file name — show stem (editable) + extension badge (read-only)
     pendingEditedName = null;
     pendingFileExt = ext;
@@ -433,7 +590,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     } else if (isImage) {
         // Show image preview
         const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-        
+
         const validatedAndroidPreview = validateImageSrc(androidPreview);
         if (isAndroid && validatedAndroidPreview) {
             // On Android, use the base64 preview we already got from cache_android_file
@@ -456,6 +613,13 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
                     <img src="${imgSrc}" class="file-preview-image" alt="Preview">
                 </div>
             `;
+        }
+        // Add spoiler toggle to whichever image container was created
+        const imgCont = contentArea.querySelector('.file-preview-image-container');
+        if (imgCont) {
+            const shouldAutoSpoiler = pendingSpoiler;
+            if (shouldAutoSpoiler) pendingSpoiler = false;
+            appendSpoilerToggle(imgCont, shouldAutoSpoiler);
         }
     } else if (isVideo) {
         const videoSrc = mediaUrl(filepath);
@@ -634,6 +798,8 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
     // Store the File object for later use when sending
     pendingFileObject = file;
     pendingFileBytes = null; // Clear bytes mode - we're using File object
+    pendingSpoiler = false; // Reset spoiler toggle for new preview
+    fileName = detectAndStripSpoilerPrefix(fileName);
     pendingFileName = fileName;
     pendingFileExt = ext;
     pendingFile = null; // Clear file path since we're using File object
@@ -716,6 +882,11 @@ async function openFilePreviewWithFile(file, fileName, ext, receiver, replyRef =
         // Read bytes and cache in Rust - this returns a preview
         // This approach works on all Android versions (uses base64 data URL from backend)
         startFileObjectCacheAndPreview(file, fileName, ext, contentArea, showCompression);
+        // Add spoiler toggle to initial loading container (will be re-added after preview loads)
+        const imgCont2 = contentArea.querySelector('.file-preview-image-container');
+        if (imgCont2) appendSpoilerToggle(imgCont2);
+        // If pendingSpoiler was set by detectAndStripSpoilerPrefix, startFileObjectCacheAndPreview
+        // will apply the spoiler state after the preview image loads.
     } else if (isVideo) {
         // For video, show icon on Android (video preview is unreliable on older devices)
         contentArea.innerHTML = `
@@ -814,6 +985,8 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     // Mark that we're using bytes mode (no file path)
     pendingFileBytes = true; // Flag to indicate bytes mode
     pendingFileObject = null; // Clear File object since we're using cached bytes
+    pendingSpoiler = false; // Reset spoiler toggle for new preview
+    fileName = detectAndStripSpoilerPrefix(fileName);
     pendingFileName = fileName;
     pendingFileExt = ext;
     pendingFile = null; // Clear file path since we're using bytes
@@ -859,6 +1032,13 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
                     <img src="${validatedPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
+            // Add spoiler toggle for clipboard-pasted images
+            const imgCont3 = contentArea.querySelector('.file-preview-image-container');
+            if (imgCont3) {
+                const shouldAutoSpoiler3 = pendingSpoiler;
+                if (shouldAutoSpoiler3) pendingSpoiler = false;
+                appendSpoilerToggle(imgCont3, shouldAutoSpoiler3);
+            }
         } else {
             // Fallback: show image icon if no preview
             contentArea.innerHTML = `
@@ -867,7 +1047,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
                 </div>
             `;
         }
-        
+
         // Show compress option for images larger than 25KB (excluding GIFs to preserve animation)
         const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
         if (ext !== 'gif' && fileSize > MIN_COMPRESS_SIZE) {
@@ -1021,6 +1201,13 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
                     <img src="${validatedResultPreview}" class="file-preview-image" alt="Preview">
                 </div>
             `;
+            // Re-add spoiler toggle after preview loaded (replaces loading container)
+            const imgCont = contentArea.querySelector('.file-preview-image-container');
+            if (imgCont) {
+                const shouldAutoSpoiler = pendingSpoiler;
+                if (shouldAutoSpoiler) pendingSpoiler = false;
+                appendSpoilerToggle(imgCont, shouldAutoSpoiler);
+            }
         } else {
             // Fallback to icon
             contentArea.innerHTML = `
@@ -1029,7 +1216,7 @@ async function startFileObjectCacheAndPreview(file, fileName, ext, contentArea, 
                 </div>
             `;
         }
-        
+
         // Start compression if requested
         if (startCompression) {
             startCachedBytesCompression();
@@ -1383,6 +1570,7 @@ function closeFilePreview() {
     pendingReplyRef = null;
     compressionInProgress = false;
     compressionComplete = false;
+    pendingSpoiler = false;
     pendingZipPath = null;
     zipInProgress = false;
 
@@ -1419,9 +1607,19 @@ async function sendPreviewedFile() {
     const fileName = pendingFileName;
     const ext = pendingFileExt;
     const editedStem = pendingEditedName;
-    const nameOverride = editedStem
-        ? (ext ? `${editedStem}.${ext}` : editedStem)
-        : '';
+    const isSpoiler = pendingSpoiler;
+    // Build nameOverride: if spoiler, always ensure SPOILER_ prefix (requires a name)
+    let nameOverride;
+    if (isSpoiler) {
+        // Need a stem to prefix — use edited name, pending name, file path, or fallback
+        const stem = editedStem || (fileName ? getFileStem(fileName) : null) || (filePath ? getFileStem(getFileName(filePath)) : null) || 'image';
+        const spoilerStem = stem.toUpperCase().startsWith('SPOILER_') ? stem : `SPOILER_${stem}`;
+        nameOverride = ext ? `${spoilerStem}.${ext}` : spoilerStem;
+    } else {
+        nameOverride = editedStem
+            ? (ext ? `${editedStem}.${ext}` : editedStem)
+            : '';
+    }
     const usingBytes = !!fileBytes;
     const isZipSend = !!pendingZipPath;
     
@@ -1467,6 +1665,7 @@ async function sendPreviewedFile() {
     pendingFileName = null;
     pendingFileExt = null;
     pendingEditedName = null;
+    pendingSpoiler = false;
     pendingReceiver = null;
     pendingReplyRef = null;
     compressionInProgress = false;

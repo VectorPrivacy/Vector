@@ -320,6 +320,7 @@ pub fn run() {
             message::cache_file_bytes,
             message::get_cached_file_info,
             message::get_cached_image_preview,
+            message::generate_thumbhash_for_preview,
             message::start_cached_bytes_compression,
             message::get_cached_bytes_compression_status,
             message::send_cached_file,
