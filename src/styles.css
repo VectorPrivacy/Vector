@@ -6560,9 +6560,14 @@ details .emoji {
 }
 
 /* Code block wrapper with copy button */
+/* Browsers hoist this block element out of the parent <p> tag, so we must
+   cap width explicitly to prevent overflow. */
 .code-block-wrapper {
   position: relative;
   margin: 8px 0;
+  max-width: min(470px, calc(100vw - 100px));
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .code-copy-btn {
