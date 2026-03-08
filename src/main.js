@@ -4365,10 +4365,72 @@ async function setupRustListeners() {
         }
     });
 
+    // Smoothly interpolated download speed display: id → { display, target, factor, lastUpdate, raf }
+    const downloadSpeedLerp = new Map();
+
+    function updateSpeedDisplay(attachId) {
+        const lerp = downloadSpeedLerp.get(attachId);
+        if (!lerp) return;
+
+        // Adaptive lerp: factor is tuned so animation spans ~1 chunk interval
+        lerp.display += (lerp.target - lerp.display) * lerp.factor;
+
+        // Snap when close enough (within 0.5 KB/s)
+        if (Math.abs(lerp.target - lerp.display) < 500) lerp.display = lerp.target;
+
+        const escapedId = CSS.escape(attachId);
+        const speedDecimals = lerp.display >= 1048576 ? 2 : 0;
+        const speedText = lerp.display > 0 ? ` · ${formatBytes(lerp.display, speedDecimals, true)}/s` : '';
+        const statusEls = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
+        for (const spinner of statusEls) {
+            const fileBox = spinner.closest('.custom-audio-player');
+            if (!fileBox) continue;
+            const status = fileBox.querySelector('.file-status');
+            if (status) status.innerText = `Downloading${speedText}`;
+        }
+
+        // Keep animating if not settled
+        if (lerp.display !== lerp.target) {
+            lerp.raf = requestAnimationFrame(() => updateSpeedDisplay(attachId));
+        } else {
+            lerp.raf = null;
+        }
+    }
+
     // Listen for Attachment Download Progress events
     _on('attachment_download_progress', async (evt) => {
         if (!strOpenChat) return;
-        const escapedId = CSS.escape(evt.payload.id);
+        const attachId = evt.payload.id;
+        const escapedId = CSS.escape(attachId);
+
+        // Update speed lerp target from backend
+        if (evt.payload.bytesPerSec != null && evt.payload.bytesPerSec > 0) {
+            const now = performance.now();
+            let lerp = downloadSpeedLerp.get(attachId);
+            if (!lerp) {
+                lerp = { display: evt.payload.bytesPerSec, target: evt.payload.bytesPerSec, factor: 0.05, lastUpdate: now, raf: null };
+                downloadSpeedLerp.set(attachId, lerp);
+            } else {
+                // Adapt lerp factor based on time between chunks
+                // factor = 3 / (dt_seconds * 60) → animation reaches ~95% in ~dt seconds
+                const dtSec = (now - lerp.lastUpdate) / 1000;
+                if (dtSec > 0.05) {
+                    lerp.factor = Math.min(0.15, Math.max(0.008, 3.0 / (dtSec * 60)));
+                }
+                lerp.target = evt.payload.bytesPerSec;
+                lerp.lastUpdate = now;
+            }
+            if (!lerp.raf) {
+                lerp.raf = requestAnimationFrame(() => updateSpeedDisplay(attachId));
+            }
+        }
+
+        // Clean up on completion
+        if (evt.payload.progress >= 100) {
+            const lerp = downloadSpeedLerp.get(attachId);
+            if (lerp && lerp.raf) cancelAnimationFrame(lerp.raf);
+            downloadSpeedLerp.delete(attachId);
+        }
 
         // Update ALL conical progress spinners with this attachment ID (handles deduplication)
         const spinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
@@ -4376,13 +4438,17 @@ async function setupRustListeners() {
             for (const spinner of spinners) {
                 spinner.style.setProperty('--progress', `${evt.payload.progress}%`);
             }
-            return;
         }
 
-        // Fallback: image thumbhash download overlays
-        const overlays = document.querySelectorAll(`[data-attachment-id="${escapedId}"]:not(.miniapp-downloading-spinner)`);
-        for (const el of overlays) {
-            el.textContent = `Downloading... ${evt.payload.progress}%`;
+        // Update file-status text (initial update before lerp kicks in)
+        if (!downloadSpeedLerp.has(attachId)) {
+            const statusEls = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
+            for (const spinner of statusEls) {
+                const fileBox = spinner.closest('.custom-audio-player');
+                if (!fileBox) continue;
+                const status = fileBox.querySelector('.file-status');
+                if (status) status.innerText = 'Downloading';
+            }
         }
     });
 
@@ -4404,6 +4470,10 @@ async function setupRustListeners() {
         cAttachment.download_failed = false;
         downloadingAttachmentIds.delete(matchId);
         downloadingAttachmentIds.delete(evt.payload.id);
+        for (const id of [matchId, evt.payload.id]) {
+            const lerp = downloadSpeedLerp.get(id);
+            if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
+        }
         if (evt.payload.success) {
             cAttachment.downloaded = true;
             // Update path from backend result (always has the correct file path)
@@ -4443,7 +4513,30 @@ async function setupRustListeners() {
                     const domMsg = document.getElementById(msgId);
                     const memMsg = cChat.messages.find(m => m.id === msgId);
                     if (domMsg && memMsg) {
-                        domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                        // Shrink + fade out any active spinners before re-rendering
+                        const spinners = domMsg.querySelectorAll('.miniapp-downloading-spinner');
+                        if (spinners.length) {
+                            for (const sp of spinners) {
+                                sp.style.transition = 'opacity 0.2s ease, scale 0.2s ease';
+                                sp.style.opacity = '0';
+                                sp.style.scale = '0.5';
+                            }
+                            setTimeout(() => {
+                                const newEl = renderMessage(memMsg, profile, msgId);
+                                domMsg.replaceWith(newEl);
+                                // Grow + fade in the new icon
+                                const icon = newEl.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
+                                if (icon) {
+                                    icon.style.opacity = '0';
+                                    icon.style.scale = '0.5';
+                                    icon.style.transition = 'opacity 0.25s ease, scale 0.25s ease';
+                                    requestAnimationFrame(() => { icon.style.opacity = '1'; icon.style.scale = '1'; });
+                                }
+                                softChatScroll();
+                            }, 200);
+                        } else {
+                            domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                        }
                     }
                 }
                 softChatScroll();
@@ -4810,6 +4903,57 @@ async function setupRustListeners() {
         if (isLastMessage) {
             updateChatlistPreview(evt.payload.chat_id);
         }
+    });
+
+    // Listen for message removal (e.g., cancelled upload)
+    _on('message_removed', (evt) => {
+        const { id, chat_id } = evt.payload;
+        const cChat = getChat(chat_id);
+        if (!cChat) return;
+
+        // Remove from in-memory messages
+        const msgIdx = cChat.messages.findIndex(m => m.id === id);
+        if (msgIdx !== -1) cChat.messages.splice(msgIdx, 1);
+
+        // Remove from event cache
+        if (eventCache.has(chat_id)) {
+            const cachedEvents = eventCache.getEvents(chat_id);
+            if (cachedEvents) {
+                const cacheIdx = cachedEvents.findIndex(m => m.id === id);
+                if (cacheIdx !== -1) cachedEvents.splice(cacheIdx, 1);
+            }
+        }
+
+        // Fade out and remove DOM element if this chat is open
+        if (strOpenChat === chat_id) {
+            const domMsg = document.getElementById(id);
+            if (domMsg) {
+                domMsg.style.transition = 'opacity 0.2s ease, max-height 0.3s ease';
+                domMsg.style.opacity = '0';
+                domMsg.style.maxHeight = domMsg.offsetHeight + 'px';
+                domMsg.style.overflow = 'hidden';
+                requestAnimationFrame(() => {
+                    domMsg.style.maxHeight = '0';
+                    domMsg.style.marginBottom = '0';
+                    domMsg.style.paddingTop = '0';
+                    domMsg.style.paddingBottom = '0';
+                });
+                setTimeout(() => {
+                    domMsg.remove();
+                    // Remove trailing timestamp if it's now the last element in the chat
+                    const lastChild = domChatMessages.lastElementChild;
+                    if (lastChild && lastChild.classList.contains('msg-inline-timestamp')) {
+                        lastChild.remove();
+                    }
+                }, 100);
+            }
+        }
+
+        // Show toast
+        showToast('Upload Cancelled');
+
+        // Update chatlist preview if the last message was removed
+        updateChatlistPreview(chat_id);
     });
 
     // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
@@ -6836,6 +6980,51 @@ function insertSystemEvent(content, parent = null) {
  * @param {'downloaded'|'download'|'downloading'} state - the download state
  * @returns {{ fileDiv: HTMLElement, isMiniApp: boolean, descriptionSpan: HTMLElement, iconElement: HTMLElement, updateMiniAppStatus: Function|null, statusSpan: HTMLElement|null }}
  */
+/**
+ * Create a conical progress spinner for file box icons and replace the target element.
+ * Handles clearing the text margin so the in-flow spinner doesn't cause layout shift.
+ * @param {HTMLElement} target - the icon element to replace (or null to just create)
+ * @param {object} [opts] - options: id (element id), attachmentId (data-attribute)
+ * @returns {HTMLDivElement} the spinner element
+ */
+function createFileBoxSpinner(target, opts = {}) {
+    const spinner = document.createElement('div');
+    spinner.className = 'miniapp-downloading-spinner';
+    if (opts.id) spinner.id = opts.id;
+    if (opts.attachmentId) spinner.setAttribute('data-attachment-id', opts.attachmentId);
+    // Match the icon's absolute positioning to prevent layout shift
+    spinner.style.position = 'absolute';
+    spinner.style.left = '10px';
+    spinner.style.top = '0';
+    spinner.style.bottom = '0';
+    spinner.style.margin = 'auto';
+    spinner.style.width = '40px';
+    spinner.style.height = '40px';
+    spinner.style.opacity = '0';
+    spinner.style.scale = '0.5';
+    spinner.style.transition = 'opacity 0.25s ease, scale 0.25s ease, --progress 0.3s ease';
+    const settleTransition = () => {
+        // After intro animation, keep only the progress transition
+        spinner.style.transition = '--progress 0.3s ease';
+    };
+    if (target) {
+        // Shrink + fade out icon, then swap to spinner and grow + fade it in
+        target.style.transition = 'opacity 0.2s ease, scale 0.2s ease';
+        target.style.opacity = '0';
+        target.style.scale = '0.5';
+        setTimeout(() => {
+            target.replaceWith(spinner);
+            requestAnimationFrame(() => { spinner.style.opacity = '1'; spinner.style.scale = '1'; });
+            setTimeout(settleTransition, 300);
+        }, 200);
+    } else {
+        // No target (initial render as downloading) — just grow + fade in
+        requestAnimationFrame(() => { spinner.style.opacity = '1'; spinner.style.scale = '1'; });
+        setTimeout(settleTransition, 300);
+    }
+    return spinner;
+}
+
 function createFileBox(cAttachment, state = 'downloaded') {
     const ext = (cAttachment.extension || '').toLowerCase();
     const fileTypeInfo = getFileTypeInfo(ext);
@@ -6881,10 +7070,11 @@ function createFileBox(cAttachment, state = 'downloaded') {
     textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
     textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
     textContainerSpan.style.lineHeight = '1.2';
+    textContainerSpan.style.minWidth = '0';
 
     // Create the description span
     const descriptionSpan = document.createElement('span');
-    descriptionSpan.style.display = 'block';
+    descriptionSpan.className = 'cutoff';
     descriptionSpan.style.color = 'var(--icon-color-primary)';
     descriptionSpan.style.fontWeight = '400';
     descriptionSpan.innerText = cAttachment.name || fileTypeInfo.description;
@@ -7027,18 +7217,11 @@ function createFileBox(cAttachment, state = 'downloaded') {
         statusSpan.style.fontWeight = '400';
 
         if (state === 'downloading') {
-            statusSpan.innerText = 'Downloading...';
+            statusSpan.innerText = 'Downloading';
             fileDiv.style.cursor = 'default';
 
             // Replace icon with conical progress spinner
-            const spinner = document.createElement('div');
-            spinner.className = 'miniapp-downloading-spinner';
-            spinner.setAttribute('data-attachment-id', cAttachment.id);
-            spinner.style.marginLeft = '5px';
-            spinner.style.width = '40px';
-            spinner.style.height = '40px';
-            spinner.style.flexShrink = '0';
-            iconElement = spinner;
+            iconElement = createFileBoxSpinner(null, { attachmentId: cAttachment.id });
         } else {
             // 'download' — waiting for user to click
             let strSize = '';
@@ -7097,17 +7280,10 @@ function startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sen
         const parentBox = oldIcon.closest('.custom-audio-player');
         if (parentBox) {
             const status = parentBox.querySelector('.file-status');
-            if (status) status.innerText = 'Downloading...';
+            if (status) status.innerText = 'Downloading';
             parentBox.style.cursor = 'default';
         }
-        const spinner = document.createElement('div');
-        spinner.className = 'miniapp-downloading-spinner';
-        spinner.setAttribute('data-attachment-id', cAttachment.id);
-        spinner.style.marginLeft = '5px';
-        spinner.style.width = '40px';
-        spinner.style.height = '40px';
-        spinner.style.flexShrink = '0';
-        oldIcon.replaceWith(spinner);
+        createFileBoxSpinner(oldIcon, { attachmentId: cAttachment.id });
     }
 }
 
@@ -7650,25 +7826,97 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
             // If the message is mine, and pending: show upload progress
             if (msg.mine && msg.pending) {
-                // Lower the attachment opacity
-                if (pMessage.lastElementChild) {
-                    pMessage.lastElementChild.style.opacity = 0.25;
-                }
+                let hasSpinner = false;
+                const uploadMsgId = msg.id;
 
                 // For file boxes: swap the icon for a conical progress spinner
                 const fileBoxIcon = pMessage.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
                 if (fileBoxIcon) {
-                    const uploadSpinner = document.createElement('div');
-                    uploadSpinner.className = 'miniapp-downloading-spinner';
-                    uploadSpinner.id = msg.id + '_file';
-                    uploadSpinner.style.marginLeft = '5px';
-                    uploadSpinner.style.width = '40px';
-                    uploadSpinner.style.height = '40px';
-                    uploadSpinner.style.flexShrink = '0';
-                    fileBoxIcon.replaceWith(uploadSpinner);
+                    hasSpinner = true;
+                    const spinnerEl = createFileBoxSpinner(fileBoxIcon, { id: msg.id + '_file' });
+                    // Add cancel button as sibling (not child — spinner mask clips children)
+                    const cancelBtn = document.createElement('div');
+                    cancelBtn.className = 'upload-cancel-btn';
+                    cancelBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        invoke('cancel_upload', { pendingId: uploadMsgId });
+                    });
+                    // Insert after spinner is placed (it replaces the icon after 200ms)
+                    setTimeout(() => {
+                        const player = pMessage.querySelector('.custom-audio-player');
+                        if (player) player.appendChild(cancelBtn);
+                    }, 210);
+                }
+
+                // For audio players: replace the play button with a spinner (stays in flex flow)
+                const audioPlayBtn = pMessage.querySelector('.audio-play-btn');
+                if (audioPlayBtn) {
+                    hasSpinner = true;
+                    const wrapper = document.createElement('div');
+                    wrapper.style.position = 'relative';
+                    wrapper.style.width = '40px';
+                    wrapper.style.height = '40px';
+                    wrapper.style.minWidth = '40px';
+                    wrapper.style.flexShrink = '0';
+                    const spinner = document.createElement('div');
+                    spinner.className = 'miniapp-downloading-spinner';
+                    spinner.id = msg.id + '_file';
+                    spinner.style.width = '40px';
+                    spinner.style.height = '40px';
+                    wrapper.appendChild(spinner);
+                    const cancelBtn = document.createElement('div');
+                    cancelBtn.className = 'upload-cancel-btn audio-upload-cancel';
+                    cancelBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        invoke('cancel_upload', { pendingId: uploadMsgId });
+                    });
+                    wrapper.appendChild(cancelBtn);
+                    audioPlayBtn.replaceWith(wrapper);
+                }
+
+                // For image/video previews: add centered upload progress spinner
+                const mediaEl = pMessage.querySelector('img:not(.emoji), video');
+                if (mediaEl) {
+                    hasSpinner = true;
+                    let container = mediaEl.parentElement;
+                    // Videos are appended directly to pMessage — wrap in positioned div
+                    if (container === pMessage) {
+                        const wrapper = document.createElement('div');
+                        wrapper.style.position = 'relative';
+                        pMessage.replaceChild(wrapper, mediaEl);
+                        wrapper.appendChild(mediaEl);
+                        container = wrapper;
+                    }
+                    // Move opacity to media element only so the spinner stays full opacity
+                    container.style.opacity = '';
+                    mediaEl.style.opacity = '0.25';
+                    // Hide native video controls so the play button doesn't clash with the spinner
+                    if (mediaEl.tagName === 'VIDEO') mediaEl.removeAttribute('controls');
+                    const overlay = document.createElement('div');
+                    overlay.className = 'attachment-progress-overlay';
+                    const spinner = document.createElement('div');
+                    spinner.className = 'miniapp-downloading-spinner';
+                    spinner.id = msg.id + '_file';
+                    spinner.style.width = '48px';
+                    spinner.style.height = '48px';
+                    overlay.appendChild(spinner);
+                    // Add cancel button as sibling of spinner (not child — mask clips children)
+                    const cancelBtn = document.createElement('div');
+                    cancelBtn.className = 'upload-cancel-btn';
+                    cancelBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        invoke('cancel_upload', { pendingId: uploadMsgId });
+                    });
+                    overlay.appendChild(cancelBtn);
+                    container.appendChild(overlay);
+                }
+
+                // Fallback: dim the whole attachment if no spinner was added
+                if (!hasSpinner && pMessage.lastElementChild) {
+                    pMessage.lastElementChild.style.opacity = 0.25;
                 }
             }
-        } else if (cAttachment.downloading) {
+        } else if (cAttachment.downloading || downloadingAttachmentIds.has(cAttachment.id)) {
             // For images, show thumbhash preview while downloading (only for formats that support thumbhash)
             if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                 // Generate thumbhash preview for downloading image
@@ -7700,29 +7948,26 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                         container.style.position = `relative`;
                         container.appendChild(imgPreview);
                         
-                        // Add downloading indicator (for progress targeting)
-                        const iDownloading = document.createElement('i');
-                        iDownloading.setAttribute('data-attachment-id', cAttachment.id);
-                        iDownloading.textContent = `Downloading`;
-                        iDownloading.style.position = `absolute`;
-                        iDownloading.style.top = `50%`;
-                        iDownloading.style.left = `50%`;
-                        iDownloading.style.transform = `translate(-50%, -50%)`;
-                        iDownloading.style.backgroundColor = `rgba(0, 0, 0, 0.7)`;
-                        iDownloading.style.padding = `5px 10px`;
-                        iDownloading.style.borderRadius = `4px`;
-                        iDownloading.style.color = `white`;
-                        container.appendChild(iDownloading);
+                        // Add downloading progress spinner overlay
+                        const dlOverlay = document.createElement('div');
+                        dlOverlay.className = 'attachment-progress-overlay';
+                        const dlSpinner = document.createElement('div');
+                        dlSpinner.className = 'miniapp-downloading-spinner';
+                        dlSpinner.setAttribute('data-attachment-id', cAttachment.id);
+                        dlSpinner.style.width = '48px';
+                        dlSpinner.style.height = '48px';
+                        dlOverlay.appendChild(dlSpinner);
+                        container.appendChild(dlOverlay);
                         
                         pMessage.appendChild(container);
                     })
                     .catch(() => {
-                        // Fallback: file box with "Downloading..." if thumbhash fails
+                        // Fallback: file box with "Downloading" if thumbhash fails
                         const { fileDiv } = createFileBox(cAttachment, 'downloading');
                         pMessage.appendChild(fileDiv);
                     });
             } else {
-                // Non-image downloading: file box with "Downloading..." text
+                // Non-image downloading: file box with "Downloading" text
                 const { fileDiv } = createFileBox(cAttachment, 'downloading');
                 pMessage.appendChild(fileDiv);
             }
@@ -7796,11 +8041,16 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                                 iDownload.style.textOverflow = `ellipsis`;
                                 container.appendChild(iDownload);
                             } else {
-                                // For auto-downloading images, create a hidden element for progress bar targeting
-                                const iHidden = document.createElement('i');
-                                iHidden.setAttribute('data-attachment-id', cAttachment.id);
-                                iHidden.style.display = `none`;
-                                container.appendChild(iHidden);
+                                // Auto-downloading: show progress spinner overlay
+                                const adOverlay = document.createElement('div');
+                                adOverlay.className = 'attachment-progress-overlay';
+                                const adSpinner = document.createElement('div');
+                                adSpinner.className = 'miniapp-downloading-spinner';
+                                adSpinner.setAttribute('data-attachment-id', cAttachment.id);
+                                adSpinner.style.width = '48px';
+                                adSpinner.style.height = '48px';
+                                adOverlay.appendChild(adSpinner);
+                                container.appendChild(adOverlay);
                             }
                             
                             pMessage.appendChild(container);
@@ -7833,7 +8083,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                 // If the size is known and within auto-download range; immediately begin downloading
                 if (willAutoDownload) {
-                    // For non-images (which don't have thumbhash previews), file box with "Downloading..." text
+                    // For non-images (which don't have thumbhash previews), file box with "Downloading" text
                     if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
                         const { fileDiv: autoFileDiv } = createFileBox(cAttachment, 'downloading');
                         pMessage.appendChild(autoFileDiv);
@@ -10690,7 +10940,9 @@ domChatMessageInput.oninput = async () => {
                         repliedTo: strReplyRef
                     });
                 } catch (e) {
-                    popupConfirm(e, '', true, '', 'vector_warning.svg');
+                    if (!e || !e.toString().includes('Upload cancelled')) {
+                        popupConfirm(e, '', true, '', 'vector_warning.svg');
+                    }
                 }
                 domChatMessageInput.setAttribute('placeholder', 'Enter message...');
                 nLastTypingIndicator = 0;

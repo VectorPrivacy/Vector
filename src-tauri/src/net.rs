@@ -10,8 +10,8 @@ use crate::simd::html_meta;
 /// Trait for reporting download progress
 pub trait ProgressReporter {
     /// Report progress of a download
-    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>) -> Result<(), &'static str>;
-    
+    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>, bytes_per_sec: Option<f64>) -> Result<(), &'static str>;
+
     /// Report completion of a download
     fn report_complete(&self) -> Result<(), &'static str>;
 }
@@ -28,7 +28,7 @@ impl NoOpProgressReporter {
 }
 
 impl ProgressReporter for NoOpProgressReporter {
-    fn report_progress(&self, _percentage: Option<u8>, _bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+    fn report_progress(&self, _percentage: Option<u8>, _bytes_downloaded: Option<u64>, _bytes_per_sec: Option<f64>) -> Result<(), &'static str> {
         // Do nothing
         Ok(())
     }
@@ -53,21 +53,25 @@ impl<'a, R: tauri::Runtime> TauriProgressReporter<'a, R> {
 }
 
 impl<'a, R: tauri::Runtime> ProgressReporter for TauriProgressReporter<'a, R> {
-    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>, bytes_per_sec: Option<f64>) -> Result<(), &'static str> {
         let mut payload = json!({
             "id": self.attachment_id
         });
-        
+
         if let Some(p) = percentage {
             payload["progress"] = json!(p);
         } else {
             payload["progress"] = json!(-1); // Use -1 to indicate unknown progress
         }
-        
+
         if let Some(bytes) = bytes_downloaded {
             payload["bytesDownloaded"] = json!(bytes);
         }
-        
+
+        if let Some(bps) = bytes_per_sec {
+            payload["bytesPerSec"] = json!(bps);
+        }
+
         self.handle
             .emit("attachment_download_progress", payload)
             .map_err(|_| "Failed to emit event")
@@ -195,7 +199,7 @@ async fn supports_range(url: &str, client: &Client) -> bool {
     false
 }
 
-/// Downloads using HTTP range requests with progress reporting
+/// Downloads using HTTP range requests with adaptive chunk sizing and speed tracking
 async fn download_with_ranges(
     client: &Client,
     url: &str,
@@ -206,11 +210,18 @@ async fn download_with_ranges(
     let mut downloaded: u64 = 0;
     let mut last_emitted_percentage: u8 = 0;
 
-    // Download in chunks
-    const CHUNK_SIZE: u64 = 256_000; // 256KB chunks (0.25MB)
+    // Adaptive chunk sizing: start at 128KB, adjust based on throughput
+    const MIN_CHUNK: u64 = 32_000;      // 32KB floor (considerate to extreme conditions)
+    const MAX_CHUNK: u64 = 2_000_000;   // 2MB ceiling
+    const TARGET_CHUNK_SECS: f64 = 1.0; // Target ~1 second per chunk
+    let mut chunk_size: u64 = 32_000;   // Start at 32KB (floor) for fast first-chunk response
+
+    // Speed tracking: rolling window of last 10 chunk measurements
+    let mut speed_samples: Vec<f64> = Vec::with_capacity(10);
 
     while downloaded < total_size {
-        let end = min(downloaded + CHUNK_SIZE - 1, total_size - 1);
+        let end = min(downloaded + chunk_size - 1, total_size - 1);
+        let chunk_start = std::time::Instant::now();
 
         let chunk_res = client
             .get(url)
@@ -228,23 +239,38 @@ async fn download_with_ranges(
             .await
             .map_err(|_| "Failed to read chunk bytes")?;
 
+        let elapsed = chunk_start.elapsed().as_secs_f64();
         result.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
 
-        // Calculate progress percentage
+        // Track speed and adapt chunk size
+        if elapsed > 0.0 {
+            let bps = chunk.len() as f64 / elapsed;
+            speed_samples.push(bps);
+            if speed_samples.len() > 10 {
+                speed_samples.remove(0);
+            }
+
+            // Adapt chunk size: target ~1 second per chunk
+            let avg_bps = speed_samples.iter().sum::<f64>() / speed_samples.len() as f64;
+            chunk_size = ((avg_bps * TARGET_CHUNK_SECS) as u64).clamp(MIN_CHUNK, MAX_CHUNK);
+        }
+
+        // Report progress with speed
         let progress = (downloaded as f64 / total_size as f64) * 100.0;
         let current_percentage = progress as u8;
-
-        // Only emit events when percentage changes (to reduce events)
         if current_percentage > last_emitted_percentage {
-            reporter.report_progress(Some(current_percentage), Some(downloaded))?;
+            let avg_speed = if !speed_samples.is_empty() {
+                Some(speed_samples.iter().sum::<f64>() / speed_samples.len() as f64)
+            } else {
+                None
+            };
+            reporter.report_progress(Some(current_percentage), Some(downloaded), avg_speed)?;
             last_emitted_percentage = current_percentage;
         }
     }
 
-    // Ensure 100% is emitted at the end
     reporter.report_complete()?;
-
     Ok(result)
 }
 
@@ -285,7 +311,7 @@ async fn download_with_streaming(
 
             // Only emit events when percentage changes (to reduce events)
             if current_percentage > last_emitted_percentage {
-                reporter.report_progress(Some(current_percentage), Some(downloaded))?;
+                reporter.report_progress(Some(current_percentage), Some(downloaded), None)?;
                 last_emitted_percentage = current_percentage;
             }
         } else {
@@ -294,7 +320,7 @@ async fn download_with_streaming(
             if downloaded - last_bytes_update >= 256 * 1024 {
             // We can't calculate percentage, but we can still show activity
             // Report with bytes downloaded instead of percentage
-            reporter.report_progress(None, Some(downloaded))?;
+            reporter.report_progress(None, Some(downloaded), None)?;
 
                 last_bytes_update = downloaded;
             }

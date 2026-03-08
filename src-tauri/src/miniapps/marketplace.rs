@@ -127,7 +127,7 @@ impl<'a, R: Runtime> MarketplaceProgressReporter<'a, R> {
 }
 
 impl<'a, R: Runtime> ProgressReporter for MarketplaceProgressReporter<'a, R> {
-    fn report_progress(&self, percentage: Option<u8>, _bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+    fn report_progress(&self, percentage: Option<u8>, _bytes_downloaded: Option<u64>, _bytes_per_sec: Option<f64>) -> Result<(), &'static str> {
         let progress = percentage.unwrap_or(0);
         let _ = self.handle.emit("marketplace_install_progress", serde_json::json!({
             "app_id": self.app_id,

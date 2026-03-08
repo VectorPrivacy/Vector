@@ -767,6 +767,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
         progress_callback,
         None, // No retries per server
         None, // Default retry spacing
+        None, // No cancel flag
     )
     .await?;
 

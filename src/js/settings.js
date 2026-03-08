@@ -5,6 +5,7 @@ let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
 /** Set of attachment IDs currently being downloaded — prevents duplicate download requests */
 const downloadingAttachmentIds = new Set();
 
+
 /**
  * Platform features retrieved from the backend
  * @typedef {Object} PlatformFeatures

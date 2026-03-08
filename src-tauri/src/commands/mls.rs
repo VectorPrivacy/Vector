@@ -587,6 +587,7 @@ pub async fn upload_group_avatar(filepath: String) -> Result<serde_json::Value, 
         progress_callback,
         None,
         None,
+        None, // No cancel flag
     )
     .await?;
 

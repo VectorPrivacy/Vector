@@ -7,8 +7,15 @@
 //! - MLS media encryption and upload
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+/// Cancel flags for in-progress uploads, keyed by pending message ID.
+static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[cfg(not(target_os = "android"))]
 use ::image::{ImageBuffer, Rgba};
@@ -59,6 +66,45 @@ async fn mark_message_failed(pending_id: Arc<String>, _receiver: &str) {
     }
 }
 
+/// Cancel an in-progress file upload by setting its cancel flag.
+/// Removes the pending message from state and emits `message_removed`.
+#[tauri::command]
+pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
+    // Set the cancel flag if upload is still in progress
+    let was_in_progress = {
+        let flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
+        if let Some(flag) = flags.get(&pending_id) {
+            flag.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    };
+
+    // Only remove the pending message if the upload was actually in progress
+    // (avoids removing a successfully-uploaded message during the relay-send window)
+    if !was_in_progress {
+        return Ok(());
+    }
+
+    let removed = {
+        let mut state = STATE.lock().await;
+        state.remove_message(&pending_id)
+    };
+
+    // Emit message_removed event so frontend removes the DOM element
+    if let Some((chat_id, _msg)) = removed {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("message_removed", serde_json::json!({
+                "id": &pending_id,
+                "chat_id": &chat_id
+            })).ok();
+        }
+    }
+
+    Ok(())
+}
+
 /// Result of MLS media encryption using MIP-04
 #[derive(Debug)]
 pub struct MlsMediaUploadResult {
@@ -85,6 +131,7 @@ async fn encrypt_and_upload_mls_media(
     file: &AttachmentFile,
     filename: &str,
     progress_callback: crate::blossom::ProgressCallback,
+    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<MlsMediaUploadResult, String> {
     use mdk_core::encrypted_media::MediaProcessingOptions;
 
@@ -150,6 +197,7 @@ async fn encrypt_and_upload_mls_media(
         progress_callback,
         Some(3),
         Some(std::time::Duration::from_secs(2)),
+        cancel_flag,
     ).await.map_err(|e| format!("Blossom upload failed: {}", e))?;
 
     // Create the imeta tag using MDK
@@ -479,6 +527,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 }
             }
 
+            // Create cancel flag for this upload
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            {
+                let mut flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
+                flags.insert(pending_id.to_string(), Arc::clone(&cancel_flag));
+            }
+
             // Create progress callback for MLS upload
             let pending_id_for_callback = Arc::clone(&pending_id);
             let handle_for_callback = handle.clone();
@@ -498,9 +553,22 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 &attached_file,
                 &filename,
                 progress_callback,
+                Some(Arc::clone(&cancel_flag)),
             ).await {
-                Ok(result) => result,
+                Ok(result) => {
+                    // Remove cancel flag on success
+                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
+                    result
+                }
                 Err(e) => {
+                    // Remove cancel flag on error
+                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
+
+                    // If cancelled, the cancel_upload command already cleaned up state
+                    if e.contains("Upload cancelled") {
+                        return Err(e);
+                    }
+
                     eprintln!("[MIP-04 Error] MLS media upload failed: {}", e);
                     mark_message_failed(Arc::clone(&pending_id), &receiver).await;
                     return Err(format!("Failed to upload MLS media: {}", e));
@@ -890,6 +958,13 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         
         // Final attachment rumor - either reused or newly uploaded
         let final_attachment_rumor = if should_upload {
+            // Create cancel flag for this upload
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            {
+                let mut flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
+                flags.insert(pending_id.to_string(), Arc::clone(&cancel_flag));
+            }
+
             // Upload the file to the server
             let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
             let servers = crate::get_blossom_servers();
@@ -908,8 +983,10 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             });
 
             // Upload the file with progress, retries, and automatic server failover
-            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2))).await {
+            match crate::blossom::upload_blob_with_progress_and_failover(signer.clone(), servers, Arc::new(enc_file), Some(mime_type.as_str()), progress_callback, Some(3), Some(std::time::Duration::from_secs(2)), Some(Arc::clone(&cancel_flag))).await {
                 Ok(url) => {
+                    // Remove cancel flag on success
+                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
                     // Update our pending message with the uploaded URL
                     {
                         let url_clone = url.clone();
@@ -968,6 +1045,14 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                     attachment_rumor
                 },
                 Err(e) => {
+                    // Remove cancel flag on error
+                    UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(pending_id.as_ref());
+
+                    // If cancelled, the cancel_upload command already cleaned up state
+                    if e.contains("Upload cancelled") {
+                        return Err(e);
+                    }
+
                     // The file upload failed: so we mark the message as failed and notify of an error
                     mark_message_failed(Arc::clone(&pending_id), &receiver).await;
                     // Return the error

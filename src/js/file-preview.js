@@ -208,7 +208,12 @@ function getFileIcon(filepath) {
     if (['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac'].includes(ext)) {
         return 'icon-volume-max';
     }
-    
+
+    // Archive extensions
+    if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'zst', 'tgz', 'tbz2'].includes(ext)) {
+        return 'icon-folder';
+    }
+
     return 'icon-file';
 }
 
@@ -1267,6 +1272,8 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
 
         pendingFile = result.zip_path;
         pendingZipPath = result.zip_path;
+        // Use the clean folder name so the attachment isn't named after the temp file
+        pendingEditedName = folderName;
 
         // Build file list HTML (shared by both branches)
         const fileTreeHtml = `
@@ -1536,6 +1543,11 @@ async function sendPreviewedFile() {
             invoke('cleanup_zip').catch(() => {});
         }
     } catch (e) {
+        // Silently ignore cancelled uploads — the user intentionally aborted
+        if (e && e.toString().includes('Upload cancelled')) {
+            if (isZipSend) invoke('cleanup_zip').catch(() => {});
+            return;
+        }
         console.error('Failed to send file:', e);
         popupConfirm(e.toString(), '', true, '', 'vector_warning.svg');
         // Clean up temp zip on error too

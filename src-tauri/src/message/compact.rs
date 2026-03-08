@@ -1179,6 +1179,25 @@ impl CompactMessageVec {
             .is_ok()
     }
 
+    /// Remove a message by hex ID string. Returns true if removed.
+    pub fn remove_by_hex_id(&mut self, id_str: &str) -> bool {
+        if id_str.is_empty() {
+            return false;
+        }
+        let id = encode_message_id(id_str);
+        // Find position in id_index
+        let idx_pos = match self.id_index.binary_search_by(|(idx_id, _)| idx_id.cmp(&id)) {
+            Ok(pos) => pos,
+            Err(_) => return false,
+        };
+        let msg_pos = self.id_index[idx_pos].1 as usize;
+        // Remove from messages vec
+        self.messages.remove(msg_pos);
+        // Rebuild index since positions shifted
+        self.rebuild_index();
+        true
+    }
+
     /// Check if a message with the given ID string exists - O(log n)
     pub fn contains_hex_id(&self, id_str: &str) -> bool {
         if id_str.is_empty() {

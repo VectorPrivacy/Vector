@@ -30,6 +30,7 @@
     "allow-mark-as-read",
     "allow-toggle-chat-mute",
     "allow-message",
+    "allow-cancel-upload",
     "allow-paste-message",
     "allow-file-message",
     "allow-file-message-compressed",

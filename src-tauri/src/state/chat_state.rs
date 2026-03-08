@@ -460,6 +460,24 @@ impl ChatState {
         Some((chat_id, added))
     }
 
+    /// Remove a message by ID from any chat.
+    /// Returns (chat_id, Message) if found and removed.
+    pub fn remove_message(&mut self, message_id: &str) -> Option<(String, Message)> {
+        if message_id.is_empty() {
+            return None;
+        }
+
+        for chat in &mut self.chats {
+            if let Some(compact) = chat.messages.find_by_hex_id(message_id) {
+                let msg = compact.to_message(&self.interner);
+                let chat_id = chat.id.clone();
+                chat.messages.remove_by_hex_id(message_id);
+                return Some((chat_id, msg));
+            }
+        }
+        None
+    }
+
     /// Check if a message exists - O(n × log m)
     #[allow(dead_code)]
     pub fn message_exists(&self, message_id: &str) -> bool {

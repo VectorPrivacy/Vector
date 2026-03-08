@@ -1364,7 +1364,6 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
     const isPending = msg.mine && msg.pending;
     if (isPending) {
         playBtn.disabled = true;
-        playBtn.style.opacity = '0.4';
         playBtn.style.cursor = 'default';
     }
 

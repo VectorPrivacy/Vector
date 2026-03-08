@@ -4,6 +4,7 @@ use nostr_blossom::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Body, StatusCode};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use futures_util::Stream;
 use std::pin::Pin;
@@ -116,6 +117,7 @@ pub async fn upload_blob_with_progress<T>(
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
     retry_spacing: Option<std::time::Duration>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
     T: NostrSigner + Clone,
@@ -132,15 +134,27 @@ where
             tokio::time::sleep(retry_spacing).await;
         }
 
+        // Check cancel flag before each attempt
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                return Err("Upload cancelled".to_string());
+            }
+        }
+
         match upload_attempt(
             signer.clone(),
             server_url,
             file_data.clone(),
             mime_type,
             &progress_callback,
+            cancel_flag.clone(),
         ).await {
             Ok(url) => return Ok(url),
             Err(e) => {
+                // Propagate cancel immediately without retrying
+                if e == "Upload cancelled" {
+                    return Err(e);
+                }
                 last_error = Some(e);
                 // Continue to next retry attempt
             }
@@ -158,6 +172,7 @@ async fn upload_attempt<T>(
     file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
     T: NostrSigner,
@@ -217,13 +232,20 @@ where
             },
             // Report progress periodically
             _ = poll_interval.tick() => {
+                // Check cancel flag each tick
+                if let Some(ref flag) = cancel_flag {
+                    if flag.load(Ordering::Relaxed) {
+                        return Err("Upload cancelled".to_string());
+                    }
+                }
+
                 let current_bytes = *bytes_sent.lock().unwrap();
                 let percentage = if total_size > 0 {
                     ((current_bytes as f64 / total_size as f64) * 100.0) as u8
                 } else {
                     0
                 };
-                
+
                 // Report every percentage change
                 if percentage != last_percentage {
                     if let Err(e) = progress_callback(Some(percentage), Some(current_bytes)) {
@@ -368,6 +390,7 @@ pub async fn upload_blob_with_progress_and_failover<T>(
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
     retry_spacing: Option<std::time::Duration>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
     T: NostrSigner + Clone,
@@ -375,6 +398,13 @@ where
     let mut last_error = String::from("No servers available");
 
     for (index, server_url_str) in server_urls.iter().enumerate() {
+        // Check cancel flag before trying next server
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                return Err("Upload cancelled".to_string());
+            }
+        }
+
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
@@ -396,12 +426,17 @@ where
             progress_callback.clone(),
             retry_count,
             retry_spacing,
+            cancel_flag.clone(),
         ).await {
             Ok(url) => {
                 eprintln!("[Blossom] Upload successful to: {}", server_url_str);
                 return Ok(url);
             }
             Err(e) => {
+                // Propagate cancel immediately without trying next server
+                if e == "Upload cancelled" {
+                    return Err(e);
+                }
                 eprintln!("[Blossom Error] Upload failed to {}: {}", server_url_str, e);
                 last_error = e;
                 // Reset progress to 0 before trying next server

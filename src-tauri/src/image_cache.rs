@@ -103,7 +103,7 @@ impl<'a, R: Runtime> InlineImageProgressReporter<'a, R> {
 }
 
 impl<R: Runtime> ProgressReporter for InlineImageProgressReporter<'_, R> {
-    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>) -> Result<(), &'static str> {
+    fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>, _bytes_per_sec: Option<f64>) -> Result<(), &'static str> {
         let mut payload = json!({
             "url": self.url
         });

@@ -529,19 +529,20 @@ function setAsyncInterval(callback, interval) {
  * @param {number} [decimals=2] - The number of decimal places to include in the formatted output.
  * @returns {string} A formatted string representing the bytes in human-readable form.
  */
-function formatBytes(bytes, decimals = 2) {
+function formatBytes(bytes, decimals = 2, pad = false) {
     if (bytes === 0) return '0 Bytes';
-    
+
     const units = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
     let unitIndex = 0;
     let value = bytes;
-    
+
     while (value >= 1024 && unitIndex < units.length - 1) {
       value /= 1024;
       unitIndex++;
     }
-    
-    return value.toFixed(decimals).replace(/\.0+$|(\.[0-9]*[1-9])0+$/, '$1') + ' ' + units[unitIndex];
+
+    const fixed = value.toFixed(decimals);
+    return (pad ? fixed : fixed.replace(/\.0+$|(\.[0-9]*[1-9])0+$/, '$1')) + ' ' + units[unitIndex];
   }
 
 /**
@@ -649,17 +650,17 @@ function getFileTypeInfo(extension) {
       "sqlite": { description: "SQLite Database", icon: "file" },
       
       // Archives
-      "zip": { description: "ZIP Archive", icon: "file" },
-      "rar": { description: "RAR Archive", icon: "file" },
-      "7z": { description: "7-Zip Archive", icon: "file" },
-      "tar": { description: "TAR Archive", icon: "file" },
-      "gz": { description: "GZip Archive", icon: "file" },
-      "bz2": { description: "BZip2 Archive", icon: "file" },
-      "xz": { description: "XZ Archive", icon: "file" },
-      "tgz": { description: "Compressed TAR", icon: "file" },
-      "tbz": { description: "Compressed TAR", icon: "file" },
-      "txz": { description: "Compressed TAR", icon: "file" },
-      "cab": { description: "Cabinet Archive", icon: "file" },
+      "zip": { description: "ZIP Archive", icon: "folder" },
+      "rar": { description: "RAR Archive", icon: "folder" },
+      "7z": { description: "7-Zip Archive", icon: "folder" },
+      "tar": { description: "TAR Archive", icon: "folder" },
+      "gz": { description: "GZip Archive", icon: "folder" },
+      "bz2": { description: "BZip2 Archive", icon: "folder" },
+      "xz": { description: "XZ Archive", icon: "folder" },
+      "tgz": { description: "Compressed TAR", icon: "folder" },
+      "tbz": { description: "Compressed TAR", icon: "folder" },
+      "txz": { description: "Compressed TAR", icon: "folder" },
+      "cab": { description: "Cabinet Archive", icon: "folder" },
       "iso": { description: "Disc Image", icon: "file" },
       "dmg": { description: "macOS Disk Image", icon: "file" },
       "pkg": { description: "Package File", icon: "file" },

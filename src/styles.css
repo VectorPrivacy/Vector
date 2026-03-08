@@ -8913,6 +8913,92 @@ hr {
   z-index: 5;
 }
 
+.attachment-progress-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Cancel button for file box uploads — positioned over the spinner inside .custom-audio-player */
+.custom-audio-player > .upload-cancel-btn {
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  margin: auto;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  z-index: 3;
+}
+/* Cancel button for image/video uploads — centered over the spinner in the overlay */
+.attachment-progress-overlay > .upload-cancel-btn {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  pointer-events: auto;
+  z-index: 3;
+}
+/* Cancel button for audio uploads — positioned over spinner in the play button wrapper */
+.audio-upload-cancel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  z-index: 3;
+}
+.audio-upload-cancel::after {
+  content: '\2715';
+  color: white;
+  font-size: 14px;
+}
+.custom-audio-player:hover .audio-upload-cancel {
+  opacity: 1;
+}
+.upload-cancel-btn::after {
+  content: '\2715';
+  color: white;
+  font-size: 16px;
+}
+.custom-audio-player:hover > .upload-cancel-btn,
+.attachment-progress-overlay:hover > .upload-cancel-btn {
+  opacity: 1;
+}
+/* Re-enable pointer events on overlay when it has a cancel button */
+.attachment-progress-overlay:has(.upload-cancel-btn) {
+  pointer-events: auto;
+}
+
 .miniapp-downloading-spinner {
   --progress: 5%;
   width: 32px;
@@ -8925,7 +9011,7 @@ hr {
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #fff calc(100% - 3px));
   animation: inline-image-spin 2s linear infinite;
-
+  transition: --progress 0.3s ease;
 }
 
 /* Version update indicator */
