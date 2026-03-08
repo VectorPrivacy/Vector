@@ -1013,7 +1013,9 @@ impl WaveformComputer {
                 self.prev_frame[bin] = smoothed;
 
                 let db = 10.0 * (smoothed.max(1e-20)).log10();
-                let normalized = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                // Range: -60dB → 0, 0dB → 0.75, +20dB → 1.0
+                // Headroom above 0dB prevents music bass from clipping to 255
+                let normalized = ((db + 60.0) / 80.0).clamp(0.0, 1.0);
                 self.output.push((normalized * 255.0) as u8);
             }
 

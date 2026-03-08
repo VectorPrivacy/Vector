@@ -476,6 +476,7 @@ pub fn run() {
             pivx::pivx_get_preferred_currency,
             // Audio engine commands (all platforms)
             commands::audio::audio_probe,
+            commands::audio::get_audio_metadata,
             commands::audio::audio_load,
             commands::audio::audio_play,
             commands::audio::audio_pause,

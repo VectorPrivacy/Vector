@@ -226,6 +226,7 @@
     "allow-audio-stop",
     "allow-audio-stop-all",
     "allow-audio-set-volume",
-    "allow-send-recording"
+    "allow-send-recording",
+    "allow-get-audio-metadata"
   ]
 }

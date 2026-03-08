@@ -90,6 +90,61 @@ pub async fn send_recording(receiver: String, replied_to: String) -> Result<crat
     crate::message::voice_message(receiver, replied_to, wav_bytes).await
 }
 
+/// Metadata extracted from an audio file's tags (ID3, Vorbis, MP4 atoms).
+#[derive(serde::Serialize)]
+pub struct AudioMetadata {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Base64 data URI for embedded cover art, e.g. "data:image/jpeg;base64,..."
+    pub cover_art: Option<String>,
+}
+
+/// Extract metadata (title, artist, album, cover art) from an audio file's tags.
+/// Returns `None` if the file has no useful metadata (no title AND no cover art).
+#[tauri::command]
+pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, String> {
+    tokio::task::spawn_blocking(move || {
+        use lofty::file::TaggedFileExt;
+        use lofty::tag::Accessor;
+
+        let tagged_file = lofty::read_from_path(&path)
+            .map_err(|e| format!("Failed to read tags: {}", e))?;
+
+        let tag = match tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let title = tag.title().map(|s| s.to_string());
+        let artist = tag.artist().map(|s| s.to_string());
+        let album = tag.album().map(|s| s.to_string());
+
+        // Extract first embedded picture as base64 data URI
+        let cover_art = tag.pictures().first().map(|pic| {
+            let mime = pic.mime_type().unwrap_or(&lofty::picture::MimeType::Jpeg);
+            let mime_str = match mime {
+                lofty::picture::MimeType::Png => "image/png",
+                lofty::picture::MimeType::Bmp => "image/bmp",
+                lofty::picture::MimeType::Gif => "image/gif",
+                lofty::picture::MimeType::Tiff => "image/tiff",
+                _ => "image/jpeg",
+            };
+            let b64 = base64_simd::STANDARD.encode_to_string(pic.data());
+            format!("data:{};base64,{}", mime_str, b64)
+        });
+
+        // Only return if there's something useful to display
+        if title.is_none() && cover_art.is_none() {
+            return Ok(None);
+        }
+
+        Ok(Some(AudioMetadata { title, artist, album, cover_art }))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
 // Handler list for this module:
 // - audio_load
 // - audio_play
@@ -99,3 +154,4 @@ pub async fn send_recording(receiver: String, replied_to: String) -> Result<crat
 // - audio_stop_all
 // - audio_set_volume
 // - send_recording
+// - get_audio_metadata

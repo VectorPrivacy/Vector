@@ -5094,6 +5094,30 @@ select:disabled:hover {
     margin: 0;
 }
 
+.audio-cover-art-wrap {
+    position: relative;
+    margin: -12px -12px 8px -12px;
+}
+
+.audio-cover-art-wrap::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 40%;
+    background: linear-gradient(transparent 74.37%, rgba(22, 22, 22, 0.73));
+    pointer-events: none;
+}
+
+.audio-cover-art {
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 12px 12px 0 0;
+    object-fit: cover;
+    display: block;
+}
+
 .audio-filename {
     font-size: 12px;
     color: rgba(255, 255, 255, 0.8);
@@ -5114,18 +5138,22 @@ select:disabled:hover {
     min-width: 2px;
     background: #59fcb3;
     border-radius: 1.5px;
-    height: 20%; /* Initial height */
-    transition: height 0.1s ease, opacity 0.1s ease, box-shadow 0.2s ease;
-    transform-origin: bottom;
+    height: 20px;
+    transform: translateY(-9px) scaleY(0.15);
+    transform-origin: bottom center;
+    will-change: transform;
+    transition: opacity 0.1s ease, box-shadow 0.2s ease;
 }
 
 /* Remove the old animation since we're using real frequency data */
-.custom-audio-player.playing .waveform-bar {
+.custom-audio-player.playing .waveform-bar,
+.custom-audio-player-inner.playing .waveform-bar {
     animation: none;
 }
 
 /* Subtle pulse effect for the entire waveform container when playing */
-.custom-audio-player.playing .audio-waveform {
+.custom-audio-player.playing .audio-waveform,
+.custom-audio-player-inner.playing .audio-waveform {
     opacity: 1;
 }
 

@@ -1393,7 +1393,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
         if (target === barCount) return;
         // Capture old bar states before destroying
         const oldStates = bars.map(b => ({
-            height: b.style.height,
+            transform: b.style.transform,
             opacity: b.style.opacity,
             boxShadow: b.style.boxShadow,
         }));
@@ -1407,7 +1407,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             if (oldCount > 0) {
                 const oldIdx = Math.min(Math.round(i * oldCount / barCount), oldCount - 1);
                 const s = oldStates[oldIdx];
-                bar.style.height = s.height;
+                bar.style.transform = s.transform;
                 bar.style.opacity = s.opacity;
                 bar.style.boxShadow = s.boxShadow;
             }
@@ -1422,6 +1422,9 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
     let waveformFps = 30;
     let waveformBins = 64;
     let durationMs = 0;
+    let binDisplay = null;    // per-bin display value (fast attack / slow release)
+    let barOffsetY = -9;      // shared translateY for all bars (centered when idle)
+    let windDownId = null;    // rAF ID for wind-down animation (cancelled on play)
 
     // Probe duration immediately (header-only, no decode) — skip for pending uploads
     if (!isPending) {
@@ -1455,25 +1458,60 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             // Full waveform available — use FFT data
             const frame = Math.floor((posMs / 1000) * waveformFps);
             const offset = frame * waveformBins;
+
+            // Initialize per-bin display state
+            if (!binDisplay || binDisplay.length !== waveformBins) {
+                binDisplay = new Float32Array(waveformBins);
+            }
+
+            // Animate shared offset toward 0 (all bars descend together uniformly)
+            barOffsetY *= 0.92;
+
+            // Mean-deviation visualization: shows spectral *shape* per frame.
+            // Each bar's height = how far above/below the frame mean, so all
+            // bins get equal visual weight regardless of absolute energy level.
+            let frameMean = 0;
+            for (let i = 0; i < waveformBins; i++) {
+                frameMean += (offset + i < waveformData.length)
+                    ? waveformData[offset + i] / 255 : 0;
+            }
+            frameMean /= waveformBins;
+
+            // Overall level gate: scale bars by loudness so silence = short bars
+            const level = Math.min(1, Math.sqrt(frameMean * 2));
+
+            for (let i = 0; i < waveformBins; i++) {
+                const v = (offset + i < waveformData.length)
+                    ? waveformData[offset + i] / 255 : 0;
+
+                // Deviation from mean, amplified and centered
+                const target = Math.max(0.05, Math.min(1,
+                    (v - frameMean) * 2.5 + 0.5)) * level;
+
+                // Smooth attack and release for fluid motion
+                if (target > binDisplay[i]) {
+                    binDisplay[i] = binDisplay[i] * 0.7 + target * 0.3;
+                } else {
+                    binDisplay[i] = binDisplay[i] * 0.85 + target * 0.15;
+                }
+            }
+
             for (let i = 0; i < barCount; i++) {
                 const binIdx = Math.floor(i * waveformBins / barCount);
-                const raw = (offset + binIdx < waveformData.length) ? waveformData[offset + binIdx] : 0;
-
-                const boosted = (raw / 255) * (1 + (i / barCount) * 0.5);
-                const compressed = Math.tanh(boosted * 2) * 255;
-                const normalizedValue = compressed / 255;
-                const scaledHeight = Math.pow(normalizedValue, 1.5) * 70;
+                const val = binDisplay[binIdx];
+                const scale = Math.max(0.1, val);
 
                 const bar = bars[i];
-                bar.style.height = `${Math.max(5, Math.min(80, scaledHeight + 5))}%`;
+                const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
+                bar.style.transform = `${yOff}scaleY(${scale})`;
 
-                const baseOpacity = 0.3 + (scaledHeight / 70) * 0.7;
+                const baseOpacity = 0.3 + val * 0.7;
                 const barProgress = (i + 0.5) / barCount;
                 const playbackOpacity = barProgress <= progress ? 1 : 0.4;
                 bar.style.opacity = baseOpacity * playbackOpacity;
 
-                if (scaledHeight > 50 && barProgress <= progress) {
-                    const glowIntensity = (scaledHeight - 50) / 3;
+                if (val > 0.7 && barProgress <= progress) {
+                    const glowIntensity = (val - 0.7) * 8;
                     bar.style.boxShadow = `0 0 ${glowIntensity}px ${cachedGlowColor}`;
                 } else {
                     bar.style.boxShadow = 'none';
@@ -1483,7 +1521,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             // Waveform still computing — show progress-only bars
             for (let i = 0; i < barCount; i++) {
                 const bar = bars[i];
-                bar.style.height = '25%';
+                bar.style.transform = 'translateY(-7px) scaleY(0.25)';
                 const barProgress = (i + 0.5) / barCount;
                 bar.style.opacity = barProgress <= progress ? '0.5' : '0.2';
                 bar.style.boxShadow = 'none';
@@ -1500,6 +1538,7 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
     // Assemble custom player
     customPlayer.appendChild(playBtn);
     if (!isVoiceMessage && cAttachment.name) {
+        audioContainer.classList.add('has-metadata');
         const waveformWrapper = document.createElement('div');
         waveformWrapper.classList.add('audio-waveform-wrapper');
         const filenameLabel = document.createElement('div');
@@ -1509,6 +1548,28 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
         waveformWrapper.appendChild(filenameLabel);
         waveformWrapper.appendChild(waveform);
         customPlayer.appendChild(waveformWrapper);
+
+        // Fetch audio metadata (ID3/Vorbis/MP4 tags) for non-voice files
+        if (cAttachment.path) {
+            invoke('get_audio_metadata', { path: cAttachment.path }).then(meta => {
+                if (!meta) return;
+                if (meta.title && filenameLabel) {
+                    filenameLabel.textContent = meta.artist
+                        ? `${meta.artist} — ${meta.title}` : meta.title;
+                    filenameLabel.title = filenameLabel.textContent;
+                }
+                if (meta.cover_art) {
+                    const artWrap = document.createElement('div');
+                    artWrap.classList.add('audio-cover-art-wrap');
+                    const art = document.createElement('img');
+                    art.classList.add('audio-cover-art');
+                    art.onerror = () => artWrap.remove();
+                    art.src = meta.cover_art;
+                    artWrap.appendChild(art);
+                    audioContainer.insertBefore(artWrap, customPlayer);
+                }
+            }).catch(() => {});
+        }
     } else {
         customPlayer.appendChild(waveform);
     }
@@ -1586,6 +1647,8 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             const posMs = await invoke('audio_play', { id: sourceId });
             playStartTime = performance.now();
             playStartPos = posMs;
+            // Cancel any wind-down animation from a previous pause
+            if (windDownId) { cancelAnimationFrame(windDownId); windDownId = null; }
             playBtn.innerHTML = '<span class="icon icon-pause"></span>';
             customPlayer.classList.add('playing');
 
@@ -1612,15 +1675,39 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             animationId = null;
         }
 
-        // Update bars to paused state (maintain playback position opacity)
+        // Smoothly wind down bars to paused state
         if (durationMs > 0) {
-            const currentProgress = posMs / durationMs;
-            bars.forEach((bar, i) => {
-                bar.style.height = '20%';
-                const barProgress = (i + 0.5) / barCount;
-                bar.style.opacity = barProgress <= currentProgress ? '0.3' : '0.15';
-                bar.style.boxShadow = 'none';
-            });
+            const pausedPos = Math.min(playStartPos + (performance.now() - playStartTime), durationMs);
+            const currentProgress = pausedPos / durationMs;
+            const windDown = () => {
+                barOffsetY = barOffsetY * 0.92 + -9 * 0.08;
+                let settled = true;
+                bars.forEach((bar, i) => {
+                    const binIdx = Math.floor(i * waveformBins / barCount);
+                    if (binDisplay && binIdx < binDisplay.length) {
+                        binDisplay[binIdx] *= 0.94;
+                        if (binDisplay[binIdx] > 0.02) settled = false;
+                    }
+                    const scale = Math.max(0.1, binDisplay ? binDisplay[binIdx] || 0.1 : 0.1);
+                    const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
+                    bar.style.transform = `${yOff}scaleY(${scale})`;
+                    const barProgress = (i + 0.5) / barCount;
+                    bar.style.opacity = barProgress <= currentProgress ? '0.3' : '0.15';
+                    bar.style.boxShadow = 'none';
+                });
+                if (!settled) {
+                    windDownId = requestAnimationFrame(windDown);
+                } else {
+                    windDownId = null;
+                    barOffsetY = -9;
+                    bars.forEach(bar => {
+                        bar.style.transform = 'translateY(-9px) scaleY(0.15)';
+                    });
+                }
+            };
+            windDown();
+        } else {
+            barOffsetY = -9;
         }
     };
 
@@ -1730,12 +1817,33 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             animationId = null;
         }
 
-        // Reset bars
-        bars.forEach(bar => {
-            bar.style.height = '20%';
-            bar.style.opacity = '0.3';
-            bar.style.boxShadow = 'none';
-        });
+        // Smoothly wind down bars
+        const windDownReset = () => {
+            barOffsetY = barOffsetY * 0.92 + -9 * 0.08;
+            let settled = true;
+            bars.forEach((bar, i) => {
+                const binIdx = Math.floor(i * waveformBins / barCount);
+                if (binDisplay && binIdx < binDisplay.length) {
+                    binDisplay[binIdx] *= 0.94;
+                    if (binDisplay[binIdx] > 0.02) settled = false;
+                }
+                const scale = Math.max(0.1, binDisplay ? binDisplay[binIdx] || 0.1 : 0.1);
+                const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
+                bar.style.transform = `${yOff}scaleY(${scale})`;
+                bar.style.opacity = '0.3';
+                bar.style.boxShadow = 'none';
+            });
+            if (!settled) {
+                windDownId = requestAnimationFrame(windDownReset);
+            } else {
+                windDownId = null;
+                barOffsetY = -9;
+                bars.forEach(bar => {
+                    bar.style.transform = 'translateY(-9px) scaleY(0.15)';
+                });
+            }
+        };
+        windDownReset();
 
     }
 
