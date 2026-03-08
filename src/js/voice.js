@@ -1529,6 +1529,10 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
 
         currentTimeEl.textContent = formatTime(posMs / 1000);
 
+        // Highlight active transcription section if visible
+        const tContainer = audioContainer.querySelector('.transcription-result:not(.hidden)');
+        if (tContainer) highlightCurrentSection(tContainer, posMs);
+
         if (posMs >= durationMs) return; // Let ended event handle cleanup
 
         animationId = requestAnimationFrame(updateVisualizerFromData);
@@ -1674,6 +1678,10 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
             animationId = null;
         }
 
+        // Clear transcription highlighting
+        const tContainer = audioContainer.querySelector('.transcription-result');
+        if (tContainer) clearHighlighting(tContainer);
+
         // Smoothly wind down bars to paused state
         if (durationMs > 0) {
             const pausedPos = Math.min(playStartPos + (performance.now() - playStartTime), durationMs);
@@ -1810,6 +1818,10 @@ function handleAudioAttachment(cAttachment, pMessage, msg) {
         playBtn.innerHTML = '<span class="icon icon-play"></span>';
         customPlayer.classList.remove('playing');
         currentTimeEl.textContent = '0:00';
+
+        // Clear transcription highlighting
+        const tContainer = audioContainer.querySelector('.transcription-result');
+        if (tContainer) clearHighlighting(tContainer);
 
         if (animationId) {
             cancelAnimationFrame(animationId);
