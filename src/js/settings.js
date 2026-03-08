@@ -1135,6 +1135,19 @@ async function initStorageSection() {
         // Render file type distribution bar
         renderFileTypeDistribution(storageInfo.type_distribution, storageInfo.file_count);
     }
+
+    // Auto-download limit
+    const savedLimit = await loadMaxAutoDownloadBytes();
+    MAX_AUTO_DOWNLOAD_BYTES = savedLimit;
+    const limitSelect = document.getElementById('auto-download-limit');
+    if (limitSelect) {
+        limitSelect.value = String(savedLimit);
+        limitSelect.addEventListener('change', async () => {
+            const bytes = parseInt(limitSelect.value, 10);
+            MAX_AUTO_DOWNLOAD_BYTES = bytes;
+            await saveMaxAutoDownloadBytes(bytes);
+        });
+    }
 }
 
 function renderFileTypeDistribution(typeDistribution, totalBytes) {

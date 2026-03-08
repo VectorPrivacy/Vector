@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_PUBLIC_KEY};
+use crate::{NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY};
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
@@ -248,7 +248,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
 
     rt.block_on(async {
         // Bootstrap the standalone client — get connected ASAP
-        let (client, my_public_key, can_decrypt) = match bootstrap_client(data_dir).await {
+        let (client, my_public_key, can_decrypt, keys) = match bootstrap_client(data_dir).await {
             Ok(result) => result,
             Err(e) => {
                 logcat(&format!("Failed to bootstrap client: {}", e));
@@ -256,7 +256,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         };
 
-        // Store the client and public key in globals so headless operations
+        // Store the client, keys, and public key in globals so headless operations
         // (notification reply, mark-as-read) can use them in service-only mode.
         // ONLY set for unencrypted accounts — encrypted accounts use a signerless
         // client that would poison the OnceCell and prevent the full app from
@@ -264,6 +264,9 @@ fn run_standalone_sync_loop(data_dir: &str) {
         if can_decrypt {
             let _ = NOSTR_CLIENT.set(client.clone());
             let _ = MY_PUBLIC_KEY.set(my_public_key);
+            if let Some(keys) = keys {
+                let _ = MY_KEYS.set(keys);
+            }
         }
 
         // Subscribe to GiftWraps addressed to us (DMs, files, MLS welcomes)
@@ -402,7 +405,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
 /// Returns (client, public_key, can_decrypt).
 /// When local encryption is enabled, returns a read-only client (no signer) that can
 /// subscribe to events but not decrypt them — used for generic "New message" notifications.
-async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), String> {
+async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Option<Keys>), String> {
     let data_path = std::path::Path::new(data_dir);
 
     // Scan for npub directories
@@ -486,7 +489,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), S
         logcat(&format!("Connecting to {} relays...", DEFAULT_RELAYS.len()));
         client.connect().await;
 
-        Ok((client, my_public_key, false))
+        Ok((client, my_public_key, false, None))
     } else {
         // Normal account — full signer client
         let pkey: String = conn
@@ -508,7 +511,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), S
             &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]));
 
         let client = Client::builder()
-            .signer(keys)
+            .signer(keys.clone())
             .build();
 
         for relay_url in DEFAULT_RELAYS {
@@ -520,7 +523,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool), S
         logcat(&format!("Connecting to {} relays...", DEFAULT_RELAYS.len()));
         client.connect().await;
 
-        Ok((client, my_public_key, true))
+        Ok((client, my_public_key, true, Some(keys)))
     }
 }
 

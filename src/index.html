@@ -1007,6 +1007,20 @@
                       <div id="storage-bar" style="height: 100%; display: flex;"></div>
                     </div>
                   </div>
+                  <div class="form-group" style="display: flex; align-items: center; margin-top: 15px;">
+                    <span style="flex: 1;">Auto-Download Limit</span>
+                    <div class="select-container" style="margin: 0;">
+                      <select id="auto-download-limit" style="margin-bottom: 0 !important;">
+                        <option value="0">Off</option>
+                        <option value="1048576">1 MB</option>
+                        <option value="5242880">5 MB</option>
+                        <option value="10485760" selected>10 MB</option>
+                        <option value="26214400">25 MB</option>
+                        <option value="52428800">50 MB</option>
+                        <option value="104857600">100 MB</option>
+                      </select>
+                    </div>
+                  </div>
                   <div class="form-group" style="margin-top: 15px;">
                     <button id="clear-storage-btn" class="btn cancel-btn">Clear Storage</button>
                   </div>

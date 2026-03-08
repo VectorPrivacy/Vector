@@ -1,3 +1,12 @@
+async function loadMaxAutoDownloadBytes() {
+    const value = await invoke('get_sql_setting', { key: 'max_auto_download_bytes' });
+    return value !== null && value !== undefined ? parseInt(value, 10) : 10485760;
+}
+
+async function saveMaxAutoDownloadBytes(bytes) {
+    await invoke('set_sql_setting', { key: 'max_auto_download_bytes', value: String(bytes) });
+}
+
 /**
  * Save the user-selected Whisper Model ID
  * @param {string} name - The model ID
