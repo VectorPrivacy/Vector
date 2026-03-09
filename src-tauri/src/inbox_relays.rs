@@ -268,7 +268,7 @@ pub(crate) async fn send_event_first_ok(
     client: &Client,
     urls: Vec<RelayUrl>,
     event: &Event,
-) -> Result<Output<EventId>, Error> {
+) -> Result<Output<EventId>, nostr_sdk::client::Error> {
     let pool = client.pool();
     let relays = pool.relays().await;
     let event_id = event.id;
@@ -331,7 +331,7 @@ pub(crate) async fn send_event_first_ok(
 pub(crate) async fn send_event_pool_first_ok(
     client: &Client,
     event: &Event,
-) -> Result<Output<EventId>, Error> {
+) -> Result<Output<EventId>, nostr_sdk::client::Error> {
     let pool = client.pool();
     let relays = pool.relays().await;
     let write_urls: Vec<RelayUrl> = relays
@@ -354,16 +354,16 @@ pub async fn send_gift_wrap(
     recipient: &PublicKey,
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
-) -> Result<Output<EventId>, Error> {
+) -> Result<Output<EventId>, String> {
     // Wrap once upfront so we can reuse on fallback (avoids ~165µs re-encrypt)
-    let signer = client.signer().await?;
-    let event = EventBuilder::gift_wrap(&signer, recipient, rumor, extra_tags).await?;
+    let signer = client.signer().await.map_err(|e| e.to_string())?;
+    let event = EventBuilder::gift_wrap(&signer, recipient, rumor, extra_tags).await.map_err(|e| e.to_string())?;
 
     let inbox_strs = get_or_fetch_inbox_relays(client, recipient).await;
 
     if inbox_strs.is_empty() {
         // No 10050 found — broadcast to pool
-        return send_event_pool_first_ok(client, &event).await;
+        return send_event_pool_first_ok(client, &event).await.map_err(|e| e.to_string());
     }
 
     let inbox: Vec<RelayUrl> = inbox_strs
@@ -385,7 +385,7 @@ pub async fn send_gift_wrap(
                 "[InboxRelays] Inbox relays failed for {}, falling back to pool broadcast",
                 recipient
             );
-            send_event_pool_first_ok(client, &event).await
+            send_event_pool_first_ok(client, &event).await.map_err(|e| e.to_string())
         }
     }
 }
