@@ -7957,6 +7957,12 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 const fileBoxIcon = pMessage.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
                 if (fileBoxIcon) {
                     hasSpinner = true;
+                    // If icon is an <img> (Mini Apps), the spinner is absolute-positioned
+                    // so bump the text container margin to clear it
+                    if (fileBoxIcon.tagName === 'IMG') {
+                        const textSpan = fileBoxIcon.parentElement?.querySelector('span');
+                        if (textSpan) textSpan.style.marginLeft = '55px';
+                    }
                     const spinnerEl = createFileBoxSpinner(fileBoxIcon, { id: msg.id + '_file' });
                     // Add cancel button as sibling (not child — spinner mask clips children)
                     const cancelBtn = document.createElement('div');
@@ -8000,7 +8006,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
 
                 // For image/video previews: add centered upload progress spinner
                 const mediaEl = pMessage.querySelector('img:not(.emoji), video');
-                if (mediaEl) {
+                if (!hasSpinner && mediaEl) {
                     hasSpinner = true;
                     let container = mediaEl.parentElement;
                     // Videos are appended directly to pMessage — wrap in positioned div
