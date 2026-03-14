@@ -112,6 +112,15 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        // WebView2's GPU blocklist can cause software rendering fallback, resulting in
+        // extremely poor WebGL performance (e.g. WebXDC games at ~5fps on gaming hardware).
+        // This env var is applied globally before any WebView2 is created, avoiding the
+        // freeze issues that occur with per-window additional_browser_args.
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--ignore-gpu-blocklist");
+    }
+
     #[allow(unused_mut)] // mut needed on desktop for plugin registration
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())

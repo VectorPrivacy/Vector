@@ -63,6 +63,102 @@ const INIT_SCRIPT: &str = r#"
 // Mini App initialization script
 // This runs in all frames to ensure security
 
+// ============================================================================
+// WebGL ANGLE performance shims (Windows)
+//
+// Every WebGL call that *reads* state back from the GPU forces a synchronous
+// pipeline flush through ANGLE's OpenGL→D3D11 translation layer.  On macOS
+// (Metal) and Linux (native GL) these round-trips are cheap; on Windows/ANGLE
+// they are devastating — a single getError() per draw call drops a 60fps game
+// to ~3fps.
+//
+// Strategy:
+//   • getError()              → stub to NO_ERROR (0)
+//   • getParameter()          → cache by GLenum (caps/limits never change)
+//   • getUniformLocation()    → cache by (program, name) — stable after link
+//   • getAttribLocation()     → cache by (program, name) — stable after link
+//   • getSupportedExtensions()→ cache once per context
+//   • getExtension()          → cache by name
+//   • getShaderPrecisionFormat() → cache by (shaderType, precisionType)
+// ============================================================================
+(function() {
+    var NO_ERROR = 0;
+
+    function shimProto(proto) {
+        // --- getError: always NO_ERROR ---
+        proto.getError = function() { return NO_ERROR; };
+
+        // --- getParameter: cache by GLenum ---
+        var realGetParam = proto.getParameter;
+        proto.getParameter = function(pname) {
+            var c = this.__gpC || (this.__gpC = {});
+            if (pname in c) return c[pname];
+            return (c[pname] = realGetParam.call(this, pname));
+        };
+
+        // --- getUniformLocation: cache by (program, name) ---
+        // Result never changes after program linking.  Uses a numeric ID stamped
+        // on the program object as map key since WebGLProgram is opaque.
+        var realGetUniLoc = proto.getUniformLocation;
+        var progId = 0;
+        proto.getUniformLocation = function(program, name) {
+            if (!program) return realGetUniLoc.call(this, program, name);
+            var id = program.__pid;
+            if (id === undefined) { id = program.__pid = ++progId; }
+            var c = this.__ulC || (this.__ulC = {});
+            var key = id + '/' + name;
+            if (key in c) return c[key];
+            return (c[key] = realGetUniLoc.call(this, program, name));
+        };
+
+        // --- getAttribLocation: cache by (program, name) ---
+        var realGetAttrLoc = proto.getAttribLocation;
+        proto.getAttribLocation = function(program, name) {
+            if (!program) return realGetAttrLoc.call(this, program, name);
+            var id = program.__pid;
+            if (id === undefined) { id = program.__pid = ++progId; }
+            var c = this.__alC || (this.__alC = {});
+            var key = id + '/' + name;
+            if (key in c) return c[key];
+            return (c[key] = realGetAttrLoc.call(this, program, name));
+        };
+
+        // --- getSupportedExtensions: cache once ---
+        var realGetSupExt = proto.getSupportedExtensions;
+        proto.getSupportedExtensions = function() {
+            var c = this.__seC;
+            if (c !== undefined) return c;
+            return (this.__seC = realGetSupExt.call(this));
+        };
+
+        // --- getExtension: cache by name ---
+        var realGetExt = proto.getExtension;
+        proto.getExtension = function(name) {
+            var c = this.__exC || (this.__exC = {});
+            if (name in c) return c[name];
+            return (c[name] = realGetExt.call(this, name));
+        };
+
+        // --- getShaderPrecisionFormat: cache by (shaderType, precisionType) ---
+        var realGetSPF = proto.getShaderPrecisionFormat;
+        proto.getShaderPrecisionFormat = function(shaderType, precisionType) {
+            var c = this.__spfC || (this.__spfC = {});
+            var key = shaderType + '/' + precisionType;
+            if (key in c) return c[key];
+            return (c[key] = realGetSPF.call(this, shaderType, precisionType));
+        };
+    }
+
+    try {
+        if (typeof WebGLRenderingContext !== 'undefined') {
+            shimProto(WebGLRenderingContext.prototype);
+        }
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+            shimProto(WebGL2RenderingContext.prototype);
+        }
+    } catch (e) {}
+})();
+
 // Disable WebRTC to prevent IP leaks
 try {
     window.RTCPeerConnection = () => {};

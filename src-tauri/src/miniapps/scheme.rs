@@ -47,13 +47,17 @@ static CSP: LazyLock<String> = LazyLock::new(|| {
         ]),
     );
     
-    // Allow inline scripts and eval (needed for many web apps)
+    // Allow inline scripts, eval, and WASM compilation (needed for many web apps).
+    // 'wasm-unsafe-eval' is required: Chromium 145+ no longer grants WASM JIT
+    // compilation permission from 'unsafe-eval' alone, causing V8 to interpret
+    // WASM bytecode (~50-100x slower) instead of compiling it to native code.
     m.insert(
         "script-src".to_string(),
         CspDirectiveSources::List(vec![
             "'self'".to_owned(),
             "'unsafe-inline'".to_owned(),
             "'unsafe-eval'".to_owned(),
+            "'wasm-unsafe-eval'".to_owned(),
             "blob:".to_owned(),
         ]),
     );
@@ -599,6 +603,13 @@ fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions:
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         // Dynamic permissions policy based on user grants
         .header("Permissions-Policy", permissions_policy)
+        // Cross-origin isolation: enables SharedArrayBuffer and high-resolution timers.
+        // WASM-threaded games (Unity, Godot, etc.) need SharedArrayBuffer for multi-threaded
+        // rendering; without these headers on Chromium/WebView2 they fall back to single-
+        // threaded mode and run extremely slowly.  WKWebView (macOS) and WebKitGTK (Linux)
+        // provide SharedArrayBuffer without these headers, so this mainly fixes Windows.
+        .header("Cross-Origin-Opener-Policy", "same-origin")
+        .header("Cross-Origin-Embedder-Policy", "require-corp")
         .body(Cow::Owned(body))
         .unwrap_or_else(|_| make_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response", ""))
 }
