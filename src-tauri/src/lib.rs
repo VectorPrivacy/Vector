@@ -101,6 +101,18 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install a panic hook that logs the crash before the process dies.
+    // Without this, panics in spawned tasks vanish silently.
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!("PANIC: {info}\n\nBacktrace:\n{backtrace}");
+        eprintln!("{msg}");
+        // Write crash log to the Tauri app data dir (set during setup via set_app_data_dir)
+        if let Ok(data_dir) = account_manager::get_app_data_dir() {
+            let _ = std::fs::write(data_dir.join("crash.log"), &msg);
+        }
+    }));
+
     // Install rustls crypto provider before any TLS usage (required when both
     // 'ring' and 'aws-lc-rs' features are pulled by different transitive deps)
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -543,6 +555,7 @@ pub fn run() {
             commands::sync::sync_all_profiles,
             // System commands (commands/system.rs)
             commands::system::run_maintenance,
+            commands::system::get_crash_log,
             // Encryption toggle commands (commands/encryption.rs)
             commands::encryption::get_encryption_status,
             commands::encryption::get_encryption_and_key,

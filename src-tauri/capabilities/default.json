@@ -230,6 +230,7 @@
     "allow-audio-stop-all",
     "allow-audio-set-volume",
     "allow-send-recording",
-    "allow-get-audio-metadata"
+    "allow-get-audio-metadata",
+    "allow-get-crash-log"
   ]
 }

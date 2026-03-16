@@ -569,12 +569,24 @@ fn get_total_memory() -> u64 {
     0
 }
 
+/// Read the crash log file (written by the panic hook in lib.rs).
+/// Returns the log contents, or an empty string if no crash log exists.
+#[tauri::command]
+pub async fn get_crash_log(handle: AppHandle) -> String {
+    let crash_path = match handle.path().app_data_dir() {
+        Ok(dir) => dir.join("crash.log"),
+        Err(_) => return String::new(),
+    };
+    std::fs::read_to_string(crash_path).unwrap_or_default()
+}
+
 // Handler list for this module (for reference):
 // - get_platform_features
 // - run_maintenance
 // - get_storage_info
 // - clear_storage
 // - get_device_memory
+// - get_crash_log
 // - check_battery_optimized
 // - request_battery_optimization
 // - get_background_service_enabled

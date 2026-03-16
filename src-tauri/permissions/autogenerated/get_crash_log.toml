@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-crash-log"
+description = "Enables the get_crash_log command without any pre-configured scope."
+commands.allow = ["get_crash_log"]
+
+[[permission]]
+identifier = "deny-get-crash-log"
+description = "Denies the get_crash_log command without any pre-configured scope."
+commands.deny = ["get_crash_log"]

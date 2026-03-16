@@ -11280,6 +11280,20 @@ domChatMessageInput.oninput = async () => {
         };
     }
 
+    // Info button for Copy Crash Logs
+    const domCrashLogInfo = document.getElementById('crash-log-info');
+    if (domCrashLogInfo) {
+        domCrashLogInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm(
+                'Crash Logs',
+                'If Vector crashed unexpectedly, this copies the technical details to your clipboard.<br><br>Share it with developers when reporting bugs to help diagnose the issue.',
+                true
+            );
+        };
+    }
+
     domSettingsLogoutInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();

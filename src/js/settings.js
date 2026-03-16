@@ -1706,6 +1706,21 @@ async function initSettings() {
         if (success) initStorageSection();
     });
 
+    // Pre-fetch crash log so clipboard.writeText runs synchronously on click
+    let cachedCrashLog = '';
+    invoke('get_crash_log').then((log) => { cachedCrashLog = log || ''; });
+    const copyCrashLogBtn = document.getElementById('copy-crash-log-btn');
+    copyCrashLogBtn.addEventListener('click', () => {
+        if (!cachedCrashLog) {
+            showToast('No logs to copy!');
+            return;
+        }
+        const lines = cachedCrashLog.split('\n').length;
+        navigator.clipboard.writeText(cachedCrashLog).then(() => {
+            showToast('Copied ' + lines + ' log lines to clipboard');
+        });
+    });
+
     // Add click handler for primary device status
     const primaryDeviceStatus = document.getElementById('primary-device-status');
     primaryDeviceStatus.onclick = showPrimaryDeviceInfo;
