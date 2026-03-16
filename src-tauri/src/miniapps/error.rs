@@ -15,7 +15,6 @@ pub enum Error {
     Anyhow(anyhow::Error),
     RealtimeChannelAlreadyActive,
     RealtimeChannelNotActive,
-    RealtimeDataTooLarge(usize),
     RealtimeError(String),
     DatabaseError(String),
 }
@@ -35,7 +34,6 @@ impl std::fmt::Display for Error {
             Error::Anyhow(e) => write!(f, "{}", e),
             Error::RealtimeChannelAlreadyActive => write!(f, "Realtime channel already active - call leave() first"),
             Error::RealtimeChannelNotActive => write!(f, "Realtime channel not active - call joinRealtimeChannel() first"),
-            Error::RealtimeDataTooLarge(size) => write!(f, "Realtime data too large: {} bytes (max 128000)", size),
             Error::RealtimeError(s) => write!(f, "Realtime channel error: {}", s),
             Error::DatabaseError(s) => write!(f, "Database error: {}", s),
         }

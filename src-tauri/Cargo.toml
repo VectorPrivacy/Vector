@@ -79,9 +79,9 @@ url = "2.5.7"
 
 # Realtime peer channels (Iroh P2P)
 iroh = "0.96"
-iroh-gossip = "0.96"
 iroh-quinn-proto = "0.15"
 rand = "0.8"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
 # PIVX Promos (addressless crypto payments)
 secp256k1 = "0.29"

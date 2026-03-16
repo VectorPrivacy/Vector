@@ -439,8 +439,8 @@ pub fn run() {
             miniapps::commands::miniapp_list_open,
             // Mini Apps realtime channel commands (Iroh P2P)
             miniapps::commands::miniapp_join_realtime_channel,
-            miniapps::commands::miniapp_send_realtime_data,
             miniapps::commands::miniapp_leave_realtime_channel,
+            miniapps::commands::miniapp_send_realtime_data,
             miniapps::commands::miniapp_add_realtime_peer,
             miniapps::commands::miniapp_get_realtime_node_addr,
             miniapps::commands::miniapp_get_realtime_status,

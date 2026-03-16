@@ -1,7 +1,7 @@
-//! Realtime peer channels for Mini Apps using Iroh
+//! Realtime peer channels for Mini Apps using raw QUIC connections via Iroh.
 //!
-//! This module provides P2P realtime communication for WebXDC apps using Iroh,
-//! matching DeltaChat's implementation for cross-compatibility.
+//! Each peer gets independent QUIC connections with per-peer send queues —
+//! one slow peer cannot block others (no head-of-line blocking).
 //!
 //! See: https://webxdc.org/docs/spec/joinRealtimeChannel.html
 
@@ -9,14 +9,10 @@
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use fast_thumbhash::base91_encode;
-use futures_util::StreamExt;
 use iroh::endpoint::VarInt;
 use iroh::{EndpointAddr, Endpoint, PublicKey, RelayMode, SecretKey, TransportAddr};
-use iroh_gossip::api::{Event, GossipReceiver, GossipSender, JoinOptions};
-use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-use iroh_gossip::proto::TopicId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager};
@@ -65,36 +61,103 @@ fn base32_nopad_decode(encoded: &[u8]) -> std::result::Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/// Custom ALPN protocol for Vector realtime P2P channels.
+const VECTOR_RT_ALPN: &[u8] = b"vector-rt/1";
+
 /// Maximum message size for realtime data (128 KB as per WebXDC spec)
 const MAX_MESSAGE_SIZE: usize = 128 * 1024;
 
+/// Bounded global send queue capacity — large enough for bursts, bounded to cap memory.
+/// At 128 KB max payload, worst case is 256 * 128 KB = 32 MB buffered.
+const SEND_QUEUE_CAPACITY: usize = 256;
+
+/// Per-peer send queue capacity. Smaller than the global queue because
+/// a single slow peer should not buffer unboundedly.
+/// At 128 KB max, worst case is 64 * 128 KB = 8 MB per peer.
+const PEER_SEND_QUEUE_CAPACITY: usize = 64;
+
 /// The length of an ed25519 PublicKey, in bytes.
-const PUBLIC_KEY_LENGTH: usize = 32;
+pub(crate) const PUBLIC_KEY_LENGTH: usize = 32;
+
+// ─── TopicId ────────────────────────────────────────────────────────────────
+
+/// Topic identifier for realtime channels (32-byte hash).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TopicId([u8; 32]);
+
+impl TopicId {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+}
+
+// ─── SendHandle ─────────────────────────────────────────────────────────────
+
+/// Sync-accessible handle for the zero-overhead send fast path.
+/// Cached per window label so the WS server can skip all async lookups.
+pub(crate) struct SendHandle {
+    pub send_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub drops: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for SendHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendHandle")
+            .field("drops", &self.drops.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+// ─── PeerConnection ─────────────────────────────────────────────────────────
+
+/// A single peer's QUIC connection and associated tasks.
+struct PeerConnection {
+    /// The QUIC connection to this peer.
+    conn: iroh::endpoint::Connection,
+    /// Background task reading incoming uni streams from this peer.
+    read_task: JoinHandle<()>,
+    /// Background task writing to uni streams for this peer.
+    write_task: JoinHandle<()>,
+    /// Per-peer send queue (drainer fans out here; non-blocking try_send).
+    send_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+// ─── IrohState ──────────────────────────────────────────────────────────────
 
 /// Store Iroh peer channels state
-#[derive(Debug)]
 pub struct IrohState {
-    /// Iroh endpoint for peer channels
+    /// Iroh QUIC endpoint for P2P connections
     pub(crate) endpoint: Endpoint,
 
-    /// Gossip protocol handler
-    pub(crate) gossip: Gossip,
-
-    /// Active realtime channels
-    pub(crate) channels: RwLock<HashMap<TopicId, ChannelState>>,
+    /// Active realtime channels (Arc for sharing with accept loop, drainer, and peer tasks)
+    pub(crate) channels: Arc<RwLock<HashMap<TopicId, ChannelState>>>,
 
     /// Our public key (attached to messages for deduplication)
     pub(crate) public_key: PublicKey,
 
     /// Cached public key bytes (avoids repeated .as_bytes() calls in hot path)
     pub(crate) public_key_bytes: [u8; PUBLIC_KEY_LENGTH],
+
+    /// Fast-path send handles keyed by window label (sync access via std RwLock).
+    /// Wrapped in Arc so the WS server can share the same map.
+    /// Populated on join_channel, removed on leave_channel.
+    pub(crate) send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
+}
+
+impl std::fmt::Debug for IrohState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrohState")
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 impl IrohState {
-    /// Initialize a new Iroh state with endpoint and gossip
+    /// Initialize a new Iroh state with QUIC endpoint (no gossip)
     pub async fn new(_relay_url: Option<String>) -> Result<Self> {
-        log_info!("Initializing Iroh peer channels");
-        
+        log_info!("Initializing Iroh peer channels (raw QUIC)");
+
         // Generate 32 random bytes and construct SecretKey from them
         // (avoids rand_core version mismatch between our rand 0.8 and iroh's rand_core 0.9)
         let mut key_bytes = [0u8; 32];
@@ -123,10 +186,10 @@ impl IrohState {
             ))
             .build();
 
-        // Build the endpoint with tuned transport
+        // Build the endpoint with our custom ALPN
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
-            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .alpns(vec![VECTOR_RT_ALPN.to_vec()])
             .relay_mode(RelayMode::Default)
             .transport_config(transport_config)
             .bind()
@@ -135,28 +198,27 @@ impl IrohState {
         // Relay connects automatically in the background (no manual wait needed)
         log_info!("[WEBXDC] Endpoint bound, relay connection will establish in background");
 
-        // Create gossip with max message size of 128 KB
-        let gossip = Gossip::builder()
-            .max_message_size(MAX_MESSAGE_SIZE)
-            .spawn(endpoint.clone());
+        let public_key_bytes = *public_key.as_bytes();
+        let channels: Arc<RwLock<HashMap<TopicId, ChannelState>>> = Arc::new(RwLock::new(HashMap::new()));
 
-        // Start the accept loop to handle incoming connections
-        // The gossip protocol doesn't accept connections itself - we need to do it
+        // Start the accept loop to handle incoming peer connections
         let accept_endpoint = endpoint.clone();
-        let accept_gossip = gossip.clone();
+        let accept_channels = channels.clone();
+        let accept_our_key = public_key_bytes;
         tokio::spawn(async move {
             log_info!("[WEBXDC] Starting connection accept loop");
             loop {
                 match accept_endpoint.accept().await {
                     Some(incoming) => {
-                        let gossip = accept_gossip.clone();
+                        let channels = accept_channels.clone();
                         tokio::spawn(async move {
                             match incoming.await {
                                 Ok(conn) => {
-                                    if conn.alpn() == GOSSIP_ALPN {
-                                        if let Err(e) = gossip.handle_connection(conn).await {
-                                            log_error!("[WEBXDC] Failed to handle gossip connection: {}", e);
-                                        }
+                                    if conn.alpn() != VECTOR_RT_ALPN {
+                                        return;
+                                    }
+                                    if let Err(e) = handle_incoming_peer(conn, channels, accept_our_key).await {
+                                        log_warn!("[WEBXDC] Failed to handle incoming peer: {e}");
                                     }
                                 }
                                 Err(e) => {
@@ -173,14 +235,12 @@ impl IrohState {
             }
         });
 
-        let public_key_bytes = *public_key.as_bytes();
-
         Ok(Self {
             endpoint,
-            gossip,
-            channels: RwLock::new(HashMap::new()),
+            channels,
             public_key,
             public_key_bytes,
+            send_handles: Arc::new(std::sync::RwLock::new(HashMap::new())),
         })
     }
 
@@ -205,77 +265,100 @@ impl IrohState {
         EndpointAddr { id: addr.id, addrs: filtered_addrs }
     }
 
-    /// Join a gossip topic and start the subscriber loop
+    /// Join a realtime channel and start per-peer tasks.
+    /// `label` is the window label (e.g. "miniapp:abc123") used for fast-path send caching.
     pub async fn join_channel(
         &self,
         topic: TopicId,
         peers: Vec<EndpointAddr>,
         event_target: EventTarget,
         app_handle: Option<AppHandle>,
+        label: String,
     ) -> Result<(bool, Option<oneshot::Receiver<()>>)> {
         let mut channels = self.channels.write().await;
 
         // If channel already exists, we're re-joining (e.g., user closed and reopened the game)
-        // Update the shared event target so the subscribe loop uses the new frontend channel
+        // Update the shared event target so the reader tasks use the new frontend channel
         if let Some(channel_state) = channels.get(&topic) {
-            log_info!("IROH_REALTIME: Re-joining existing gossip topic {:?}, updating event target", topic);
+            log_info!("IROH_REALTIME: Re-joining existing topic {:?}, updating event target", topic);
             let mut shared_target = channel_state.event_target.write().unwrap_or_else(|e| e.into_inner());
             *shared_target = Some(event_target);
             return Ok((true, None));
         }
 
-        let peer_ids: Vec<PublicKey> = peers.iter().map(|p| p.id).collect();
-
         log_info!(
-            "IROH_REALTIME: Joining gossip topic {:?} with {} peers",
+            "IROH_REALTIME: Joining topic {:?} with {} peers",
             topic,
-            peer_ids.len()
+            peers.len()
         );
 
-        // Connect to peers so gossip can discover them
-        for peer_addr in &peers {
+        // Create shared state
+        let shared_event_target: SharedEventTarget = Arc::new(std::sync::RwLock::new(Some(event_target)));
+        let shared_peer_count: SharedPeerCount = Arc::new(AtomicUsize::new(0));
+
+        // Bounded send queue: JS invoke returns instantly, drainer fans out in background
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(SEND_QUEUE_CAPACITY);
+        let drops = Arc::new(AtomicU64::new(0));
+
+        // Spawn the fan-out drainer task
+        let drainer_channels = self.channels.clone();
+        let drainer_topic = topic;
+        let drainer_drops = drops.clone();
+        let drainer_handle = tokio::spawn(async move {
+            run_send_drainer(send_rx, drainer_channels, drainer_topic, drainer_drops).await;
+        });
+
+        channels.insert(topic, ChannelState {
+            peers: HashMap::new(),
+            drainer_handle,
+            send_tx: send_tx.clone(),
+            event_target: shared_event_target.clone(),
+            peer_count: shared_peer_count.clone(),
+            drops: drops.clone(),
+        });
+
+        // Drop channels lock before connecting to peers (connections may take time)
+        drop(channels);
+
+        // Populate fast-path send handle for the WS server (zero-overhead sends)
+        self.send_handles.write().unwrap_or_else(|e| e.into_inner()).insert(label, SendHandle {
+            send_tx,
+            drops,
+        });
+
+        // Connect to initial peers concurrently
+        let (join_tx, join_rx) = oneshot::channel();
+        let join_tx = Arc::new(std::sync::Mutex::new(Some(join_tx)));
+
+        for peer_addr in peers {
             if !peer_addr.addrs.is_empty() {
-                let addr = peer_addr.clone();
                 let ep = self.endpoint.clone();
-                let g = self.gossip.clone();
+                let channels_ref = self.channels.clone();
+                let et = shared_event_target.clone();
+                let pc = shared_peer_count.clone();
+                let our_key = self.public_key_bytes;
+                let join_tx_clone = join_tx.clone();
+                let app_handle_clone = app_handle.clone();
+                let topic_encoded = encode_topic_id(&topic);
+
                 tokio::spawn(async move {
-                    match ep.connect(addr, GOSSIP_ALPN).await {
-                        Ok(conn) => {
-                            if let Err(e) = g.handle_connection(conn).await {
-                                log_warn!("[WEBXDC] Failed to handle peer connection: {e}");
+                    match connect_to_peer(&ep, peer_addr, topic, et.clone(), pc.clone(), our_key, channels_ref).await {
+                        Ok(_) => {
+                            // Signal connected on first peer
+                            if let Ok(mut guard) = join_tx_clone.lock() {
+                                if let Some(tx) = guard.take() {
+                                    let _ = tx.send(());
+                                    send_event(&et, RealtimeEvent::Connected);
+                                }
                             }
+                            let new_count = pc.load(Ordering::Relaxed);
+                            emit_realtime_status(&app_handle_clone, &topic_encoded, new_count, true);
                         }
                         Err(e) => log_warn!("[WEBXDC] Failed to connect to peer: {e}"),
                     }
                 });
             }
         }
-
-        let (join_tx, join_rx) = oneshot::channel();
-
-        let gossip_topic = self
-            .gossip
-            .subscribe_with_opts(topic, JoinOptions::with_bootstrap(peer_ids))
-            .await?;
-        let (gossip_sender, gossip_receiver) = gossip_topic.split();
-
-        // Create shared event target for the subscribe loop
-        let shared_event_target: SharedEventTarget = Arc::new(std::sync::RwLock::new(Some(event_target)));
-        let shared_target_clone = shared_event_target.clone();
-        
-        // Create shared peer count
-        let shared_peer_count: SharedPeerCount = Arc::new(AtomicUsize::new(0));
-        let peer_count_clone = shared_peer_count.clone();
-
-        let our_key_bytes = self.public_key_bytes;
-        let topic_encoded = encode_topic_id(&topic);
-        let subscribe_loop = tokio::spawn(async move {
-            if let Err(e) = run_subscribe_loop(gossip_receiver, topic, shared_target_clone, join_tx, our_key_bytes, peer_count_clone, app_handle, topic_encoded).await {
-                log_warn!("Subscribe loop failed: {e}");
-            }
-        });
-
-        channels.insert(topic, ChannelState::new(subscribe_loop, gossip_sender, shared_event_target, shared_peer_count));
 
         Ok((false, Some(join_rx)))
     }
@@ -285,7 +368,7 @@ impl IrohState {
         self.add_peer_with_retry(topic, peer, 3).await
     }
 
-    /// Add a peer to a gossip topic with retry logic
+    /// Add a peer to a topic with retry logic
     /// Retries with exponential backoff: 1s, 2s, 4s
     async fn add_peer_with_retry(&self, topic: TopicId, peer: EndpointAddr, max_retries: u32) -> Result<()> {
         let mut last_error = None;
@@ -316,62 +399,52 @@ impl IrohState {
             peer.id,
             peer.addrs.len());
 
-        // Connect to the peer and hand the connection to gossip
-        let conn = self.endpoint.connect(peer.clone(), GOSSIP_ALPN).await?;
-        self.gossip.handle_connection(conn).await?;
+        let (event_target, peer_count) = {
+            let channels = self.channels.read().await;
+            let channel = channels.get(topic)
+                .ok_or_else(|| anyhow!("Channel not found for topic"))?;
+            (channel.event_target.clone(), channel.peer_count.clone())
+        };
 
-        // Verify the connection via remote_info
-        if let Some(_info) = self.endpoint.remote_info(peer.id).await {
-            log_trace!("[WEBXDC] add_peer: Remote info confirmed for peer {}", peer.id);
-        } else {
-            log_trace!("[WEBXDC] add_peer: WARNING - Could not get remote info for peer {}", peer.id);
-        }
+        connect_to_peer(
+            &self.endpoint, peer.clone(), *topic,
+            event_target, peer_count,
+            self.public_key_bytes, self.channels.clone(),
+        ).await?;
 
-        // Then, use the existing channel's sender to join the peer
-        let channels = self.channels.read().await;
-        if let Some(channel_state) = channels.get(topic) {
-            log_trace!("[WEBXDC] add_peer: Joining peer {} via existing channel sender", peer.id);
-            channel_state.sender.join_peers(vec![peer.id]).await?;
-            log_info!("[WEBXDC] add_peer: Successfully joined peer {} to topic", peer.id);
-        } else {
-            return Err(anyhow!("Channel not found for topic"));
-        }
+        log_info!("[WEBXDC] add_peer: Successfully connected peer {} to topic", peer.id);
         Ok(())
     }
 
-    /// Send data to a gossip topic
-    pub async fn send_data(&self, topic: TopicId, mut data: Vec<u8>) -> Result<()> {
-        // Clone sender and read seq under the lock, then release before broadcast.
-        // This prevents holding the read lock during potentially slow network I/O
-        // (backpressure under 4K video streaming, gaming, voice/video loads).
-        let sender = {
-            let channels = self.channels.read().await;
-            let state = channels
-                .get(&topic)
-                .ok_or_else(|| anyhow!("Channel not found for topic"))?;
+    /// Zero-overhead send via the fast-path cache (entirely synchronous).
+    /// Called from the WS server and invoke fallback — no async, no JSON, no encoding.
+    pub fn fast_send(&self, label: &str, data: Vec<u8>) {
+        let handles = self.send_handles.read().unwrap_or_else(|e| e.into_inner());
+        let Some(handle) = handles.get(label) else { return };
 
-            // Pre-allocate for trailer: 4-byte seq + 32-byte public key
-            data.reserve(4 + PUBLIC_KEY_LENGTH);
-            let seq_num = state.seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-            data.extend_from_slice(&seq_num.to_le_bytes());
-            data.extend_from_slice(&self.public_key_bytes);
-
-            state.sender.clone()
-        };
-
-        sender.broadcast(data.into()).await?;
-
-        log_trace!("Sent realtime data to topic {:?}", topic);
-
-        Ok(())
+        // Non-blocking enqueue — drops packet on overload
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = handle.send_tx.try_send(data) {
+            handle.drops.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Leave a realtime channel
-    pub async fn leave_channel(&self, topic: TopicId) -> Result<()> {
+    pub async fn leave_channel(&self, topic: TopicId, label: &str) -> Result<()> {
+        // Remove fast-path send handle
+        self.send_handles.write().unwrap_or_else(|e| e.into_inner()).remove(label);
+
         if let Some(channel) = self.channels.write().await.remove(&topic) {
-            // Abort the subscribe loop (this drops the receiver)
-            channel.subscribe_loop.abort();
-            let _ = channel.subscribe_loop.await;
+            // Abort drainer
+            channel.drainer_handle.abort();
+            let _ = channel.drainer_handle.await;
+
+            // Close all peer connections and abort their tasks
+            for (_key, peer) in channel.peers {
+                peer.conn.close(0u32.into(), b"leaving");
+                peer.read_task.abort();
+                peer.write_task.abort();
+            }
+
             log_info!("Left realtime channel {:?}", topic);
         }
         Ok(())
@@ -389,7 +462,7 @@ impl IrohState {
 
     /// Clear the event target for a topic (e.g., when the window is destroyed but
     /// the Iroh channel is intentionally kept alive for peer count tracking).
-    /// Prevents the subscribe loop from logging errors on every received message.
+    /// Prevents the reader tasks from logging errors on every received message.
     pub async fn clear_event_target(&self, topic: &TopicId) {
         let channels = self.channels.read().await;
         if let Some(channel_state) = channels.get(topic) {
@@ -405,6 +478,8 @@ impl IrohState {
 
 }
 
+// ─── EventTarget / RealtimeEvent ────────────────────────────────────────────
+
 /// Target for delivering realtime events (abstracts desktop vs Android)
 #[derive(Clone)]
 pub enum EventTarget {
@@ -417,47 +492,39 @@ pub enum EventTarget {
 /// Shared event target that can be updated when a user re-joins.
 /// Uses std::sync::RwLock (not tokio) because the lock is held for <1μs
 /// (just dispatching one event) and this avoids async runtime overhead
-/// on every received message in the subscribe loop hot path.
+/// on every received message in the reader hot path.
 pub(crate) type SharedEventTarget = Arc<std::sync::RwLock<Option<EventTarget>>>;
 
-/// Shared peer count that can be updated by the subscribe loop
+/// Shared peer count that can be updated by reader tasks
 pub(crate) type SharedPeerCount = Arc<AtomicUsize>;
 
-/// State for a single gossip channel
+// ─── ChannelState ───────────────────────────────────────────────────────────
+
+/// State for a single realtime channel (one per TopicId)
 pub(crate) struct ChannelState {
-    /// Handle to the subscribe loop task
-    subscribe_loop: JoinHandle<()>,
-    /// Sender for broadcasting messages
-    sender: GossipSender,
+    /// Per-peer connections, keyed by remote PublicKey
+    peers: HashMap<PublicKey, PeerConnection>,
+    /// Handle to the fan-out drainer task
+    drainer_handle: JoinHandle<()>,
+    /// Bounded send queue — `try_send()` returns instantly, drainer fans out in background
+    send_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// Shared event target (can be updated on re-join)
     event_target: SharedEventTarget,
     /// Current number of connected peers
     peer_count: SharedPeerCount,
-    /// Sequence number for deduplication (lock-free)
-    seq: AtomicI32,
+    /// Dropped packet counter (overload detection, shared with SendHandle)
+    drops: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for ChannelState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChannelState")
-            .field("subscribe_loop", &"JoinHandle<()>")
-            .field("sender", &"GossipSender")
+            .field("peers", &self.peers.len())
+            .field("drainer_handle", &"JoinHandle<()>")
             .field("event_target", &"SharedEventTarget")
             .field("peer_count", &self.peer_count.load(Ordering::Relaxed))
-            .field("seq", &self.seq.load(Ordering::Relaxed))
+            .field("drops", &self.drops.load(Ordering::Relaxed))
             .finish()
-    }
-}
-
-impl ChannelState {
-    fn new(subscribe_loop: JoinHandle<()>, sender: GossipSender, event_target: SharedEventTarget, peer_count: SharedPeerCount) -> Self {
-        Self {
-            subscribe_loop,
-            sender,
-            event_target,
-            peer_count,
-            seq: AtomicI32::new(0),
-        }
     }
 }
 
@@ -473,9 +540,11 @@ pub enum RealtimeEvent {
     PeerJoined(String),
     /// A peer left the channel
     PeerLeft(String),
-    /// Gossip stream lagged — some messages were lost (app should request resync)
+    /// Messages were lost (app should request resync)
     Lagged,
 }
+
+// ─── Event helpers ──────────────────────────────────────────────────────────
 
 /// Helper to send an event through the shared event target (sync — no async overhead)
 fn send_event(shared_target: &SharedEventTarget, event: RealtimeEvent) -> bool {
@@ -521,88 +590,381 @@ fn emit_realtime_status(app_handle: &Option<AppHandle>, topic_encoded: &str, pee
     }
 }
 
-/// Run the subscribe loop for a gossip topic
-async fn run_subscribe_loop(
-    mut receiver: GossipReceiver,
-    topic: TopicId,
-    shared_event_target: SharedEventTarget,
-    join_tx: oneshot::Sender<()>,
+// ─── Peer connection management ─────────────────────────────────────────────
+
+/// Handle an incoming peer connection from the accept loop.
+/// The peer opens a bi stream and sends a 32-byte topic ID.
+async fn handle_incoming_peer(
+    conn: iroh::endpoint::Connection,
+    channels: Arc<RwLock<HashMap<TopicId, ChannelState>>>,
     our_key_bytes: [u8; PUBLIC_KEY_LENGTH],
-    peer_count: SharedPeerCount,
-    app_handle: Option<AppHandle>,
-    topic_encoded: String,
 ) -> Result<()> {
-    let mut join_tx = Some(join_tx);
-    log_info!("[WEBXDC] Subscribe loop started for topic {:?}", topic);
+    let peer_key = conn.remote_id();
 
-    const TRAILER_LEN: usize = 4 + PUBLIC_KEY_LENGTH; // seq(4) + pubkey(32)
+    // Read topic ID from the control bi stream (with timeout to prevent stalling)
+    let (_ctrl_send, mut ctrl_recv) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        conn.accept_bi(),
+    ).await
+        .map_err(|_| anyhow!("Timeout waiting for topic handshake"))?
+        .map_err(|e| anyhow!("Failed to accept bi stream: {e}"))?;
 
-    while let Some(event) = receiver.next().await {
-        match event {
-            Ok(Event::Received(msg)) => {
-                let content = &msg.content;
+    let mut topic_bytes = [0u8; 32];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ctrl_recv.read_exact(&mut topic_bytes),
+    ).await
+        .map_err(|_| anyhow!("Timeout reading topic ID"))?
+        .map_err(|e| anyhow!("Failed to read topic ID: {e}"))?;
 
-                // Extract trailer (seq + pubkey) via zero-copy slicing
-                if content.len() >= TRAILER_LEN {
-                    let payload_len = content.len() - TRAILER_LEN;
-                    let sender_key = &content[payload_len + 4..];
+    let topic = TopicId::from_bytes(topic_bytes);
+    log_info!("[WEBXDC] Incoming peer {} for topic {:?}", peer_key, topic);
 
-                    // Skip messages from ourselves (32-byte memcmp, no PublicKey construction)
-                    if sender_key == our_key_bytes {
-                        continue;
-                    }
+    let mut channels_guard = channels.write().await;
+    let Some(channel) = channels_guard.get_mut(&topic) else {
+        conn.close(0u32.into(), b"unknown topic");
+        bail!("Incoming peer for unknown topic {:?}", topic);
+    };
 
-                    // Only encode the payload portion (excludes 36-byte trailer)
-                    send_event(&shared_event_target, RealtimeEvent::Data(base91_encode(&content[..payload_len])));
-                } else {
-                    // Malformed message (no trailer) — forward as-is
-                    send_event(&shared_event_target, RealtimeEvent::Data(base91_encode(content)));
-                }
-            }
-            Ok(Event::NeighborUp(peer_id)) => {
-                // Increment peer count
-                let new_count = peer_count.fetch_add(1, Ordering::Relaxed) + 1;
-
-                // Emit status update to main window
-                emit_realtime_status(&app_handle, &topic_encoded, new_count, true);
-
-                // Signal that we're connected when first neighbor comes up
-                if let Some(tx) = join_tx.take() {
-                    let _ = tx.send(());
-                    send_event(&shared_event_target, RealtimeEvent::Connected);
-                }
-                let peer_str = base32_nopad_encode(peer_id.as_bytes());
-                send_event(&shared_event_target, RealtimeEvent::PeerJoined(peer_str));
-            }
-            Ok(Event::NeighborDown(peer_id)) => {
-                let peer_str = base32_nopad_encode(peer_id.as_bytes());
-
-                // Atomically decrement peer count (saturating to avoid underflow)
-                let _ = peer_count.fetch_update(
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                    |count| if count > 0 { Some(count - 1) } else { None },
-                );
-                let new_count = peer_count.load(Ordering::Relaxed);
-
-                // Emit status update to main window
-                emit_realtime_status(&app_handle, &topic_encoded, new_count, true);
-
-                send_event(&shared_event_target, RealtimeEvent::PeerLeft(peer_str));
-            }
-            Ok(Event::Lagged) => {
-                log_warn!("[WEBXDC] Gossip lagged for topic {:?}", topic);
-                send_event(&shared_event_target, RealtimeEvent::Lagged);
-            }
-            Err(e) => {
-                log_error!("[WEBXDC] Gossip error for topic {:?}: {e}", topic);
-            }
+    // Tie-breaker for simultaneous connections: if we already have a connection
+    // to this peer, the side with the higher public key wins (keeps their outgoing).
+    // We're the acceptor here (incoming connection), so we should only accept if
+    // the remote peer has the higher key (they're the rightful initiator).
+    if channel.peers.contains_key(&peer_key) {
+        if *peer_key.as_bytes() > our_key_bytes {
+            // Remote has higher key — they're the initiator, accept their connection
+            log_info!("[WEBXDC] Tie-breaker: accepting incoming from {} (higher key wins)", peer_key);
+            let old = channel.peers.remove(&peer_key).unwrap();
+            old.conn.close(0u32.into(), b"tie-break");
+            old.read_task.abort();
+            old.write_task.abort();
+            // Decrement peer count since we'll re-increment below
+            let _ = channel.peer_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                if c > 0 { Some(c - 1) } else { None }
+            });
+        } else {
+            // We have higher key — we're the initiator, keep our outgoing connection
+            log_info!("[WEBXDC] Tie-breaker: rejecting incoming from {} (we have higher key)", peer_key);
+            conn.close(0u32.into(), b"tie-break");
+            return Ok(());
         }
     }
 
-    log_info!("[WEBXDC] Subscribe loop ended for topic {:?}", topic);
+    // Spawn read/write tasks for this peer
+    let peer_conn = spawn_peer_tasks(
+        conn,
+        peer_key,
+        topic,
+        channel.event_target.clone(),
+        channel.peer_count.clone(),
+        channels.clone(),
+    );
+
+    // Increment peer count and emit events
+    let new_count = channel.peer_count.fetch_add(1, Ordering::Relaxed) + 1;
+    log_info!("[WEBXDC] Peer {} joined topic {:?} (now {} peers)", peer_key, topic, new_count);
+    let peer_str = base32_nopad_encode(peer_key.as_bytes());
+    send_event(&channel.event_target, RealtimeEvent::PeerJoined(peer_str));
+
+    channel.peers.insert(peer_key, peer_conn);
+
     Ok(())
 }
+
+/// Connect to a peer: establish QUIC connection, send topic ID, spawn tasks.
+///
+/// Tie-breaker: only the side with the higher public key initiates connections.
+/// The lower-key side skips `connect_to_peer` and waits for the incoming connection
+/// via the accept loop. This prevents simultaneous connections that cause
+/// stream orphaning with persistent uni streams.
+async fn connect_to_peer(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    topic: TopicId,
+    event_target: SharedEventTarget,
+    peer_count: SharedPeerCount,
+    our_key_bytes: [u8; PUBLIC_KEY_LENGTH],
+    channels: Arc<RwLock<HashMap<TopicId, ChannelState>>>,
+) -> Result<()> {
+    // Tie-breaker: only initiate if we have the higher public key
+    let peer_id_bytes = addr.id.as_bytes();
+    if our_key_bytes < *peer_id_bytes {
+        log_info!("[WEBXDC] Skipping outgoing connection to {} (they have higher key, they'll initiate)", addr.id);
+        return Ok(());
+    }
+
+    let conn = endpoint.connect(addr.clone(), VECTOR_RT_ALPN).await
+        .map_err(|e| anyhow!("Failed to connect to peer: {e}"))?;
+    let peer_key = conn.remote_id();
+
+    // Open control bi stream and send topic ID (topic handshake)
+    let (mut ctrl_send, _ctrl_recv) = conn.open_bi().await
+        .map_err(|e| anyhow!("Failed to open bi stream: {e}"))?;
+    ctrl_send.write_all(topic.as_bytes()).await
+        .map_err(|e| anyhow!("Failed to send topic ID: {e}"))?;
+
+    let peer_conn = spawn_peer_tasks(
+        conn, peer_key, topic,
+        event_target.clone(), peer_count.clone(),
+        channels.clone(),
+    );
+
+    // Add to channel
+    let mut channels_guard = channels.write().await;
+    if let Some(channel) = channels_guard.get_mut(&topic) {
+        // Should not have an existing connection (we're the initiator), but handle gracefully
+        if let Some(old) = channel.peers.remove(&peer_key) {
+            old.conn.close(0u32.into(), b"replaced");
+            old.read_task.abort();
+            old.write_task.abort();
+        }
+
+        let new_count = channel.peer_count.fetch_add(1, Ordering::Relaxed) + 1;
+        log_info!("[WEBXDC] Connected to peer {} for topic {:?} (now {} peers)", peer_key, topic, new_count);
+        let peer_str = base32_nopad_encode(peer_key.as_bytes());
+        send_event(&channel.event_target, RealtimeEvent::PeerJoined(peer_str));
+
+        channel.peers.insert(peer_key, peer_conn);
+    } else {
+        bail!("Channel removed before peer connection completed");
+    }
+
+    Ok(())
+}
+
+/// Spawn read and write tasks for a peer connection.
+fn spawn_peer_tasks(
+    conn: iroh::endpoint::Connection,
+    peer_key: PublicKey,
+    topic: TopicId,
+    event_target: SharedEventTarget,
+    peer_count: SharedPeerCount,
+    channels: Arc<RwLock<HashMap<TopicId, ChannelState>>>,
+) -> PeerConnection {
+    let (send_tx, send_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PEER_SEND_QUEUE_CAPACITY);
+
+    let read_conn = conn.clone();
+    let read_target = event_target;
+    let read_peer_count = peer_count;
+    let read_channels = channels;
+    let read_task = tokio::spawn(async move {
+        run_peer_reader(read_conn, peer_key, topic, read_target, read_peer_count, read_channels).await;
+    });
+
+    let write_conn = conn.clone();
+    let write_task = tokio::spawn(async move {
+        run_peer_writer(write_conn, send_rx).await;
+    });
+
+    PeerConnection {
+        conn,
+        read_task,
+        write_task,
+        send_tx,
+    }
+}
+
+// ─── Per-peer reader/writer tasks ───────────────────────────────────────────
+
+/// Read varint-length-prefixed messages from a persistent uni stream and deliver to the event target.
+/// No trailer needed — with raw QUIC, sender identity comes from the connection
+/// itself and QUIC guarantees no duplicates.
+async fn run_peer_reader(
+    conn: iroh::endpoint::Connection,
+    peer_key: PublicKey,
+    topic: TopicId,
+    shared_event_target: SharedEventTarget,
+    peer_count: SharedPeerCount,
+    channels: Arc<RwLock<HashMap<TopicId, ChannelState>>>,
+) {
+    // Accept the persistent uni stream from this peer's writer
+    let mut recv = match conn.accept_uni().await {
+        Ok(r) => r,
+        Err(_) => {
+            cleanup_peer(peer_key, &peer_count, &shared_event_target, &channels, &topic).await;
+            return;
+        }
+    };
+
+    let mut b0 = [0u8; 1];
+    loop {
+        // Read varint length prefix:
+        //   0xxxxxxx          = 1 byte  (0–127)
+        //   10xxxxxx xxxxxxxx = 2 bytes (128–16,383)
+        //   11xxxxxx xxxxxxxx xxxxxxxx = 3 bytes (16,384–4,194,303)
+        match recv.read_exact(&mut b0).await {
+            Ok(()) => {}
+            Err(_) => break, // Stream/connection closed
+        }
+        let msg_len = if b0[0] & 0x80 == 0 {
+            b0[0] as usize
+        } else {
+            let mut extra = [0u8; 1];
+            if recv.read_exact(&mut extra).await.is_err() { break; }
+            if b0[0] & 0xC0 == 0x80 {
+                ((b0[0] as usize & 0x3F) << 8) | extra[0] as usize
+            } else {
+                let mut extra2 = [0u8; 1];
+                if recv.read_exact(&mut extra2).await.is_err() { break; }
+                ((b0[0] as usize & 0x3F) << 16) | ((extra[0] as usize) << 8) | extra2[0] as usize
+            }
+        };
+        if msg_len == 0 {
+            continue; // Stream announcement packet — skip
+        }
+        if msg_len > MAX_MESSAGE_SIZE {
+            log_warn!("[WEBXDC] Peer {} sent oversized message: {} bytes", peer_key, msg_len);
+            break;
+        }
+
+        // Read the message body
+        let mut content = vec![0u8; msg_len];
+        match recv.read_exact(&mut content).await {
+            Ok(()) => {}
+            Err(e) => {
+                log_warn!("[WEBXDC] Failed to read message from peer {}: {e}", peer_key);
+                break;
+            }
+        }
+
+        // Deliver raw payload — no trailer to strip, no self-check needed
+        send_event(&shared_event_target, RealtimeEvent::Data(base91_encode(&content)));
+    }
+
+    cleanup_peer(peer_key, &peer_count, &shared_event_target, &channels, &topic).await;
+}
+
+/// Clean up after a peer disconnects.
+async fn cleanup_peer(
+    peer_key: PublicKey,
+    peer_count: &SharedPeerCount,
+    shared_event_target: &SharedEventTarget,
+    channels: &Arc<RwLock<HashMap<TopicId, ChannelState>>>,
+    topic: &TopicId,
+) {
+    log_info!("[WEBXDC] Peer disconnected: {}", peer_key);
+    let peer_str = base32_nopad_encode(peer_key.as_bytes());
+
+    // Decrement peer count (saturating to avoid underflow)
+    let _ = peer_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+        if c > 0 { Some(c - 1) } else { None }
+    });
+
+    send_event(shared_event_target, RealtimeEvent::PeerLeft(peer_str));
+
+    // Remove from channel peers map
+    let mut channels_guard = channels.write().await;
+    if let Some(channel) = channels_guard.get_mut(topic) {
+        if let Some(peer) = channel.peers.remove(&peer_key) {
+            peer.write_task.abort();
+        }
+    }
+}
+
+/// Write varint-length-prefixed messages to a persistent uni stream.
+/// Opens one stream and reuses it for all messages — eliminates per-message
+/// stream handshake overhead (critical for relay-routed connections).
+async fn run_peer_writer(
+    conn: iroh::endpoint::Connection,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    // Open the persistent send stream
+    let mut send = match conn.open_uni().await {
+        Ok(s) => s,
+        Err(e) => {
+            log_warn!("[WEBXDC] Failed to open send stream: {e}");
+            return;
+        }
+    };
+
+    // Write a zero-length announcement to make the stream visible to the remote reader.
+    // QUIC doesn't notify the peer that a stream exists until data is written.
+    if let Err(e) = send.write_all(&[0u8]).await {
+        log_warn!("[WEBXDC] Failed to announce stream: {e}");
+        return;
+    }
+
+    while let Some(data) = rx.recv().await {
+        // Varint length prefix: 1 byte (0–127), 2 bytes (128–16,383), 3 bytes (16,384+)
+        let n = data.len();
+        let (hdr, hdr_len) = if n < 128 {
+            ([n as u8, 0, 0], 1)
+        } else if n < 16384 {
+            ([0x80 | (n >> 8) as u8, n as u8, 0], 2)
+        } else {
+            ([0xC0 | (n >> 16) as u8, (n >> 8) as u8, n as u8], 3)
+        };
+        if let Err(e) = send.write_all(&hdr[..hdr_len]).await {
+            log_warn!("[WEBXDC] Peer write failed (length): {e}");
+            break;
+        }
+        if let Err(e) = send.write_all(&data).await {
+            log_warn!("[WEBXDC] Peer write failed (payload): {e}");
+            break;
+        }
+    }
+
+    // Gracefully close the stream
+    let _ = send.finish();
+}
+
+// ─── Drainer ────────────────────────────────────────────────────────────────
+
+/// Drainer task: reads from the global send queue and fans out to all per-peer
+/// send queues. Each peer has its own independent queue so one slow peer
+/// cannot block others — the architectural solution to head-of-line blocking.
+async fn run_send_drainer(
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    channels: Arc<RwLock<HashMap<TopicId, ChannelState>>>,
+    topic: TopicId,
+    drops: Arc<AtomicU64>,
+) {
+    let mut drop_check = tokio::time::interval(std::time::Duration::from_secs(5));
+    drop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut batch = Vec::with_capacity(64);
+
+    loop {
+        // Wait for at least one message (or drop-check tick)
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Some(data) => batch.push(data),
+                    None => break,
+                }
+            }
+            _ = drop_check.tick() => {
+                let dropped = drops.swap(0, Ordering::Relaxed);
+                if dropped > 0 {
+                    log_warn!("[WEBXDC] Realtime overload: {dropped} packets dropped in last 5s");
+                }
+                continue;
+            }
+        }
+
+        // Drain all immediately-available messages (non-blocking)
+        while batch.len() < 64 {
+            match rx.try_recv() {
+                Ok(data) => batch.push(data),
+                Err(_) => break,
+            }
+        }
+
+        // Fan-out: send each message to every peer's individual queue (non-blocking)
+        let channels_guard = channels.read().await;
+        if let Some(channel) = channels_guard.get(&topic) {
+            for data in batch.drain(..) {
+                for (_peer_key, peer_conn) in &channel.peers {
+                    // Non-blocking: if this peer's queue is full, they're slow — skip them
+                    let _ = peer_conn.send_tx.try_send(data.clone());
+                }
+            }
+        } else {
+            batch.clear();
+        }
+    }
+}
+
+// ─── RealtimeManager ────────────────────────────────────────────────────────
 
 /// Global Iroh state manager
 ///
@@ -613,6 +975,8 @@ pub struct RealtimeManager {
     iroh: tokio::sync::OnceCell<IrohState>,
     /// Custom relay URL (if any)
     relay_url: Option<String>,
+    /// WebSocket server info (port + token), set once after Iroh init
+    ws_info: std::sync::OnceLock<super::rt_ws::WsInfo>,
 }
 
 impl RealtimeManager {
@@ -620,15 +984,41 @@ impl RealtimeManager {
         Self {
             iroh: tokio::sync::OnceCell::new(),
             relay_url,
+            ws_info: std::sync::OnceLock::new(),
         }
     }
 
     /// Get or initialize the Iroh state.
     /// After first call, this is a single atomic load (~5ns).
+    /// Also starts the realtime WebSocket server on first init.
     pub async fn get_or_init(&self) -> Result<&IrohState> {
-        self.iroh
+        let iroh = self.iroh
             .get_or_try_init(|| IrohState::new(self.relay_url.clone()))
-            .await
+            .await?;
+
+        // Start the WS server once (after IrohState is available)
+        if self.ws_info.get().is_none() {
+            match super::rt_ws::start(
+                iroh.send_handles.clone(),
+            ).await {
+                Ok(info) => {
+                    let _ = self.ws_info.set(info);
+                }
+                Err(e) => {
+                    log_warn!("[WEBXDC] Failed to start RT WS server: {e}");
+                }
+            }
+        }
+
+        Ok(iroh)
+    }
+
+    /// Get the WebSocket URL for the realtime fast path, if the server is running.
+    /// Returns `ws://127.0.0.1:{port}/{token}`.
+    pub fn ws_url(&self) -> Option<String> {
+        self.ws_info.get().map(|info| {
+            format!("ws://127.0.0.1:{}/{}", info.port, info.token)
+        })
     }
 
     /// Shutdown Iroh if initialized
@@ -646,7 +1036,8 @@ impl Default for RealtimeManager {
     }
 }
 
-/// Generate a new random topic ID for a Mini App
+// ─── Topic ID helpers ───────────────────────────────────────────────────────
+
 /// Generate a random topic ID (for testing/fallback only)
 #[allow(dead_code)]
 pub fn generate_topic_id() -> TopicId {
@@ -661,7 +1052,7 @@ pub fn generate_topic_id() -> TopicId {
 /// Including message_id ensures reposts create isolated instances.
 pub fn derive_topic_id(file_hash: &str, chat_id: &str, message_id: &str) -> TopicId {
     use sha2::{Sha256, Digest};
-    
+
     let mut hasher = Sha256::new();
     hasher.update(b"webxdc-realtime-v1:");
     hasher.update(file_hash.as_bytes());
@@ -669,7 +1060,7 @@ pub fn derive_topic_id(file_hash: &str, chat_id: &str, message_id: &str) -> Topi
     hasher.update(chat_id.as_bytes());
     hasher.update(b":");
     hasher.update(message_id.as_bytes());
-    
+
     let result = hasher.finalize();
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&result);

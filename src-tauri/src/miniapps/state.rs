@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
-use iroh_gossip::proto::TopicId;
+use super::realtime::TopicId;
 
 use super::error::Error;
 use super::realtime::RealtimeManager;

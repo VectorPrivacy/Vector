@@ -485,8 +485,8 @@ try {
         'miniapp_get_updates',
         'miniapp_send_update',
         'miniapp_join_realtime_channel',
-        'miniapp_send_realtime_data',
         'miniapp_leave_realtime_channel',
+        'miniapp_send_realtime_data',
         'miniapp_add_realtime_peer',
         'miniapp_get_realtime_node_addr',
         'miniapp_get_granted_permissions_for_window'
@@ -1113,15 +1113,24 @@ fn md5_hash(input: &str) -> u64 {
 // Realtime Channel Commands (Iroh P2P)
 // ============================================================================
 
+/// Result of joining a realtime channel
+#[derive(Serialize)]
+pub struct JoinRealtimeResult {
+    /// Encoded topic ID
+    pub topic: String,
+    /// WebSocket URL for the zero-overhead fast path (if WS server is running)
+    pub ws_url: Option<String>,
+}
+
 /// Join the realtime channel for a Mini App
-/// Returns the topic ID that can be shared with other participants
+/// Returns the topic ID and WebSocket URL for the fast-path send
 #[tauri::command]
 pub async fn miniapp_join_realtime_channel(
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, MiniAppsState>,
     channel: Channel<RealtimeEvent>,
-) -> Result<String, Error> {
+) -> Result<JoinRealtimeResult, Error> {
     let label = window.label();
 
     if !label.starts_with("miniapp:") {
@@ -1153,7 +1162,7 @@ pub async fn miniapp_join_realtime_channel(
     // Join the Iroh gossip channel with no initial peers
     // Peers will be added via advertisements
     let event_target = EventTarget::TauriChannel(channel.clone());
-    let (is_rejoin, _join_rx) = iroh.join_channel(topic, vec![], event_target, Some(app.clone())).await
+    let (is_rejoin, _join_rx) = iroh.join_channel(topic, vec![], event_target, Some(app.clone()), label.to_string()).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
     
     let topic_encoded = encode_topic_id(&topic);
@@ -1237,45 +1246,24 @@ pub async fn miniapp_join_realtime_channel(
             "is_active": true,
         }));
     }
-    
-    Ok(topic_encoded)
+
+    // Return the topic + WebSocket URL for the fast-path send
+    let ws_url = state.realtime.ws_url();
+    Ok(JoinRealtimeResult { topic: topic_encoded, ws_url })
 }
 
-/// Send data through the realtime channel (receives base91-encoded string from JS)
+/// Send realtime data (invoke fallback for platforms where WebSocket is unavailable, e.g. Linux/WebKitGTK).
+/// On macOS/Windows the WS fast-path is used instead; this command is only called when WS fails.
 #[tauri::command]
 pub async fn miniapp_send_realtime_data(
     window: WebviewWindow,
     state: State<'_, MiniAppsState>,
-    data: String,
+    data: Vec<u8>,
 ) -> Result<(), Error> {
     let label = window.label();
-
-    if !label.starts_with("miniapp:") {
-        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+    if let Ok(iroh) = state.realtime.get_or_init().await {
+        iroh.fast_send(label, data);
     }
-
-    // Decode base91 string to raw bytes
-    let bytes = fast_thumbhash::base91_decode(&data)
-        .map_err(|_| Error::RealtimeError("Invalid base91 encoding".to_string()))?;
-
-    // Check data size (max 128 KB as per WebXDC spec)
-    if bytes.len() > 128_000 {
-        return Err(Error::RealtimeDataTooLarge(bytes.len()));
-    }
-
-    // Get the topic for this instance
-    let topic = state.get_realtime_channel(label).await
-        .ok_or(Error::RealtimeChannelNotActive)?;
-
-    // Send the data
-    let iroh = state.realtime.get_or_init().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
-
-    iroh.send_data(topic, bytes).await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
-
-    log_trace!("Sent realtime data for Mini App: {}", label);
-
     Ok(())
 }
 
@@ -1297,7 +1285,7 @@ pub async fn miniapp_leave_realtime_channel(
         let iroh = state.realtime.get_or_init().await
             .map_err(|e| Error::RealtimeError(e.to_string()))?;
         
-        iroh.leave_channel(channel_state.topic).await
+        iroh.leave_channel(channel_state.topic, label).await
             .map_err(|e| Error::RealtimeError(e.to_string()))?;
         
         log_info!("Left realtime channel for Mini App: {} (topic: {})", label, encode_topic_id(&channel_state.topic));

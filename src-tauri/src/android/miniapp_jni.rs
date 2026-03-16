@@ -20,17 +20,12 @@ use crate::TAURI_APP;
 /// - `default-src 'self'`: Only allow resources from same origin (webxdc.localhost)
 /// - `webrtc 'block'`: Prevent IP leaks via WebRTC
 /// - `unsafe-inline/eval`: Required for many Mini Apps to function
-const CSP_HEADER: &str = r#"default-src 'self' http://webxdc.localhost; style-src 'self' http://webxdc.localhost 'unsafe-inline' blob:; font-src 'self' http://webxdc.localhost data: blob:; script-src 'self' http://webxdc.localhost 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' http://webxdc.localhost ipc: data: blob:; img-src 'self' http://webxdc.localhost data: blob:; media-src 'self' http://webxdc.localhost data: blob:; webrtc 'block'"#;
+const CSP_HEADER: &str = r#"default-src 'self' http://webxdc.localhost; style-src 'self' http://webxdc.localhost 'unsafe-inline' blob:; font-src 'self' http://webxdc.localhost data: blob:; script-src 'self' http://webxdc.localhost 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' http://webxdc.localhost ws://127.0.0.1:* ipc: data: blob:; img-src 'self' http://webxdc.localhost data: blob:; media-src 'self' http://webxdc.localhost data: blob:; webrtc 'block'"#;
 
 /// Permissions Policy for Mini Apps (Android document responses).
 /// Autoplay is allowed (self) for video streaming in Mini Apps.
 /// Must be on the document response to take effect (not subresource responses).
 const PERMISSIONS_POLICY_HEADER: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(self), battery=(), bluetooth=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), speaker-selection=(), usb=(), web-share=(), xr-spatial-tracking=()";
-
-/// Maximum size for realtime channel data (128 KB).
-/// This matches the WebXDC specification limit.
-#[allow(dead_code)]
-pub const REALTIME_DATA_MAX_SIZE: usize = 128_000;
 
 // ============================================================================
 // MiniAppManager Callbacks
@@ -115,7 +110,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                     // Leave the Iroh gossip channel (with timeout to avoid hanging)
                     match tokio::time::timeout(
                         tokio::time::Duration::from_secs(5),
-                        iroh.leave_channel(channel.topic),
+                        iroh.leave_channel(channel.topic, &miniapp_id_owned),
                     ).await {
                         Ok(Ok(())) => {
                             log_info!("[WEBXDC] Left Iroh channel on Mini App close: {}", miniapp_id_owned);
@@ -345,9 +340,9 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
 
     let state = app.state::<crate::miniapps::state::MiniAppsState>();
 
-    // Read instance, derive topic, and set channel state synchronously.
-    // Setting channel state here (before the async join) prevents a race where
-    // sendRealtimeData arrives before the spawned join task completes.
+    // Read instance, derive topic, set channel state, and eagerly init Iroh + WS server
+    // synchronously. Setting channel state before async join prevents races.
+    // Iroh init here ensures the WS URL is available for the return value.
     let setup = rt.block_on(async {
         let instance = state.get_instance(&miniapp_id).await
             .ok_or("Instance not found")?;
@@ -367,20 +362,30 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         // If channel already active, just return the topic (skip re-join)
         if state.has_realtime_channel(&miniapp_id).await {
             log_info!("[WEBXDC] Android: Realtime channel already active for: {}", miniapp_id);
-            return Ok((None, topic, topic_encoded));
+            let ws_url = state.realtime.ws_url();
+            return Ok((None, topic, topic_encoded, ws_url));
         }
 
-        // Set channel state immediately so sendRealtimeData can find the topic
+        // Set channel state immediately
         state.set_realtime_channel(&miniapp_id, crate::miniapps::state::RealtimeChannelState {
             topic,
             active: true,
         }).await;
 
-        Ok::<_, String>((Some(instance), topic, topic_encoded))
+        // Eagerly init Iroh + WS server so we can return the WS URL
+        let ws_url = match state.realtime.get_or_init().await {
+            Ok(_) => state.realtime.ws_url(),
+            Err(e) => {
+                log_warn!("[WEBXDC] Android: Failed to eagerly init Iroh: {}", e);
+                None
+            }
+        };
+
+        Ok::<_, String>((Some(instance), topic, topic_encoded, ws_url))
     });
     drop(rt);
 
-    let (instance_opt, topic, topic_encoded) = match setup {
+    let (instance_opt, topic, topic_encoded, ws_url) = match setup {
         Ok(r) => r,
         Err(e) => {
             log_error!("[{}] joinRealtimeChannel setup failed: {}", miniapp_id, e);
@@ -388,11 +393,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
         }
     };
 
-    // If already active, return existing topic without spawning new tasks
+    // If already active, return existing result without spawning new tasks
     let instance = match instance_opt {
         Some(inst) => inst,
         None => {
-            return match env.new_string(&topic_encoded) {
+            let result = serde_json::json!({ "topic": topic_encoded, "ws_url": ws_url, "label": miniapp_id });
+            return match env.new_string(&result.to_string()) {
                 Ok(s) => s.into_raw(),
                 Err(_) => std::ptr::null_mut(),
             };
@@ -424,7 +430,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
 
         // Join the channel with mpsc event target
         let event_target = crate::miniapps::realtime::EventTarget::MpscSender(tx);
-        match iroh.join_channel(topic, vec![], event_target, Some(app_for_join.clone())).await {
+        match iroh.join_channel(topic, vec![], event_target, Some(app_for_join.clone()), miniapp_id_for_join.clone()).await {
             Ok((is_rejoin, _)) => {
                 if is_rejoin {
                     log_info!("[WEBXDC] Android: Re-joined existing channel for topic: {}", topic_encoded_for_join);
@@ -504,93 +510,12 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
     // Spawn the delivery task that forwards events to Android WebView via JNI
     tauri::async_runtime::spawn(android_realtime_delivery_loop(rx));
 
-    // Return topic ID to Kotlin
-    match env.new_string(&topic_encoded) {
+    // Return JSON with topic + WS URL + label to Kotlin/JS
+    let result = serde_json::json!({ "topic": topic_encoded, "ws_url": ws_url, "label": miniapp_id });
+    match env.new_string(&result.to_string()) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
-}
-
-/// Send realtime data.
-#[no_mangle]
-pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
-    mut env: JNIEnv,
-    _class: JClass,
-    miniapp_id: JString,
-    data: JString,
-) {
-    let miniapp_id: String = match env.get_string(&miniapp_id) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            log_error!("Failed to get miniapp_id: {:?}", e);
-            return;
-        }
-    };
-
-    let encoded: String = match env.get_string(&data) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            log_error!("Failed to get data string: {:?}", e);
-            return;
-        }
-    };
-
-    // Decode base91 to raw bytes
-    let bytes = match fast_thumbhash::base91_decode(&encoded) {
-        Ok(b) => b,
-        Err(_) => {
-            log_error!("[{}] sendRealtimeData: failed to decode base91", miniapp_id);
-            return;
-        }
-    };
-
-    log_debug!(
-        "[{}] sendRealtimeData: {} bytes",
-        miniapp_id,
-        bytes.len()
-    );
-
-    // Validate data size
-    if bytes.len() > REALTIME_DATA_MAX_SIZE {
-        log_error!("[{}] sendRealtimeData: data too large ({} bytes)", miniapp_id, bytes.len());
-        return;
-    }
-
-    let app = match TAURI_APP.get() {
-        Some(a) => a.clone(),
-        None => {
-            log_error!("[{}] TAURI_APP not initialized", miniapp_id);
-            return;
-        }
-    };
-
-    let miniapp_id_owned = miniapp_id;
-    let data = bytes;
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<crate::miniapps::state::MiniAppsState>();
-
-        // Get the topic for this instance
-        let topic = match state.get_realtime_channel(&miniapp_id_owned).await {
-            Some(t) => t,
-            None => {
-                log_warn!("[WEBXDC] Android sendRealtimeData: no active channel for {}", miniapp_id_owned);
-                return;
-            }
-        };
-
-        // Send via Iroh
-        let iroh = match state.realtime.get_or_init().await {
-            Ok(iroh) => iroh,
-            Err(e) => {
-                log_error!("[WEBXDC] Android sendRealtimeData: failed to get Iroh: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = iroh.send_data(topic, data).await {
-            log_error!("[WEBXDC] Android sendRealtimeData: failed to send: {}", e);
-        }
-    });
 }
 
 /// Leave the realtime channel.
@@ -632,7 +557,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
                 }
             };
 
-            if let Err(e) = iroh.leave_channel(channel_state.topic).await {
+            if let Err(e) = iroh.leave_channel(channel_state.topic, &miniapp_id_owned).await {
                 log_error!("[WEBXDC] Android leaveRealtimeChannel: failed to leave: {}", e);
             } else {
                 log_info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
@@ -1205,6 +1130,7 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
         }},
 
         joinRealtimeChannel: function() {{
+            var rtWs = null;
             var channel = {{
                 _listener: null,
                 setListener: function(listener) {{
@@ -1212,21 +1138,14 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
                     window.__miniapp_realtime_listener = listener;
                 }},
                 send: function(data) {{
-                    if (!(data instanceof Uint8Array)) {{
-                        throw new Error('realtime data must be a Uint8Array');
-                    }}
-                    if (data.length > 128000) {{
-                        throw new Error('realtime data exceeds maximum size of 128000 bytes');
-                    }}
-                    try {{
-                        window.__MINIAPP_IPC__.sendRealtimeData(b91e(data));
-                    }} catch(e) {{
-                        console.error('Failed to send realtime data:', e);
-                    }}
+                    var buf = data instanceof Uint8Array ? data : new Uint8Array(data);
+                    // WebSocket fast path — silently drop if not connected yet
+                    if (rtWs && rtWs.readyState === 1) rtWs.send(buf);
                 }},
                 leave: function() {{
                     this._listener = null;
                     window.__miniapp_realtime_listener = null;
+                    if (rtWs) {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }}
                     try {{
                         window.__MINIAPP_IPC__.leaveRealtimeChannel();
                     }} catch(e) {{
@@ -1235,7 +1154,17 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
                 }}
             }};
             try {{
-                window.__MINIAPP_IPC__.joinRealtimeChannel();
+                var resultJson = window.__MINIAPP_IPC__.joinRealtimeChannel();
+                if (resultJson) {{
+                    var result = JSON.parse(resultJson);
+                    if (result.ws_url && result.label) {{
+                        var label = encodeURIComponent(result.label);
+                        rtWs = new WebSocket(result.ws_url + '/' + label);
+                        rtWs.binaryType = 'arraybuffer';
+                        rtWs.onclose = function() {{ rtWs = null; }};
+                        rtWs.onerror = function() {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }};
+                    }}
+                }}
             }} catch(e) {{
                 console.error('Failed to join realtime channel:', e);
             }}

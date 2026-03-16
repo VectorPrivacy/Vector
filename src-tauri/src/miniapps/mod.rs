@@ -14,5 +14,6 @@ pub(crate) mod state;
 pub(crate) mod commands;
 pub(crate) mod network_isolation;
 pub(crate) mod realtime;
+pub(crate) mod rt_ws;
 pub(crate) mod marketplace;
 pub(crate) mod permissions;

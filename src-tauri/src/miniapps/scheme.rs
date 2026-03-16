@@ -62,7 +62,8 @@ static CSP: LazyLock<String> = LazyLock::new(|| {
         ]),
     );
     
-    // Restrict connections to self, IPC, and data/blob URLs only
+    // Restrict connections to self, IPC, data/blob URLs, and localhost WebSocket
+    // (the realtime WS server uses a random token for auth, so wildcard port is safe)
     m.insert(
         "connect-src".to_string(),
         CspDirectiveSources::List(vec![
@@ -70,6 +71,7 @@ static CSP: LazyLock<String> = LazyLock::new(|| {
             "ipc:".to_owned(),
             "data:".to_owned(),
             "blob:".to_owned(),
+            "ws://127.0.0.1:*".to_owned(),
         ]),
     );
     
@@ -282,7 +284,7 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
     // Windows/Android: http://webxdc.localhost/<path>
 
     let webview_label = ctx.webview_label().to_owned();
-    
+
     // Security: Only allow Mini App windows to access this scheme
     if !webview_label.starts_with("miniapp:") {
         log_error!(
@@ -293,7 +295,7 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
     }
 
     let app_handle = ctx.app_handle().clone();
-    
+
     // Spawn an async task to handle the request without blocking
     // This is the pattern used by DeltaChat to avoid deadlocks on Windows
     tauri::async_runtime::spawn(async move {
@@ -485,6 +487,8 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
     var realtimeChannel = null;
     var realtimeListener = null;
     var tauriChannel = null;
+    var rtWs = null; // WebSocket for realtime fast-path
+    var rtWsFailed = false; // true if WS can't connect (e.g. Linux/WebKitGTK)
 
     function waitForTauri(callback) {{
         if (window.__TAURI__ && window.__TAURI__.core) {{
@@ -548,19 +552,22 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
                 send: function(data) {{
                     if (realtimeChannel === null) return;
                     var buf = data instanceof Uint8Array ? data : new Uint8Array(data);
-                    var encoded = b91e(buf);
-                    waitForTauri(function() {{
+                    // Fast path: WebSocket binary frame (persistent TCP, ~1μs per msg)
+                    if (rtWs && rtWs.readyState === 1) {{
+                        rtWs.send(buf);
+                    }} else if (rtWsFailed && window.__TAURI__) {{
+                        // Fallback: Tauri invoke (for Linux/WebKitGTK where WS from
+                        // custom scheme origins silently hangs)
                         window.__TAURI__.core.invoke('miniapp_send_realtime_data', {{
-                            data: encoded
-                        }}).catch(function(err) {{
-                            console.error('[webxdc] Failed to send realtime data:', err);
+                            data: Array.from(buf)
                         }});
-                    }});
+                    }}
                 }},
 
                 leave: function() {{
                     realtimeListener = null;
                     realtimeChannel = null;
+                    if (rtWs) {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }}
                     waitForTauri(function() {{
                         window.__TAURI__.core.invoke('miniapp_leave_realtime_channel', {{}}).catch(function(err) {{
                             console.error('[webxdc] Failed to leave realtime channel:', err);
@@ -578,6 +585,29 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
                 }};
                 window.__TAURI__.core.invoke('miniapp_join_realtime_channel', {{
                     channel: tauriChannel
+                }}).then(function(result) {{
+                    // Open WebSocket fast-path if backend returned a URL
+                    if (result && result.ws_url) {{
+                        try {{
+                            var label = encodeURIComponent(window.__TAURI_INTERNALS__.metadata.currentWebview.label || '');
+                            rtWs = new WebSocket(result.ws_url + '/' + label);
+                            rtWs.binaryType = 'arraybuffer';
+                            rtWs.onclose = function() {{ rtWs = null; }};
+                            rtWs.onerror = function() {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; rtWsFailed = true; }};
+                            // Detect WebKitGTK silent WS block: if still CONNECTING after 1.5s, fall back to invoke
+                            setTimeout(function() {{
+                                if (rtWs && rtWs.readyState === 0) {{
+                                    console.warn('[webxdc] WebSocket stuck in CONNECTING — falling back to invoke');
+                                    try {{ rtWs.close(); }} catch(e) {{}}
+                                    rtWs = null;
+                                    rtWsFailed = true;
+                                }}
+                            }}, 1500);
+                        }} catch(e) {{
+                            rtWs = null;
+                            rtWsFailed = true;
+                        }}
+                    }}
                 }}).catch(function(err) {{
                     console.error('[webxdc] Failed to join realtime channel:', err);
                 }});
@@ -598,7 +628,7 @@ fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions:
     http::Response::builder()
         .status(http::StatusCode::OK)
         .header(http::header::CONTENT_TYPE, content_type)
-        .header(http::header::CONTENT_SECURITY_POLICY, CSP.as_str())
+        .header(http::header::CONTENT_SECURITY_POLICY, &*CSP)
         // Ensure that the browser doesn't try to interpret the file incorrectly
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         // Dynamic permissions policy based on user grants
@@ -625,7 +655,7 @@ fn make_error_response(status: http::StatusCode, message: &str, granted_permissi
     http::Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "text/plain")
-        .header(http::header::CONTENT_SECURITY_POLICY, CSP.as_str())
+        .header(http::header::CONTENT_SECURITY_POLICY, &*CSP)
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header("Permissions-Policy", permissions_policy)
         // Cross-origin isolation headers for SharedArrayBuffer (WASM threads)
