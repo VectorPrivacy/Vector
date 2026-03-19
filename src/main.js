@@ -6056,6 +6056,24 @@ function renderProfileTab(cProfile) {
         
         document.querySelector('.profile-banner-edit').style.display = 'flex';
         document.querySelector('.profile-banner-edit').onclick = askForBanner;
+
+        // Show Share button on own profile (top-right of banner)
+        const ownShareBtn = document.getElementById('profile-share-btn');
+        ownShareBtn.style.display = 'block';
+        ownShareBtn.onclick = () => {
+            const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
+            if (npub) {
+                const profileUrl = `https://vectorapp.io/profile/${npub}`;
+                navigator.clipboard.writeText(profileUrl).then(() => {
+                    const icon = ownShareBtn.querySelector('span');
+                    showToast('Profile Link Copied');
+                    icon.classList.replace('icon-share', 'icon-check');
+                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+                }).catch(() => {
+                    showToast('Failed to copy profile link');
+                });
+            }
+        };
         
         // Hide the 'Back' button and deregister its clickable function
         domProfileBackBtn.style.display = 'none';
@@ -6125,9 +6143,10 @@ function renderProfileTab(cProfile) {
             }
         };
 
-        // Hide edit buttons
+        // Hide edit buttons and own-profile share
         document.querySelector('.profile-avatar-edit').style.display = 'none';
         document.querySelector('.profile-banner-edit').style.display = 'none';
+        document.getElementById('profile-share-btn').style.display = 'none';
         
         // Remove click handlers from avatar and banner
         domProfileAvatar.onclick = null;
