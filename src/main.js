@@ -6992,9 +6992,9 @@ function createFileBoxSpinner(target, opts = {}) {
     spinner.className = 'miniapp-downloading-spinner';
     if (opts.id) spinner.id = opts.id;
     if (opts.attachmentId) spinner.setAttribute('data-attachment-id', opts.attachmentId);
-    // Match the icon's absolute positioning to prevent layout shift
+    // Match the Mini App icon position (marginLeft:5px + padding:10px = 15px from edge)
     spinner.style.position = 'absolute';
-    spinner.style.left = '10px';
+    spinner.style.left = '15px';
     spinner.style.top = '0';
     spinner.style.bottom = '0';
     spinner.style.margin = 'auto';
@@ -7013,6 +7013,9 @@ function createFileBoxSpinner(target, opts = {}) {
         target.style.opacity = '0';
         target.style.scale = '0.5';
         setTimeout(() => {
+            // Spinner is absolute-positioned — push sibling text past it
+            const textSibling = target.parentElement?.querySelector('span');
+            if (textSibling) textSibling.style.marginLeft = '60px';
             target.replaceWith(spinner);
             requestAnimationFrame(() => { spinner.style.opacity = '1'; spinner.style.scale = '1'; });
             setTimeout(settleTransition, 300);
@@ -7265,6 +7268,8 @@ function createFileBox(cAttachment, state = 'downloaded') {
 
             // Replace icon with conical progress spinner
             iconElement = createFileBoxSpinner(null, { attachmentId: cAttachment.id });
+            // Spinner is absolute-positioned (left:10px, width:40px) — push text past it
+            textContainerSpan.style.marginLeft = '60px';
         } else {
             // 'download' — waiting for user to click
             let strSize = '';
