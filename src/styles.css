@@ -3253,6 +3253,7 @@ audio {
   opacity: 0.75;
 }
 
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -5022,6 +5023,7 @@ select:disabled:hover {
     border-color: rgba(89, 252, 179, 0.4);
     background: rgba(22, 22, 22, 0.8);
 }
+
 
 
 .audio-play-btn {
@@ -7398,7 +7400,7 @@ hr {
   width: 100px;
   height: 100px;
   border-radius: 20px;
-  background: rgba(255, 255, 255, 0.1);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;

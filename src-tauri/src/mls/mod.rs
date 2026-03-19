@@ -2488,9 +2488,11 @@ impl MlsService {
                                     println!("[MLS] Not admin, ignoring leave request from {}", member_pubkey);
                                 }
                             }
-                            RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
-                                // Handle WebXDC peer advertisement - add peer to realtime channel
-                                crate::services::handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
+                            RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
+                                crate::services::handle_webxdc_peer_advertisement(&event_id, &topic_id, &node_addr, &sender_npub, created_at, &chat_id).await;
+                            }
+                            RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
+                                crate::services::handle_webxdc_peer_left(&event_id, &topic_id, &sender_npub, created_at, &chat_id).await;
                             }
                             RumorProcessingResult::UnknownEvent(mut event) => {
                                 // Store unknown events for future compatibility

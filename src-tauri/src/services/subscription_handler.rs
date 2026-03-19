@@ -452,8 +452,12 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                             }
                                             None
                                         }
-                                        RumorProcessingResult::WebxdcPeerAdvertisement { topic_id, node_addr } => {
-                                            super::handle_webxdc_peer_advertisement(&topic_id, &node_addr).await;
+                                        RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
+                                            super::handle_webxdc_peer_advertisement(&event_id, &topic_id, &node_addr, &sender_npub, created_at, &group_id_for_persist).await;
+                                            None
+                                        }
+                                        RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
+                                            super::handle_webxdc_peer_left(&event_id, &topic_id, &sender_npub, created_at, &group_id_for_persist).await;
                                             None
                                         }
                                         RumorProcessingResult::UnknownEvent(mut event) => {

@@ -555,11 +555,13 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
                     // Fast path: WebSocket binary frame (persistent TCP, ~1μs per msg)
                     if (rtWs && rtWs.readyState === 1) {{
                         rtWs.send(buf);
-                    }} else if (rtWsFailed && window.__TAURI__) {{
-                        // Fallback: Tauri invoke (for Linux/WebKitGTK where WS from
-                        // custom scheme origins silently hangs)
-                        window.__TAURI__.core.invoke('miniapp_send_realtime_data', {{
-                            data: Array.from(buf)
+                    }} else {{
+                        // Fallback: Tauri invoke via waitForTauri (queues until __TAURI__ is injected).
+                        // On Android, __TAURI__ is injected asynchronously — direct checks fail.
+                        waitForTauri(function() {{
+                            window.__TAURI__.core.invoke('miniapp_send_realtime_data', {{
+                                data: Array.from(buf)
+                            }});
                         }});
                     }}
                 }},
@@ -607,6 +609,9 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
                             rtWs = null;
                             rtWsFailed = true;
                         }}
+                    }} else {{
+                        console.warn('[webxdc] No ws_url returned — using invoke fallback');
+                        rtWsFailed = true;
                     }}
                 }}).catch(function(err) {{
                     console.error('[webxdc] Failed to join realtime channel:', err);

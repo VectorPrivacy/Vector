@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri::ipc::Channel;
-use futures_util::future::join_all;
 
 #[cfg(not(target_os = "android"))]
 use std::sync::Arc;
@@ -11,6 +10,7 @@ use std::sync::Arc;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use serde::{Deserialize, Serialize};
 
+use nostr_sdk::prelude::ToBech32;
 use super::error::Error;
 use super::state::{MiniAppInstance, MiniAppsState, MiniAppPackage, RealtimeChannelState};
 use super::realtime::{RealtimeEvent, EventTarget, encode_topic_id, encode_node_addr};
@@ -791,6 +791,130 @@ pub async fn miniapp_open(
     // Register the instance before creating the window
     state.add_instance(instance.clone()).await;
 
+    // Preconnect: if this Mini App uses the realtime API, create the gossip channel
+    // and connect to peers in the background. joinRealtimeChannel() awaits the
+    // signal, then just attaches the event listener — preconnect is the sole initiator.
+    let (pc_tx, pc_rx) = tokio::sync::watch::channel(false);
+    state.set_preconnect_signal(&window_label, pc_rx).await;
+    {
+        let app_pc = app.clone();
+        let pkg_path = package.path.clone();
+        let pkg_name = package.manifest.name.clone();
+        let chat_id_pc = chat_id.clone();
+        let msg_id_pc = message_id.clone();
+        let topic_str = topic_id.clone();
+        let rt_topic = instance.realtime_topic;
+        let label_pc = window_label.clone();
+        tokio::spawn(async move {
+            log_info!("[WEBXDC] Preconnect: scanning '{}' for realtime API (path: {:?})", pkg_name, pkg_path);
+            let uses_rt = tokio::task::spawn_blocking(move || {
+                MiniAppPackage::scan_for_realtime_api(&pkg_path)
+            }).await.unwrap_or(false);
+
+            if !uses_rt {
+                log_info!("[WEBXDC] Preconnect: '{}' does NOT use realtime API, skipping", pkg_name);
+                drop(pc_tx);
+                return;
+            }
+            log_info!("[WEBXDC] Preconnect: '{}' uses realtime API, initializing Iroh", pkg_name);
+
+            // Compute topic (same logic as joinRealtimeChannel)
+            let topic = rt_topic.unwrap_or_else(|| {
+                super::realtime::derive_topic_id(&pkg_name, &chat_id_pc, &msg_id_pc)
+            });
+            let topic_encoded = match topic_str {
+                Some(ts) => ts,
+                None => super::realtime::encode_topic_id(&topic),
+            };
+
+            let state = app_pc.state::<super::state::MiniAppsState>();
+            let iroh = match state.realtime.get_or_init().await {
+                Ok(i) => i,
+                Err(e) => { log_warn!("[WEBXDC] Preconnect: Iroh init failed: {e}"); return; }
+            };
+
+            // Create gossip channel with NO event target. Incoming data is BUFFERED
+            // (not dropped) until joinRealtimeChannel sets the target and flushes.
+            // This lets us form the gossip mesh NOW so peers are connected before
+            // the game starts its election/handshake.
+            if let Err(e) = iroh.join_channel(topic, vec![], None, Some(app_pc.clone()), label_pc.clone()).await {
+                log_warn!("[WEBXDC] Preconnect: join_channel failed: {e}");
+                return;
+            }
+
+            state.set_realtime_channel(&label_pc, super::state::RealtimeChannelState {
+                topic, active: true,
+            }).await;
+
+            // Send advertisement so peers know we're online
+            let node_addr = iroh.get_node_addr();
+            if let Ok(encoded) = super::realtime::encode_node_addr(&node_addr) {
+                crate::commands::realtime::send_webxdc_peer_advertisement(
+                    chat_id_pc, topic_encoded.clone(), encoded,
+                ).await;
+            }
+
+            if let Some(pk) = crate::MY_PUBLIC_KEY.get() {
+                let npub = pk.to_bech32().unwrap();
+                state.add_session_peer(topic, npub).await;
+            }
+
+            if let Some(main_window) = app_pc.get_webview_window("main") {
+                let session_peers = state.get_session_peers(&topic).await;
+                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                    "topic": topic_encoded,
+                    "peer_count": session_peers.len(),
+                    "peers": session_peers,
+                    "is_active": true,
+                }));
+            }
+
+            log_info!("[WEBXDC] Preconnect: Iroh ready for '{}'", label_pc);
+            let _ = pc_tx.send(true);
+
+            // Connect to known peers (runs after signal — doesn't block joinRealtimeChannel).
+            // Single attempt, 5s timeout — stale peers fail fast.
+            let my_npub = crate::MY_PUBLIC_KEY.get()
+                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(pk).ok())
+                .unwrap_or_default();
+            let mut connected_ids = std::collections::HashSet::new();
+
+            if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
+                if !records.is_empty() {
+                    log_info!("[WEBXDC] Preconnect: trying {} persisted peers", records.len());
+                    for record in &records {
+                        state.add_session_peer(topic, record.npub.clone()).await;
+                    }
+                    let peers: Vec<_> = records.iter().filter_map(|r| {
+                        match super::realtime::decode_node_addr(&r.node_addr_encoded) {
+                            Ok(addr) => { connected_ids.insert(addr.id); Some(addr) }
+                            Err(e) => { log_warn!("[WEBXDC] Preconnect: bad peer addr: {e}"); None }
+                        }
+                    }).collect();
+                    for addr in peers {
+                        let peer_id = addr.id;
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            iroh.try_add_peer(&topic, &addr),
+                        ).await {
+                            Ok(Ok(_)) => log_info!("[WEBXDC] Preconnect: connected to peer {}", peer_id),
+                            Ok(Err(e)) => log_trace!("[WEBXDC] Preconnect: peer {} failed: {e}", peer_id),
+                            Err(_) => log_trace!("[WEBXDC] Preconnect: peer {} timed out (stale?)", peer_id),
+                        }
+                    }
+                }
+            }
+
+            let cached = state.take_peer_addrs(&topic).await;
+            for addr in cached.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    iroh.try_add_peer(&topic, &addr),
+                ).await;
+            }
+        });
+    }
+
     // ========================================
     // Android: Use native WebView overlay
     // ========================================
@@ -909,36 +1033,51 @@ pub async fn miniapp_open(
                 let label = window_label_for_handler.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<MiniAppsState>();
-                    
-                    // Get the channel state before removing to get the topic
-                    // We remove the channel state (marking us as not playing) but DON'T leave the Iroh channel
-                    // This way we can still see other players' peer count
+
+                    // Full teardown: remove channel state, leave QUIC, clean session peers
                     let channel_state = state.remove_realtime_channel(&label).await;
-                    
+
                     if let Some(channel) = channel_state {
                         let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
 
-                        // Get current peer count and clear the stale event target.
-                        // Clearing prevents the subscribe loop from logging errors
-                        // on every received message after the window is gone.
-                        let peer_count = if let Ok(iroh) = state.realtime.get_or_init().await {
-                            iroh.clear_event_target(&channel.topic).await;
-                            iroh.get_peer_count(&channel.topic).await
-                        } else {
-                            0
-                        };
-                        
-                        // Emit status update to main window - we're no longer playing but can still see peers
+                        // Tear down the QUIC channel completely (close connections, abort tasks)
+                        if let Ok(iroh) = state.realtime.get_or_init().await {
+                            if let Err(e) = iroh.leave_channel(channel.topic, &label).await {
+                                log_warn!("[WEBXDC] Failed to leave channel on close: {}", e);
+                            }
+                        }
+
+                        // Remove ourselves from session peers
+                        if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                            let my_npub = my_pk.to_bech32().unwrap();
+                            state.remove_session_peer(&channel.topic, &my_npub).await;
+                        }
+
+                        // Emit status update — session_peers is the single source of truth
+                        let session_peers = state.get_session_peers(&channel.topic).await;
+                        let peer_count = session_peers.len();
                         if let Some(main_window) = app_handle.get_webview_window("main") {
                             let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
                                 "topic": topic_encoded,
                                 "peer_count": peer_count,
+                                "peers": session_peers,
                                 "is_active": false,
                                 "has_pending_peers": peer_count > 0,
                             }));
                         }
+
+                        // Send peer-left via Nostr so other clients update their lobby state
+                        if let Some(instance) = state.get_instance(&label).await {
+                            let chat_id = instance.chat_id.clone();
+                            let topic_for_left = topic_encoded.clone();
+                            tokio::spawn(async move {
+                                if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
+                                    log_warn!("[WEBXDC] Failed to send peer-left signal");
+                                }
+                            });
+                        }
                     }
-                    
+
                     // Remove the instance
                     state.remove_instance(&label).await;
                 });
@@ -1122,8 +1261,10 @@ pub struct JoinRealtimeResult {
     pub ws_url: Option<String>,
 }
 
-/// Join the realtime channel for a Mini App
-/// Returns the topic ID and WebSocket URL for the fast-path send
+/// Join the realtime channel for a Mini App.
+/// Preconnect (spawned in miniapp_open) pre-initializes Iroh and sends the advertisement.
+/// This function creates the gossip channel WITH the event target (so no data is dropped),
+/// then connects to known peers. Thanks to preconnect, Iroh is already init'd (~300ms vs 2-5s).
 #[tauri::command]
 pub async fn miniapp_join_realtime_channel(
     window: WebviewWindow,
@@ -1137,17 +1278,9 @@ pub async fn miniapp_join_realtime_channel(
         return Err(Error::InstanceNotFoundByLabel(label.to_string()));
     }
 
-    // Check if already has an active channel
-    if state.has_realtime_channel(label).await {
-        return Err(Error::RealtimeChannelAlreadyActive);
-    }
-
-    // Get the instance to get the topic from the webxdc-topic tag
     let instance = state.get_instance(label).await
         .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
 
-    // Use the topic from the Nostr event's webxdc-topic tag if available
-    // Otherwise, derive a topic from the chat_id and message_id for local testing
     let topic = if let Some(t) = instance.realtime_topic {
         t
     } else {
@@ -1155,105 +1288,113 @@ pub async fn miniapp_join_realtime_channel(
         super::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
     };
 
-    // Get the realtime manager and join the channel
+    let topic_encoded = encode_topic_id(&topic);
+
+    // Wait for preconnect to finish initializing Iroh (up to 10s).
+    // Preconnect handles: Iroh init (2-5s), advertisement, session peers, status.
+    // If preconnect already finished, this returns instantly.
+    if let Some(mut rx) = state.take_preconnect_signal(label).await {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            rx.wait_for(|ready| *ready),
+        ).await;
+    }
+
+    // Iroh is pre-initialized by preconnect — this is instant (~5ns atomic load)
     let iroh = state.realtime.get_or_init().await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
-    // Join the Iroh gossip channel with no initial peers
-    // Peers will be added via advertisements
-    let event_target = EventTarget::TauriChannel(channel.clone());
-    let (is_rejoin, _join_rx) = iroh.join_channel(topic, vec![], event_target, Some(app.clone()), label.to_string()).await
+
+    // Create the gossip channel WITH the event target — no data can be dropped
+    let event_target = EventTarget::TauriChannel(channel);
+    let (is_rejoin, _) = iroh.join_channel(topic, vec![], Some(event_target), Some(app.clone()), label.to_string()).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
-    let topic_encoded = encode_topic_id(&topic);
-    
+
+    let topic_encoded_clone = topic_encoded.clone();
     if is_rejoin {
-        log_info!("Re-joined existing realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
+        log_info!("[WEBXDC] Re-joined existing channel: {} (topic: {})", label, topic_encoded);
     } else {
-        log_info!("Joined new realtime channel for Mini App: {} (topic: {})", label, topic_encoded);
+        log_info!("[WEBXDC] Joined new channel: {} (topic: {})", label, topic_encoded);
     }
-    
-    // Store/update the channel state
-    // This is important for re-joins: the old event target is stale (old window closed)
-    let channel_state = RealtimeChannelState {
-        topic,
-        active: true,
-    };
-    state.set_realtime_channel(label, channel_state).await;
-    
-    // Check for pending peers that advertised before we joined
-    let pending_peers = state.take_pending_peers(&topic).await;
-    let pending_peer_count = pending_peers.len();
-    log_info!("[WEBXDC] Checking for pending peers for topic {}: found {}", topic_encoded, pending_peer_count);
-    if !pending_peers.is_empty() {
-        log_info!("[WEBXDC] Found {} pending peers for topic {}, adding concurrently", pending_peer_count, topic_encoded);
-        
-        // Add all pending peers concurrently for faster connection establishment
-        let add_peer_futures: Vec<_> = pending_peers.into_iter().map(|pending| {
-            let iroh_ref = &iroh;
-            async move {
-                let peer_id = pending.node_addr.id;
-                match iroh_ref.add_peer(topic, pending.node_addr).await {
-                    Ok(_) => {
-                        log_info!("[WEBXDC] Successfully added pending peer {} to realtime channel", peer_id);
-                        Ok(peer_id)
+
+    state.set_realtime_channel(label, RealtimeChannelState { topic, active: true }).await;
+
+    if !is_rejoin {
+        // Preconnect didn't run (scan false negative or non-realtime app).
+        // Do peer connections + advertisement here as fallback.
+        let my_npub = crate::MY_PUBLIC_KEY.get()
+            .and_then(|pk| ToBech32::to_bech32(pk).ok())
+            .unwrap_or_default();
+        let mut connected_ids = std::collections::HashSet::new();
+
+        if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
+            if !records.is_empty() {
+                log_info!("[WEBXDC] Connecting to {} persisted peers for topic {}", records.len(), topic_encoded);
+                for record in &records {
+                    state.add_session_peer(topic, record.npub.clone()).await;
+                }
+                let peers: Vec<_> = records.iter().filter_map(|record| {
+                    match super::realtime::decode_node_addr(&record.node_addr_encoded) {
+                        Ok(addr) => { connected_ids.insert(addr.id); Some(addr) }
+                        Err(e) => { log_warn!("[WEBXDC] Failed to decode persisted peer addr: {}", e); None }
                     }
-                    Err(e) => {
-                        log_warn!("[WEBXDC] Failed to add pending peer {}: {}", peer_id, e);
-                        Err((peer_id, e))
+                }).collect();
+                for addr in peers {
+                    let peer_id = addr.id;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        iroh.try_add_peer(&topic, &addr),
+                    ).await {
+                        Ok(Ok(_)) => log_info!("[WEBXDC] Connected to persisted peer {}", peer_id),
+                        Ok(Err(e)) => log_trace!("[WEBXDC] Peer {} failed: {e}", peer_id),
+                        Err(_) => log_trace!("[WEBXDC] Peer {} timed out (stale?)", peer_id),
                     }
                 }
             }
-        }).collect();
-        
-        let results = join_all(add_peer_futures).await;
-        let success_count = results.iter().filter(|r| r.is_ok()).count();
-        let fail_count = results.len() - success_count;
-        
-        if fail_count > 0 {
-            log_warn!("[WEBXDC] Added {}/{} pending peers ({} failed)", success_count, results.len(), fail_count);
-        } else {
-            log_info!("[WEBXDC] Successfully added all {} pending peers", success_count);
         }
-    } else {
-        log_trace!("[WEBXDC] No pending peers found for topic {}", topic_encoded);
-    }
-    
-    // Get our node address and send a peer advertisement to the chat
-    // This allows other participants to discover and connect to us
-    let node_addr = iroh.get_node_addr();
-    let node_addr_encoded = encode_node_addr(&node_addr)
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
-    
-    // Send peer advertisement to the chat so other participants can discover us.
-    // Late joiners will pick this up from the relay backlog via pending peers.
-    let chat_id = instance.chat_id.clone();
-    let topic_for_advert = topic_encoded.clone();
-    let node_addr_for_advert = node_addr_encoded.clone();
-    tokio::spawn(async move {
-        if !crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, topic_for_advert, node_addr_for_advert).await {
-            log_warn!("[WEBXDC] Failed to send peer advertisement");
-        }
-    });
 
-    // Emit status event to main window so UI updates to show "Playing"
+        let cached_addrs = state.take_peer_addrs(&topic).await;
+        for addr in cached_addrs.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                iroh.try_add_peer(&topic, &addr),
+            ).await;
+        }
+    }
+
+    // Send advertisement if preconnect didn't
+    if !is_rejoin {
+        let node_addr = iroh.get_node_addr();
+        if let Ok(encoded) = encode_node_addr(&node_addr) {
+            let chat_id = instance.chat_id.clone();
+            let te = topic_encoded.clone();
+            tokio::spawn(async move {
+                crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, te, encoded).await;
+            });
+        }
+    }
+
+    // Add self + emit status
+    if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+        let npub = my_pk.to_bech32().unwrap();
+        state.add_session_peer(topic, npub).await;
+    }
+
     if let Some(main_window) = app.get_webview_window("main") {
-        let current_peer_count = iroh.get_peer_count(&topic).await;
-        let effective_peer_count = std::cmp::max(current_peer_count, pending_peer_count);
+        let session_peers = state.get_session_peers(&topic).await;
         let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-            "topic": topic_encoded.clone(),
-            "peer_count": effective_peer_count,
+            "topic": topic_encoded_clone,
+            "peer_count": session_peers.len(),
+            "peers": session_peers,
             "is_active": true,
         }));
     }
 
-    // Return the topic + WebSocket URL for the fast-path send
     let ws_url = state.realtime.ws_url();
     Ok(JoinRealtimeResult { topic: topic_encoded, ws_url })
 }
 
-/// Send realtime data (invoke fallback for platforms where WebSocket is unavailable, e.g. Linux/WebKitGTK).
-/// On macOS/Windows the WS fast-path is used instead; this command is only called when WS fails.
+/// Send realtime data via invoke fallback (used when WS fast-path isn't available).
+/// Accepts raw bytes (Array.from(Uint8Array)) to avoid base91 encode/decode overhead.
 #[tauri::command]
 pub async fn miniapp_send_realtime_data(
     window: WebviewWindow,
@@ -1261,9 +1402,21 @@ pub async fn miniapp_send_realtime_data(
     data: Vec<u8>,
 ) -> Result<(), Error> {
     let label = window.label();
-    if let Ok(iroh) = state.realtime.get_or_init().await {
-        iroh.fast_send(label, data);
+
+    if data.len() > 128_000 {
+        return Err(Error::RealtimeError(format!("Data too large: {} bytes", data.len())));
     }
+
+    // Get the topic for this instance
+    let topic = state.get_realtime_channel(label).await
+        .ok_or(Error::RealtimeChannelNotActive)?;
+
+    let iroh = state.realtime.get_or_init().await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+
+    iroh.send_data(topic, data).await
+        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+
     Ok(())
 }
 
@@ -1352,6 +1505,8 @@ pub struct RealtimeChannelInfo {
     pub pending_peer_count: usize,
     /// Topic ID (encoded)
     pub topic_id: String,
+    /// Npubs of peers in the session (for avatar display)
+    pub peers: Vec<String>,
 }
 
 /// Get the realtime channel status for a topic
@@ -1364,34 +1519,23 @@ pub async fn miniapp_get_realtime_status(
     let topic = super::realtime::decode_topic_id(&topic_id)
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
 
-    let pending_peer_count = state.get_pending_peer_count(&topic).await;
-
     // Check if WE are actively playing (have a Mini App window open for this topic)
-    // This is different from whether we have an Iroh channel (which we keep open to see peers)
     let we_are_playing = {
         let channels = state.realtime_channels.read().await;
         channels.values().any(|ch| ch.topic == topic && ch.active)
     };
 
-    match state.realtime.get_or_init().await {
-        Ok(iroh) => {
-            let peer_count = iroh.get_peer_count(&topic).await;
-            Ok(RealtimeChannelInfo {
-                active: we_are_playing,
-                peer_count,
-                pending_peer_count,
-                topic_id,
-            })
-        }
-        Err(_) => {
-            Ok(RealtimeChannelInfo {
-                active: false,
-                peer_count: 0,
-                pending_peer_count,
-                topic_id,
-            })
-        }
-    }
+    // session_peers is the single source of truth for both count and avatars
+    let peer_npubs = state.get_session_peers(&topic).await;
+    let peer_count = peer_npubs.len();
+
+    Ok(RealtimeChannelInfo {
+        active: we_are_playing,
+        peer_count,
+        pending_peer_count: 0,
+        topic_id,
+        peers: peer_npubs,
+    })
 }
 
 // ============================================================================

@@ -189,6 +189,35 @@ impl MiniAppPackage {
             self.get_file(&self.manifest.icon).ok()
         }
     }
+
+    /// Check if an XDC package's source uses the WebXDC realtime channel API.
+    /// Scans HTML/JS files for `joinRealtimeChannel`. Designed for `spawn_blocking`.
+    pub fn scan_for_realtime_api(path: &std::path::Path) -> bool {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut archive = match zip::ZipArchive::new(file) {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        const NEEDLE: &[u8] = b"joinRealtimeChannel";
+        for i in 0..archive.len() {
+            let Ok(mut entry) = archive.by_index(i) else { continue };
+            let name = entry.name().to_lowercase();
+            if !(name.ends_with(".html") || name.ends_with(".htm")
+                || name.ends_with(".js") || name.ends_with(".mjs"))
+            {
+                continue;
+            }
+            let mut buf = Vec::new();
+            if entry.read_to_end(&mut buf).is_err() { continue; }
+            if buf.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Represents a running Mini App instance
@@ -216,13 +245,6 @@ pub struct RealtimeChannelState {
 }
 
 /// Global state for managing Mini App instances
-/// A pending peer advertisement (received before we joined the channel)
-#[derive(Clone, Debug)]
-pub struct PendingPeer {
-    pub node_addr: iroh::EndpointAddr,
-    pub received_at: std::time::Instant,
-}
-
 pub struct MiniAppsState {
     /// Map of window_label -> MiniAppInstance
     instances: RwLock<HashMap<String, MiniAppInstance>>,
@@ -232,9 +254,15 @@ pub struct MiniAppsState {
     pub realtime: RealtimeManager,
     /// Map of window_label -> realtime channel state
     pub realtime_channels: RwLock<HashMap<String, RealtimeChannelState>>,
-    /// Pending peer advertisements (topic -> list of peers)
-    /// These are peers that advertised before we joined the channel
-    pub pending_peers: RwLock<HashMap<TopicId, Vec<PendingPeer>>>,
+    /// Cached peer addresses for QUIC connection on join (topic -> addrs).
+    /// Populated from peer advertisements, consumed on join.
+    peer_addrs: RwLock<HashMap<TopicId, Vec<iroh::EndpointAddr>>>,
+    /// Known session participants (topic -> list of npubs).
+    /// Single source of truth for lobby state and avatar display.
+    session_peers: RwLock<HashMap<TopicId, Vec<String>>>,
+    /// Preconnect completion signals — joinRealtimeChannel awaits these
+    /// before attaching the event listener. Sender lives in the preconnect task.
+    preconnect_signals: RwLock<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
 }
 
 impl MiniAppsState {
@@ -244,7 +272,9 @@ impl MiniAppsState {
             packages: RwLock::new(HashMap::new()),
             realtime: RealtimeManager::new(None),
             realtime_channels: RwLock::new(HashMap::new()),
-            pending_peers: RwLock::new(HashMap::new()),
+            peer_addrs: RwLock::new(HashMap::new()),
+            session_peers: RwLock::new(HashMap::new()),
+            preconnect_signals: RwLock::new(HashMap::new()),
         }
     }
     
@@ -267,85 +297,92 @@ impl MiniAppsState {
     }
     
     /// Check if an instance has an active realtime channel
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub async fn has_realtime_channel(&self, window_label: &str) -> bool {
         let channels = self.realtime_channels.read().await;
         channels.get(window_label).map(|s| s.active).unwrap_or(false)
     }
+
+    /// Check if ANY instance has an active realtime channel for a given topic
+    pub async fn has_realtime_channel_for_topic(&self, topic: &TopicId) -> bool {
+        let channels = self.realtime_channels.read().await;
+        channels.values().any(|s| s.active && &s.topic == topic)
+    }
+
+    /// Get the chat_id for an instance that has a realtime channel with the given topic
+    pub async fn get_chat_id_for_topic(&self, topic: &TopicId) -> Option<String> {
+        let channels = self.realtime_channels.read().await;
+        let label = channels.iter()
+            .find(|(_, s)| s.active && &s.topic == topic)
+            .map(|(label, _)| label.clone())?;
+        drop(channels);
+        self.get_instance(&label).await.map(|i| i.chat_id.clone())
+    }
     
-    /// Add a pending peer for a topic (received before we joined)
-    pub async fn add_pending_peer(&self, topic: TopicId, node_addr: iroh::EndpointAddr) {
-        let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
-        println!("[WEBXDC] add_pending_peer: Adding peer {} for topic {}", node_addr.id, topic_encoded);
+    // ─── Preconnect signals ───────────────────────────────────────────────
 
-        let mut pending = self.pending_peers.write().await;
-        let peers = pending.entry(topic).or_insert_with(Vec::new);
+    /// Store a preconnect completion signal for a window label
+    pub async fn set_preconnect_signal(&self, label: &str, rx: tokio::sync::watch::Receiver<bool>) {
+        self.preconnect_signals.write().await.insert(label.to_string(), rx);
+    }
 
-        // Don't add duplicates
-        if !peers.iter().any(|p| p.node_addr.id == node_addr.id) {
-            peers.push(PendingPeer {
-                node_addr: node_addr.clone(),
-                received_at: std::time::Instant::now(),
-            });
-            println!("[WEBXDC] add_pending_peer: Stored pending peer {} for topic {}", node_addr.id, topic_encoded);
-        } else {
-            println!("[WEBXDC] add_pending_peer: Peer {} already exists for topic {}", node_addr.id, topic_encoded);
+    /// Take the preconnect signal for a window label (consumed by joinRealtimeChannel)
+    pub async fn take_preconnect_signal(&self, label: &str) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.preconnect_signals.write().await.remove(label)
+    }
+
+    // ─── Peer address cache (for QUIC connection on join) ──────────────────
+
+    /// Cache a peer's address for a topic (from a peer advertisement)
+    pub async fn cache_peer_addr(&self, topic: TopicId, addr: iroh::EndpointAddr) {
+        let mut addrs = self.peer_addrs.write().await;
+        let list = addrs.entry(topic).or_default();
+        if !list.iter().any(|a| a.id == addr.id) {
+            list.push(addr);
         }
     }
-    
-    /// Get and clear pending peers for a topic
-    pub async fn take_pending_peers(&self, topic: &TopicId) -> Vec<PendingPeer> {
-        let topic_encoded = crate::miniapps::realtime::encode_topic_id(topic);
-        println!("[WEBXDC] take_pending_peers: Looking for peers for topic {}", topic_encoded);
-        
-        let mut pending = self.pending_peers.write().await;
-        
-        // Debug: print all pending topics
-        println!("[WEBXDC] take_pending_peers: Currently have {} topics with pending peers", pending.len());
-        for (t, peers) in pending.iter() {
-            let t_encoded = crate::miniapps::realtime::encode_topic_id(t);
-            println!("[WEBXDC] take_pending_peers:   Topic {} has {} pending peers", t_encoded, peers.len());
-        }
-        
-        let peers = pending.remove(topic).unwrap_or_default();
-        println!("[WEBXDC] take_pending_peers: Found {} peers for topic {}", peers.len(), topic_encoded);
-        
-        // Filter out peers that are too old (more than 5 minutes)
-        let now = std::time::Instant::now();
-        let filtered: Vec<PendingPeer> = peers.into_iter()
-            .filter(|p| now.duration_since(p.received_at).as_secs() < 300)
-            .collect();
-        
-        println!("[WEBXDC] take_pending_peers: After filtering, {} peers remain", filtered.len());
-        filtered
-    }
-    
-    /// Get the count of pending peers for a topic (without removing them)
-    pub async fn get_pending_peer_count(&self, topic: &TopicId) -> usize {
-        let pending = self.pending_peers.read().await;
-        pending.get(topic).map(|peers| peers.len()).unwrap_or(0)
-    }
-    
-    /// Clean up expired pending peers (older than 5 minutes)
-    /// This should be called periodically to prevent memory leaks
-    pub async fn cleanup_expired_pending_peers(&self) {
-        let now = std::time::Instant::now();
-        let mut pending = self.pending_peers.write().await;
-        
-        // Remove expired peers from each topic
-        pending.retain(|_topic, peers| {
-            let before_count = peers.len();
-            peers.retain(|p| now.duration_since(p.received_at).as_secs() < 300);
-            let after_count = peers.len();
 
-            if before_count != after_count {
-                log_debug!("[WEBXDC] Cleaned up {} expired peers for topic {}",
-                    before_count - after_count, crate::miniapps::realtime::encode_topic_id(_topic));
+    /// Take all cached peer addresses for a topic (consumed on join)
+    pub async fn take_peer_addrs(&self, topic: &TopicId) -> Vec<iroh::EndpointAddr> {
+        let mut addrs = self.peer_addrs.write().await;
+        addrs.remove(topic).unwrap_or_default()
+    }
+
+    // ─── Session peers (persistent participant tracking) ───────────────────
+
+    /// Add a participant npub to the session (idempotent)
+    pub async fn add_session_peer(&self, topic: TopicId, npub: String) {
+        let mut peers = self.session_peers.write().await;
+        let list = peers.entry(topic).or_default();
+        if !list.contains(&npub) {
+            list.push(npub);
+        }
+    }
+
+    /// Remove a participant npub from the session
+    pub async fn remove_session_peer(&self, topic: &TopicId, npub: &str) {
+        let mut peers = self.session_peers.write().await;
+        if let Some(list) = peers.get_mut(topic) {
+            list.retain(|n| n != npub);
+            if list.is_empty() {
+                peers.remove(topic);
             }
-            
-            // Keep the topic entry only if it still has peers
-            !peers.is_empty()
-        });
+        }
     }
+
+    /// Get all participant npubs for a session
+    pub async fn get_session_peers(&self, topic: &TopicId) -> Vec<String> {
+        let peers = self.session_peers.read().await;
+        peers.get(topic).cloned().unwrap_or_default()
+    }
+
+    /// Clear all session peers for a topic
+    #[allow(dead_code)]
+    pub async fn clear_session_peers(&self, topic: &TopicId) {
+        let mut peers = self.session_peers.write().await;
+        peers.remove(topic);
+    }
+
     
     /// Register a new Mini App instance
     pub async fn add_instance(&self, instance: MiniAppInstance) {

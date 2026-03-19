@@ -9,6 +9,7 @@ use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
 use std::io::Read;
 use tauri::{Emitter, Manager};
+use nostr_sdk::prelude::ToBech32;
 use crate::util::bytes_to_hex_string;
 use crate::TAURI_APP;
 
@@ -128,15 +129,34 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                     0
                 };
 
-                // Emit status update to main window so frontend clears "Playing" state
+                // Remove ourselves from session peers
+                if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                    let my_npub = my_pk.to_bech32().unwrap();
+                    state.remove_session_peer(&channel.topic, &my_npub).await;
+                }
+
+                // Emit status update — session_peers is the single source of truth
+                let session_peers = state.get_session_peers(&channel.topic).await;
+                let session_count = session_peers.len();
                 if let Some(main_window) = app.get_webview_window("main") {
                     let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
                         "topic": topic_encoded,
-                        "peer_count": peer_count,
+                        "peer_count": session_count,
+                        "peers": session_peers,
                         "is_active": false,
-                        "has_pending_peers": peer_count > 0,
+                        "has_pending_peers": session_count > 0,
                     }));
-                    log_info!("[WEBXDC] Emitted miniapp_realtime_status: active=false, peer_count={} for topic {}", peer_count, topic_encoded);
+                    log_info!("[WEBXDC] Emitted miniapp_realtime_status: active=false, peer_count={} for topic {}", session_count, topic_encoded);
+                }
+                // Send peer-left signal so other clients update their online indicators
+                if let Some(instance) = state.get_instance(&miniapp_id_owned).await {
+                    let chat_id = instance.chat_id.clone();
+                    let topic_for_left = topic_encoded.clone();
+                    tokio::spawn(async move {
+                        if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
+                            log_warn!("[WEBXDC] Failed to send peer-left signal");
+                        }
+                    });
                 }
             }
 
@@ -372,14 +392,15 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
             active: true,
         }).await;
 
-        // Eagerly init Iroh + WS server so we can return the WS URL
-        let ws_url = match state.realtime.get_or_init().await {
-            Ok(_) => state.realtime.ws_url(),
-            Err(e) => {
-                log_warn!("[WEBXDC] Android: Failed to eagerly init Iroh: {}", e);
-                None
-            }
-        };
+        // NOTE: Do NOT call get_or_init() here! This block runs on a temporary
+        // single-threaded tokio runtime (rt) that is dropped after block_on().
+        // Any tasks spawned by Endpoint::bind() would be killed when rt is dropped.
+        // Iroh init happens in the tauri::async_runtime::spawn block below instead.
+        //
+        // BUT: start the WS server eagerly (sync bind + spawn on main runtime).
+        // This ensures ws_url is available BEFORE returning to JS.
+        state.realtime.ensure_ws_started();
+        let ws_url = state.realtime.ws_url();
 
         Ok::<_, String>((Some(instance), topic, topic_encoded, ws_url))
     });
@@ -417,7 +438,15 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
     tauri::async_runtime::spawn(async move {
         let state = app_for_join.state::<crate::miniapps::state::MiniAppsState>();
 
-        // Initialize Iroh
+        // Wait for preconnect to finish (if it ran for this Mini App)
+        if let Some(mut rx) = state.take_preconnect_signal(&miniapp_id_for_join).await {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                rx.wait_for(|ready| *ready),
+            ).await;
+        }
+
+        // Initialize Iroh (instant if preconnect already ran)
         let iroh = match state.realtime.get_or_init().await {
             Ok(iroh) => iroh,
             Err(e) => {
@@ -430,37 +459,38 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
 
         // Join the channel with mpsc event target
         let event_target = crate::miniapps::realtime::EventTarget::MpscSender(tx);
-        match iroh.join_channel(topic, vec![], event_target, Some(app_for_join.clone()), miniapp_id_for_join.clone()).await {
-            Ok((is_rejoin, _)) => {
-                if is_rejoin {
+        let is_rejoin = match iroh.join_channel(topic, vec![], Some(event_target), Some(app_for_join.clone()), miniapp_id_for_join.clone()).await {
+            Ok((rejoin, _)) => {
+                if rejoin {
                     log_info!("[WEBXDC] Android: Re-joined existing channel for topic: {}", topic_encoded_for_join);
                 } else {
                     log_info!("[WEBXDC] Android: Joined new channel for topic: {}", topic_encoded_for_join);
                 }
+                rejoin
             }
             Err(e) => {
                 log_error!("[WEBXDC] Android: Failed to join channel: {}", e);
-                // Clean up the channel state we set synchronously
                 state.remove_realtime_channel(&miniapp_id_for_join).await;
                 return;
             }
-        }
+        };
 
-        // Process pending peers
-        let pending_peers = state.take_pending_peers(&topic).await;
-        let pending_peer_count = pending_peers.len();
-        if !pending_peers.is_empty() {
-            log_info!("[WEBXDC] Android: Adding {} pending peers", pending_peer_count);
-            for pending in pending_peers {
-                let peer_id = pending.node_addr.id;
-                if let Err(e) = iroh.add_peer(topic, pending.node_addr).await {
-                    log_warn!("[WEBXDC] Android: Failed to add pending peer {}: {}", peer_id, e);
+        // Only connect peers + send advertisement if preconnect didn't
+        if !is_rejoin {
+            let cached_addrs = state.take_peer_addrs(&topic).await;
+            if !cached_addrs.is_empty() {
+                log_info!("[WEBXDC] Android: Connecting to {} cached peers", cached_addrs.len());
+                for addr in cached_addrs {
+                    let peer_id = addr.id;
+                    if let Err(e) = iroh.add_peer(topic, addr).await {
+                        log_warn!("[WEBXDC] Android: Failed to connect to cached peer {}: {}", peer_id, e);
+                    }
                 }
             }
         }
 
         // Get node address and send peer advertisements
-        {
+        if !is_rejoin {
             let node_addr = iroh.get_node_addr();
             match crate::miniapps::realtime::encode_node_addr(&node_addr) {
                 Ok(node_addr_encoded) => {
@@ -493,15 +523,22 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
                     log_warn!("[WEBXDC] Android: Failed to encode node addr: {}", e);
                 }
             }
+        } // if !is_rejoin (advertisement)
+
+        // Add ourselves to session peers
+        if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+            let my_npub = my_pk.to_bech32().unwrap();
+            state.add_session_peer(topic, my_npub).await;
         }
 
-        // Emit status event to main window so UI updates to show "Playing"
+        // Emit status event — session_peers is the single source of truth
         if let Some(main_window) = app_for_join.get_webview_window("main") {
-            let current_peer_count = iroh.get_peer_count(&topic).await;
-            let effective_peer_count = std::cmp::max(current_peer_count, pending_peer_count);
+            let session_peers = state.get_session_peers(&topic).await;
+            let peer_count = session_peers.len();
             let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
                 "topic": topic_encoded_for_join,
-                "peer_count": effective_peer_count,
+                "peer_count": peer_count,
+                "peers": session_peers,
                 "is_active": true,
             }));
         }
@@ -562,6 +599,78 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
             } else {
                 log_info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
             }
+        }
+    });
+}
+
+/// Send realtime data via gossip (JNI bridge fallback when WS isn't available).
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
+    mut env: JNIEnv,
+    _class: JClass,
+    miniapp_id: JString,
+    data: JString,
+) {
+    let miniapp_id: String = match env.get_string(&miniapp_id) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log_error!("Failed to get miniapp_id: {:?}", e);
+            return;
+        }
+    };
+
+    let encoded: String = match env.get_string(&data) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log_error!("Failed to get data string: {:?}", e);
+            return;
+        }
+    };
+
+    // Decode base91 to raw bytes
+    let bytes = match fast_thumbhash::base91_decode(&encoded) {
+        Ok(b) => b,
+        Err(_) => {
+            log_error!("[{}] sendRealtimeData: failed to decode base91", miniapp_id);
+            return;
+        }
+    };
+
+    if bytes.len() > 128_000 {
+        log_error!("[{}] sendRealtimeData: data too large ({} bytes)", miniapp_id, bytes.len());
+        return;
+    }
+
+    let app = match TAURI_APP.get() {
+        Some(a) => a.clone(),
+        None => {
+            log_error!("[{}] TAURI_APP not initialized", miniapp_id);
+            return;
+        }
+    };
+
+    let data = bytes;
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<crate::miniapps::state::MiniAppsState>();
+
+        let topic = match state.get_realtime_channel(&miniapp_id).await {
+            Some(t) => t,
+            None => {
+                log_warn!("[WEBXDC] Android sendRealtimeData: no active channel for {}", miniapp_id);
+                return;
+            }
+        };
+
+        let iroh = match state.realtime.get_or_init().await {
+            Ok(iroh) => iroh,
+            Err(e) => {
+                log_error!("[WEBXDC] Android sendRealtimeData: failed to get Iroh: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = iroh.send_data(topic, data).await {
+            log_error!("[WEBXDC] Android sendRealtimeData: failed to send: {}", e);
         }
     });
 }
@@ -1139,8 +1248,15 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
                 }},
                 send: function(data) {{
                     var buf = data instanceof Uint8Array ? data : new Uint8Array(data);
-                    // WebSocket fast path — silently drop if not connected yet
-                    if (rtWs && rtWs.readyState === 1) rtWs.send(buf);
+                    // Fast path: WebSocket binary frame
+                    if (rtWs && rtWs.readyState === 1) {{
+                        rtWs.send(buf);
+                    }} else {{
+                        // Fallback: JNI bridge (always available on Android)
+                        try {{
+                            window.__MINIAPP_IPC__.sendRealtimeData(b91e(buf));
+                        }} catch(e) {{}}
+                    }}
                 }},
                 leave: function() {{
                     this._listener = null;
@@ -1163,6 +1279,14 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
                         rtWs.binaryType = 'arraybuffer';
                         rtWs.onclose = function() {{ rtWs = null; }};
                         rtWs.onerror = function() {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }};
+                        // Detect stuck CONNECTING state (some WebViews silently block WS)
+                        setTimeout(function() {{
+                            if (rtWs && rtWs.readyState === 0) {{
+                                console.warn('[webxdc] WS stuck in CONNECTING — falling back to JNI');
+                                try {{ rtWs.close(); }} catch(e) {{}}
+                                rtWs = null;
+                            }}
+                        }}, 1500);
                     }}
                 }}
             }} catch(e) {{

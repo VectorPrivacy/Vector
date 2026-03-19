@@ -283,21 +283,6 @@ pub fn run() {
                 profile_sync::start_profile_sync_processor().await;
             });
             
-            // Start the Mini Apps pending peer cleanup task (runs every 5 minutes)
-            {
-                let handle_for_cleanup = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        // Wait 5 minutes between cleanups
-                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-                        
-                        // Get the MiniAppsState and run cleanup
-                        let state = handle_for_cleanup.state::<miniapps::state::MiniAppsState>();
-                        state.cleanup_expired_pending_peers().await;
-                    }
-                });
-            }
-
             // Setup deep link listener for macOS/iOS/Android
             // On these platforms, deep links are received as events rather than CLI args
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]

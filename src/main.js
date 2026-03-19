@@ -5050,17 +5050,15 @@ async function setupRustListeners() {
 
     // Listen for Mini App realtime status updates (peer count changes)
     _on('miniapp_realtime_status', (evt) => {
-        const { topic, peer_count, is_active, has_pending_peers } = evt.payload;
-        console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'pending:', has_pending_peers);
-        
+        const { topic, peer_count, is_active, has_pending_peers, peers } = evt.payload;
+        console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'npubs:', peers);
+
         // Find all Mini App attachments with this topic and update their status
         const attachments = document.querySelectorAll(`.miniapp-attachment[data-webxdc-topic="${topic}"]`);
-        console.log('[MINIAPP] Found', attachments.length, 'attachments for topic', topic);
-        
+
         attachments.forEach(attachment => {
-            // Use the stored update function if available
             if (attachment._updateMiniAppStatus) {
-                attachment._updateMiniAppStatus(is_active, peer_count);
+                attachment._updateMiniAppStatus(is_active, peer_count, peers);
             }
         });
     });
@@ -7046,7 +7044,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
 
     // Create the main container
     const btnDiv = document.createElement('div');
-    btnDiv.className = 'btn custom-audio-player';
+    btnDiv.className = isMiniApp ? 'custom-audio-player' : 'btn custom-audio-player';
     btnDiv.style.display = 'flex';
     btnDiv.style.alignItems = 'center';
     btnDiv.style.padding = '10px';
@@ -7061,7 +7059,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
         iconElement.style.height = '40px';
         iconElement.style.borderRadius = '8px';
         iconElement.style.objectFit = 'cover';
-        iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+        iconElement.style.backgroundColor = 'transparent';
         iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
     } else {
         iconElement = document.createElement('span');
@@ -7107,10 +7105,11 @@ function createFileBox(cAttachment, state = 'downloaded') {
         const peerBadge = document.createElement('span');
         peerBadge.style.padding = '2px 8px';
         peerBadge.style.borderRadius = '10px';
-        peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.3)';
-        peerBadge.style.color = '#2ed573';
+        peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.15)';
+        peerBadge.style.color = 'rgb(46, 213, 115)';
         peerBadge.style.fontSize = '0.85em';
         peerBadge.style.fontWeight = '500';
+        peerBadge.style.border = '0.5px solid rgba(46, 213, 115, 0.3)';
         peerBadge.style.display = 'none';
         smallElement.appendChild(peerBadge);
 
@@ -7120,19 +7119,56 @@ function createFileBox(cAttachment, state = 'downloaded') {
             fileDiv.setAttribute('data-webxdc-topic', topicId);
         }
 
-        // Helper function to update the peer badge
-        const updatePeerBadge = (peerCount, isPlaying) => {
-            const totalPlayers = isPlaying ? peerCount + 1 : peerCount;
+        // Helper function to update the peer badge with avatar stack
+        const updatePeerBadge = (peerCount, isPlaying, peerNpubs) => {
+            // session_peers is the single source of truth — use its length as the count
+            const totalPlayers = (peerNpubs && peerNpubs.length > 0) ? peerNpubs.length : (isPlaying ? peerCount + 1 : peerCount);
             if (totalPlayers > 0) {
-                const groupIcon = document.createElement('img');
-                groupIcon.src = 'icons/group-placeholder.svg';
-                groupIcon.style.width = '14px';
-                groupIcon.style.height = '14px';
-                groupIcon.style.verticalAlign = 'middle';
-                groupIcon.style.marginRight = '4px';
-
                 peerBadge.innerHTML = '';
-                peerBadge.appendChild(groupIcon);
+
+                // Avatar stack — show up to 5 tiny overlapping profile pictures
+                const npubs = (peerNpubs || []).sort(); // deterministic order
+                const shown = npubs.slice(0, 5);
+                if (shown.length > 0) {
+                    const stack = document.createElement('span');
+                    stack.style.display = 'inline-flex';
+                    stack.style.alignItems = 'center';
+                    stack.style.marginRight = '4px';
+                    shown.forEach((npub, i) => {
+                        const wrapper = document.createElement('span');
+                        wrapper.style.position = 'relative';
+                        wrapper.style.zIndex = String(shown.length - i);
+                        if (i > 0) wrapper.style.marginLeft = '-5px';
+                        const img = document.createElement('img');
+                        const profile = getProfile(npub);
+                        const src = getProfileAvatarSrc(profile);
+                        const displayName = profile?.nickname || profile?.name;
+                        if (displayName) {
+                            wrapper.addEventListener('mouseenter', () => showGlobalTooltip(displayName, wrapper));
+                            wrapper.addEventListener('mouseleave', hideGlobalTooltip);
+                        }
+                        img.onerror = function() { this.src = 'icons/contact-placeholder.svg'; };
+                        img.src = src || 'icons/contact-placeholder.svg';
+                        img.style.width = '14px';
+                        img.style.height = '14px';
+                        img.style.borderRadius = '50%';
+                        img.style.border = '1px solid #1a1a2e';
+                        img.style.objectFit = 'cover';
+                        img.style.display = 'block';
+                        wrapper.appendChild(img);
+                        stack.appendChild(wrapper);
+                    });
+                    peerBadge.appendChild(stack);
+                } else {
+                    const groupIcon = document.createElement('img');
+                    groupIcon.src = 'icons/group-placeholder.svg';
+                    groupIcon.style.width = '14px';
+                    groupIcon.style.height = '14px';
+                    groupIcon.style.verticalAlign = 'middle';
+                    groupIcon.style.marginRight = '4px';
+                    peerBadge.appendChild(groupIcon);
+                }
+
                 peerBadge.appendChild(document.createTextNode(`${totalPlayers} online`));
                 peerBadge.style.display = 'inline-flex';
                 peerBadge.style.alignItems = 'center';
@@ -7141,28 +7177,29 @@ function createFileBox(cAttachment, state = 'downloaded') {
             }
         };
 
+        // Track last known peer npubs (preserved across status updates that omit it)
+        let lastPeerNpubs = [];
+
         // Helper function to update the UI based on status
-        updateMiniAppStatus = (isPlaying, peerCount) => {
+        updateMiniAppStatus = (isPlaying, peerCount, peerNpubs) => {
+            if (peerNpubs) lastPeerNpubs = peerNpubs;
             if (isPlaying) {
                 playSpan.innerText = 'Playing';
                 playSpan.style.color = '#2ed573';
                 fileDiv.style.cursor = 'default';
-                fileDiv.style.opacity = '0.9';
                 fileDiv.setAttribute('data-playing', 'true');
             } else if (peerCount > 0) {
                 playSpan.innerText = 'Click to Join';
                 playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
                 fileDiv.style.cursor = 'pointer';
-                fileDiv.style.opacity = '1';
                 fileDiv.removeAttribute('data-playing');
             } else {
                 playSpan.innerText = 'Click to Play';
                 playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
                 fileDiv.style.cursor = 'pointer';
-                fileDiv.style.opacity = '1';
                 fileDiv.removeAttribute('data-playing');
             }
-            updatePeerBadge(peerCount, isPlaying);
+            updatePeerBadge(peerCount, isPlaying, lastPeerNpubs);
         };
 
         // Load Mini App info asynchronously to get name and icon
@@ -7188,7 +7225,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
                     const peerCount = (status?.peer_count || 0) > 0
                         ? status.peer_count
                         : (status?.pending_peer_count || 0);
-                    updateMiniAppStatus(status?.active || false, peerCount);
+                    updateMiniAppStatus(status?.active || false, peerCount, status?.peers);
                 })
                 .catch(err => {
                     console.debug('Could not get realtime status:', err);
@@ -7907,13 +7944,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                     if (!path) return;
 
                     if (isMiniApp) {
-                        // Check if we're already playing
-                        if (fileDiv.getAttribute('data-playing') === 'true') {
-                            console.log('[MiniApp] Already playing, ignoring click');
-                            return;
-                        }
-
-                        // Open Mini App in a new window
+                        // Open Mini App in a new window (or focus existing)
                         try {
                             const attachment = msg.attachments.find(a => a.path === path);
                             const topicId = attachment?.webxdc_topic || null;
@@ -7927,10 +7958,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                                 if (topicId) {
                                     invoke('miniapp_get_realtime_status', { topicId })
                                         .then(status => {
-                                            fileDiv._updateMiniAppStatus(true, status?.peer_count || 0);
+                                            fileDiv._updateMiniAppStatus(true, status?.peer_count || 0, status?.peers);
                                         })
                                         .catch(() => {
-                                            fileDiv._updateMiniAppStatus(true, 0);
+                                            fileDiv._updateMiniAppStatus(true, 0, []);
                                         });
                                 } else {
                                     fileDiv._updateMiniAppStatus(true, 0);

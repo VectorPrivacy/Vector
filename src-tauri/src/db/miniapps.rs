@@ -459,3 +459,71 @@ pub fn copy_miniapp_permissions(
 
     Ok(())
 }
+
+// ============================================================================
+// Peer Advertisement Queries (for realtime channel discovery)
+// ============================================================================
+
+/// A persisted peer advertisement record from SQLite.
+pub struct PeerAdvertisementRecord {
+    pub npub: String,
+    pub node_addr_encoded: String,
+}
+
+/// Get active peer advertisements for a topic.
+///
+/// Returns advertisements where the sender's most recent event for this topic
+/// is a "peer-advertisement" (not invalidated by a subsequent "peer-left").
+/// Excludes our own npub. Uses `reference_id` = topic_encoded (indexed).
+pub fn get_active_peer_advertisements(
+    topic_encoded: &str,
+    my_npub: &str,
+) -> Result<Vec<PeerAdvertisementRecord>, String> {
+    let conn = crate::account_manager::get_db_connection_guard_static()?;
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT e.npub, e.tags, e.created_at
+        FROM events e
+        INNER JOIN (
+            SELECT npub, MAX(created_at) as max_ts
+            FROM events
+            WHERE kind = 30078
+              AND reference_id = ?1
+              AND content IN ('peer-advertisement', 'peer-left')
+              AND npub IS NOT NULL
+              AND npub != ?2
+            GROUP BY npub
+        ) latest ON e.npub = latest.npub AND e.created_at = latest.max_ts
+        WHERE e.kind = 30078
+          AND e.reference_id = ?1
+          AND e.content = 'peer-advertisement'
+        "#
+    ).map_err(|e| format!("Failed to prepare peer advertisement query: {}", e))?;
+
+    let records = stmt.query_map(
+        rusqlite::params![topic_encoded, my_npub],
+        |row| {
+            let npub: String = row.get(0)?;
+            let tags_json: String = row.get(1)?;
+            let _: i64 = row.get(2)?; // created_at consumed by query join
+
+            // Extract node_addr from tags JSON
+            let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+            let node_addr = tags.iter()
+                .find(|t| t.first().map(|s| s.as_str()) == Some("webxdc-node-addr"))
+                .and_then(|t| t.get(1))
+                .cloned()
+                .unwrap_or_default();
+
+            let _: i64 = row.get(2)?; // created_at used by query ordering
+
+            Ok(PeerAdvertisementRecord {
+                npub,
+                node_addr_encoded: node_addr,
+            })
+        }
+    ).map_err(|e| format!("Failed to query peer advertisements: {}", e))?;
+
+    Ok(records.filter_map(|r| r.ok()).filter(|r| !r.node_addr_encoded.is_empty()).collect())
+}

@@ -27,55 +27,36 @@ struct WsState {
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
 }
 
-/// Start the realtime WebSocket server on a random localhost port.
-///
-/// Returns `(port, token)`. The server runs as a background tokio task.
-pub(crate) async fn start(
+
+
+/// Run the WS accept loop. Public so RealtimeManager can call it directly
+/// with a pre-bound listener (needed for Android JNI timing).
+pub(crate) async fn run_accept_loop(
+    listener: TcpListener,
+    token: String,
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
-) -> Result<WsInfo, String> {
-    // Random 32-char hex token (128-bit security)
-    let token = {
-        let mut bytes = [0u8; 16];
-        use rand::RngCore;
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
-        crate::simd::hex::bytes_to_hex_16(&bytes)
-    };
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("Failed to bind RT WS server: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local addr: {e}"))?
-        .port();
-
-    log_info!("[WEBXDC] Realtime WS server listening on 127.0.0.1:{port}");
-
+) {
     let state = Arc::new(WsState {
-        token: token.clone(),
+        token,
         send_handles,
     });
 
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let st = Arc::clone(&state);
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, &st).await {
-                            log_trace!("[WEBXDC] RT WS connection error: {e}");
-                        }
-                    });
-                }
-                Err(e) => {
-                    log_warn!("[WEBXDC] RT WS accept error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                let st = Arc::clone(&state);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, &st).await {
+                        log_trace!("[WEBXDC] RT WS connection error: {e}");
+                    }
+                });
+            }
+            Err(e) => {
+                log_warn!("[WEBXDC] RT WS accept error: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
-    });
-
-    Ok(WsInfo { port, token })
+    }
 }
 
 /// Handle a single WebSocket connection.
@@ -192,9 +173,7 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Inline fast_send — forwards raw payload directly to the send queue.
-/// No trailer needed: raw QUIC connections identify senders by connection
-/// and guarantee no duplicates, so seq/pubkey trailers are unnecessary.
+/// Inline fast_send — adds gossip trailer and broadcasts via gossip protocol.
 #[inline]
 fn fast_send_inline(
     send_handles: &std::sync::RwLock<HashMap<String, SendHandle>>,
@@ -206,10 +185,18 @@ fn fast_send_inline(
         return;
     };
 
-    // Non-blocking enqueue — drops packet on overload
-    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = handle.send_tx.try_send(data) {
-        handle.drops.fetch_add(1, Ordering::Relaxed);
-    }
+    // Add trailer: seq(4) + pubkey(32)
+    let mut msg = data;
+    msg.reserve(36);
+    let seq_num = handle.seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    msg.extend_from_slice(&seq_num.to_le_bytes());
+    msg.extend_from_slice(&handle.public_key_bytes);
+
+    // Fire-and-forget broadcast (gossip is async, spawn a task)
+    let sender = handle.sender.clone();
+    tokio::spawn(async move {
+        let _ = sender.broadcast(msg.into()).await;
+    });
 }
 
 /// Simple percent-decode for URL path segments.

@@ -99,8 +99,18 @@ pub enum RumorProcessingResult {
     },
     /// A WebXDC peer advertisement for realtime channels
     WebxdcPeerAdvertisement {
+        event_id: String,
         topic_id: String,
         node_addr: String,
+        sender_npub: String,
+        created_at: u64,
+    },
+    /// A WebXDC peer left signal (peer closed their Mini App)
+    WebxdcPeerLeft {
+        event_id: String,
+        topic_id: String,
+        sender_npub: String,
+        created_at: u64,
     },
     /// Unknown event type - stored for future compatibility
     /// The frontend will render this as "Unknown Event" placeholder
@@ -904,29 +914,39 @@ async fn process_app_specific(
             .ok_or("Peer advertisement missing webxdc-node-addr tag")?
             .to_string();
         
-        // Validate expiration (peer advertisements should be short-lived)
-        if let Some(expiry_tag) = rumor.tags.find(TagKind::Expiration) {
-            if let Some(expiry_str) = expiry_tag.content() {
-                if let Ok(expiry_timestamp) = expiry_str.parse::<u64>() {
-                    let current_timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|e| format!("System time error: {}", e))?
-                        .as_secs();
-                    
-                    // Reject expired advertisements
-                    if expiry_timestamp <= current_timestamp {
-                        return Ok(RumorProcessingResult::Ignored);
-                    }
-                }
-            }
-        }
-        
+        let sender_npub = rumor.pubkey.to_bech32().unwrap_or_default();
         return Ok(RumorProcessingResult::WebxdcPeerAdvertisement {
+            event_id: rumor.id.to_hex(),
             topic_id,
             node_addr,
+            sender_npub,
+            created_at: rumor.created_at.as_secs(),
         });
     }
     
+    // Check if this is a WebXDC peer-left signal
+    if is_webxdc_peer_left(&rumor) {
+        if context.is_mine {
+            return Ok(RumorProcessingResult::Ignored);
+        }
+
+        log_info!("[WEBXDC] Detected peer-left signal from another device");
+
+        let topic_id = rumor.tags
+            .find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic")))
+            .and_then(|tag| tag.content())
+            .ok_or("Peer-left missing webxdc-topic tag")?
+            .to_string();
+
+        let sender_npub = rumor.pubkey.to_bech32().unwrap_or_default();
+        return Ok(RumorProcessingResult::WebxdcPeerLeft {
+            event_id: rumor.id.to_hex(),
+            topic_id,
+            sender_npub,
+            created_at: rumor.created_at.as_secs(),
+        });
+    }
+
     // Unknown application-specific data
     Ok(RumorProcessingResult::Ignored)
 }
@@ -936,6 +956,12 @@ fn is_webxdc_peer_advertisement(rumor: &RumorEvent) -> bool {
     rumor.content == "peer-advertisement"
         && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
         && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-node-addr"))).is_some()
+}
+
+/// Check if a rumor is a WebXDC peer-left signal
+fn is_webxdc_peer_left(rumor: &RumorEvent) -> bool {
+    rumor.content == "peer-left"
+        && rumor.tags.find(TagKind::Custom(std::borrow::Cow::Borrowed("webxdc-topic"))).is_some()
 }
 
 /// Check if a rumor is a PIVX payment

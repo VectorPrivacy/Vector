@@ -78,8 +78,9 @@ http = "1.3"
 url = "2.5.7"
 
 # Realtime peer channels (Iroh P2P)
-iroh = "0.96"
-iroh-quinn-proto = "0.15"
+iroh = "0.97"
+iroh-gossip = "0.97"
+noq-proto = "0.16"
 rand = "0.8"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 

@@ -106,35 +106,21 @@ pub async fn send_webxdc_peer_advertisement(
         Ok(pubkey) => {
             // This is a DM - use NIP-17 gift wrapping
 
-            // Build the peer advertisement rumor
+            // Build the peer advertisement rumor (no expiry — peer-left signal handles cleanup)
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
                 .tag(Tag::public_key(pubkey))
                 .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
                 .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
                 .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
-                .tag(Tag::expiration(Timestamp::from_secs(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        + 300, // 5 minute expiry
-                )))
                 .build(my_public_key);
 
             // Gift Wrap and send to receiver via our Trusted Relays
-            let expiry_time = Timestamp::from_secs(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + 300,
-            );
             match client
                 .gift_wrap_to(
                     active_trusted_relays().await.into_iter(),
                     &pubkey,
                     rumor,
-                    [Tag::expiration(expiry_time)],
+                    [],
                 )
                 .await
             {
@@ -146,24 +132,64 @@ pub async fn send_webxdc_peer_advertisement(
             // This is a group chat - use MLS
             let group_id = receiver.clone();
 
-            // Build the peer advertisement rumor
+            // Build the peer advertisement rumor (no expiry — peer-left signal handles cleanup)
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
                 .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
                 .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
                 .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
-                .tag(Tag::expiration(Timestamp::from_secs(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        + 300,
-                )))
                 .build(my_public_key);
 
             // Send via MLS
             match mls::send_mls_message(&group_id, rumor, None).await {
                 Ok(_) => true,
                 Err(_e) => false,
+            }
+        }
+    }
+}
+
+/// Send a "peer-left" signal so other clients know we've stopped playing.
+/// Same transport as peer advertisements (NIP-17 DM or MLS group message).
+pub async fn send_webxdc_peer_left(
+    receiver: String,
+    topic_id: String,
+) -> bool {
+    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
+    let my_public_key = *crate::MY_PUBLIC_KEY.get().expect("Public key not initialized");
+
+    log_info!("Sending WebXDC peer-left to {} for topic {}", receiver, topic_id);
+
+    match PublicKey::from_bech32(receiver.as_str()) {
+        Ok(pubkey) => {
+            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-left")
+                .tag(Tag::public_key(pubkey))
+                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
+                .build(my_public_key);
+
+            match client
+                .gift_wrap_to(
+                    active_trusted_relays().await.into_iter(),
+                    &pubkey,
+                    rumor,
+                    [],
+                )
+                .await
+            {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        }
+        Err(_) => {
+            let group_id = receiver;
+            let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-left")
+                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
+                .build(my_public_key);
+
+            match mls::send_mls_message(&group_id, rumor, None).await {
+                Ok(_) => true,
+                Err(_) => false,
             }
         }
     }

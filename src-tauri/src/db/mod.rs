@@ -39,6 +39,7 @@ pub use miniapps::{
     get_miniapp_granted_permissions, set_miniapp_permission, set_miniapp_permissions,
     has_miniapp_permission_prompt, revoke_all_miniapp_permissions, copy_miniapp_permissions,
     save_marketplace_cache, load_marketplace_cache,
+    get_active_peer_advertisements,
 };
 // Chat database functions
 pub use chats::{
