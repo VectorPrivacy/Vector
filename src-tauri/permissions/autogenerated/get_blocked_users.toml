@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-blocked-users"
+description = "Enables the get_blocked_users command without any pre-configured scope."
+commands.allow = ["get_blocked_users"]
+
+[[permission]]
+identifier = "deny-get-blocked-users"
+description = "Denies the get_blocked_users command without any pre-configured scope."
+commands.deny = ["get_blocked_users"]

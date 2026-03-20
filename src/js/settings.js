@@ -1624,6 +1624,66 @@ async function saveCurrentNotificationSettings() {
 }
 
 /**
+ * Load and render the blocked users list in Privacy settings
+ */
+async function loadBlockedUsersList() {
+    const listContainer = document.getElementById('settings-blocked-list');
+    const emptyMsg = document.getElementById('settings-blocked-empty');
+    listContainer.innerHTML = '';
+
+    try {
+        const blocked = await invoke('get_blocked_users');
+        emptyMsg.style.display = blocked.length ? 'none' : '';
+
+        for (const profile of blocked) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;';
+
+            const left = document.createElement('div');
+            left.style.cssText = 'display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; -webkit-user-select: none; user-select: none;';
+
+            const avatar = createAvatarImg(getProfileAvatarSrc(profile), 30, false);
+            avatar.style.flexShrink = '0';
+            const name = document.createElement('span');
+            name.style.cssText = 'color: #ddd; font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;';
+            const displayName = profile.nickname || profile.name;
+            if (displayName) {
+                name.textContent = displayName + ' ';
+                const npubHint = document.createElement('span');
+                npubHint.style.cssText = 'opacity: 0.4; font-size: 12px;';
+                npubHint.textContent = '(' + profile.id.substring(0, 8) + ')';
+                name.appendChild(npubHint);
+            } else {
+                name.textContent = profile.id.substring(0, 20) + '...';
+            }
+
+            left.appendChild(avatar);
+            left.appendChild(name);
+
+            const unblockBtn = document.createElement('span');
+            unblockBtn.textContent = 'Unblock';
+            unblockBtn.style.cssText = 'color: #ff4444; font-size: 13px; cursor: pointer; padding: 4px 10px; border: 1px solid #ff4444; border-radius: 6px;';
+            unblockBtn.onmouseenter = () => { unblockBtn.style.backgroundColor = '#ff444420'; };
+            unblockBtn.onmouseleave = () => { unblockBtn.style.backgroundColor = ''; };
+            unblockBtn.onclick = async () => {
+                const confirmed = await popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(profile.nickname || profile.name || profile.id.substring(0, 16))}?`);
+                if (!confirmed) return;
+                await invoke('unblock_user', { npub: profile.id });
+                showToast('User unblocked');
+                renderChatlist();
+                await loadBlockedUsersList();
+            };
+
+            row.appendChild(left);
+            row.appendChild(unblockBtn);
+            listContainer.appendChild(row);
+        }
+    } catch (e) {
+        console.warn('Failed to load blocked users:', e);
+    }
+}
+
+/**
  * Initialize settings on app start
  */
 async function initSettings() {
@@ -1654,6 +1714,23 @@ async function initSettings() {
         fSendTypingIndicators = e.target.checked;
         await saveSendTypingIndicators(e.target.checked);
     });
+
+    // Load blocked users list + toggle
+    await loadBlockedUsersList();
+    const blockedToggle = document.getElementById('settings-blocked-toggle');
+    const blockedContent = document.getElementById('settings-blocked-content');
+    const blockedChevron = blockedToggle.querySelector('.icon');
+    blockedToggle.onclick = () => {
+        const isOpen = blockedContent.style.display !== 'none';
+        if (isOpen) {
+            blockedContent.style.display = 'none';
+            blockedChevron.style.transform = '';
+        } else {
+            blockedContent.style.display = '';
+            blockedContent.style.animation = 'blockedFadeIn 0.2s ease';
+            blockedChevron.style.transform = 'rotate(180deg)';
+        }
+    };
 
     // Load and initialize display settings
     fDisplayImageTypes = await loadDisplayImageTypes();

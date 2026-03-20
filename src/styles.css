@@ -933,6 +933,66 @@ html, body {
   opacity: 1;
 }
 
+/* Profile "More" dropdown menu */
+.profile-more-dropdown {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  background: #1e1e1e;
+  border: 1px solid #393B3C;
+  border-radius: 10px;
+  padding: 0;
+  min-width: 150px;
+  overflow: hidden;
+  z-index: 10;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  opacity: 1 !important;
+}
+
+#profile-option-more:hover,
+#profile-option-more.active {
+  opacity: 1 !important;
+  background-color: #171717;
+  border-color: #959899;
+  color: white;
+}
+
+.profile-more-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  color: #b2b2b2;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.profile-more-item .icon {
+  position: relative;
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.profile-more-item:hover {
+  background: #2a2a2a;
+  color: white;
+  opacity: 1 !important;
+}
+
+.profile-more-item:first-child {
+  border-radius: 10px 10px 0 0;
+}
+
+.profile-more-item:last-child {
+  border-radius: 0 0 10px 10px;
+}
+
+@keyframes blockedFadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Profile npub Section */
 .profile-npub-container {
   display: flex;
@@ -4145,6 +4205,10 @@ select:focus::-ms-value {
 
 .icon-x-user {
   mask-image: url("./icons/x-user.svg");
+}
+
+.icon-dots-horizontal {
+  mask-image: url("./icons/dots-horizontal.svg");
 }
 
 /* For downloaded models - make it more prominent */

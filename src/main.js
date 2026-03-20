@@ -57,9 +57,20 @@ const domProfileDescriptionEditor = document.getElementById('profile-description
 const domProfileOptions = document.getElementById('profile-option-list');
 const domProfileOptionMessage = document.getElementById('profile-option-message');
 const domProfileOptionMute = document.getElementById('profile-option-mute');
-const domProfileOptionNickname = document.getElementById('profile-option-nickname');
 const domProfileOptionShare = document.getElementById('profile-option-share');
+const domProfileOptionMore = document.getElementById('profile-option-more');
+const domProfileMoreDropdown = document.getElementById('profile-more-dropdown');
+const domProfileOptionNickname = document.getElementById('profile-option-nickname');
+const domProfileOptionBlock = document.getElementById('profile-option-block');
 const domProfileId = document.getElementById('profile-id');
+
+// Close profile "More" dropdown when clicking outside
+document.addEventListener('click', () => {
+    if (domProfileMoreDropdown) {
+        domProfileMoreDropdown.style.display = 'none';
+        domProfileOptionMore.classList.remove('active');
+    }
+});
 
 const domGroupOverview = document.getElementById('group-overview');
 const domGroupOverviewBackBtn = document.getElementById('group-overview-back-btn');
@@ -2761,6 +2772,8 @@ let arrMLSInvites = [];
  * The current open chat (by npub)
  */
 let strOpenChat = "";
+/** Blocked message IDs the user has clicked to reveal (survives re-renders) */
+const revealedBlockedMessages = new Set();
 
 /**
  * The chat ID we came from when opening a profile (to return to on back)
@@ -3336,6 +3349,7 @@ function generateChatlistStateHash() {
             profile?.avatar,
             profile?.avatar_cached,
             chat.muted,
+            profile?.is_blocked,
             isGroup ? chat.metadata?.avatar_cached : undefined,
             isGroup ? chat.metadata?.custom_fields?.name : undefined
         );
@@ -3377,6 +3391,12 @@ function renderChatlist() {
 
         // Do not render our own profile: it is accessible via the Bookmarks/Notes section
         if (chat.id === strPubkey) continue;
+
+        // Hide DM chats with blocked users from the chat list
+        if (chat.chat_type !== 'MlsGroup') {
+            const chatProfile = getProfile(chat.id);
+            if (chatProfile?.is_blocked) continue;
+        }
 
         const divContact = renderChat(chat, primaryColor);
         fragment.appendChild(divContact);
@@ -3517,10 +3537,16 @@ function renderInviteItem(invite, primaryColor) {
  * @returns {string|null} - The typing text, or null if no one is typing
  */
 function generateTypingText(chat) {
-    const activeTypers = chat.active_typers || [];
+    let activeTypers = chat.active_typers || [];
     if (activeTypers.length === 0) return null;
 
     const isGroup = chat.chat_type === 'MlsGroup';
+
+    // Filter out blocked users from typing indicators in group chats
+    if (isGroup) {
+        activeTypers = activeTypers.filter(npub => !getProfile(npub)?.is_blocked);
+        if (activeTypers.length === 0) return null;
+    }
 
     // DMs just show "Typing..." since we already know who it is
     if (!isGroup) return 'Typing...';
@@ -3572,7 +3598,22 @@ function resolveMentionText(text) {
  */
 function generateChatPreviewText(chat) {
     const isGroup = chat.chat_type === 'MlsGroup';
-    const cLastMsg = chat.messages[chat.messages.length - 1];
+
+    // In group chats, skip messages from blocked users for the preview
+    let cLastMsg = null;
+    if (isGroup) {
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+            const m = chat.messages[i];
+            if (m.npub && !m.mine) {
+                const authorProfile = getProfile(m.npub);
+                if (authorProfile?.is_blocked) continue;
+            }
+            cLastMsg = m;
+            break;
+        }
+    } else {
+        cLastMsg = chat.messages[chat.messages.length - 1];
+    }
 
     // Handle typing indicators
     const typingText = generateTypingText(chat);
@@ -3849,6 +3890,12 @@ function countUnreadMessages(chat) {
             break;
         }
         
+        // Skip messages from blocked users in group chats
+        if (chat.chat_type === 'MlsGroup' && msg.npub) {
+            const authorProfile = getProfile(msg.npub);
+            if (authorProfile?.is_blocked) continue;
+        }
+
         // Count this message as unread
         unreadCount++;
     }
@@ -6116,16 +6163,6 @@ function renderProfileTab(cProfile) {
         // Setup Message option
         domProfileOptionMessage.onclick = () => openChat(cProfile.id);
 
-        // Setup Nickname option
-        domProfileOptionNickname.onclick = async () => {
-            const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
-            // Check if they cancelled the nicknaming (resetting a nickname with an empty '' result is fine, though)
-            if (nick === false) return;
-            // Ensure it's not massive
-            if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
-            await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
-        }
-
         // Setup Share option
         domProfileOptionShare.onclick = () => {
             const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
@@ -6141,6 +6178,48 @@ function renderProfileTab(cProfile) {
                     showToast('Failed to copy profile link');
                 });
             }
+        };
+
+        // Setup Block option (inside More dropdown)
+        const isBlocked = cProfile.is_blocked || false;
+        const blockIcon = domProfileOptionBlock.querySelector('.icon');
+        const blockLabel = domProfileOptionBlock.querySelector('span:first-child');
+        blockIcon.style.backgroundColor = '#ff4444';
+        if (blockLabel) {
+            blockLabel.style.color = '#ff4444';
+            blockLabel.textContent = isBlocked ? 'Unblock' : 'Block';
+        }
+        domProfileOptionBlock.onclick = async () => {
+            domProfileMoreDropdown.style.display = 'none';
+            if (isBlocked) {
+                await invoke('unblock_user', { npub: cProfile.id });
+                showToast('User unblocked');
+                renderChatlist();
+            } else {
+                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.');
+                if (!confirmed) return;
+                await invoke('block_user', { npub: cProfile.id });
+                showToast('User blocked');
+                renderChatlist();
+            }
+        };
+
+        // Setup Nickname option (inside More dropdown)
+        domProfileOptionNickname.onclick = async () => {
+            domProfileMoreDropdown.style.display = 'none';
+            const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
+            if (nick === false) return;
+            if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
+            await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
+        };
+
+        // Setup More dropdown toggle
+        domProfileMoreDropdown.style.display = 'none';
+        domProfileOptionMore.onclick = (e) => {
+            e.stopPropagation();
+            const isOpen = domProfileMoreDropdown.style.display !== 'none';
+            domProfileMoreDropdown.style.display = isOpen ? 'none' : 'block';
+            domProfileOptionMore.classList.toggle('active', !isOpen);
         };
 
         // Hide edit buttons and own-profile share
@@ -7094,7 +7173,7 @@ function createFileBox(cAttachment, state = 'downloaded') {
     // Create the text container span
     const textContainerSpan = document.createElement('span');
     textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-    textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '50px';
+    textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '60px';
     textContainerSpan.style.lineHeight = '1.2';
     textContainerSpan.style.minWidth = '0';
 
@@ -7741,6 +7820,35 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         }
     }
 
+    // In group chats, filter messages from blocked users with a click-to-reveal placeholder
+    const blockedAuthorNpub = isGroupChat && !msg.mine ? (msg.npub || sender?.id || '') : '';
+    const blockedAuthorProfile = blockedAuthorNpub ? getProfile(blockedAuthorNpub) : null;
+    const isRevealedBlockedMsg = blockedAuthorProfile?.is_blocked && revealedBlockedMessages.has(msg.id);
+    if (blockedAuthorProfile?.is_blocked && !revealedBlockedMessages.has(msg.id)) {
+            // Placeholder
+            const blockedSpan = document.createElement('span');
+            blockedSpan.style.cssText = 'color: rgba(255, 255, 255, 0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;';
+            const blockedIcon = document.createElement('span');
+            blockedIcon.classList.add('icon', 'icon-cancel');
+            blockedIcon.style.cssText = 'width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255, 255, 255, 0.3);';
+            blockedSpan.appendChild(blockedIcon);
+            blockedSpan.appendChild(document.createTextNode('Blocked message'));
+
+            blockedSpan.onclick = (e) => {
+                e.stopPropagation();
+                revealedBlockedMessages.add(msg.id);
+                // Re-open the chat so the message renders through the full pipeline
+                openChat(strOpenChat);
+            };
+
+            pMessage.append(blockedSpan);
+            pMessage.classList.add('no-background');
+            pMessage.style.borderRadius = '0';
+            pMessage.style.overflow = 'visible';
+            divMessage.appendChild(pMessage);
+            return divMessage;
+    }
+
     // Pre-detect npub to potentially modify displayed content
     // If npub is at the end of the message, we'll strip it from the text display
     const npubInfoEarly = detectNostrProfile(msg.content);
@@ -7768,7 +7876,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         linkifyUrls(spanMessage);
 
         // Process inline image URLs (async - will load images in background)
-        processInlineImages(spanMessage);
+        // Skip for revealed blocked messages to prevent IP leaks via rogue image URLs
+        if (!isRevealedBlockedMsg) processInlineImages(spanMessage);
 
         // Render @npub1... mentions as highlighted display names
         const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
@@ -8159,8 +8268,8 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 pMessage.appendChild(fileDiv);
             }
             } else {
-                // Check if this attachment will auto-download (skip if previously failed)
-                const willAutoDownload = cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
+                // Check if this attachment will auto-download (skip if previously failed or from a revealed blocked user)
+                const willAutoDownload = !isRevealedBlockedMsg && cAttachment.size > 0 && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
 
                 // For images, show thumbhash preview with download button (unless auto-downloading)
                 if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
@@ -8371,7 +8480,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     // Append Metadata Previews (i.e: OpenGraph data from URLs, etc) - only if enabled
     // Skip web preview if we already rendered a profile preview (e.g., vectorapp.io/profile links)
     const skipWebPreview = npubInfoEarly && npubInfoEarly.type === 'link';
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview) {
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !isRevealedBlockedMsg) {
         // Check if we have metadata with either an image OR a title/description
         const hasMetadata = msg.preview_metadata && (
             msg.preview_metadata.og_image ||
@@ -8537,8 +8646,9 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
         divExtras.style.marginTop = `25px`;
     }
 
-    // These can ONLY be shown on fully sent messages (inherently does not apply to received msgs)
-    if (!msg.pending && !msg.failed) {
+    // These can ONLY be shown on fully sent messages, and not in blocked DM chats
+    const isBlockedDM = !isGroupChat && sender?.is_blocked;
+    if (!msg.pending && !msg.failed && !isBlockedDM) {
         // Reactions
         if (spanReaction) {
             if (msg.mine) {
@@ -8669,6 +8779,11 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             }
         }
     }, 0);
+
+    // Revealed blocked messages render normally but at reduced opacity
+    if (isRevealedBlockedMsg) {
+        divMessage.style.opacity = '0.4';
+    }
 
     return divMessage;
 }
@@ -8978,6 +9093,11 @@ async function openChat(contact) {
     // Hide the Navbar
     domNavbar.style.display = `none`;
 
+    // Clear existing messages so they're fully re-rendered (picks up state changes like blocking)
+    domChatMessages.innerHTML = '';
+    // Only reset revealed blocked messages when switching to a different chat
+    if (strOpenChat !== contact) revealedBlockedMessages.clear();
+
     // Warm up GIF server connection early (non-blocking)
     preconnectGifServer();
 
@@ -9098,7 +9218,32 @@ async function openChat(contact) {
     // Initialize procedural scroll state with actual counts
     initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
     
-    updateChat(chat, initialMessages, profile, true);
+    await updateChat(chat, initialMessages, profile, true);
+
+    // If the user is blocked (DM only), disable the chat input and show a system message
+    const isBlockedChat = !isGroup && profile?.is_blocked;
+    // Remove any previous blocked notice before (re-)evaluating
+    document.getElementById('blocked-notice')?.remove();
+    if (isBlockedChat) {
+        domChatMessageInput.disabled = true;
+        domChatMessageInput.placeholder = 'Unblock to send messages';
+        domChatMessageInput.style.paddingLeft = '15px';
+        domChatMessageInputFile.style.display = 'none';
+        domChatMessageInputVoice.style.display = 'none';
+        domChatMessageInputEmoji.style.display = 'none';
+        // Append a system-style blocked notice at the bottom of the chat
+        const blockedNotice = insertSystemEvent('Blocked — You won\'t receive new messages from them');
+        blockedNotice.id = 'blocked-notice';
+        blockedNotice.style.marginBottom = '20px';
+        domChatMessages.appendChild(blockedNotice);
+    } else {
+        domChatMessageInput.disabled = false;
+        domChatMessageInput.placeholder = 'Enter message...';
+        domChatMessageInput.style.paddingLeft = '';
+        domChatMessageInputFile.style.display = '';
+        domChatMessageInputVoice.style.display = '';
+        domChatMessageInputEmoji.style.display = '';
+    }
 
     // Mark as read on open (needed for Windows where is_focused may not work)
     // Only mark the last contact message, not our own messages
@@ -9119,7 +9264,7 @@ async function openChat(contact) {
     updateChatBackNotification();
 
     // Focus chat input on desktop (mobile keyboards are intrusive)
-    if (!platformFeatures.is_mobile) {
+    if (!platformFeatures.is_mobile && !isBlockedChat) {
         domChatMessageInput.focus();
     }
 }
@@ -10227,6 +10372,9 @@ function openSettings() {
 
     // Update the Storage Breakdown
     initStorageSection();
+
+    // Refresh blocked users list
+    loadBlockedUsersList();
 
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
@@ -11507,9 +11655,20 @@ document.addEventListener('click', (e) => {
     // If we're clicking an Attachment Download button, request the download
     if (e.target.hasAttribute('download')) {
         const attId = e.target.getAttribute('data-attachment-id');
+        const dlNpub = e.target.getAttribute('npub');
+        const dlMsgId = e.target.getAttribute('msg');
         if (downloadingAttachmentIds.has(attId)) return;
         downloadingAttachmentIds.add(attId);
-        return invoke('download_attachment', { npub: e.target.getAttribute('npub'), msgId: e.target.getAttribute('msg'), attachmentId: attId })
+        // Swap download button for a centered progress spinner overlay
+        const overlay = document.createElement('div');
+        overlay.className = 'attachment-progress-overlay';
+        const spinner = document.createElement('div');
+        spinner.className = 'miniapp-downloading-spinner';
+        spinner.setAttribute('data-attachment-id', attId);
+        spinner.style.cssText = 'width: 48px; height: 48px;';
+        overlay.appendChild(spinner);
+        e.target.replaceWith(overlay);
+        return invoke('download_attachment', { npub: dlNpub, msgId: dlMsgId, attachmentId: attId })
             .catch(() => downloadingAttachmentIds.delete(attId));
     }
 

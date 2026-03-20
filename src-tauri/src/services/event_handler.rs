@@ -101,6 +101,18 @@ pub(crate) async fn handle_event_with_context(
             // Persist wrapper for negentropy reconciliation (so next boot knows we've seen this event)
             let _ = db::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at);
 
+            // Single lock: check blocked (drop event) + muted (suppress notification later)
+            let is_contact_muted = if !is_mine {
+                let state = STATE.lock().await;
+                if state.get_profile(&contact).map_or(false, |p| p.flags.is_blocked()) {
+                    // Wrapper already persisted above for negentropy. Content never stored.
+                    return false;
+                }
+                state.get_chat(&contact).map_or(false, |c| c.muted)
+            } else {
+                false
+            };
+
             // Skip NIP-17 group messages (multiple p-tags) — Vector uses MLS for group chats.
             // Without this, multi-recipient messages appear incorrectly in random DM chats.
             // The wrapper is already persisted above for negentropy reconciliation.
@@ -255,12 +267,12 @@ pub(crate) async fn handle_event_with_context(
                         RumorProcessingResult::TextMessage(mut msg) => {
                             // Set the wrapper event ID for database storage
                             msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
+                            handle_text_message(msg, &contact, is_mine, is_new, is_contact_muted, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::FileAttachment(mut msg) => {
                             // Set the wrapper event ID for database storage
                             msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                            handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
+                            handle_file_attachment(msg, &contact, is_mine, is_new, is_contact_muted, &wrapper_event_id, wrapper_event_id_bytes).await
                         }
                         RumorProcessingResult::Reaction(reaction) => {
                             let result = handle_reaction(reaction.clone(), &contact).await;
@@ -376,7 +388,7 @@ pub(crate) async fn handle_event_with_context(
 }
 
 /// Handle a processed text message
-async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
+async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, is_contact_muted: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Ok(exists) = db::message_exists_in_db(&msg.id).await {
         if exists {
@@ -416,41 +428,37 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
         }
 
         // Send OS notification for incoming messages (only after confirming message is new)
+        // Mute status pre-checked during block check — skip lock entirely when muted
         if !is_mine && is_new {
-            let display_info = {
+            let display_info = if is_contact_muted {
+                None
+            } else {
                 let state = STATE.lock().await;
-                // DM mute blocks everything including mentions
-                let chat_muted = state.get_chat(contact)
-                    .map_or(false, |c| c.muted);
-                if chat_muted {
-                    None
-                } else {
-                    match state.get_profile(contact) {
-                        Some(profile) => {
-                            let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.to_string()
-                            } else if !profile.name.is_empty() {
-                                profile.name.to_string()
-                            } else {
-                                String::from("New Message")
-                            };
-                            let avatar = if !profile.avatar_cached.is_empty() {
-                                Some(profile.avatar_cached.to_string())
-                            } else {
-                                None
-                            };
-                            let resolved_content = crate::services::strip_content_for_preview(
-                                &crate::services::resolve_mention_display_names(&msg.content, &state)
-                            );
-                            Some((display_name, resolved_content, avatar))
-                        }
-                        None => {
-                            let resolved_content = crate::services::strip_content_for_preview(
-                                &crate::services::resolve_mention_display_names(&msg.content, &state)
-                            );
-                            Some((String::from("New Message"), resolved_content, None))
-                        },
+                match state.get_profile(contact) {
+                    Some(profile) => {
+                        let display_name = if !profile.nickname.is_empty() {
+                            profile.nickname.to_string()
+                        } else if !profile.name.is_empty() {
+                            profile.name.to_string()
+                        } else {
+                            String::from("New Message")
+                        };
+                        let avatar = if !profile.avatar_cached.is_empty() {
+                            Some(profile.avatar_cached.to_string())
+                        } else {
+                            None
+                        };
+                        let resolved_content = crate::services::strip_content_for_preview(
+                            &crate::services::resolve_mention_display_names(&msg.content, &state)
+                        );
+                        Some((display_name, resolved_content, avatar))
                     }
+                    None => {
+                        let resolved_content = crate::services::strip_content_for_preview(
+                            &crate::services::resolve_mention_display_names(&msg.content, &state)
+                        );
+                        Some((String::from("New Message"), resolved_content, None))
+                    },
                 }
             };
             if let Some((display_name, content, avatar)) = display_info {
@@ -471,7 +479,7 @@ async fn handle_text_message(mut msg: Message, contact: &str, is_mine: bool, is_
 }
 
 /// Handle a processed file attachment
-async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
+async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, is_new: bool, is_contact_muted: bool, wrapper_event_id: &str, wrapper_event_id_bytes: [u8; 32]) -> bool {
     // Check if message already exists in database (important for sync with partial message loading)
     if let Ok(exists) = db::message_exists_in_db(&msg.id).await {
         if exists {
@@ -532,32 +540,27 @@ async fn handle_file_attachment(mut msg: Message, contact: &str, is_mine: bool, 
 
         // Send OS notification for incoming files (only after confirming message is new)
         if !is_mine && is_new {
-            let display_info = {
+            let display_info = if is_contact_muted {
+                None
+            } else {
                 let state = STATE.lock().await;
-                // DM mute blocks everything including mentions
-                let chat_muted = state.get_chat(contact)
-                    .map_or(false, |c| c.muted);
-                if chat_muted {
-                    None
-                } else {
-                    match state.get_profile(contact) {
-                        Some(profile) => {
-                            let display_name = if !profile.nickname.is_empty() {
-                                profile.nickname.to_string()
-                            } else if !profile.name.is_empty() {
-                                profile.name.to_string()
-                            } else {
-                                String::from("New Message")
-                            };
-                            let avatar = if !profile.avatar_cached.is_empty() {
-                                Some(profile.avatar_cached.to_string())
-                            } else {
-                                None
-                            };
-                            Some((display_name, extension.clone(), avatar))
-                        }
-                        None => Some((String::from("New Message"), extension.clone(), None)),
+                match state.get_profile(contact) {
+                    Some(profile) => {
+                        let display_name = if !profile.nickname.is_empty() {
+                            profile.nickname.to_string()
+                        } else if !profile.name.is_empty() {
+                            profile.name.to_string()
+                        } else {
+                            String::from("New Message")
+                        };
+                        let avatar = if !profile.avatar_cached.is_empty() {
+                            Some(profile.avatar_cached.to_string())
+                        } else {
+                            None
+                        };
+                        Some((display_name, extension.clone(), avatar))
                     }
+                    None => Some((String::from("New Message"), extension.clone(), None)),
                 }
             };
             if let Some((display_name, file_extension, avatar)) = display_info {
@@ -819,11 +822,11 @@ pub(crate) async fn commit_prepared_event(prepared: PreparedEvent, is_new: bool)
             match result {
                 RumorProcessingResult::TextMessage(mut msg) => {
                     msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                    handle_text_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
+                    handle_text_message(msg, &contact, is_mine, is_new, false, &wrapper_event_id, wrapper_event_id_bytes).await
                 }
                 RumorProcessingResult::FileAttachment(mut msg) => {
                     msg.wrapper_event_id = Some(wrapper_event_id.clone());
-                    handle_file_attachment(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes).await
+                    handle_file_attachment(msg, &contact, is_mine, is_new, false, &wrapper_event_id, wrapper_event_id_bytes).await
                 }
                 RumorProcessingResult::Reaction(reaction) => {
                     let result = handle_reaction(reaction.clone(), &contact).await;

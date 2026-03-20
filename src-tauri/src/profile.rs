@@ -17,21 +17,24 @@ use crate::message::AttachmentFile;
 use crate::android::filesystem;
 
 // ============================================================================
-// ProfileFlags — 2 bools packed into 1 byte
+// ProfileFlags — 3 bools packed into 1 byte
 // ============================================================================
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProfileFlags(u8);
 
 impl ProfileFlags {
-    const MINE:  u8 = 0b001;
-    const BOT:   u8 = 0b100;
+    const MINE:    u8 = 0b001;
+    const BLOCKED: u8 = 0b010;
+    const BOT:     u8 = 0b100;
 
-    #[inline] pub fn is_mine(self) -> bool  { self.0 & Self::MINE != 0 }
-    #[inline] pub fn is_bot(self) -> bool   { self.0 & Self::BOT != 0 }
+    #[inline] pub fn is_mine(self) -> bool    { self.0 & Self::MINE != 0 }
+    #[inline] pub fn is_blocked(self) -> bool  { self.0 & Self::BLOCKED != 0 }
+    #[inline] pub fn is_bot(self) -> bool      { self.0 & Self::BOT != 0 }
 
-    #[inline] pub fn set_mine(&mut self, v: bool)  { if v { self.0 |= Self::MINE } else { self.0 &= !Self::MINE } }
-    #[inline] pub fn set_bot(&mut self, v: bool)   { if v { self.0 |= Self::BOT } else { self.0 &= !Self::BOT } }
+    #[inline] pub fn set_mine(&mut self, v: bool)    { if v { self.0 |= Self::MINE } else { self.0 &= !Self::MINE } }
+    #[inline] pub fn set_blocked(&mut self, v: bool)  { if v { self.0 |= Self::BLOCKED } else { self.0 &= !Self::BLOCKED } }
+    #[inline] pub fn set_bot(&mut self, v: bool)      { if v { self.0 |= Self::BOT } else { self.0 &= !Self::BOT } }
 }
 
 // ============================================================================
@@ -64,7 +67,7 @@ pub struct Profile {
     pub status_url: Box<str>,
     /// Compact timestamp: seconds since 2020 epoch (valid until 2156)
     pub last_updated: u32,
-    /// Packed boolean flags: mine | bot
+    /// Packed boolean flags: mine | blocked | bot
     pub flags: ProfileFlags,
     /// Local cached path for avatar image (for offline support)
     pub avatar_cached: Box<str>,
@@ -782,6 +785,78 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     Ok(upload_url)
 }
 
+
+/// Blocks a user by npub. DM events from blocked users are dropped after decryption.
+/// Group messages are stored but filtered in the UI.
+#[tauri::command]
+pub async fn block_user(npub: String) -> bool {
+    // Prevent blocking yourself (would break Notes/Bookmarks and self-DM processing)
+    if let Some(&my_pk) = crate::MY_PUBLIC_KEY.get() {
+        if my_pk.to_bech32().ok().as_deref() == Some(npub.as_str()) {
+            return false;
+        }
+    }
+
+    let handle = TAURI_APP.get().unwrap();
+    let mut state = STATE.lock().await;
+
+    // Create profile if it doesn't exist (can block someone with no prior contact)
+    if state.interner.lookup(&npub).is_none() {
+        let new_profile = Profile::new();
+        state.insert_or_replace_profile(&npub, new_profile);
+    }
+
+    if let Some(id) = state.interner.lookup(&npub) {
+        {
+            let profile = match state.get_profile_mut_by_id(id) {
+                Some(p) => p,
+                None => return false,
+            };
+            profile.flags.set_blocked(true);
+        }
+        let slim = state.serialize_profile(id).unwrap();
+        handle.emit("profile_update", &slim).ok();
+        drop(state);
+        db::set_profile(slim).await.ok();
+        true
+    } else {
+        false
+    }
+}
+
+/// Unblocks a user by npub.
+#[tauri::command]
+pub async fn unblock_user(npub: String) -> bool {
+    let handle = TAURI_APP.get().unwrap();
+    let mut state = STATE.lock().await;
+
+    if let Some(id) = state.interner.lookup(&npub) {
+        {
+            let profile = match state.get_profile_mut_by_id(id) {
+                Some(p) => p,
+                None => return false,
+            };
+            profile.flags.set_blocked(false);
+        }
+        let slim = state.serialize_profile(id).unwrap();
+        handle.emit("profile_update", &slim).ok();
+        drop(state);
+        db::set_profile(slim).await.ok();
+        true
+    } else {
+        false
+    }
+}
+
+/// Returns all blocked profiles for the Settings blocked users list.
+#[tauri::command]
+pub async fn get_blocked_users() -> Vec<crate::db::SlimProfile> {
+    let state = STATE.lock().await;
+    state.profiles.iter()
+        .filter(|p| p.flags.is_blocked())
+        .filter_map(|p| state.serialize_profile(p.id))
+        .collect()
+}
 
 /// Sets a nickname for a profile
 #[tauri::command]

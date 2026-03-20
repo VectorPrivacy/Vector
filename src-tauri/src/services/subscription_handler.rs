@@ -167,8 +167,12 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                 } else { false };
                                                 let sender_dm_muted = state.get_chat(&sender_npub)
                                                     .map_or(false, |c| c.muted);
+                                                let sender_blocked = state.get_profile(&sender_npub)
+                                                    .map_or(false, |p| p.flags.is_blocked());
                                                 let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    if mentions_me || everyone_ping {
+                                                    if sender_blocked {
+                                                        false
+                                                    } else if mentions_me || everyone_ping {
                                                         !message.mine && !sender_dm_muted
                                                     } else {
                                                         !message.mine && !chat.muted
@@ -268,8 +272,12 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
                                                 } else { false };
                                                 let sender_dm_muted = state.get_chat(&sender_npub)
                                                     .map_or(false, |c| c.muted);
+                                                let sender_blocked = state.get_profile(&sender_npub)
+                                                    .map_or(false, |p| p.flags.is_blocked());
                                                 let notify = if let Some(chat) = state.get_chat(&group_id_for_persist) {
-                                                    if mentions_me || everyone_ping {
+                                                    if sender_blocked {
+                                                        false
+                                                    } else if mentions_me || everyone_ping {
                                                         !message.mine && !sender_dm_muted
                                                     } else {
                                                         !message.mine && !chat.muted
@@ -647,13 +655,21 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
     .unwrap_or(None);
 
     if let Some(record) = emit_record {
+        let sender_blocked = {
+            let state = crate::STATE.lock().await;
+            record.npub.as_ref().and_then(|npub| state.get_profile(npub))
+                .map_or(false, |p| p.flags.is_blocked())
+        };
         if let Some(handle) = TAURI_APP.get() {
+            // Always emit so the message renders in the group chat
             let _ = handle.emit("mls_message_new", serde_json::json!({
                 "group_id": group_id_for_emit,
                 "message": record
             }));
-            // Update OS badge counter for group messages
-            let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+            // Only update unread badge for non-blocked senders
+            if !sender_blocked {
+                let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+            }
         }
     }
 

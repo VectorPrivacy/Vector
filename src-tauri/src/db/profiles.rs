@@ -33,6 +33,7 @@ pub struct SlimProfile {
     pub last_updated: u64,
     pub mine: bool,
     pub bot: bool,
+    pub is_blocked: bool,
     pub avatar_cached: String,
     pub banner_cached: String,
 }
@@ -55,6 +56,7 @@ impl Default for SlimProfile {
             last_updated: 0,
             mine: false,
             bot: false,
+            is_blocked: false,
             avatar_cached: String::new(),
             banner_cached: String::new(),
         }
@@ -84,6 +86,7 @@ impl SlimProfile {
             last_updated: secs_from_compact(profile.last_updated),
             mine: profile.flags.is_mine(),
             bot: profile.flags.is_bot(),
+            is_blocked: profile.flags.is_blocked(),
             avatar_cached: profile.avatar_cached.to_string(),
             banner_cached: profile.banner_cached.to_string(),
         }
@@ -94,6 +97,7 @@ impl SlimProfile {
         let mut flags = ProfileFlags::default();
         flags.set_mine(self.mine);
         flags.set_bot(self.bot);
+        flags.set_blocked(self.is_blocked);
 
         crate::Profile {
             id: crate::message::compact::NO_NPUB,
@@ -122,7 +126,7 @@ impl SlimProfile {
 pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
 
-    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached FROM profiles")
+    let mut stmt = conn.prepare("SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached, is_blocked FROM profiles")
         .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
@@ -154,6 +158,7 @@ pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
                 let p: String = row.get(15)?;
                 if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
             },
+            is_blocked: row.get::<_, i32>(16).unwrap_or(0) != 0,
         })
     })
     .map_err(|e| format!("Failed to query profiles: {}", e))?
@@ -171,8 +176,8 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
     let conn = crate::account_manager::get_write_connection_guard_static()?;
 
     conn.execute(
-        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached, is_blocked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(npub) DO UPDATE SET
             name = excluded.name,
             display_name = excluded.display_name,
@@ -188,7 +193,8 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
             status_url = excluded.status_url,
             bot = excluded.bot,
             avatar_cached = excluded.avatar_cached,
-            banner_cached = excluded.banner_cached",
+            banner_cached = excluded.banner_cached,
+            is_blocked = excluded.is_blocked",
         rusqlite::params![
             profile.id,  // This is the npub
             profile.name,
@@ -206,6 +212,7 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
             profile.bot as i32,
             profile.avatar_cached,
             profile.banner_cached,
+            profile.is_blocked as i32,
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 

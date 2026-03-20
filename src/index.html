@@ -577,10 +577,6 @@
         <span class="icon icon-message navbar-icon"></span>
         <p class="navbar-text">Message</p>
       </div>
-      <div id="profile-option-nickname" class="profile-option">
-        <span class="icon icon-edit navbar-icon" style="background-color: white;"></span>
-        <p class="navbar-text">Rename</p>
-      </div>
       <div id="profile-option-mute" class="profile-option">
         <span class="icon icon-volume-mute navbar-icon"></span>
         <p class="navbar-text">Mute</p>
@@ -588,6 +584,20 @@
       <div id="profile-option-share" class="profile-option">
         <span class="icon icon-share navbar-icon"></span>
         <p class="navbar-text">Share</p>
+      </div>
+      <div id="profile-option-more" class="profile-option btn" style="position: relative;">
+        <span class="icon icon-dots-horizontal navbar-icon"></span>
+        <p class="navbar-text">More</p>
+        <div id="profile-more-dropdown" class="profile-more-dropdown" style="display: none;">
+          <div id="profile-option-nickname" class="profile-more-item">
+            <span>Nickname</span>
+            <span class="icon icon-edit" style="width: 18px; height: 18px; background-color: white;"></span>
+          </div>
+          <div id="profile-option-block" class="profile-more-item">
+            <span style="color: #ff4444;">Block</span>
+            <span class="icon icon-x-user" style="width: 18px; height: 18px; background-color: #ff4444;"></span>
+          </div>
+        </div>
       </div>
     </div>
       <span id="profile-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-wrap: break-word; font-style: normal; margin-top: 10px; text-align: center; display: block;"></span>
@@ -900,6 +910,17 @@
               <input type="checkbox" id="privacy-send-typing-toggle" checked>
               <span class="neon-toggle"></span>
             </label>
+          </div>
+
+          <div id="settings-blocked-users" style="margin-top: 25px;">
+            <h3 id="settings-blocked-toggle" class="btn" style="font-size: 14px; color: #b2b2b2; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; -webkit-user-select: none; user-select: none;">
+              <span class="icon icon-chevron-down" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: #b2b2b2; transition: transform 0.2s;"></span>
+              Blocked Users
+            </h3>
+            <div id="settings-blocked-content" style="display: none; overflow: hidden;">
+              <div id="settings-blocked-list"></div>
+              <p id="settings-blocked-empty" style="color: #666; font-size: 13px;">No blocked users</p>
+            </div>
           </div>
         </div>
 

@@ -634,7 +634,7 @@ function getFileTypeInfo(extension) {
       
       // Text Files
       "txt": { description: "Text File", icon: "file" },
-      "md": { description: "Markdown", icon: "file" },
+      "md": { description: "Markdown File", icon: "file" },
       "log": { description: "Log File", icon: "file" },
       "csv": { description: "CSV File", icon: "file" },
       "tsv": { description: "TSV File", icon: "file" },

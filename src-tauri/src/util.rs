@@ -148,7 +148,7 @@ pub fn get_file_type_description(extension: &str) -> String {
         
         // Text Files
         map.insert("txt", "Text File");
-        map.insert("md", "Markdown");
+        map.insert("md", "Markdown File");
         map.insert("log", "Log File");
         map.insert("csv", "CSV File");
         map.insert("tsv", "TSV File");

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-unblock-user"
+description = "Enables the unblock_user command without any pre-configured scope."
+commands.allow = ["unblock_user"]
+
+[[permission]]
+identifier = "deny-unblock-user"
+description = "Denies the unblock_user command without any pre-configured scope."
+commands.deny = ["unblock_user"]

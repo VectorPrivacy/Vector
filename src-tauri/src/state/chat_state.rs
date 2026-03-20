@@ -500,6 +500,16 @@ impl ChatState {
                 continue;
             }
 
+            // Skip DM chats with blocked users entirely
+            let is_group = chat.is_mls_group();
+            if !is_group {
+                if let Some(id) = self.interner.lookup(&chat.id) {
+                    if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) {
+                        continue;
+                    }
+                }
+            }
+
             let mut unread_count = 0;
             for msg in chat.iter_compact().rev() {
                 if msg.flags.is_mine() {
@@ -507,6 +517,12 @@ impl ChatState {
                 }
                 if chat.last_read != [0u8; 32] && msg.id == chat.last_read {
                     break;
+                }
+                // In group chats, skip messages from blocked members
+                if is_group && msg.npub_idx != crate::message::compact::NO_NPUB {
+                    if self.get_profile_by_id(msg.npub_idx).map_or(false, |p| p.flags.is_blocked()) {
+                        continue;
+                    }
                 }
                 unread_count += 1;
             }

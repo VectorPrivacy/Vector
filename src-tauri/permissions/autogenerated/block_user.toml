@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-block-user"
+description = "Enables the block_user command without any pre-configured scope."
+commands.allow = ["block_user"]
+
+[[permission]]
+identifier = "deny-block-user"
+description = "Denies the block_user command without any pre-configured scope."
+commands.deny = ["block_user"]

@@ -1390,6 +1390,18 @@ fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 20: Add is_blocked column to profiles table
+    // =========================================================================
+    // Supports user blocking: blocked profiles have DM events dropped after
+    // decrypt (wrapper kept for negentropy), group messages filtered in UI.
+    run_atomic_migration(conn, 20, "Add is_blocked column to profiles", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE profiles ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0;"
+        ).map_err(|e| format!("Failed to add is_blocked column: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
 }
 
