@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::realtime::SendHandle;
+use super::realtime::{SendHandle, SharedEventTarget};
 
 /// Info returned after starting the WS server.
 pub(crate) struct WsInfo {
@@ -25,6 +25,9 @@ pub(crate) struct WsInfo {
 struct WsState {
     token: String,
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
+    /// Map of window label → WS sender. WS handler registers here on connect.
+    /// join_channel looks up the sender and wires it into the event target.
+    ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
 
@@ -35,10 +38,12 @@ pub(crate) async fn run_accept_loop(
     listener: TcpListener,
     token: String,
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
+    ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 ) {
     let state = Arc::new(WsState {
         token,
         send_handles,
+        ws_senders,
     });
 
     loop {
@@ -113,19 +118,33 @@ async fn handle_connection(
 
     log_info!("[WEBXDC] RT WS connected: {label}");
 
-    // Read loop: binary frames → fast_send, with periodic stats
-    let (mut _sink, mut stream) = ws_stream.split();
+    // Bi-directional: read from JS (send to gossip) AND write to JS (receive from gossip)
+    let (mut sink, mut stream) = ws_stream.split();
+
+    // Create a channel for incoming gossip data → WS write
+    let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+    // Store WS sender in a shared map so join_channel can find it later.
+    // The WS connects before join_channel runs, so we can't look up the event
+    // target here. Instead, join_channel looks up our sender and wires it in.
+    {
+        let mut senders = state.ws_senders.write().unwrap_or_else(|e| e.into_inner());
+        senders.insert(label.clone(), ws_tx.clone());
+        log_info!("[WEBXDC] RT WS sender registered for: {label}");
+    }
+
     let mut msg_count: u64 = 0;
     let mut total_nanos: u64 = 0;
     let mut peak_nanos: u64 = 0;
     let mut total_bytes: u64 = 0;
+    let mut recv_count: u64 = 0;
     let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
     stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Skip the first immediate tick
     stats_interval.tick().await;
 
     loop {
         tokio::select! {
+            // JS → gossip (send path)
             msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
@@ -145,28 +164,42 @@ async fn handle_connection(
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        let _ = _sink.send(Message::Pong(payload)).await;
+                        let _ = sink.send(Message::Pong(payload)).await;
                     }
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     _ => {}
                 }
             }
+            // Gossip → JS (receive path via WS)
+            Some(data) = ws_rx.recv() => {
+                if sink.send(Message::Binary(data.into())).await.is_err() {
+                    break;
+                }
+                recv_count += 1;
+            }
             _ = stats_interval.tick() => {
-                if msg_count > 0 {
-                    let avg_us = (total_nanos / msg_count) / 1_000;
+                if msg_count > 0 || recv_count > 0 {
+                    let avg_us = if msg_count > 0 { (total_nanos / msg_count) / 1_000 } else { 0 };
                     let peak_us = peak_nanos / 1_000;
-                    let avg_kb = total_bytes / msg_count / 1024;
+                    let avg_kb = if msg_count > 0 { total_bytes / msg_count / 1024 } else { 0 };
                     log_info!(
-                        "[WEBXDC] RT WS stats: {msg_count} msgs in 5s ({}/s), avg {avg_us}μs, peak {peak_us}μs, avg {avg_kb}KB/msg",
+                        "[WEBXDC] RT WS stats: {msg_count} sent/{recv_count} recv in 5s ({}/s), avg {avg_us}μs, peak {peak_us}μs, avg {avg_kb}KB/msg",
                         msg_count / 5
                     );
                     msg_count = 0;
+                    recv_count = 0;
                     total_nanos = 0;
                     peak_nanos = 0;
                     total_bytes = 0;
                 }
             }
         }
+    }
+
+    // Clean up WS sender
+    {
+        let mut senders = state.ws_senders.write().unwrap_or_else(|e| e.into_inner());
+        senders.remove(&label);
     }
 
     log_info!("[WEBXDC] RT WS disconnected: {label}");

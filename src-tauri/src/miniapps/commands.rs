@@ -696,8 +696,9 @@ pub async fn miniapp_open(
     href: Option<String>,
     topic_id: Option<String>,
 ) -> Result<(), Error> {
+    log_info!("[WEBXDC] miniapp_open called: chat={}, msg={}", chat_id, message_id);
     let path = PathBuf::from(&file_path);
-    
+
     // Generate unique ID from file hash
     let id = format!("miniapp_{:x}", md5_hash(&file_path));
     // For marketplace apps (empty chat/message), use the app id as the window label
@@ -724,8 +725,29 @@ pub async fn miniapp_open(
                 }
                 return Ok(());
             } else {
-                // Overlay was closed, clean up state
-                log_warn!("Instance exists but overlay closed, cleaning up: {}", existing_label);
+                // Overlay was closed but state was never cleaned up.
+                // Do full teardown: realtime channel, session peers, instance.
+                log_warn!("Instance exists but overlay closed, full cleanup: {}", existing_label);
+
+                let channel_state = state.remove_realtime_channel(&existing_label).await;
+                if let Some(channel) = channel_state {
+                    let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
+                    if let Ok(iroh) = state.realtime.get_or_init().await {
+                        if let Err(e) = iroh.leave_channel(channel.topic, &existing_label).await {
+                            log_warn!("[WEBXDC] Stale cleanup: leave_channel failed: {}", e);
+                        }
+                    }
+                    if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                        if let Ok(my_npub) = my_pk.to_bech32() {
+                            state.remove_session_peer(&channel.topic, &my_npub).await;
+                        }
+                    }
+                    let chat_id_clone = chat_id.clone();
+                    tokio::spawn(async move {
+                        crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
+                    });
+                }
+                state.realtime.ws_senders.write().unwrap_or_else(|e| e.into_inner()).remove(&existing_label);
                 state.remove_instance(&existing_label).await;
             }
         }
@@ -833,11 +855,32 @@ pub async fn miniapp_open(
                 Err(e) => { log_warn!("[WEBXDC] Preconnect: Iroh init failed: {e}"); return; }
             };
 
-            // Create gossip channel with NO event target. Incoming data is BUFFERED
-            // (not dropped) until joinRealtimeChannel sets the target and flushes.
-            // This lets us form the gossip mesh NOW so peers are connected before
-            // the game starts its election/handshake.
-            if let Err(e) = iroh.join_channel(topic, vec![], None, Some(app_pc.clone()), label_pc.clone()).await {
+            // Collect any cached peer addresses (from advertisements that arrived
+            // before we opened) + persisted peers from the DB to use as bootstrap.
+            let mut bootstrap_peers: Vec<iroh::EndpointAddr> = Vec::new();
+
+            // Cached from recent Nostr advertisements
+            let cached = state.take_peer_addrs(&topic).await;
+            bootstrap_peers.extend(cached);
+
+            // Persisted from DB
+            let my_npub = crate::MY_PUBLIC_KEY.get()
+                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(pk).ok())
+                .unwrap_or_default();
+            if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
+                for record in &records {
+                    if let Ok(addr) = super::realtime::decode_node_addr(&record.node_addr_encoded) {
+                        bootstrap_peers.push(addr);
+                    }
+                }
+            }
+
+            log_info!("[WEBXDC] Preconnect: joining with {} bootstrap peers", bootstrap_peers.len());
+
+            // Create gossip channel with bootstrap peers and NO event target.
+            // Incoming data is BUFFERED (not dropped) until joinRealtimeChannel
+            // sets the target and flushes.
+            if let Err(e) = iroh.join_channel(topic, bootstrap_peers, None, Some(app_pc.clone()), label_pc.clone(), None).await {
                 log_warn!("[WEBXDC] Preconnect: join_channel failed: {e}");
                 return;
             }
@@ -1163,6 +1206,36 @@ pub async fn miniapp_close(
             }
         }
 
+        // Full teardown: remove channel state, leave gossip, clean up
+        // (Desktop does this in WindowEvent::Destroyed, but Android has no
+        // Tauri window, so we must do it here explicitly)
+        let channel_state = state.remove_realtime_channel(&label).await;
+        if let Some(channel) = channel_state {
+            let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
+
+            if let Ok(iroh) = state.realtime.get_or_init().await {
+                if let Err(e) = iroh.leave_channel(channel.topic, &label).await {
+                    log_warn!("[WEBXDC] Failed to leave channel on close: {}", e);
+                }
+            }
+
+            // Remove ourselves from session peers
+            if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
+                if let Ok(my_npub) = my_pk.to_bech32() {
+                    state.remove_session_peer(&channel.topic, &my_npub).await;
+                }
+            }
+
+            // Send peer-left via Nostr
+            let chat_id_clone = chat_id.clone();
+            tokio::spawn(async move {
+                crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
+            });
+        }
+
+        // Clean up WS sender
+        state.realtime.ws_senders.write().unwrap_or_else(|e| e.into_inner()).remove(&label);
+
         state.remove_instance(&label).await;
     }
 
@@ -1306,7 +1379,8 @@ pub async fn miniapp_join_realtime_channel(
 
     // Create the gossip channel WITH the event target — no data can be dropped
     let event_target = EventTarget::TauriChannel(channel);
-    let (is_rejoin, _) = iroh.join_channel(topic, vec![], Some(event_target), Some(app.clone()), label.to_string()).await
+    let ws_targets = Some(state.realtime.ws_senders.clone());
+    let (is_rejoin, _) = iroh.join_channel(topic, vec![], Some(event_target), Some(app.clone()), label.to_string(), ws_targets).await
         .map_err(|e| Error::RealtimeError(e.to_string()))?;
 
     let topic_encoded_clone = topic_encoded.clone();

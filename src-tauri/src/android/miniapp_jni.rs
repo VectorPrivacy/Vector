@@ -459,7 +459,8 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
 
         // Join the channel with mpsc event target
         let event_target = crate::miniapps::realtime::EventTarget::MpscSender(tx);
-        let is_rejoin = match iroh.join_channel(topic, vec![], Some(event_target), Some(app_for_join.clone()), miniapp_id_for_join.clone()).await {
+        let ws_targets = Some(state.realtime.ws_senders.clone());
+        let is_rejoin = match iroh.join_channel(topic, vec![], Some(event_target), Some(app_for_join.clone()), miniapp_id_for_join.clone(), ws_targets).await {
             Ok((rejoin, _)) => {
                 if rejoin {
                     log_info!("[WEBXDC] Android: Re-joined existing channel for topic: {}", topic_encoded_for_join);
@@ -1279,6 +1280,17 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
                         rtWs.binaryType = 'arraybuffer';
                         rtWs.onclose = function() {{ rtWs = null; }};
                         rtWs.onerror = function() {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }};
+                        // Bi-directional: receive gossip data via WS (bypasses JNI starvation)
+                        rtWs.onmessage = function(ev) {{
+                            var fn_listener = window.__miniapp_realtime_listener;
+                            if (fn_listener && ev.data) {{
+                                // Data arrives as base91 string in binary frame
+                                var bytes = new Uint8Array(ev.data);
+                                var str = '';
+                                for (var i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+                                fn_listener(new Uint8Array(b91d(str)));
+                            }}
+                        }};
                         // Detect stuck CONNECTING state (some WebViews silently block WS)
                         setTimeout(function() {{
                             if (rtWs && rtWs.readyState === 0) {{

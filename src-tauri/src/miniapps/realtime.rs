@@ -254,6 +254,7 @@ impl IrohState {
         event_target: Option<EventTarget>,
         app_handle: Option<AppHandle>,
         label: String,
+        ws_event_targets: Option<Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>>,
     ) -> Result<(bool, Option<oneshot::Receiver<()>>)> {
         let mut channels = self.channels.write().await;
 
@@ -264,6 +265,15 @@ impl IrohState {
             if let Some(target) = event_target {
                 let mut state = channel_state.event_target.write().unwrap_or_else(|e| { log_error!("[WEBXDC] RwLock poisoned — recovering"); e.into_inner() });
                 state.set_target(target); // Flushes buffered events from preconnect phase
+            }
+            // Wire up WS sender for bi-directional receive (if WS is connected)
+            if let Some(ref senders) = ws_event_targets {
+                let map = senders.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(ws_tx) = map.get(&label) {
+                    let mut state = channel_state.event_target.write().unwrap_or_else(|e| e.into_inner());
+                    state.set_ws_sender(ws_tx.clone());
+                    log_info!("[WEBXDC] RT WS bi-directional enabled for: {label}");
+                }
             }
             return Ok((true, None));
         }
@@ -276,7 +286,20 @@ impl IrohState {
             peer_ids.len()
         );
 
-        // Connect to peers so gossip can discover them
+        // DON'T manually connect + handle_connection here — that creates
+        // connections BEFORE the topic subscription exists, causing a race
+        // where messages arrive for an unregistered topic and get lost.
+        // Instead, connect AFTER subscribing, so the gossip actor has the
+        // topic registered when the connection delivers messages.
+
+        let (join_tx, join_rx) = oneshot::channel();
+
+        let gossip_topic = self
+            .gossip
+            .subscribe_with_opts(topic, JoinOptions::with_bootstrap(peer_ids))
+            .await?;
+
+        // NOW connect — topic subscription is registered, safe to receive
         for peer_addr in &peers {
             if !peer_addr.addrs.is_empty() {
                 let addr = peer_addr.clone();
@@ -294,18 +317,21 @@ impl IrohState {
                 });
             }
         }
-
-        let (join_tx, join_rx) = oneshot::channel();
-
-        let gossip_topic = self
-            .gossip
-            .subscribe_with_opts(topic, JoinOptions::with_bootstrap(peer_ids))
-            .await?;
         let (gossip_sender, gossip_receiver) = gossip_topic.split();
 
         // Create shared event target for the subscribe loop (buffers events if target is None)
         let shared_event_target: SharedEventTarget = Arc::new(std::sync::RwLock::new(EventTargetState::new(event_target)));
         let shared_target_clone = shared_event_target.clone();
+
+        // Wire up WS sender for bi-directional receive (if WS is connected)
+        if let Some(ref senders) = ws_event_targets {
+            let map = senders.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ws_tx) = map.get(&label) {
+                let mut state = shared_event_target.write().unwrap_or_else(|e| e.into_inner());
+                state.set_ws_sender(ws_tx.clone());
+                log_info!("[WEBXDC] RT WS bi-directional enabled for: {label}");
+            }
+        }
 
         // Create shared peer count
         let shared_peer_count: SharedPeerCount = Arc::new(AtomicUsize::new(0));
@@ -391,11 +417,12 @@ impl IrohState {
 
         log_trace!("[WEBXDC] add_peer: Connecting to peer {}", peer_addr.id);
 
-        // Connect to the peer and hand the connection to gossip
+        // Connect and hand to gossip, then join_peers.
+        // Topic subscription already exists (channel is in the map),
+        // so the connection won't race with topic registration.
         let conn = self.endpoint.connect(peer_addr, GOSSIP_ALPN).await?;
         self.gossip.handle_connection(conn).await?;
 
-        // Join the peer to the existing gossip topic
         let channels = self.channels.read().await;
         if let Some(channel_state) = channels.get(topic) {
             channel_state.sender.join_peers(vec![peer.id]).await?;
@@ -459,6 +486,9 @@ impl IrohState {
         // 1. Remove fast-path SendHandle (drops its GossipSender clone)
         self.send_handles.write().unwrap_or_else(|e| { log_error!("[WEBXDC] RwLock poisoned — recovering"); e.into_inner() }).remove(label);
 
+        // Remove WS sender for this label (ws_senders is on RealtimeManager,
+        // but we're on IrohState — caller handles this separately)
+
         if let Some(channel) = self.channels.write().await.remove(&topic) {
             // 2. Drop the ChannelState's sender explicitly (don't wait for implicit drop)
             drop(channel.sender);
@@ -467,7 +497,7 @@ impl IrohState {
             channel.subscribe_loop.abort();
             let _ = channel.subscribe_loop.await;
 
-            // 4. Small yield to let the runtime fully clean up dropped tasks
+            // 4. Yield to let the gossip actor process the quit
             tokio::task::yield_now().await;
 
             log_info!("Left realtime channel {:?}", topic);
@@ -515,19 +545,42 @@ pub enum EventTarget {
 pub(crate) struct EventTargetState {
     target: Option<EventTarget>,
     buffer: Vec<RealtimeEvent>,
+    /// Optional WebSocket sender for bi-directional WS (bypasses JNI on Android).
+    /// When set, Data events are sent directly through WS instead of the normal target.
+    ws_sender: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 impl EventTargetState {
     fn new(target: Option<EventTarget>) -> Self {
-        Self { target, buffer: Vec::new() }
+        Self { target, buffer: Vec::new(), ws_sender: None }
     }
 
-    /// Send an event, buffering if no target is set yet
+    /// Register a WS sender for bi-directional receive. Data events bypass
+    /// the normal target (JNI on Android) and go straight through WebSocket.
+    pub fn set_ws_sender(&mut self, sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
+        self.ws_sender = Some(sender);
+    }
+
+    pub fn clear_ws_sender(&mut self) {
+        self.ws_sender = None;
+    }
+
+    /// Send an event, buffering if no target is set yet.
+    /// Data events are routed through WebSocket when available (bypasses JNI on Android).
     fn send(&mut self, event: RealtimeEvent) -> bool {
+        // If WS sender is available and this is a Data event, send via WS directly.
+        // This bypasses the JNI/evaluateJavascript path that gets starved by WASM.
+        if let Some(ref ws_tx) = self.ws_sender {
+            if let RealtimeEvent::Data(ref b91_data) = event {
+                // Send raw base91 string as binary WS frame
+                let _ = ws_tx.try_send(b91_data.as_bytes().to_vec());
+                return true;
+            }
+        }
+
         if let Some(ref target) = self.target {
             Self::deliver(target, event)
         } else {
-            // Buffer up to 256 events (prevents unbounded memory if target is never set)
             if self.buffer.len() < 256 {
                 self.buffer.push(event);
             }
@@ -764,6 +817,9 @@ pub struct RealtimeManager {
     /// Fast-path send handles — owned here so the WS server can start
     /// before IrohState exists (critical for Android JNI timing).
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
+    /// Map of window_label → WS sender for bi-directional receive.
+    /// WS handler registers sender on connect, join_channel wires it into the event target.
+    pub(crate) ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
 impl RealtimeManager {
@@ -773,6 +829,7 @@ impl RealtimeManager {
             relay_url,
             ws_info: std::sync::OnceLock::new(),
             send_handles: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            ws_senders: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -831,6 +888,7 @@ impl RealtimeManager {
 
         // Spawn accept loop on the MAIN Tauri runtime (survives JNI temp runtime)
         let send_handles = self.send_handles.clone();
+        let ws_senders = self.ws_senders.clone();
         tauri::async_runtime::spawn(async move {
             // Convert std listener to tokio listener on the main runtime
             let listener = match tokio::net::TcpListener::from_std(std_listener) {
@@ -840,7 +898,7 @@ impl RealtimeManager {
                     return;
                 }
             };
-            super::rt_ws::run_accept_loop(listener, token, send_handles).await;
+            super::rt_ws::run_accept_loop(listener, token, send_handles, ws_senders).await;
         });
     }
 
