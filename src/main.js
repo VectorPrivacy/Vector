@@ -353,6 +353,11 @@ function hideGlobalTooltip() {
     tooltip.classList.remove('visible');
 }
 
+// Dismiss stuck tooltips on any click/tap or window blur
+document.addEventListener('click', hideGlobalTooltip);
+document.addEventListener('touchstart', hideGlobalTooltip);
+window.addEventListener('blur', hideGlobalTooltip);
+
 /**
  * Shows the main attachment panel view (File, Mini Apps buttons)
  */

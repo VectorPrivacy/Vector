@@ -541,7 +541,7 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
 
         joinRealtimeChannel: function() {{
             if (realtimeChannel !== null) {{
-                throw new Error('Already joined realtime channel. Call leave() first.');
+                return realtimeChannel;
             }}
 
             realtimeChannel = {{
@@ -590,28 +590,40 @@ fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String
                 }}).then(function(result) {{
                     // Open WebSocket fast-path if backend returned a URL
                     if (result && result.ws_url) {{
-                        try {{
-                            var label = encodeURIComponent(window.__TAURI_INTERNALS__.metadata.currentWebview.label || '');
-                            rtWs = new WebSocket(result.ws_url + '/' + label);
-                            rtWs.binaryType = 'arraybuffer';
-                            rtWs.onclose = function() {{ rtWs = null; }};
-                            rtWs.onerror = function() {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; rtWsFailed = true; }};
-                            // Detect WebKitGTK silent WS block: if still CONNECTING after 1.5s, fall back to invoke
-                            setTimeout(function() {{
-                                if (rtWs && rtWs.readyState === 0) {{
-                                    console.warn('[webxdc] WebSocket stuck in CONNECTING — falling back to invoke');
+                        var wsUrl = result.ws_url;
+                        var label = encodeURIComponent(window.__TAURI_INTERNALS__.metadata.currentWebview.label || '');
+                        var wsRetried = false;
+                        function connectWs() {{
+                            try {{
+                                rtWs = new WebSocket(wsUrl + '/' + label);
+                                rtWs.binaryType = 'arraybuffer';
+                                rtWs.onclose = function() {{ rtWs = null; }};
+                                rtWs.onerror = function() {{
                                     try {{ rtWs.close(); }} catch(e) {{}}
                                     rtWs = null;
-                                    rtWsFailed = true;
-                                }}
-                            }}, 1500);
-                        }} catch(e) {{
-                            rtWs = null;
-                            rtWsFailed = true;
+                                    // Retry once after 200ms (accept loop may not have polled yet)
+                                    if (!wsRetried) {{
+                                        wsRetried = true;
+                                        setTimeout(connectWs, 200);
+                                    }} else {{
+                                        rtWsFailed = true;
+                                    }}
+                                }};
+                                // Detect WebKitGTK silent WS block: if still CONNECTING after 1.5s, fall back to invoke
+                                setTimeout(function() {{
+                                    if (rtWs && rtWs.readyState === 0) {{
+                                        console.warn('[webxdc] WebSocket stuck in CONNECTING — falling back to invoke');
+                                        try {{ rtWs.close(); }} catch(e) {{}}
+                                        rtWs = null;
+                                        rtWsFailed = true;
+                                    }}
+                                }}, 1500);
+                            }} catch(e) {{
+                                rtWs = null;
+                                rtWsFailed = true;
+                            }}
                         }}
-                    }} else {{
-                        console.warn('[webxdc] No ws_url returned — using invoke fallback');
-                        rtWsFailed = true;
+                        connectWs();
                     }}
                 }}).catch(function(err) {{
                     console.error('[webxdc] Failed to join realtime channel:', err);

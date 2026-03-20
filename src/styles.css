@@ -9123,7 +9123,7 @@ hr {
 /* Cancel button for file box uploads — positioned over the spinner inside .custom-audio-player */
 .custom-audio-player > .upload-cancel-btn {
   position: absolute;
-  left: 10px;
+  left: 15px;
   top: 0;
   bottom: 0;
   margin: auto;
