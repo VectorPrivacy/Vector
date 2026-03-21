@@ -4449,6 +4449,11 @@ async function setupRustListeners() {
         }
     }
 
+    // Listen for backend error toasts
+    _on('show_toast', (evt) => {
+        showToast(evt.payload || 'An error occurred');
+    });
+
     // Listen for Attachment Download Progress events
     _on('attachment_download_progress', async (evt) => {
         if (!strOpenChat) return;
@@ -10379,8 +10384,9 @@ function openSettings() {
     // Update the Storage Breakdown
     initStorageSection();
 
-    // Refresh blocked users list
+    // Refresh blocked users list and logs cache
     loadBlockedUsersList();
+    invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
 
     // Check primary device status when settings are opened
     checkPrimaryDeviceStatus();
@@ -11489,15 +11495,15 @@ domChatMessageInput.oninput = async () => {
         };
     }
 
-    // Info button for Copy Crash Logs
+    // Info button for Copy Logs
     const domCrashLogInfo = document.getElementById('crash-log-info');
     if (domCrashLogInfo) {
         domCrashLogInfo.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
             popupConfirm(
-                'Crash Logs',
-                'If Vector crashed unexpectedly, this copies the technical details to your clipboard.<br><br>Share it with developers when reporting bugs to help diagnose the issue.',
+                'Logs',
+                'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.',
                 true
             );
         };

@@ -1783,18 +1783,18 @@ async function initSettings() {
         if (success) initStorageSection();
     });
 
-    // Pre-fetch crash log so clipboard.writeText runs synchronously on click
-    let cachedCrashLog = '';
-    invoke('get_crash_log').then((log) => { cachedCrashLog = log || ''; });
+    // Pre-fetch logs so clipboard.writeText runs synchronously on click (user gesture required)
+    window._cachedLogs = '';
+    invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
     const copyCrashLogBtn = document.getElementById('copy-crash-log-btn');
     copyCrashLogBtn.addEventListener('click', () => {
-        if (!cachedCrashLog) {
+        if (!window._cachedLogs) {
             showToast('No logs to copy!');
             return;
         }
-        const lines = cachedCrashLog.split('\n').length;
-        navigator.clipboard.writeText(cachedCrashLog).then(() => {
-            showToast('Copied ' + lines + ' log lines to clipboard');
+        const lines = window._cachedLogs.split('\n').filter(l => l.trim()).length;
+        navigator.clipboard.writeText(window._cachedLogs).then(() => {
+            showToast('Copied ' + lines + ' log entries to clipboard');
         });
     });
 

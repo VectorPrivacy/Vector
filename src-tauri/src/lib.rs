@@ -105,11 +105,19 @@ pub fn run() {
     // Without this, panics in spawned tasks vanish silently.
     std::panic::set_hook(Box::new(|info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
-        let msg = format!("PANIC: {info}\n\nBacktrace:\n{backtrace}");
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let msg = format!("[PANIC {:02}:{:02}:{:02}Z] {info}\n\nBacktrace:\n{backtrace}\n",
+            (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
         eprintln!("{msg}");
-        // Write crash log to the Tauri app data dir (set during setup via set_app_data_dir)
+        // Append to log file (shared with log_error!)
         if let Ok(data_dir) = account_manager::get_app_data_dir() {
-            let _ = std::fs::write(data_dir.join("crash.log"), &msg);
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("vector.log")) {
+                let _ = write!(f, "{}\n", &msg);
+            }
         }
     }));
 
@@ -282,6 +290,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 profile_sync::start_profile_sync_processor().await;
             });
+
             
             // Setup deep link listener for macOS/iOS/Android
             // On these platforms, deep links are received as events rather than CLI args
@@ -543,7 +552,7 @@ pub fn run() {
             commands::sync::sync_all_profiles,
             // System commands (commands/system.rs)
             commands::system::run_maintenance,
-            commands::system::get_crash_log,
+            commands::system::get_logs,
             // Encryption toggle commands (commands/encryption.rs)
             commands::encryption::get_encryption_status,
             commands::encryption::get_encryption_and_key,

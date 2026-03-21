@@ -234,6 +234,6 @@
     "allow-audio-set-volume",
     "allow-send-recording",
     "allow-get-audio-metadata",
-    "allow-get-crash-log"
+    "allow-get-logs"
   ]
 }
