@@ -90,44 +90,19 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
 
     log_info!("Mini App closed (JNI callback): {}", miniapp_id);
 
-    // Clean up realtime channel and instance state, notify frontend
+    // Full teardown: destroy Iroh entirely so next session gets a fresh start.
+    // The old approach (leave_channel) left stale gossip state that broke session 2.
     if let Some(app) = TAURI_APP.get() {
         let app = app.clone();
         let miniapp_id_owned = miniapp_id.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<crate::miniapps::state::MiniAppsState>();
 
-            // Remove the realtime channel state (marks us as not playing)
+            // Grab channel info before teardown (for peer-left signal + status update)
             let channel_state = state.remove_realtime_channel(&miniapp_id_owned).await;
 
             if let Some(channel) = channel_state {
                 let topic_encoded = crate::miniapps::realtime::encode_topic_id(&channel.topic);
-
-                // Get current peer count and clear stale event target
-                let peer_count = if let Ok(iroh) = state.realtime.get_or_init().await {
-                    iroh.clear_event_target(&channel.topic).await;
-                    let count = iroh.get_peer_count(&channel.topic).await;
-
-                    // Leave the Iroh gossip channel (with timeout to avoid hanging)
-                    match tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5),
-                        iroh.leave_channel(channel.topic, &miniapp_id_owned),
-                    ).await {
-                        Ok(Ok(())) => {
-                            log_info!("[WEBXDC] Left Iroh channel on Mini App close: {}", miniapp_id_owned);
-                        }
-                        Ok(Err(e)) => {
-                            log_warn!("[WEBXDC] Failed to leave Iroh channel on close: {}", e);
-                        }
-                        Err(_) => {
-                            log_warn!("[WEBXDC] Timed out leaving Iroh channel on close: {}", miniapp_id_owned);
-                        }
-                    }
-
-                    count
-                } else {
-                    0
-                };
 
                 // Remove ourselves from session peers
                 if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
@@ -135,7 +110,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                     state.remove_session_peer(&channel.topic, &my_npub).await;
                 }
 
-                // Emit status update — session_peers is the single source of truth
+                // Emit status update
                 let session_peers = state.get_session_peers(&channel.topic).await;
                 let session_count = session_peers.len();
                 if let Some(main_window) = app.get_webview_window("main") {
@@ -146,9 +121,9 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                         "is_active": false,
                         "has_pending_peers": session_count > 0,
                     }));
-                    log_info!("[WEBXDC] Emitted miniapp_realtime_status: active=false, peer_count={} for topic {}", session_count, topic_encoded);
                 }
-                // Send peer-left signal so other clients update their online indicators
+
+                // Send peer-left signal
                 if let Some(instance) = state.get_instance(&miniapp_id_owned).await {
                     let chat_id = instance.chat_id.clone();
                     let topic_for_left = topic_encoded.clone();
@@ -160,8 +135,21 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                 }
             }
 
+            // NUCLEAR OPTION: Shut down the entire Iroh instance.
+            // This closes all QUIC connections, leaves all gossip topics,
+            // and stops the gossip actor. Next miniapp_open creates a fresh one.
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                state.realtime.shutdown_iroh(),
+            ).await {
+                Ok(()) => log_info!("[WEBXDC] Iroh fully shut down on Mini App close"),
+                Err(_) => log_warn!("[WEBXDC] Iroh shutdown timed out (5s) — forcing drop"),
+            }
+
             // Remove the instance
             state.remove_instance(&miniapp_id_owned).await;
+
+            log_info!("[WEBXDC] Mini App cleanup complete: {}", miniapp_id_owned);
         });
     }
 }

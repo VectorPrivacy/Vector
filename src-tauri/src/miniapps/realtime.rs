@@ -231,6 +231,35 @@ impl IrohState {
         })
     }
 
+    /// Shut down Iroh completely: leave all topics, close endpoint.
+    /// After this, the instance should be dropped and a fresh one created.
+    pub async fn shutdown(&self) {
+        log_info!("[WEBXDC] Shutting down Iroh: leaving all topics...");
+
+        // 1. Clear all send handles (drops GossipSender clones)
+        self.send_handles.write().unwrap_or_else(|e| e.into_inner()).clear();
+
+        // 2. Abort all subscribe loops and drop all channel state
+        let mut channels = self.channels.write().await;
+        for (topic, channel) in channels.drain() {
+            drop(channel.sender);
+            channel.subscribe_loop.abort();
+            let _ = channel.subscribe_loop.await;
+            log_info!("[WEBXDC] Cleaned up topic {:?}", topic);
+        }
+        drop(channels);
+
+        // 3. Shut down gossip actor (sends Disconnect to peers, stops actor loop)
+        if let Err(e) = self.gossip.shutdown().await {
+            log_warn!("[WEBXDC] Gossip shutdown error: {e}");
+        }
+
+        // 4. Close QUIC endpoint (stops accept loop)
+        self.endpoint.close().await;
+
+        log_info!("[WEBXDC] Iroh shutdown complete");
+    }
+
     /// Notify the endpoint that the network has changed
     pub async fn network_change(&self) {
         self.endpoint.network_change().await
@@ -805,11 +834,13 @@ async fn run_subscribe_loop(
 
 /// Global Iroh state manager
 ///
-/// Uses `OnceCell` for lock-free reads after initialization —
-/// `get_or_init()` is a single atomic load on the hot path.
+/// Manages the Iroh realtime state lifecycle.
+/// Uses `RwLock<Option<Arc<IrohState>>>` so the Iroh instance can be fully
+/// destroyed on mini app close and recreated fresh on next open.
 pub struct RealtimeManager {
-    /// Iroh state (initialized once, then read-only via atomic load)
-    iroh: tokio::sync::OnceCell<IrohState>,
+    /// Iroh state — None when not initialized or after shutdown.
+    /// Arc allows callers to hold a reference while shutdown proceeds.
+    iroh: tokio::sync::RwLock<Option<Arc<IrohState>>>,
     /// Custom relay URL (if any)
     relay_url: Option<String>,
     /// WebSocket server info (port + token), set once after WS server starts
@@ -825,7 +856,7 @@ pub struct RealtimeManager {
 impl RealtimeManager {
     pub fn new(relay_url: Option<String>) -> Self {
         Self {
-            iroh: tokio::sync::OnceCell::new(),
+            iroh: tokio::sync::RwLock::new(None),
             relay_url,
             ws_info: std::sync::OnceLock::new(),
             send_handles: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -834,18 +865,52 @@ impl RealtimeManager {
     }
 
     /// Get or initialize the Iroh state.
-    /// After first call, this is a single atomic load (~5ns).
+    /// Returns an Arc clone — cheap, and allows callers to hold a reference
+    /// while shutdown can proceed independently.
     /// Also starts the realtime WebSocket server on first init.
-    pub async fn get_or_init(&self) -> Result<&IrohState> {
+    pub async fn get_or_init(&self) -> Result<Arc<IrohState>> {
+        // Fast path: read lock, check if already initialized
+        {
+            let guard = self.iroh.read().await;
+            if let Some(ref iroh) = *guard {
+                self.ensure_ws_started();
+                return Ok(Arc::clone(iroh));
+            }
+        }
+
+        // Slow path: write lock, double-check, initialize
+        let mut guard = self.iroh.write().await;
+        if let Some(ref iroh) = *guard {
+            self.ensure_ws_started();
+            return Ok(Arc::clone(iroh));
+        }
+
         let sh = self.send_handles.clone();
-        let iroh = self.iroh
-            .get_or_try_init(|| IrohState::new(self.relay_url.clone(), sh))
-            .await?;
+        let iroh = Arc::new(IrohState::new(self.relay_url.clone(), sh).await?);
+        *guard = Some(Arc::clone(&iroh));
+        drop(guard);
 
-        // Start WS server if not already running
         self.ensure_ws_started();
-
         Ok(iroh)
+    }
+
+    /// Fully shut down Iroh: leave all topics, close endpoint, clear state.
+    /// Next `get_or_init()` will create a completely fresh instance.
+    pub async fn shutdown_iroh(&self) {
+        let iroh = {
+            let mut guard = self.iroh.write().await;
+            guard.take()
+        };
+
+        // Clear send handles (they hold GossipSender clones from the old instance)
+        self.send_handles.write().unwrap_or_else(|e| e.into_inner()).clear();
+
+        // Clear WS senders
+        self.ws_senders.write().unwrap_or_else(|e| e.into_inner()).clear();
+
+        if let Some(iroh) = iroh {
+            iroh.shutdown().await;
+        }
     }
 
     /// Start the WS server if not already running.
@@ -909,11 +974,9 @@ impl RealtimeManager {
         })
     }
 
-    /// Shutdown Iroh if initialized
+    /// Shutdown Iroh if initialized (delegates to shutdown_iroh)
     pub async fn shutdown(&self) -> Result<()> {
-        if let Some(iroh) = self.iroh.get() {
-            iroh.endpoint.close().await;
-        }
+        self.shutdown_iroh().await;
         Ok(())
     }
 }

@@ -726,17 +726,12 @@ pub async fn miniapp_open(
                 return Ok(());
             } else {
                 // Overlay was closed but state was never cleaned up.
-                // Do full teardown: realtime channel, session peers, instance.
+                // Full Iroh shutdown — next preconnect creates a fresh instance.
                 log_warn!("Instance exists but overlay closed, full cleanup: {}", existing_label);
 
                 let channel_state = state.remove_realtime_channel(&existing_label).await;
                 if let Some(channel) = channel_state {
                     let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
-                    if let Ok(iroh) = state.realtime.get_or_init().await {
-                        if let Err(e) = iroh.leave_channel(channel.topic, &existing_label).await {
-                            log_warn!("[WEBXDC] Stale cleanup: leave_channel failed: {}", e);
-                        }
-                    }
                     if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
                         if let Ok(my_npub) = my_pk.to_bech32() {
                             state.remove_session_peer(&channel.topic, &my_npub).await;
@@ -747,7 +742,8 @@ pub async fn miniapp_open(
                         crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
                     });
                 }
-                state.realtime.ws_senders.write().unwrap_or_else(|e| e.into_inner()).remove(&existing_label);
+                // Destroy Iroh completely — guarantees clean state for session 2
+                state.realtime.shutdown_iroh().await;
                 state.remove_instance(&existing_label).await;
             }
         }
@@ -1206,18 +1202,10 @@ pub async fn miniapp_close(
             }
         }
 
-        // Full teardown: remove channel state, leave gossip, clean up
-        // (Desktop does this in WindowEvent::Destroyed, but Android has no
-        // Tauri window, so we must do it here explicitly)
+        // Full teardown: remove channel state, shut down Iroh entirely on Android
         let channel_state = state.remove_realtime_channel(&label).await;
         if let Some(channel) = channel_state {
             let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
-
-            if let Ok(iroh) = state.realtime.get_or_init().await {
-                if let Err(e) = iroh.leave_channel(channel.topic, &label).await {
-                    log_warn!("[WEBXDC] Failed to leave channel on close: {}", e);
-                }
-            }
 
             // Remove ourselves from session peers
             if let Some(my_pk) = crate::MY_PUBLIC_KEY.get() {
@@ -1233,8 +1221,12 @@ pub async fn miniapp_close(
             });
         }
 
-        // Clean up WS sender
-        state.realtime.ws_senders.write().unwrap_or_else(|e| e.into_inner()).remove(&label);
+        // On Android: full Iroh shutdown so next session gets a clean slate.
+        // On desktop: WindowEvent::Destroyed handles leave_channel.
+        #[cfg(target_os = "android")]
+        {
+            state.realtime.shutdown_iroh().await;
+        }
 
         state.remove_instance(&label).await;
     }
