@@ -8568,6 +8568,7 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
                 const imgPreview = document.createElement('img');
                 imgPreview.classList.add('msg-preview-img');
                 imgPreview.src = msg.preview_metadata.og_image;
+                imgPreview.onerror = () => imgPreview.remove();
                 // Auto-scroll the chat to correct against container resizes
                 imgPreview.addEventListener('load', () => {
                     if (proceduralScrollState.isLoadingOlderMessages) {
