@@ -194,6 +194,38 @@ pub async fn logout<R: Runtime>(handle: AppHandle<R>) {
         }
     }
 
+    // Zeroize the encryption key before restart
+    {
+        use zeroize::Zeroize;
+        let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
+        if let Some(ref mut key) = *guard {
+            key.zeroize();
+        }
+        *guard = None;
+    }
+
+    // Zeroize the pending nsec if still held
+    {
+        use zeroize::Zeroize;
+        if let Ok(mut guard) = crate::PENDING_NSEC.lock() {
+            if let Some(ref mut nsec) = *guard {
+                nsec.zeroize();
+            }
+            *guard = None;
+        }
+    }
+
+    // Zeroize the mnemonic seed if still held
+    {
+        use zeroize::Zeroize;
+        if let Ok(mut guard) = crate::MNEMONIC_SEED.lock() {
+            if let Some(ref mut seed) = *guard {
+                seed.zeroize();
+            }
+            *guard = None;
+        }
+    }
+
     // Restart the Core process
     handle.restart();
 }
@@ -235,7 +267,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
     STATE.lock().await.insert_or_replace_profile(&npub, profile);
 
     // Save the seed in memory, ready for post-pin-setup encryption
-    let _ = MNEMONIC_SEED.set(mnemonic_string);
+    *MNEMONIC_SEED.lock().unwrap() = Some(mnemonic_string);
 
     // Store npub temporarily - database will be created when set_pkey is called (after user sets PIN)
     // This prevents creating "dead accounts" if user quits before setting a PIN
@@ -259,8 +291,9 @@ pub async fn export_keys() -> Result<serde_json::Value, String> {
     };
 
     // Try to get seed phrase from memory first, then from database
-    let seed_phrase = if let Some(seed) = MNEMONIC_SEED.get() {
-        Some(seed.clone())
+    let seed_from_mem = MNEMONIC_SEED.lock().unwrap().clone();
+    let seed_phrase = if seed_from_mem.is_some() {
+        seed_from_mem
     } else {
         match db::get_seed().await {
             Ok(Some(seed)) => Some(seed),
@@ -288,12 +321,9 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
     let res = crypto::internal_encrypt(input, password).await;
 
     // If we have one; save the in-memory seedphrase in an encrypted at-rest format
-    match MNEMONIC_SEED.get() {
-        Some(seed) => {
-            // Save the seed phrase to the database
-            let _ = db::set_seed(seed.to_string()).await;
-        }
-        _ => ()
+    let seed_copy = MNEMONIC_SEED.lock().unwrap().clone();
+    if let Some(seed) = seed_copy {
+        let _ = db::set_seed(seed).await;
     }
 
     // Check if we have a pending invite acceptance to broadcast
@@ -478,7 +508,7 @@ pub async fn setup_encryption<R: Runtime>(
     let nsec = PENDING_NSEC.lock().unwrap().take()
         .ok_or("No pending key — call create_account or login first")?;
 
-    // Encrypt the key with the user's password
+    // Encrypt the key with the user's password (internal_encrypt zeroizes the plaintext)
     let encrypted = crypto::internal_encrypt(nsec, Some(password)).await;
 
     // Store via set_pkey (handles pending account DB creation + MLS bootstrap)
@@ -488,9 +518,18 @@ pub async fn setup_encryption<R: Runtime>(
     db::set_sql_setting("security_type".to_string(), security_type)?;
     crate::state::set_encryption_enabled(true);
 
-    // Save seed phrase if available
-    if let Some(seed) = MNEMONIC_SEED.get() {
-        let _ = db::set_seed(seed.to_string()).await;
+    // Save seed phrase if available, then zeroize from memory
+    {
+        use zeroize::Zeroize;
+        let seed_copy = MNEMONIC_SEED.lock().unwrap().clone();
+        if let Some(seed) = seed_copy {
+            let _ = db::set_seed(seed).await;
+        }
+        let mut guard = MNEMONIC_SEED.lock().unwrap();
+        if let Some(ref mut seed) = *guard {
+            seed.zeroize();
+        }
+        *guard = None;
     }
 
     // Broadcast pending invite acceptance
@@ -536,9 +575,18 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     db::set_sql_setting("encryption_enabled".to_string(), "false".to_string())?;
     crate::state::set_encryption_enabled(false);
 
-    // Save seed phrase if available (stored plaintext since encryption is disabled)
-    if let Some(seed) = MNEMONIC_SEED.get() {
-        let _ = db::set_seed(seed.to_string()).await;
+    // Save seed phrase if available, then zeroize from memory
+    {
+        use zeroize::Zeroize;
+        let seed_copy = MNEMONIC_SEED.lock().unwrap().clone();
+        if let Some(seed) = seed_copy {
+            let _ = db::set_seed(seed).await;
+        }
+        let mut guard = MNEMONIC_SEED.lock().unwrap();
+        if let Some(ref mut seed) = *guard {
+            seed.zeroize();
+        }
+        *guard = None;
     }
 
     Ok(())

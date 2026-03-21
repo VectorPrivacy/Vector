@@ -68,6 +68,7 @@ rayon = "1.11.0"
 
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
 memchr = "2"
+zeroize = "1.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Mini Apps (WebXDC) support

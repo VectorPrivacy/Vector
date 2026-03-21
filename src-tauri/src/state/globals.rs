@@ -132,8 +132,9 @@ pub fn get_blossom_servers() -> Vec<String> {
         .clone()
 }
 
-/// Mnemonic seed for wallet/key derivation
-pub static MNEMONIC_SEED: OnceLock<String> = OnceLock::new();
+/// Mnemonic seed for wallet/key derivation.
+/// Uses Mutex<Option<>> so it can be zeroized and cleared after persisting to DB.
+pub static MNEMONIC_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Temporary nsec storage between create_account/login and setup_encryption/skip_encryption.
 /// The private key is set here and consumed by encryption setup — it never crosses IPC.

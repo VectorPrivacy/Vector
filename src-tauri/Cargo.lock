@@ -9253,6 +9253,7 @@ dependencies = [
  "toml 0.8.23",
  "url",
  "whisper-rs",
+ "zeroize",
  "zip 2.4.2",
 ]
 

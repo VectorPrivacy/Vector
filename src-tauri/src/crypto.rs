@@ -9,6 +9,7 @@ use chacha20poly1305::{
     aead::Aead,
     ChaCha20Poly1305, Nonce
 };
+use zeroize::Zeroize;
 
 /// Represents encryption parameters
 #[derive(Debug)]
@@ -20,16 +21,18 @@ pub struct EncryptionParams {
 /// Generates random encryption parameters (key and nonce)
 pub fn generate_encryption_params() -> EncryptionParams {
     let mut rng = rand::thread_rng();
-    
+
     // Generate 32 byte key (for AES-256)
-    let key: [u8; 32] = rng.gen();
+    let mut key: [u8; 32] = rng.gen();
     // Generate 16 byte nonce (to match 0xChat)
     let nonce: [u8; 16] = rng.gen();
-    
-    EncryptionParams {
+
+    let params = EncryptionParams {
         key: bytes_to_hex_string(&key),
         nonce: bytes_to_hex_string(&nonce),
-    }
+    };
+    key.zeroize();
+    params
 }
 
 /// Encrypts data using AES-256-GCM with a 16-byte nonce
@@ -62,7 +65,7 @@ pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, S
 }
 
 /// Hash a password using Argon2id
-pub async fn hash_pass(password: String) -> [u8; 32] {
+pub async fn hash_pass(mut password: String) -> [u8; 32] {
     // 150000 KiB memory size
     let memory = 150000;
     // 10 iterations
@@ -80,13 +83,16 @@ pub async fn hash_pass(password: String) -> [u8; 32] {
         .hash_password_into(password.as_bytes(), salt, &mut key)
         .unwrap();
 
+    // Zeroize the password from memory
+    password.zeroize();
+
     key
 }
 
 /// Internal function for encryption logic using ChaCha20Poly1305
-pub async fn internal_encrypt(input: String, password: Option<String>) -> String {
+pub async fn internal_encrypt(mut input: String, password: Option<String>) -> String {
     // Hash our password with Argon2 and use it as the key
-    let key: [u8; 32] = if password.is_none() {
+    let mut key: [u8; 32] = if password.is_none() {
         // Read the cached key
         let guard = crate::ENCRYPTION_KEY.read().unwrap();
         *guard.as_ref().expect("Encryption key must be set")
@@ -105,10 +111,11 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
     // Create the nonce
     let nonce: Nonce = nonce_bytes.into();
 
-    // Encrypt the input
+    // Encrypt the input, then zeroize plaintext
     let ciphertext = cipher
         .encrypt(&nonce, input.as_bytes())
         .expect("Encryption should not fail");
+    input.zeroize();
 
     // Prepend the nonce to our ciphertext
     let mut buffer = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
@@ -123,6 +130,9 @@ pub async fn internal_encrypt(input: String, password: Option<String>) -> String
         }
     }
 
+    // Zeroize the local key copy
+    key.zeroize();
+
     // Convert the encrypted bytes to a hex string for safe storage/transmission
     bytes_to_hex_string(&buffer)
 }
@@ -133,7 +143,7 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
     let has_password = password.is_some();
 
     // Get the key - either from password or cached
-    let key: [u8; 32] = if let Some(pass) = password {
+    let mut key: [u8; 32] = if let Some(pass) = password {
         // Hash the password
         hash_pass(pass).await
     } else {
@@ -148,7 +158,7 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
     // Convert hex to bytes - use reference to avoid copying the string
     let encrypted_data = match hex_string_to_bytes(ciphertext.as_str()) {
         bytes if bytes.len() >= 12 => bytes,
-        _ => return Err(())
+        _ => { key.zeroize(); return Err(()) }
     };
 
     // Extract nonce and encrypted data - use slices to avoid copying data
@@ -157,7 +167,7 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
     // Create the cipher instance
     let cipher = match ChaCha20Poly1305::new_from_slice(&key) {
         Ok(c) => c,
-        Err(_) => return Err(())
+        Err(_) => { key.zeroize(); return Err(()) }
     };
 
     // Create the nonce and decrypt
@@ -165,7 +175,7 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
     let nonce: Nonce = nonce_arr.into();
     let plaintext = match cipher.decrypt(&nonce, actual_ciphertext) {
         Ok(pt) => pt,
-        Err(_) => return Err(())
+        Err(_) => { key.zeroize(); return Err(()) }
     };
 
     // Cache the key if needed - only set if we came from password path
@@ -175,6 +185,9 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
             *guard = Some(key);
         }
     }
+
+    // Zeroize the local key copy
+    key.zeroize();
 
     // Convert decrypted bytes to string using unsafe version, because SPEED!
     // SAFETY: The plaintext bytes are guaranteed to be valid UTF-8, making this safe, because:
