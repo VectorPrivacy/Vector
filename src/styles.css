@@ -4717,6 +4717,19 @@ select:disabled:hover {
   bottom: 0px;
 }
 
+.login-encrypt-password {
+  width: 100%;
+}
+
+.login-encrypt-password .login-input-container {
+  position: relative;
+}
+
+.login-encrypt-password .chat-input-container {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
 .login-encrypt-header {
   display: inline-flex;
 }
