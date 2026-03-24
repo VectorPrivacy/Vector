@@ -36,12 +36,19 @@
 use nostr_sdk::prelude::*;
 use tauri::Emitter;
 
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
+
 use crate::{
     commands, db,
     MlsService, NotificationData, show_notification_generic,
     TAURI_APP, NOSTR_CLIENT,
     util::get_file_type_description,
 };
+
+/// Current MLS group message subscription ID. Updated by `refresh_mls_subscription()`
+/// when groups are joined or left — single subscription, never accumulates.
+static MLS_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Process an MLS group message event through the full pipeline.
 /// Shared between live subscriptions (full app) and standalone sync (background service).
@@ -677,6 +684,39 @@ pub(crate) async fn handle_mls_group_message(event: Event, my_public_key: Public
 }
 
 /// Start live subscriptions for GiftWraps and MLS group messages.
+/// Refresh the MLS group message subscription with current group IDs from the DB.
+/// Unsubscribes the old subscription (if any) and creates a new one scoped to our groups.
+/// Called at boot and whenever groups change (join/leave/evict).
+pub(crate) async fn refresh_mls_subscription() {
+    let Some(client) = NOSTR_CLIENT.get() else { return; };
+
+    let group_ids: Vec<String> = crate::db::load_mls_groups().await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| !g.evicted)
+        .map(|g| g.group_id)
+        .collect();
+
+    let mut sub_guard = MLS_SUB_ID.lock().await;
+
+    // Unsubscribe the old MLS subscription
+    if let Some(old_id) = sub_guard.take() {
+        client.unsubscribe(&old_id).await;
+    }
+
+    // Subscribe with current group IDs (skip if no groups)
+    if !group_ids.is_empty() {
+        let filter = Filter::new()
+            .kind(Kind::MlsGroupMessage)
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
+            .limit(0);
+        match client.subscribe(filter, None).await {
+            Ok(output) => { *sub_guard = Some(output.val); }
+            Err(e) => eprintln!("[MLS] Failed to subscribe: {:?}", e),
+        }
+    }
+}
+
 /// Called once after login to begin receiving real-time events.
 pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
@@ -690,35 +730,13 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
         .kind(Kind::GiftWrap)
         .limit(0);
 
-    // Live MLS group wrappers scoped to our groups via 'h' tag.
-    // Falls back to broad subscribe if group loading fails.
-    let group_ids: Vec<String> = crate::db::load_mls_groups().await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|g| !g.evicted)
-        .map(|g| g.group_id)
-        .collect();
-
-    let mls_msg_filter = if group_ids.is_empty() {
-        Filter::new()
-            .kind(Kind::MlsGroupMessage)
-            .limit(0)
-    } else {
-        Filter::new()
-            .kind(Kind::MlsGroupMessage)
-            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
-            .limit(0)
-    };
-
-    // Subscribe to both filters
     let gift_sub_id = match client.subscribe(giftwrap_filter, None).await {
         Ok(id) => id.val,
         Err(e) => return Err(e.to_string()),
     };
-    let mls_sub_id = match client.subscribe(mls_msg_filter, None).await {
-        Ok(id) => id.val,
-        Err(e) => return Err(e.to_string()),
-    };
+
+    // Initial MLS subscription (scoped to current groups, or skipped if none)
+    refresh_mls_subscription().await;
 
     // Begin watching for notifications from our subscriptions
     match client
@@ -727,7 +745,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                 if subscription_id == gift_sub_id {
                     // Handle DMs/files/vector-specific + MLS welcomes inside giftwrap
                     super::handle_event(*event, true).await;
-                } else if subscription_id == mls_sub_id {
+                } else if MLS_SUB_ID.lock().await.as_ref() == Some(&subscription_id) {
                     // Handle live MLS group message via shared handler
                     let my_pk = crate::MY_PUBLIC_KEY.get()
                         .copied()

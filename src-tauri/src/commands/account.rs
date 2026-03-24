@@ -11,8 +11,13 @@ use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use zeroize::Zeroize;
 
+use std::sync::atomic::AtomicBool;
 use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, active_trusted_relays};
 use crate::{Profile, account_manager, db, crypto, commands};
+
+/// Set to true after a full foreground login+sync flow completes.
+/// Prevents debug_hot_reload_sync from using partial state preloaded by standalone background sync.
+static FULL_SESSION_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 // ============================================================================
 // Types
@@ -54,9 +59,13 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
     // Get the full state
     let state = STATE.lock().await;
 
-    // Verify we have meaningful state (not just an empty initialized state)
+    // Verify we have state from a full app session, not partial state from
+    // standalone background sync (which only preloads MLS groups + notification profiles).
     if state.profiles.is_empty() && state.chats.is_empty() {
         return Err("Backend state is empty - perform normal login".to_string());
+    }
+    if !FULL_SESSION_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("State is from background sync, not a full session - perform normal login".to_string());
     }
 
     // Return the full state for the frontend to hydrate
@@ -158,6 +167,7 @@ pub async fn login(mut import_key: String) -> Result<LoginResult, String> {
         }
     }
 
+    FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
     Ok(LoginResult { public: npub })
 }
 
@@ -277,6 +287,7 @@ pub async fn create_account() -> Result<LoginResult, String> {
     // This prevents creating "dead accounts" if user quits before setting a PIN
     account_manager::set_pending_account(npub.clone())?;
 
+    FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
     Ok(LoginResult { public: npub })
 }
 
@@ -446,8 +457,32 @@ pub async fn decrypt(ciphertext: String, password: Option<String>) -> Result<Str
 /// Returns only the npub — the private key never crosses IPC.
 #[tauri::command]
 pub async fn login_from_stored_key(password: Option<String>) -> Result<String, String> {
-    // If already logged in, just return the npub
-    if let Some(_client) = NOSTR_CLIENT.get() {
+    // If already logged in (e.g. standalone background sync set NOSTR_CLIENT before
+    // the Activity created), clear stale state so the foreground rebuilds everything fresh.
+    // The client's signer (GuardedSigner) and MY_SECRET_KEY are still valid.
+    if let Some(client) = NOSTR_CLIENT.get() {
+        // Remove background sync's relay(s) — they may be disconnected and incomplete.
+        // The frontend's connect() call will add all proper relays and reconnect.
+        let stale_relays: Vec<String> = client.relays().await
+            .keys().map(|u| u.to_string()).collect();
+        for url in &stale_relays {
+            let _ = client.remove_relay(url.as_str()).await;
+        }
+
+        // Clear STATE — standalone sync only preloads MLS groups + notification profiles,
+        // which is a partial subset. The debug hot-reload guard would mistake this for a
+        // full session state and skip login, showing only group chats and missing DMs.
+        // Clearing forces the frontend through the full boot flow.
+        {
+            let mut state = STATE.lock().await;
+            state.profiles.clear();
+            state.chats.clear();
+        }
+
+        if !stale_relays.is_empty() {
+            println!("[Login] Cleared {} stale relay(s) and partial state from background sync", stale_relays.len());
+        }
+
         let npub = crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?
             .to_bech32()
             .map_err(|e| format!("Bech32 error: {}", e))?;
@@ -499,6 +534,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // MLS keypackage bootstrap (non-blocking, same as decrypt command)
     spawn_mls_bootstrap();
 
+    FULL_SESSION_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
     Ok(npub)
 }
 

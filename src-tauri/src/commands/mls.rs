@@ -295,7 +295,11 @@ pub async fn leave_mls_group(group_id: String) -> Result<(), String> {
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+
+    // Refresh the live MLS subscription to remove the left group
+    crate::services::subscription_handler::refresh_mls_subscription().await;
+    Ok(())
 }
 
 // ============================================================================
@@ -908,7 +912,7 @@ pub async fn create_mls_group(
     });
 
     // Use tokio::task::spawn_blocking to run the non-Send MlsService in a blocking context
-    tokio::task::spawn_blocking(move || {
+    let group_id = tokio::task::spawn_blocking(move || {
         TAURI_APP.get().ok_or("App handle not initialized")?;
 
         // Use tokio runtime to run async code from blocking context
@@ -931,7 +935,12 @@ pub async fn create_mls_group(
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+
+    // Refresh the live MLS subscription to include the new group
+    crate::services::subscription_handler::refresh_mls_subscription().await;
+
+    Ok(group_id)
 }
 
 /// Create an MLS group from a group name + member npubs (multi-device aware)
@@ -1854,6 +1863,9 @@ pub async fn accept_mls_welcome(welcome_event_id_hex: String) -> Result<bool, St
     .map_err(|e| format!("Task join error: {}", e))??;
 
     if accepted {
+        // Refresh the live MLS subscription to include the new group
+        crate::services::subscription_handler::refresh_mls_subscription().await;
+
         let gid_for_avatar = nostr_group_id.clone();
         tokio::spawn(async {
             if let Err(err) = regenerate_device_keypackage(false).await {
