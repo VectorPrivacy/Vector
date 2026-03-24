@@ -1,10 +1,10 @@
 <img width="1293" height="646" alt="GitHub-Repo-Graphics-Header" src="./assets/github_header_readme.png"/>
 
 <p align="center">
-  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.2/Vector_0.3.2_amd64.AppImage"><img src="https://img.shields.io/badge/Linux-5E5E5E?style=flat&logo=linux&logoColor=33DB98" alt="Linux"/></a>
-  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.2/Vector_0.3.2_x64.dmg"><img src="https://img.shields.io/badge/macOS-5E5E5E?style=flat&logo=apple&logoColor=33DB98" alt="macOS"/></a>
-  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.2/Vector_0.3.2_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-5E5E5E?style=flat&logo=windows&logoColor=33DB98" alt="Windows"/></a>
-  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.2/Vector.apk"><img src="https://img.shields.io/badge/Android-5E5E5E?style=flat&logo=android&logoColor=33DB98" alt="Android"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.3/Vector_0.3.3_amd64.AppImage"><img src="https://img.shields.io/badge/Linux-5E5E5E?style=flat&logo=linux&logoColor=33DB98" alt="Linux"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.3/Vector_0.3.3_x64.dmg"><img src="https://img.shields.io/badge/macOS-5E5E5E?style=flat&logo=apple&logoColor=33DB98" alt="macOS"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.3/Vector_0.3.3_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-5E5E5E?style=flat&logo=windows&logoColor=33DB98" alt="Windows"/></a>
+  <a href="https://github.com/VectorPrivacy/Vector/releases/download/v0.3.3/Vector.apk"><img src="https://img.shields.io/badge/Android-5E5E5E?style=flat&logo=android&logoColor=33DB98" alt="Android"/></a>
   <a href="https://github.com/VectorPrivacy/Vector/blob/master/LICENSE"><img src="https://img.shields.io/github/license/henriquesebastiao/badges?style=flat&color=33DB98" alt="License"/></a>
 </p>
 
