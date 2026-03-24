@@ -53,6 +53,10 @@ pub fn is_activity_in_foreground() -> bool {
 /// Signal to stop the standalone sync thread
 static STOP_STANDALONE_SYNC: AtomicBool = AtomicBool::new(false);
 
+/// Instant wakeup for the stop-checker task. Zero CPU cost when idle (futex-based),
+/// unlike the old 5-second polling loop which woke the runtime 17,280 times/day.
+static STOP_NOTIFY: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(|| tokio::sync::Notify::new());
+
 /// Whether the standalone sync thread is currently running
 static STANDALONE_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -79,6 +83,7 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
     if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
         logcat("Stopping standalone sync (activity resumed)");
         STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
+        STOP_NOTIFY.notify_one();
     }
 }
 
@@ -222,6 +227,7 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStopBackgrou
     logcat("Stopping background sync");
     BACKGROUND_SYNC_ACTIVE.store(false, Ordering::SeqCst);
     STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
+    STOP_NOTIFY.notify_one();
 }
 
 /// Main loop for standalone background sync.
@@ -288,45 +294,52 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         };
 
-        // Subscribe to MLS group messages (only useful for unencrypted accounts that can decrypt)
+        // Preload profiles and MLS groups — needed for display names and scoped subscriptions.
+        // Skip for encrypted accounts (can't read from encrypted DB).
+        if can_decrypt {
+            preload_profiles_into_state().await;
+            preload_mls_groups_into_state().await;
+        }
+
+        // Subscribe to MLS group messages scoped to OUR groups only (via 'h' tag).
+        // Without scoping, the relay sends ALL MLS traffic network-wide — massive battery waste.
+        // Scoped after preload so group IDs are available from the DB.
         let mls_sub_id = if can_decrypt {
-            let mls_filter = Filter::new()
-                .kind(Kind::MlsGroupMessage)
-                .limit(0);
-            match client.subscribe(mls_filter, None).await {
-                Ok(output) => {
-                    logcat("Live MLS group message subscription active");
-                    Some(output.val)
-                }
-                Err(e) => {
-                    logcat(&format!("Failed to subscribe to MLS messages: {:?}", e));
-                    None
+            let group_ids: Vec<String> = match crate::db::load_mls_groups().await {
+                Ok(groups) => groups.into_iter()
+                    .filter(|g| !g.evicted)
+                    .map(|g| g.group_id)
+                    .collect(),
+                Err(_) => vec![],
+            };
+            if group_ids.is_empty() {
+                logcat("No MLS groups found, skipping MLS subscription");
+                None
+            } else {
+                logcat(&format!("Subscribing to MLS messages for {} groups", group_ids.len()));
+                let mls_filter = Filter::new()
+                    .kind(Kind::MlsGroupMessage)
+                    .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
+                    .limit(0);
+                match client.subscribe(mls_filter, None).await {
+                    Ok(output) => Some(output.val),
+                    Err(e) => {
+                        logcat(&format!("Failed to subscribe to MLS messages: {:?}", e));
+                        None
+                    }
                 }
             }
         } else {
             None
         };
 
-        // Preload profiles AFTER subscribe — runs while relay TCP/TLS handshakes complete.
-        // Profiles are only needed when a notification arrives (to resolve display names).
-        // Skip for encrypted accounts (can't read profiles from encrypted DB).
-        if can_decrypt {
-            preload_profiles_into_state().await;
-            preload_mls_groups_into_state().await;
-        }
-
         // Spawn a stop-checker task that disconnects the client when stop is signaled.
-        // This ensures handle_notifications() returns even if no events arrive.
+        // Uses Notify for instant zero-cost wakeup instead of polling.
         let client_for_stop = client.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
-                    logcat("Stop signal received, disconnecting client...");
-                    client_for_stop.disconnect().await;
-                    break;
-                }
-            }
+            STOP_NOTIFY.notified().await;
+            logcat("Stop signal received, disconnecting client...");
+            client_for_stop.disconnect().await;
         });
 
         // Track seen event IDs to deduplicate across relays
@@ -400,6 +413,116 @@ fn run_standalone_sync_loop(data_dir: &str) {
         client.disconnect().await;
         logcat("Client disconnected");
     });
+}
+
+/// Connect the background client to a SINGLE relay for battery efficiency.
+/// Tries each candidate relay in order until one connects successfully.
+///
+/// Relay priority: user's custom relays first, then non-disabled defaults.
+/// Connecting to one relay instead of 4-5 dramatically reduces mobile radio wakeups
+/// and battery drain — background only needs one relay for push notifications.
+async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), String> {
+    // Build the candidate list: user's custom relays first, then defaults
+    let mut candidates: Vec<String> = Vec::new();
+
+    // Read user's relay config from DB (custom relays + disabled defaults)
+    let npub_dir = std::fs::read_dir(data_dir)
+        .ok()
+        .and_then(|entries| {
+            entries.flatten().find(|e| {
+                e.file_name().to_str().map_or(false, |n| n.starts_with("npub1"))
+            })
+        })
+        .map(|e| e.path());
+
+    let (custom_relays, disabled_defaults) = if let Some(ref dir) = npub_dir {
+        let db_path = dir.join("vector.db");
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            let custom: Vec<String> = conn.query_row(
+                "SELECT value FROM settings WHERE key = 'custom_relays'",
+                [],
+                |row| row.get::<_, String>(0),
+            ).ok()
+            .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
+            .map(|arr| arr.iter().filter_map(|v| {
+                // Custom relays are objects with "url" and optionally "enabled" fields
+                let url = v.get("url").and_then(|u| u.as_str())?;
+                let enabled = v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+                if enabled { Some(url.to_string()) } else { None }
+            }).collect())
+            .unwrap_or_default();
+
+            let disabled: Vec<String> = conn.query_row(
+                "SELECT value FROM settings WHERE key = 'disabled_default_relays'",
+                [],
+                |row| row.get::<_, String>(0),
+            ).ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+
+            (custom, disabled)
+        } else {
+            (vec![], vec![])
+        }
+    } else {
+        (vec![], vec![])
+    };
+
+    // Custom relays first (user's preference)
+    candidates.extend(custom_relays);
+
+    // Then non-disabled defaults
+    for url in DEFAULT_RELAYS {
+        let normalized = url.to_lowercase();
+        let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(&normalized));
+        if !is_disabled && !candidates.iter().any(|c| c.eq_ignore_ascii_case(url)) {
+            candidates.push(url.to_string());
+        }
+    }
+
+    // Fallback: if everything is disabled/empty, use all defaults
+    if candidates.is_empty() {
+        candidates.extend(DEFAULT_RELAYS.iter().map(|s| s.to_string()));
+    }
+
+    // Try each relay until one connects successfully
+    for url in &candidates {
+        logcat(&format!("Background: trying relay {}", url));
+        if let Err(e) = client.add_relay(url.as_str()).await {
+            logcat(&format!("Failed to add relay {}: {:?}", url, e));
+            continue;
+        }
+        client.connect().await;
+
+        // Poll for connection (500ms intervals, up to 10 seconds).
+        // Mobile TLS handshakes can take 3-5s; a single fixed sleep misses slow relays.
+        let mut connected = false;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Bail if user foregrounded the app during connection
+            if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
+                return Err("Stop signal during relay connection".to_string());
+            }
+            if client.relays().await.values().any(|r| matches!(r.status(), RelayStatus::Connected)) {
+                connected = true;
+                break;
+            }
+        }
+
+        if connected {
+            logcat(&format!("Background: connected to {}", url));
+            return Ok(());
+        }
+
+        // Didn't connect — remove and try next
+        logcat(&format!("Background: {} failed to connect, trying next", url));
+        client.remove_relay(url.as_str()).await;
+    }
+
+    Err("Failed to connect to any relay".to_string())
 }
 
 /// Bootstrap a standalone Nostr client from stored keys in the database.
@@ -480,15 +603,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
             &npub_name[..20.min(npub_name.len())]));
 
         let client = Client::builder().build();
-
-        for relay_url in DEFAULT_RELAYS {
-            if let Err(e) = client.add_relay(*relay_url).await {
-                logcat(&format!("Failed to add relay {}: {:?}", relay_url, e));
-            }
-        }
-
-        logcat(&format!("Connecting to {} relays...", DEFAULT_RELAYS.len()));
-        client.connect().await;
+        bg_connect_single_relay(&client, data_dir).await?;
 
         Ok((client, my_public_key, false, None))
     } else {
@@ -518,14 +633,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
             .signer(crate::guarded_key::GuardedSigner::new(public_key_for_signer))
             .build();
 
-        for relay_url in DEFAULT_RELAYS {
-            if let Err(e) = client.add_relay(*relay_url).await {
-                logcat(&format!("Failed to add relay {}: {:?}", relay_url, e));
-            }
-        }
-
-        logcat(&format!("Connecting to {} relays...", DEFAULT_RELAYS.len()));
-        client.connect().await;
+        bg_connect_single_relay(&client, data_dir).await?;
 
         Ok((client, my_public_key, true, Some(keys)))
     }

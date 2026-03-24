@@ -690,10 +690,25 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
         .kind(Kind::GiftWrap)
         .limit(0);
 
-    // Live MLS group wrappers (Kind::MlsGroupMessage). Broad subscribe; we'll filter by membership in handler.
-    let mls_msg_filter = Filter::new()
-        .kind(Kind::MlsGroupMessage)
-        .limit(0);
+    // Live MLS group wrappers scoped to our groups via 'h' tag.
+    // Falls back to broad subscribe if group loading fails.
+    let group_ids: Vec<String> = crate::db::load_mls_groups().await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| !g.evicted)
+        .map(|g| g.group_id)
+        .collect();
+
+    let mls_msg_filter = if group_ids.is_empty() {
+        Filter::new()
+            .kind(Kind::MlsGroupMessage)
+            .limit(0)
+    } else {
+        Filter::new()
+            .kind(Kind::MlsGroupMessage)
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), group_ids)
+            .limit(0)
+    };
 
     // Subscribe to both filters
     let gift_sub_id = match client.subscribe(giftwrap_filter, None).await {
