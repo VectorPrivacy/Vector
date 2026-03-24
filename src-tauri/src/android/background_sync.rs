@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY};
+use crate::{NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY};
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
 
@@ -265,7 +265,8 @@ fn run_standalone_sync_loop(data_dir: &str) {
             let _ = NOSTR_CLIENT.set(client.clone());
             let _ = MY_PUBLIC_KEY.set(my_public_key);
             if let Some(keys) = keys {
-                let _ = MY_KEYS.set(keys);
+                MY_SECRET_KEY.store_from_keys(&keys);
+                drop(keys);
             }
         }
 
@@ -510,8 +511,11 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         logcat(&format!("Bootstrapped client for {}...",
             &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]));
 
+        let public_key_for_signer = keys.public_key();
+        MY_SECRET_KEY.store_from_keys(&keys);
+
         let client = Client::builder()
-            .signer(keys.clone())
+            .signer(crate::guarded_key::GuardedSigner::new(public_key_for_signer))
             .build();
 
         for relay_url in DEFAULT_RELAYS {

@@ -93,9 +93,8 @@ pub async fn hash_pass(mut password: String) -> [u8; 32] {
 pub async fn internal_encrypt(mut input: String, password: Option<String>) -> String {
     // Hash our password with Argon2 and use it as the key
     let mut key: [u8; 32] = if password.is_none() {
-        // Read the cached key
-        let guard = crate::ENCRYPTION_KEY.read().unwrap();
-        *guard.as_ref().expect("Encryption key must be set")
+        // Read from the guarded vault
+        crate::ENCRYPTION_KEY.get().expect("Encryption key must be set")
     } else {
         hash_pass(password.unwrap()).await
     };
@@ -122,12 +121,9 @@ pub async fn internal_encrypt(mut input: String, password: Option<String>) -> St
     buffer.extend_from_slice(&nonce_bytes);
     buffer.extend_from_slice(&ciphertext);
 
-    // Cache the key if not already set
-    {
-        let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-        if guard.is_none() {
-            *guard = Some(key);
-        }
+    // Cache the key in the guarded vault if not already set
+    if !crate::ENCRYPTION_KEY.has_key() {
+        crate::ENCRYPTION_KEY.set(key);
     }
 
     // Zeroize the local key copy
@@ -142,15 +138,14 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
     // Check if we're using a password before we potentially move it
     let has_password = password.is_some();
 
-    // Get the key - either from password or cached
+    // Get the key - either from password or guarded vault
     let mut key: [u8; 32] = if let Some(pass) = password {
         // Hash the password
         hash_pass(pass).await
     } else {
-        // Try to use cached key
-        let guard = crate::ENCRYPTION_KEY.read().unwrap();
-        match guard.as_ref() {
-            Some(k) => *k,
+        // Read from the guarded vault
+        match crate::ENCRYPTION_KEY.get() {
+            Some(k) => k,
             None => return Err(()),
         }
     };
@@ -178,12 +173,9 @@ pub async fn internal_decrypt(ciphertext: String, password: Option<String>) -> R
         Err(_) => { key.zeroize(); return Err(()) }
     };
 
-    // Cache the key if needed - only set if we came from password path
-    if has_password {
-        let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-        if guard.is_none() {
-            *guard = Some(key);
-        }
+    // Cache the key in the guarded vault if needed - only set if we came from password path
+    if has_password && !crate::ENCRYPTION_KEY.has_key() {
+        crate::ENCRYPTION_KEY.set(key);
     }
 
     // Zeroize the local key copy

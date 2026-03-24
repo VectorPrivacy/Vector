@@ -742,7 +742,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
     // Upload the file to the server using Blossom with automatic failover and progress
-    let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
+    let signer = crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
     let servers = crate::get_blossom_servers();
 
     // Create progress callback that emits events to frontend

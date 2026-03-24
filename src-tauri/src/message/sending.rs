@@ -225,7 +225,7 @@ async fn encrypt_and_upload_mls_media(
         .map_err(|e| format!("MIP-04 encryption failed: {}", e))?;
 
     // Upload the encrypted data to Blossom
-    let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
+    let signer = crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
     let servers = crate::get_blossom_servers();
 
     let url = crate::blossom::upload_blob_with_progress_and_failover(
@@ -1005,7 +1005,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
             }
 
             // Upload the file to the server
-            let signer = crate::MY_KEYS.get().expect("Keys not initialized").clone();
+            let signer = crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized");
             let servers = crate::get_blossom_servers();
             let file_size = enc_file.len();
             // Clone the Arc outside the closure for use inside a seperate-threaded progress callback

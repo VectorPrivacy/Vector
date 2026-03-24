@@ -7,6 +7,7 @@
 //! - Event queue management during migration
 
 use tauri::{command, AppHandle, Emitter, Runtime};
+use zeroize::Zeroize;
 use crate::crypto::{encrypt_with_key, decrypt_with_key, is_encryption_enabled};
 use crate::state::{close_processing_gate, open_processing_gate, set_encryption_enabled, PENDING_EVENTS};
 use crate::stored_event::event_kind;
@@ -141,22 +142,22 @@ pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), 
 /// Inner work for disable_encryption — separated so the outer function
 /// can guarantee the processing gate is always reopened.
 fn disable_encryption_work<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
-    // Read the encryption key
-    let key: [u8; 32] = {
-        let guard = crate::ENCRYPTION_KEY.read().unwrap();
-        (*guard).ok_or("No encryption key available".to_string())?
-    };
+    // Read the encryption key from the guarded vault
+    let mut key: [u8; 32] = crate::ENCRYPTION_KEY.get()
+        .ok_or("No encryption key available".to_string())?;
 
     // Run transactional migration (all-or-nothing via SQLite transaction, audit C3/C4)
-    disable_encryption_transactional(handle, &key)?;
+    let result = disable_encryption_transactional(handle, &key);
 
-    // Clear the encryption key from memory (only after successful commit)
-    {
-        let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-        *guard = None;
+    // Zeroize local key copy
+    key.zeroize();
+
+    // Clear the guarded vault (only after successful commit)
+    if result.is_ok() {
+        crate::ENCRYPTION_KEY.clear();
     }
 
-    Ok(())
+    result
 }
 
 /// Enable encryption - bulk encrypt all plaintext content
@@ -181,10 +182,7 @@ pub async fn enable_encryption<R: Runtime>(
 ) -> Result<(), String> {
     // Derive key from credential (this is the slow Argon2 step)
     let key = crate::crypto::hash_pass(credential).await;
-    {
-        let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-        *guard = Some(key);
-    }
+    crate::ENCRYPTION_KEY.set(key);
 
     // Close the processing gate
     close_processing_gate();
@@ -204,10 +202,7 @@ pub async fn enable_encryption<R: Runtime>(
             // Transaction rolled back — database is still plaintext.
             // Clear key from memory so maybe_encrypt doesn't encrypt new events
             // while old events remain plaintext (would create mixed state).
-            {
-                let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-                *guard = None;
-            }
+            crate::ENCRYPTION_KEY.clear();
             Err(e)
         }
     }
@@ -219,16 +214,15 @@ fn enable_encryption_work<R: Runtime>(
     handle: &AppHandle<R>,
     security_type: &str,
 ) -> Result<(), String> {
-    // Read the encryption key
-    let key: [u8; 32] = {
-        let guard = crate::ENCRYPTION_KEY.read().unwrap();
-        (*guard).ok_or("No encryption key available".to_string())?
-    };
+    // Read the encryption key from the guarded vault
+    let mut key: [u8; 32] = crate::ENCRYPTION_KEY.get()
+        .ok_or("No encryption key available".to_string())?;
 
     // Run transactional migration (all-or-nothing via SQLite transaction, audit C3/C4)
-    enable_encryption_transactional(handle, &key, security_type)?;
+    let result = enable_encryption_transactional(handle, &key, security_type);
+    key.zeroize();
 
-    Ok(())
+    result
 }
 
 // ============================================================================
@@ -852,11 +846,8 @@ pub async fn rekey_encryption<R: Runtime>(
 
     match result {
         Ok(()) => {
-            // Update global ENCRYPTION_KEY to new key ONLY after successful commit
-            {
-                let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-                *guard = Some(new_key);
-            }
+            // Update guarded vault to new key ONLY after successful commit
+            crate::ENCRYPTION_KEY.set(new_key);
             let _ = handle.emit("encryption_migration_complete", ());
             println!("[Rekey] Re-keying complete");
             Ok(())

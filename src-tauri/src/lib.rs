@@ -5,6 +5,7 @@ use tauri::Manager;
 mod macros;
 
 mod crypto;
+mod guarded_key;
 
 mod db;
 
@@ -85,7 +86,7 @@ mod simd;
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility
 pub(crate) use state::{
-    TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, STATE,
+    TAURI_APP, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, STATE,
     TRUSTED_RELAYS, active_trusted_relays, NOTIFIED_WELCOMES, WRAPPER_ID_CACHE,
     MNEMONIC_SEED, ENCRYPTION_KEY, PENDING_NSEC, PENDING_INVITE,
     get_blossom_servers, PendingInviteAcceptance,
@@ -120,6 +121,84 @@ pub fn run() {
             }
         }
     }));
+
+    // Harden against memory inspection and debugger attachment (release builds only).
+    // macOS:   PT_DENY_ATTACH blocks task_for_pid + debugger attachment.
+    // Linux:   PR_SET_DUMPABLE(0) blocks /proc/pid/mem + ptrace + core dumps.
+    // Windows: Strip PROCESS_VM_READ from process DACL, block unsigned DLL injection,
+    //          and exit if a debugger is attached.
+    #[cfg(not(debug_assertions))]
+    {
+        #[cfg(target_os = "macos")]
+        unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0); }
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0); }
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            extern "system" {
+                // kernel32.dll
+                fn IsDebuggerPresent() -> i32;
+                fn GetCurrentProcess() -> isize;
+                fn SetProcessMitigationPolicy(policy: u32, buf: *const u8, len: usize) -> i32;
+                // advapi32.dll — strip memory-read from process handle
+                fn SetSecurityInfo(
+                    handle: isize, object_type: u32, info: u32,
+                    owner: *const u8, group: *const u8, dacl: *const u8, sacl: *const u8,
+                ) -> u32;
+                fn SetEntriesInAclA(
+                    count: u32, entries: *const ExplicitAccessA,
+                    old_acl: *const u8, new_acl: *mut *mut u8,
+                ) -> u32;
+            }
+
+            #[repr(C)]
+            struct ExplicitAccessA {
+                access_permissions: u32,
+                access_mode: u32, // DENY_ACCESS = 3
+                inheritance: u32,
+                trustee: TrusteeA,
+            }
+            #[repr(C)]
+            struct TrusteeA {
+                multiple_trustee: *const u8,
+                multiple_trustee_operation: u32,
+                trustee_form: u32, // TRUSTEE_IS_NAME = 1
+                trustee_type: u32, // TRUSTEE_IS_WELL_KNOWN_GROUP = 5
+                trustee_name: *const u8,
+            }
+
+            // 1. Exit if debugger is attached
+            if IsDebuggerPresent() != 0 {
+                std::process::exit(0);
+            }
+
+            // 2. Block unsigned DLL injection (ProcessSignaturePolicy = 8, MicrosoftSignedOnly)
+            let signature_policy: [u8; 4] = [0x01, 0x00, 0x00, 0x00]; // MicrosoftSignedOnly = 1
+            SetProcessMitigationPolicy(8, signature_policy.as_ptr(), 4);
+
+            // 3. Strip PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE from Everyone
+            let everyone = b"Everyone\0";
+            let entry = ExplicitAccessA {
+                access_permissions: 0x0010 | 0x0020 | 0x0040, // VM_READ | VM_WRITE | DUP_HANDLE
+                access_mode: 3, // DENY_ACCESS
+                inheritance: 0, // NO_INHERITANCE
+                trustee: TrusteeA {
+                    multiple_trustee: std::ptr::null(),
+                    multiple_trustee_operation: 0,
+                    trustee_form: 1, // TRUSTEE_IS_NAME
+                    trustee_type: 5, // TRUSTEE_IS_WELL_KNOWN_GROUP
+                    trustee_name: everyone.as_ptr(),
+                },
+            };
+            let mut new_dacl: *mut u8 = std::ptr::null_mut();
+            if SetEntriesInAclA(1, &entry, std::ptr::null(), &mut new_dacl) == 0 && !new_dacl.is_null() {
+                // SE_KERNEL_OBJECT = 6, DACL_SECURITY_INFORMATION = 4
+                SetSecurityInfo(GetCurrentProcess(), 6, 4, std::ptr::null(), std::ptr::null(), new_dacl, std::ptr::null());
+            }
+        }
+    }
 
     // Install rustls crypto provider before any TLS usage (required when both
     // 'ring' and 'aws-lc-rs' features are pulled by different transitive deps)

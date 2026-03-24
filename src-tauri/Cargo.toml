@@ -69,6 +69,7 @@ rayon = "1.11.0"
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)
 memchr = "2"
 zeroize = "1.8"
+libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Mini Apps (WebXDC) support
@@ -132,3 +133,7 @@ whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", bran
 # pkarr uses reqwest with "rustls" feature which forces aws-lc-rs (breaks Android 11).
 # Patched to use "rustls-no-provider" so our ring install_default() is used instead.
 pkarr = { path = "patches/pkarr" }
+# nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
+# Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
+# Fork: https://github.com/VectorPrivacy/nostr/tree/zeroize-secretkey
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }

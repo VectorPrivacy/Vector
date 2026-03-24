@@ -141,8 +141,9 @@ pub static MNEMONIC_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::n
 pub static PENDING_NSEC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Encryption key derived from user's PIN via Argon2.
-/// Uses RwLock to allow clearing/updating (for PIN changes, encryption toggle).
-pub static ENCRYPTION_KEY: std::sync::RwLock<Option<[u8; 32]>> = std::sync::RwLock::new(None);
+/// Stored in a memory-hardened vault: XOR-split into 4 shares scattered across
+/// 128 indistinguishable arrays. The key only exists briefly during encrypt/decrypt.
+pub static ENCRYPTION_KEY: crate::guarded_key::GuardedKey = crate::guarded_key::GuardedKey::empty();
 
 /// Cached encryption-enabled flag. Read by every maybe_encrypt/maybe_decrypt call.
 /// Default: false (safe — no encryption until explicitly initialized, avoids panic if
@@ -176,9 +177,10 @@ pub fn init_encryption_enabled() {
 /// Global Nostr client instance
 pub static NOSTR_CLIENT: OnceLock<Client> = OnceLock::new();
 
-/// Cached signer keys — set once at login, never changes during a session.
-/// `Keys` implements `NostrSigner`, so this can be used directly for signing.
-pub static MY_KEYS: OnceLock<Keys> = OnceLock::new();
+/// Secret key stored in a memory-hardened vault: XOR-split into 4 shares scattered
+/// across 128 indistinguishable arrays. Use `MY_SECRET_KEY.to_keys()` for temporary
+/// signing operations. The key only exists for microseconds during use.
+pub static MY_SECRET_KEY: crate::guarded_key::GuardedKey = crate::guarded_key::GuardedKey::empty();
 
 /// Cached public key — set once at login, never changes during a session.
 /// Avoids redundant async signer→get_public_key derivations.

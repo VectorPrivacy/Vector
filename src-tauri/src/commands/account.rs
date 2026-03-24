@@ -9,8 +9,9 @@
 
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use zeroize::Zeroize;
 
-use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_KEYS, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, active_trusted_relays};
+use crate::{STATE, TAURI_APP, NOSTR_CLIENT, MY_SECRET_KEY, MY_PUBLIC_KEY, MNEMONIC_SEED, PENDING_NSEC, PENDING_INVITE, active_trusted_relays};
 use crate::{Profile, account_manager, db, crypto, commands};
 
 // ============================================================================
@@ -83,7 +84,7 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
 /// The private key is stored in PENDING_NSEC for setup_encryption/skip_encryption
 /// to consume — it is never returned over IPC.
 #[tauri::command]
-pub async fn login(import_key: String) -> Result<LoginResult, String> {
+pub async fn login(mut import_key: String) -> Result<LoginResult, String> {
     let keys: Keys;
 
     // If we're already logged in (i.e: Developer Mode with frontend hot-loading), just return the existing keys.
@@ -106,9 +107,14 @@ pub async fn login(import_key: String) -> Result<LoginResult, String> {
             Ok(parsed) => keys = parsed,
             Err(_) => return Err(String::from("Invalid nsec")),
         };
+        // Zeroize the nsec string — Keys struct has the parsed data
+        import_key.zeroize();
     } else {
         // Otherwise, we'll try importing it as a mnemonic seed phrase (BIP-39)
-        match Keys::from_mnemonic(import_key, Some(String::new())) {
+        // from_mnemonic takes ownership, so clone for zeroize
+        let mnemonic_copy = import_key.clone();
+        import_key.zeroize();
+        match Keys::from_mnemonic(mnemonic_copy, Some(String::new())) {
             Ok(parsed) => keys = parsed,
             Err(_) => return Err(String::from("Invalid Seed Phrase")),
         };
@@ -120,19 +126,21 @@ pub async fn login(import_key: String) -> Result<LoginResult, String> {
         *pending = Some(keys.secret_key().to_bech32().unwrap());
     }
 
-    // Initialise the Nostr client
-    let _ = MY_KEYS.set(keys.clone());
-    let _ = MY_PUBLIC_KEY.set(keys.public_key);
+    // Store secret key in the guarded vault, then construct the client with GuardedSigner
+    let public_key = keys.public_key;
+    MY_SECRET_KEY.store_from_keys(&keys);
+    let _ = MY_PUBLIC_KEY.set(public_key);
+    drop(keys); // Drop the Keys struct (secp256k1 Drop zeroizes)
 
     let client = Client::builder()
-        .signer(keys.clone())
+        .signer(crate::guarded_key::GuardedSigner::new(public_key))
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
 
     // Add our profile (at least, the npub of it) to our state
-    let npub = keys.public_key.to_bech32().unwrap();
+    let npub = public_key.to_bech32().unwrap();
     let mut profile = Profile::new();
     profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(&npub, profile);
@@ -194,15 +202,9 @@ pub async fn logout<R: Runtime>(handle: AppHandle<R>) {
         }
     }
 
-    // Zeroize the encryption key before restart
-    {
-        use zeroize::Zeroize;
-        let mut guard = crate::ENCRYPTION_KEY.write().unwrap();
-        if let Some(ref mut key) = *guard {
-            key.zeroize();
-        }
-        *guard = None;
-    }
+    // Clear all guarded key vaults (zeroizes all shares + decoys)
+    crate::ENCRYPTION_KEY.clear();
+    crate::MY_SECRET_KEY.clear();
 
     // Zeroize the pending nsec if still held
     {
@@ -249,19 +251,21 @@ pub async fn create_account() -> Result<LoginResult, String> {
         *pending = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
     }
 
-    // Initialise the Nostr client
-    let _ = MY_KEYS.set(keys.clone());
-    let _ = MY_PUBLIC_KEY.set(keys.public_key);
+    // Store secret key in the guarded vault, then construct the client with GuardedSigner
+    let public_key = keys.public_key;
+    MY_SECRET_KEY.store_from_keys(&keys);
+    let _ = MY_PUBLIC_KEY.set(public_key);
+    drop(keys);
 
     let client = Client::builder()
-        .signer(keys.clone())
+        .signer(crate::guarded_key::GuardedSigner::new(public_key))
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
 
     // Add our profile (at least, the npub of it) to our state
-    let npub = keys.public_key.to_bech32().map_err(|e| e.to_string())?;
+    let npub = public_key.to_bech32().map_err(|e| e.to_string())?;
     let mut profile = Profile::new();
     profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(&npub, profile);
@@ -455,27 +459,30 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         .ok_or("No private key found")?;
 
     // Decrypt if password provided
-    let nsec = if let Some(pwd) = password {
+    let mut nsec = if let Some(pwd) = password {
         crypto::internal_decrypt(stored_pkey, Some(pwd)).await
             .map_err(|_| "Incorrect password".to_string())?
     } else {
         stored_pkey
     };
 
-    // Initialize Client with the key
+    // Initialize Client with the key, then zeroize the plaintext nsec
     let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
+    nsec.zeroize();
 
-    let _ = MY_KEYS.set(keys.clone());
-    let _ = MY_PUBLIC_KEY.set(keys.public_key);
+    let public_key = keys.public_key;
+    MY_SECRET_KEY.store_from_keys(&keys);
+    let _ = MY_PUBLIC_KEY.set(public_key);
+    drop(keys);
 
     let client = Client::builder()
-        .signer(keys.clone())
+        .signer(crate::guarded_key::GuardedSigner::new(public_key))
         .opts(ClientOptions::new())
         .monitor(Monitor::new(1024))
         .build();
     NOSTR_CLIENT.set(client).unwrap();
 
-    let npub = keys.public_key.to_bech32().map_err(|e| e.to_string())?;
+    let npub = public_key.to_bech32().map_err(|e| e.to_string())?;
     let mut profile = Profile::new();
     profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(&npub, profile);

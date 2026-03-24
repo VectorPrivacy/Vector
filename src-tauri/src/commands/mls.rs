@@ -144,7 +144,7 @@ pub async fn regenerate_device_keypackage(cache: bool) -> Result<serde_json::Val
     // Build and sign event with nostr client
     let kp_event = EventBuilder::new(Kind::MlsKeyPackage, kp_encoded)
         .tags(filtered_tags)
-        .sign_with_keys(crate::MY_KEYS.get().unwrap())
+        .sign_with_keys(&crate::MY_SECRET_KEY.to_keys().expect("Keys not initialized"))
         .map_err(|e| e.to_string())?;
 
     // Debug: Print event details before publishing
