@@ -2314,7 +2314,8 @@ async function searchGifs(query) {
             gifCurrentOffset = data.results.length;
             gifHasMore = data.results.length >= gifPageSize;
         } else {
-            showGifEmptyState(`No GIFs found for "${query}"`);
+            const displayQuery = query.length > 32 ? query.slice(0, 32) + '...' : query;
+            showGifEmptyState(`No GIFs found for "${displayQuery}"`);
             gifHasMore = false;
         }
     } catch (error) {
