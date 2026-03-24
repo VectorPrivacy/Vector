@@ -10242,6 +10242,7 @@ async function openInviteMemberToGroup(chat) {
         const availableContacts = arrProfiles.filter(p => {
             if (!p || !p.id || p.id === mine) return false;
             if (currentMembers.includes(p.id)) return false;
+            if (p.is_blocked) return false;
 
             if (filter) {
                 const name = (p.nickname || p.name || '').toLowerCase();
@@ -11942,6 +11943,7 @@ function renderCreateGroupList(filterText = '') {
     for (const p of sortedProfiles) {
         if (!p || !p.id) continue;
         if (p.id === mine) continue;
+        if (p.is_blocked) continue;
 
         // Filter by nickname/name/npub (use extracted npub if input is a profile URL)
         const name = p.nickname || p.name || '';
