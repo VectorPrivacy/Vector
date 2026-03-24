@@ -178,7 +178,29 @@ pub fn run() {
             let signature_policy: [u8; 4] = [0x01, 0x00, 0x00, 0x00]; // MicrosoftSignedOnly = 1
             SetProcessMitigationPolicy(8, signature_policy.as_ptr(), 4);
 
-            // 3. Strip PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE from Everyone
+            // 3. Strip PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE from Everyone.
+            //    MUST merge into the existing DACL — passing null as old_acl would discard all
+            //    default allow ACEs, making the process inaccessible to Explorer (breaks taskbar
+            //    pinning, jump lists, and other shell integrations).
+            extern "system" {
+                fn GetSecurityInfo(
+                    handle: isize, object_type: u32, info: u32,
+                    owner: *mut *mut u8, group: *mut *mut u8,
+                    dacl: *mut *mut u8, sacl: *mut *mut u8,
+                    descriptor: *mut *mut u8,
+                ) -> u32;
+            }
+
+            let mut existing_dacl: *mut u8 = std::ptr::null_mut();
+            let mut security_descriptor: *mut u8 = std::ptr::null_mut();
+            // SE_KERNEL_OBJECT = 6, DACL_SECURITY_INFORMATION = 4
+            let got_dacl = GetSecurityInfo(
+                GetCurrentProcess(), 6, 4,
+                std::ptr::null_mut(), std::ptr::null_mut(),
+                &mut existing_dacl, std::ptr::null_mut(),
+                &mut security_descriptor,
+            ) == 0;
+
             let everyone = b"Everyone\0";
             let entry = ExplicitAccessA {
                 access_permissions: 0x0010 | 0x0020 | 0x0040, // VM_READ | VM_WRITE | DUP_HANDLE
@@ -193,8 +215,9 @@ pub fn run() {
                 },
             };
             let mut new_dacl: *mut u8 = std::ptr::null_mut();
-            if SetEntriesInAclA(1, &entry, std::ptr::null(), &mut new_dacl) == 0 && !new_dacl.is_null() {
-                // SE_KERNEL_OBJECT = 6, DACL_SECURITY_INFORMATION = 4
+            // Merge our deny ACE into the existing DACL (preserving default allow ACEs)
+            let old_dacl = if got_dacl && !existing_dacl.is_null() { existing_dacl } else { std::ptr::null() };
+            if SetEntriesInAclA(1, &entry, old_dacl, &mut new_dacl) == 0 && !new_dacl.is_null() {
                 SetSecurityInfo(GetCurrentProcess(), 6, 4, std::ptr::null(), std::ptr::null(), new_dacl, std::ptr::null());
             }
         }
