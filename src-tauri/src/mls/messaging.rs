@@ -144,6 +144,25 @@ pub async fn send_mls_message(group_id: &str, rumor: nostr_sdk::UnsignedEvent, p
                 crate::inbox_relays::send_event_first_ok(client, urls, &mls_wrapper).await
             };
             
+            // Track the wrapper event ID we just sent so the relay echo is deduplicated.
+            // Without this, the subscription handler sees the echo as a "new" event
+            // (different wrapper ID from what it tracked) and emits a duplicate to the frontend.
+            if send_result.is_ok() {
+                let sent_wrapper_id = if is_typing_indicator {
+                    // We don't track typing indicators — they're ephemeral
+                    None
+                } else {
+                    Some(mls_wrapper.id.to_hex())
+                };
+                if let Some(wrapper_id) = sent_wrapper_id {
+                    let _ = crate::mls::track_mls_event_processed(
+                        &wrapper_id,
+                        &group_id,
+                        mls_wrapper.created_at.as_secs(),
+                    );
+                }
+            }
+
             // Update pending message based on send result
             if let (Some(ref pid), Some(ref real_id)) = (&pending_id, &inner_event_id) {
                 match send_result {

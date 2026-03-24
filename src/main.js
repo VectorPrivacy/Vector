@@ -2549,12 +2549,17 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
  * @param {string} message - The message to display
  */
 function showGifEmptyState(message) {
-    gifGrid.innerHTML = `
-        <div class="gif-empty-state" style="grid-column: 1 / -1;">
-            <span class="icon icon-image"></span>
-            <span>${message}</span>
-        </div>
-    `;
+    const div = document.createElement('div');
+    div.className = 'gif-empty-state';
+    div.style.gridColumn = '1 / -1';
+    const icon = document.createElement('span');
+    icon.className = 'icon icon-image';
+    const text = document.createElement('span');
+    text.textContent = message;
+    div.appendChild(icon);
+    div.appendChild(text);
+    gifGrid.innerHTML = '';
+    gifGrid.appendChild(div);
 }
 
 /**
