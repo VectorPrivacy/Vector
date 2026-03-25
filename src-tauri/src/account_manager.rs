@@ -689,7 +689,7 @@ pub fn init_db_pool_static(db_path: &std::path::Path) -> Result<(), String> {
 fn open_db_connection(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA mmap_size=536870912;")
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA cache_size=-1000; ")
         .map_err(|e| format!("Failed to set pragmas: {}", e))?;
     Ok(conn)
 }
@@ -1874,7 +1874,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let db_path = dir.path().join("vector.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA mmap_size=536870912;").unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA cache_size=-1000; ").unwrap();
         conn.execute_batch(V0_2_3_SCHEMA).unwrap();
 
         // Seed realistic data
@@ -2047,7 +2047,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("vector.db");
         let mut conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA mmap_size=536870912;").unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA cache_size=-1000; ").unwrap();
 
         conn.execute_batch(SQL_SCHEMA).unwrap();
         run_migrations(&mut conn).unwrap();
