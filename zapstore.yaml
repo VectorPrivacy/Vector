@@ -1,0 +1,56 @@
+repository: https://github.com/VectorPrivacy/Vector
+match: Vector\.apk$
+name: Vector
+description: |
+    Privacy by Principle. No KYC, no metadata, no compromises.
+
+    - End-to-end encrypted DMs using NIP-17
+    - Scalable encrypted group chats using the Marmot protocol (MLS)
+    - Voice messaging
+    - Private local AI for multilingual translations
+    - Zero metadata leakage
+    - Integrated WebXDC mini-app store (Nexus)
+    - Mentions, reactions, emoji shortcodes, image spoilers, and rich link previews
+summary: A decentralized, privacy-focused community messenger with zero metadata leakage
+tags:
+    - messenger
+    - nostr
+    - privacy
+    - encrypted
+    - chat
+    - messaging
+    - end-to-end-encryption
+    - decentralized
+    - security
+    - MLS
+    - E2EE
+    - freedom-tech
+    - cryptography
+    - gaming
+    - voice
+    - video
+    - streaming
+    - appstore
+license: MIT
+website: https://vectorapp.io
+icon: https://vectorapp.io/images/Vector-Icon.png
+images:
+    - https://vectorapp.io/images/vector_screenshot_01.png
+    - https://vectorapp.io/images/vector_screenshot_03.png
+    - https://vectorapp.io/images/vector_screenshot_06.png
+    - https://vectorapp.io/images/vector_screenshot_04.png
+    - https://vectorapp.io/images/vector_screenshot_02.png
+    - https://vectorapp.io/images/vector_screenshot_05.png
+supported_nips:
+    - "06"
+    - "17"
+    - "24"
+    - "25"
+    - "38"
+    - "60"
+    - "65"
+    - "77"
+    - "78"
+metadata_sources:
+    - github
+pubkey: npub16ye7evyevwnl0fc9hujsxf9zym72e063awn0pvde0huvpyec5nyq4dg4wn

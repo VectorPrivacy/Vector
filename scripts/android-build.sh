@@ -56,7 +56,15 @@ export ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/armv7/lib"
 
 # Build the APK
 cd "$PROJECT_ROOT"
-npx tauri android build --apk true --target aarch64 --target armv7 "$@"
+
+# Support --armv7-only for Android Go / 32-bit budget devices (~42MB vs ~95MB universal)
+if [ "$1" = "--armv7-only" ]; then
+    shift
+    echo "Building armv7-only APK (Android Go / 32-bit)"
+    npx tauri android build --apk true --target armv7 "$@"
+else
+    npx tauri android build --apk true --target aarch64 --target armv7 "$@"
+fi
 
 # Show output location
 APK_PATH="$TAURI_DIR/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
