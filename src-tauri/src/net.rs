@@ -1,11 +1,71 @@
 use std::cmp::min;
+use std::net::IpAddr;
 
 use futures_util::StreamExt;
 use reqwest::{self, Client};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
+use url::Url;
 
 use crate::simd::html_meta;
+
+/// Reject URLs that resolve to private/loopback/link-local addresses (SSRF protection).
+/// Returns Ok(()) if the URL is safe to fetch, Err with reason otherwise.
+pub fn validate_url_not_private(url_str: &str) -> Result<(), &'static str> {
+    let parsed = Url::parse(url_str).map_err(|_| "Invalid URL")?;
+
+    // Only allow http/https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return Err("Only HTTP(S) URLs are allowed"),
+    }
+
+    // Check the host — reject IPs directly, resolve hostnames later (reqwest handles DNS)
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            let o = ip.octets();
+            if ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+                || (o[0] == 100 && o[1] >= 64 && o[1] <= 127) // CGN (100.64.0.0/10)
+            {
+                return Err("Private/internal IP addresses are not allowed");
+            }
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback() || ip.is_unspecified() || is_ipv6_private(&ip) {
+                return Err("Private/internal IP addresses are not allowed");
+            }
+        }
+        Some(url::Host::Domain(domain)) => {
+            // Block localhost variants
+            if domain == "localhost"
+                || domain.ends_with(".local")
+                || domain.ends_with(".internal")
+            {
+                return Err("Local hostnames are not allowed");
+            }
+        }
+        None => return Err("URL has no host"),
+    }
+
+    Ok(())
+}
+
+fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
+    // Check for IPv4-mapped addresses (::ffff:x.x.x.x)
+    if let Some(ipv4) = ip.to_ipv4_mapped() {
+        return ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local();
+    }
+    let segments = ip.segments();
+    // Unique local (fc00::/7)
+    if segments[0] & 0xfe00 == 0xfc00 { return true; }
+    // Link-local (fe80::/10)
+    if segments[0] & 0xffc0 == 0xfe80 { return true; }
+    false
+}
 
 /// Trait for reporting download progress
 pub trait ProgressReporter {
@@ -105,6 +165,7 @@ pub async fn download<R: tauri::Runtime>(
 /// Tries HTTP HEAD first, falls back to a 2-byte Range request.
 /// Returns None if size cannot be determined.
 pub async fn get_remote_file_size(url: &str) -> Option<u64> {
+    validate_url_not_private(url).ok()?;
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -151,6 +212,8 @@ pub async fn download_with_reporter(
     reporter: &impl ProgressReporter,
     timeout: Option<std::time::Duration>,
 ) -> Result<Vec<u8>, &'static str> {
+    validate_url_not_private(content_url)?;
+
     // Create a client with the specified timeout
     let client = if let Some(duration) = timeout {
         Client::builder()
@@ -348,6 +411,7 @@ pub struct SiteMetadata {
 
 /// Fetch metadata specifically for Twitter/X posts using their oEmbed API
 async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
+    validate_url_not_private(url).map_err(|e| e.to_string())?;
     // Use Twitter's oEmbed API for reliable metadata extraction
     let encoded_url = url.replace("&", "%26").replace("?", "%3F").replace("=", "%3D");
     let oembed_url = format!("https://publish.twitter.com/oembed?url={}", encoded_url);
@@ -403,6 +467,7 @@ async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
 }
 
 pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
+    validate_url_not_private(url).map_err(|e| e.to_string())?;
     // Check if this is a Twitter/X URL and use specialized handler
     if url.contains("twitter.com") || url.contains("x.com") {
         return fetch_twitter_metadata(url).await;
@@ -546,6 +611,7 @@ fn normalize_url(url: &str, domain: &str) -> String {
 /// Check if a URL is live and accessible
 /// Returns true if the URL responds with a success status (2xx)
 pub async fn check_url_live(url: &str) -> Result<bool, &'static str> {
+    validate_url_not_private(url)?;
     // Create a client with a reasonable timeout for checking
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(10))

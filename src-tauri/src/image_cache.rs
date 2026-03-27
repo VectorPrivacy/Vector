@@ -314,6 +314,11 @@ pub async fn cache_image<R: Runtime>(
         return CacheResult::Failed("Failed to acquire download permit".to_string());
     }
 
+    // SSRF protection: block private/internal IPs
+    if let Err(e) = crate::net::validate_url_not_private(url) {
+        return CacheResult::Failed(format!("Blocked: {}", e));
+    }
+
     // Download the image
     log_debug!("[ImageCache] Downloading {} for {:?}", url, image_type);
 

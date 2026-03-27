@@ -595,10 +595,22 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
         return Ok(false);
     }
 
-    let client = NOSTR_CLIENT.get().expect("Nostr client not initialized");
-    let handle = TAURI_APP.get().unwrap().clone();
+    // Wait for client/app to be available — monitor is started fire-and-forget from
+    // frontend, so returning Err would silently kill it forever (MONITOR_STARTED stays true).
+    let (client, handle) = loop {
+        if let (Some(c), Some(h)) = (NOSTR_CLIENT.get(), TAURI_APP.get()) {
+            break (c, h.clone());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
 
-    let monitor = client.monitor().ok_or("Failed to get monitor")?;
+    let monitor = match client.monitor() {
+        Some(m) => m,
+        None => {
+            MONITOR_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err("Failed to get monitor".to_string());
+        }
+    };
     let mut receiver = monitor.subscribe();
 
     // Spawn task for real-time relay status notifications
@@ -627,10 +639,10 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                     };
                     add_relay_log(&url_str, log_level, &format!("Status changed to {}", status_str));
 
-                    handle_clone.emit("relay_status_change", serde_json::json!({
+                    let _ = handle_clone.emit("relay_status_change", serde_json::json!({
                         "url": url_str,
                         "status": status_str
-                    })).unwrap();
+                    }));
 
                     match status {
                         RelayStatus::Connected => {
