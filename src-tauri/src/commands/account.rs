@@ -483,6 +483,19 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
             println!("[Login] Cleared {} stale relay(s) and partial state from background sync", stale_relays.len());
         }
 
+        // Populate ENCRYPTION_KEY if the user provided a password and encryption is enabled.
+        // Background sync doesn't have the password, so ENCRYPTION_KEY is empty — without
+        // this, every maybe_decrypt() call fails with [Decryption failed].
+        if let Some(pwd) = password {
+            if crypto::is_encryption_enabled() && !crate::ENCRYPTION_KEY.has_key() {
+                // Derive the key from the password (Argon2) and cache it in the vault.
+                // We don't need the decrypted nsec — MY_SECRET_KEY is already valid from
+                // the background sync or previous foreground session.
+                let key = crypto::hash_pass(pwd).await;
+                crate::ENCRYPTION_KEY.set(key);
+            }
+        }
+
         let npub = crate::MY_PUBLIC_KEY.get().ok_or("Public key not initialized")?
             .to_bech32()
             .map_err(|e| format!("Bech32 error: {}", e))?;

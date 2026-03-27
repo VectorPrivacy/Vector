@@ -841,13 +841,21 @@ pub async fn rekey_encryption<R: Runtime>(
     // 4. Perform transactional re-key (all-or-nothing via SQLite transaction)
     let result = rekey_encryption_transactional(&handle, &old_key, &new_key, &security_type);
 
-    // 5. ALWAYS reopen gate and drain queued events (audit C2)
+    // 5. Update vault to new key BEFORE draining queued events.
+    // Events queued during the rekey must be encrypted with the NEW key so they
+    // match the rest of the database. Previously, the vault update happened AFTER
+    // drain, causing drained events to be encrypted with the old key — orphaning
+    // them permanently (the new key couldn't decrypt them, and subsequent rekeys
+    // silently skipped them).
+    if result.is_ok() {
+        crate::ENCRYPTION_KEY.set(new_key);
+    }
+
+    // 6. ALWAYS reopen gate and drain queued events (audit C2)
     drain_pending_events(&handle).await;
 
     match result {
         Ok(()) => {
-            // Update guarded vault to new key ONLY after successful commit
-            crate::ENCRYPTION_KEY.set(new_key);
             let _ = handle.emit("encryption_migration_complete", ());
             println!("[Rekey] Re-keying complete");
             Ok(())

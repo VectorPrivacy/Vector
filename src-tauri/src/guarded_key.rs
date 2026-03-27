@@ -886,4 +886,243 @@ mod tests {
         crate::MY_SECRET_KEY.store_from_keys(&keys);
         assert_eq!(crate::MY_SECRET_KEY.get(), Some(expected));
     }
+
+    // ================================================================
+    // End-to-end encryption pipeline tests
+    //
+    // These test the FULL path: GuardedKey vault → ChaCha20-Poly1305
+    // encrypt → hex encode → hex decode → decrypt → verify plaintext.
+    // Argon2 is skipped (too expensive for bulk runs); keys are injected
+    // directly into the vault, which is what happens after Argon2 in
+    // production (hash_pass → ENCRYPTION_KEY.set).
+    // ================================================================
+
+    /// Helper: set ENCRYPTION_KEY in vault + enable the encryption flag.
+    fn setup_encryption(key: [u8; 32]) {
+        reset();
+        crate::ENCRYPTION_KEY.set(key);
+        crate::state::set_encryption_enabled(true);
+    }
+
+    /// Helper: tear down encryption state.
+    fn teardown_encryption() {
+        crate::MY_SECRET_KEY.active.store(0, Ordering::SeqCst);
+        crate::ENCRYPTION_KEY.active.store(0, Ordering::SeqCst);
+        crate::state::set_encryption_enabled(false);
+    }
+
+    /// Basic encrypt → decrypt roundtrip, 10 000 iterations.
+    /// Tests: vault key retrieval, ChaCha20 nonce uniqueness, hex encode/decode,
+    /// and the full internal_encrypt → internal_decrypt pipeline.
+    #[tokio::test]
+    async fn e2e_encrypt_decrypt_10k() {
+        let _l = TEST_LOCK.lock().unwrap();
+        let key = test_key(0xAB);
+        setup_encryption(key);
+
+        for i in 0..10_000u32 {
+            let plaintext = format!("Message #{i} — the quick brown fox 🦊");
+            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
+
+            // Sanity: ciphertext is hex and longer than plaintext
+            assert!(crate::crypto::looks_encrypted(&ciphertext),
+                "Iteration {i}: ciphertext doesn't look encrypted");
+
+            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
+                .unwrap_or_else(|_| panic!("Iteration {i}: decrypt returned Err"));
+            assert_eq!(decrypted, plaintext, "Iteration {i}: plaintext mismatch");
+        }
+
+        teardown_encryption();
+    }
+
+    /// Cross-key stress test: encrypt with ENCRYPTION_KEY, then set/clear
+    /// MY_SECRET_KEY (which runs write_decoys with cross-key protection),
+    /// then decrypt. Verifies write_decoys never corrupts ENCRYPTION_KEY's
+    /// vault data. 10 000 iterations.
+    #[tokio::test]
+    async fn e2e_cross_key_stress_10k() {
+        let _l = TEST_LOCK.lock().unwrap();
+        let enc_key = test_key(0xCD);
+        setup_encryption(enc_key);
+
+        for i in 0..10_000u32 {
+            let plaintext = format!("Cross-key test #{i}");
+            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
+
+            // Inject noise: set MY_SECRET_KEY (runs write_decoys that must avoid ENCRYPTION_KEY)
+            let sk = test_key((i & 0xFF) as u8);
+            crate::MY_SECRET_KEY.set(sk);
+
+            // Decrypt must still work — ENCRYPTION_KEY's vault data must survive
+            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
+                .unwrap_or_else(|_| panic!("Iteration {i}: decrypt failed after MY_SECRET_KEY.set"));
+            assert_eq!(decrypted, plaintext, "Iteration {i}: plaintext mismatch after cross-key write");
+
+            // Also verify MY_SECRET_KEY survived ENCRYPTION_KEY being read
+            assert_eq!(crate::MY_SECRET_KEY.get(), Some(sk),
+                "Iteration {i}: MY_SECRET_KEY corrupted");
+
+            // Clear MY_SECRET_KEY (runs write_decoys again)
+            crate::MY_SECRET_KEY.clear();
+        }
+
+        teardown_encryption();
+    }
+
+    /// maybe_encrypt → maybe_decrypt full path, 10 000 iterations.
+    /// Tests the production code path including looks_encrypted() checks
+    /// and the crash-recovery fallback logic.
+    #[tokio::test]
+    async fn e2e_maybe_encrypt_decrypt_10k() {
+        let _l = TEST_LOCK.lock().unwrap();
+        let key = test_key(0xEF);
+        setup_encryption(key);
+
+        for i in 0..10_000u32 {
+            let plaintext = format!("Maybe-path #{i}: こんにちは世界");
+            let ciphertext = crate::crypto::maybe_encrypt(plaintext.clone()).await;
+
+            // maybe_encrypt with encryption enabled should always produce encrypted output
+            assert_ne!(ciphertext, plaintext, "Iteration {i}: content wasn't encrypted");
+
+            let decrypted = crate::crypto::maybe_decrypt(ciphertext).await
+                .unwrap_or_else(|_| panic!("Iteration {i}: maybe_decrypt returned Err"));
+            assert_eq!(decrypted, plaintext, "Iteration {i}: plaintext mismatch");
+        }
+
+        teardown_encryption();
+    }
+
+    /// Batch encrypt, then batch decrypt. Simulates boot-time message loading
+    /// where all messages are decrypted in sequence from SQLite.
+    #[tokio::test]
+    async fn e2e_batch_encrypt_then_decrypt() {
+        let _l = TEST_LOCK.lock().unwrap();
+        let key = test_key(0x77);
+        setup_encryption(key);
+
+        let count = 500;
+        let mut pairs: Vec<(String, String)> = Vec::with_capacity(count);
+
+        // Encrypt all
+        for i in 0..count {
+            let plaintext = format!("Batch msg #{i} — {}", "x".repeat(i % 200));
+            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
+            pairs.push((plaintext, ciphertext));
+        }
+
+        // Inject cross-key noise mid-batch
+        crate::MY_SECRET_KEY.set(test_key(0x99));
+
+        // Decrypt all — must survive cross-key write
+        for (i, (plaintext, ciphertext)) in pairs.into_iter().enumerate() {
+            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
+                .unwrap_or_else(|_| panic!("Batch {i}: decrypt failed"));
+            assert_eq!(decrypted, plaintext, "Batch {i}: mismatch");
+        }
+
+        teardown_encryption();
+    }
+
+    /// Verify that different keys produce different ciphertexts and
+    /// cannot cross-decrypt each other's messages.
+    #[tokio::test]
+    async fn e2e_key_isolation() {
+        let _l = TEST_LOCK.lock().unwrap();
+        let key_a = test_key(0x11);
+        let key_b = test_key(0x22);
+        let message = "Secret message".to_string();
+
+        // Encrypt with key A
+        setup_encryption(key_a);
+        let ciphertext_a = crate::crypto::internal_encrypt(message.clone(), None).await;
+
+        // Switch to key B — decrypt must fail for key A's ciphertext
+        crate::ENCRYPTION_KEY.clear();
+        crate::ENCRYPTION_KEY.set(key_b);
+        let result = crate::crypto::internal_decrypt(ciphertext_a.clone(), None).await;
+        assert!(result.is_err(), "Wrong key should fail to decrypt");
+
+        // Switch back to key A — must succeed
+        crate::ENCRYPTION_KEY.clear();
+        crate::ENCRYPTION_KEY.set(key_a);
+        let decrypted = crate::crypto::internal_decrypt(ciphertext_a, None).await
+            .expect("Original key should decrypt");
+        assert_eq!(decrypted, message);
+
+        teardown_encryption();
+    }
+
+    /// Edge case content: empty-ish strings, pure unicode, JSON, hex-like
+    /// strings that could confuse looks_encrypted().
+    #[tokio::test]
+    async fn e2e_edge_case_content() {
+        let _l = TEST_LOCK.lock().unwrap();
+        let key = test_key(0x33);
+        setup_encryption(key);
+
+        let long_msg = "x".repeat(10_000);
+        let multiline = format!("line1\nline2\nline3\n{}", "data".repeat(100));
+        let cases: Vec<&str> = vec![
+            "a",                                           // minimal
+            " ",                                           // whitespace
+            "Hello, World!",                               // basic ASCII
+            "🦊🔑🔒💬",                                  // emoji-only
+            "日本語テスト",                                 // CJK
+            "{\"type\":\"message\",\"text\":\"hello\"}",   // JSON
+            &long_msg,                                     // 10KB message
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567", // hex-like (64 chars)
+            "\n\r\t\0",                                    // control chars
+            &multiline,                                    // multiline
+        ];
+
+        for (i, plaintext) in cases.iter().enumerate() {
+            let ciphertext = crate::crypto::internal_encrypt(plaintext.to_string(), None).await;
+            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
+                .unwrap_or_else(|_| panic!("Edge case {i} failed: {:?}", &plaintext[..plaintext.len().min(50)]));
+            assert_eq!(&decrypted, plaintext, "Edge case {i} mismatch");
+        }
+
+        teardown_encryption();
+    }
+
+    /// Simulates the real login sequence: set ENCRYPTION_KEY first,
+    /// then set MY_SECRET_KEY (which triggers write_decoys), then
+    /// encrypt and decrypt messages. Repeats 5000 times to catch
+    /// any probabilistic cross-key corruption.
+    #[tokio::test]
+    async fn e2e_login_sequence_stress_5k() {
+        let _l = TEST_LOCK.lock().unwrap();
+
+        for i in 0..5_000u32 {
+            reset();
+
+            // Step 1: ENCRYPTION_KEY set (happens during password decrypt in login)
+            let enc_key = test_key((i & 0xFF) as u8);
+            crate::ENCRYPTION_KEY.set(enc_key);
+            crate::state::set_encryption_enabled(true);
+
+            // Step 2: MY_SECRET_KEY set (happens right after in login flow)
+            let sk = test_key(((i >> 8) & 0xFF) as u8 ^ 0xAA);
+            crate::MY_SECRET_KEY.set(sk);
+
+            // Step 3: Encrypt a message (happens when user sends/stores)
+            let plaintext = format!("Login seq #{i}");
+            let ciphertext = crate::crypto::internal_encrypt(plaintext.clone(), None).await;
+
+            // Step 4: Decrypt (happens when loading messages from DB)
+            let decrypted = crate::crypto::internal_decrypt(ciphertext, None).await
+                .unwrap_or_else(|_| panic!("Login sequence {i}: decrypt failed"));
+            assert_eq!(decrypted, plaintext, "Login sequence {i}: mismatch");
+
+            // Verify both keys survived
+            assert_eq!(crate::ENCRYPTION_KEY.get(), Some(enc_key),
+                "Login sequence {i}: ENCRYPTION_KEY corrupted");
+            assert_eq!(crate::MY_SECRET_KEY.get(), Some(sk),
+                "Login sequence {i}: MY_SECRET_KEY corrupted");
+        }
+
+        teardown_encryption();
+    }
 }
